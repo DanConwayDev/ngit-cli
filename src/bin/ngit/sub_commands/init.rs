@@ -163,6 +163,10 @@ struct ResolvedFields {
     /// ngit-known tags, and dropping them would silently discard
     /// moderators and restart every member's role history.
     role_tags: Vec<nostr::prelude::Tag>,
+    /// The lead maintainer to assert with the NIP-34 `M` role: my own
+    /// announcement's existing assertion, carried forward while the lead
+    /// remains in `maintainers`. `None` emits only `m` tags.
+    lead: Option<PublicKey>,
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -477,6 +481,7 @@ pub struct SubCommandArgs {
     #[clap(long, value_parser, num_args = 1..)]
     /// npubs of other maintainers
     other_maintainers: Vec<String>,
+
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
     hashtag: Vec<String>,
@@ -997,6 +1002,14 @@ fn resolve_fields(
             .collect()
     };
 
+    // --- Lead maintainer (NIP-34 `M` role) ---
+    // carry my own announcement's assertion forward while the lead remains
+    // in the listing
+    let lead = my_ref
+        .as_ref()
+        .and_then(|mr| mr.lead)
+        .filter(|lead| maintainers.contains(lead));
+
     // --- Interactive: github/codeberg warning ---
     if interactive
         && selected_grasp_servers.is_empty()
@@ -1189,6 +1202,7 @@ fn resolve_fields(
             .unwrap_or_default(),
         extra_tags,
         role_tags,
+        lead,
     })
 }
 
@@ -1355,6 +1369,7 @@ async fn publish_and_finalize(
         extra_tags: fields.extra_tags,
         role_tags: fields.role_tags,
         moderators: vec![],
+        lead: fields.lead,
     };
     clear_private_git_auth();
     if repo_ref.private {

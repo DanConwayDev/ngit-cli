@@ -237,6 +237,12 @@ async fn accept_with_grasp_servers(
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
     let maintainers = default_acceptance_maintainers(repo_ref, *my_pubkey);
+    // per NIP-34 the acceptance re-asserts the repository's wire lead as
+    // `M`; the guard is defensive — a lead reported by lead_maintainer()
+    // always ends up in the default listing
+    let lead = repo_ref
+        .lead_maintainer()
+        .filter(|lead| maintainers.contains(lead));
 
     let my_repo_ref = RepoRef {
         identifier: identifier.clone(),
@@ -258,6 +264,7 @@ async fn accept_with_grasp_servers(
         extra_tags: vec![],
         role_tags: vec![],
         moderators: vec![],
+        lead,
     };
 
     let repo_event = my_repo_ref.to_event(signer).await?;

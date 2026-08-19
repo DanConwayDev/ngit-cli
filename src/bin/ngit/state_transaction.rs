@@ -817,6 +817,7 @@ mod tests {
             extra_tags: vec![],
             role_tags: vec![],
             moderators: vec![],
+            lead: None,
         }
     }
 

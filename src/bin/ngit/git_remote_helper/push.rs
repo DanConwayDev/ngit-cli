@@ -1482,18 +1482,23 @@ async fn get_maintainers_yaml_update(
                                 let mut repo_ref = repo_ref.clone();
                                 repo_ref.maintainers = config_maintainers;
                                 repo_ref.relays = config_relays;
-                                // role history is the author's own statement:
-                                // the consolidated RepoRef carries the
-                                // *selected* maintainer's role tags, so swap
-                                // in the signer's own record (first use of
-                                // role tags when they have none)
+                                // role history and the lead assertion are the
+                                // author's own statement: the consolidated
+                                // RepoRef carries the *selected* maintainer's,
+                                // so swap in the signer's own record (first
+                                // use of role tags when they have none)
                                 let author = signer.get_public_key().await?;
-                                repo_ref.role_tags = repo_ref
+                                let my_prior = repo_ref
                                     .events
                                     .values()
                                     .find(|e| e.pubkey == author)
-                                    .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
-                                    .map_or_else(Vec::new, |r| r.role_tags);
+                                    .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
+                                repo_ref.role_tags = my_prior
+                                    .as_ref()
+                                    .map_or_else(Vec::new, |r| r.role_tags.clone());
+                                repo_ref.lead = my_prior
+                                    .and_then(|r| r.lead)
+                                    .filter(|lead| repo_ref.maintainers.contains(lead));
                                 term.write_line("maintainers.yaml update detected so publishing repo announcement update")?;
                                 return Ok(Some(repo_ref.to_event(signer).await?));
                             }
