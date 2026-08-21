@@ -536,6 +536,9 @@ async fn local_apk_manifest_upload_preserves_android_metadata() -> Result<()> {
         r#"schema: 1
 application: {APP_ID}
 notes: "Android metadata from a local manifest asset"
+publication:
+  blossom_servers:
+    - "{blossom_server}"
 assets:
   - file: dist/ngit-{{version}}.apk
     filename: ngit-{{version}}-android-arm64-v8a.apk
@@ -545,6 +548,7 @@ assets:
       min_allowed_version_code: 10100
       certificate_sha256: [{CERTIFICATE_SHA256}]
 "#,
+        blossom_server = blossom.base_url(),
     );
     fs::write(manifest_dir.join("release.yaml"), manifest)
         .context("failed to write local-file release manifest")?;
@@ -557,8 +561,6 @@ assets:
             RELEASE_VERSION,
             "--manifest",
             ".ngit/release.yaml",
-            "--blossom-server",
-            blossom.base_url(),
             "--json",
         ],
     )
@@ -581,7 +583,7 @@ assets:
             .collect::<Vec<_>>()
             == [Some("application"), Some("asset"), Some("release")]
     );
-    ensure!(output["result"]["blossom"]["server_selection"]["source"] == "explicit");
+    ensure!(output["result"]["blossom"]["server_selection"]["source"] == "manifest");
     ensure!(output["result"]["blossom"]["uploads"][0]["sha256"] == hash);
     ensure!(
         output["result"]["blossom"]["uploads"][0]["apk_platform_inference"]["derived_platforms"][0]

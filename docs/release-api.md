@@ -725,17 +725,18 @@ release. New asset inputs append; they do not replace or remove the existing
 operation. An exact asset event already present in the release is an error, not
 a silent no-op.
 
-When local files are present, explicit `--blossom-server` values replace
-discovery. The first server receives `PUT /upload`; every remaining server
-receives `PUT /mirror` in argument order. Without an override, ngit uses the
-ordered `server` tags from the latest kind `10063` event authored by the
-application author, and fails rather than falling back when that latest event
-is invalid. It fails before signing when neither source yields a server. Every
-selected server is required in v1: a failed mirror aborts NIP-82 publication
-rather than silently reducing the requested durability. Discovery requires at
-least one completed author-relay route and reports other failed routes as
-`relay_discovery_incomplete`; an explicit override is the deterministic
-recovery when stale discovery is unacceptable.
+When local files are present, explicit `--blossom-server` values take first
+precedence, followed by `publication.blossom_servers` from the loaded manifest.
+Either ordered list replaces discovery. The first server receives `PUT
+/upload`; every remaining server receives `PUT /mirror` in argument order.
+Without an override, ngit uses the ordered `server` tags from the latest kind
+`10063` event authored by the application author, and fails rather than falling
+back when that latest event is invalid. It fails before signing when no source
+yields a server. Every selected server is required in v1: a failed mirror
+aborts NIP-82 publication rather than silently reducing the requested
+durability. Discovery requires at least one completed author-relay route and
+reports other failed routes as `relay_discovery_incomplete`; an explicit
+override is the deterministic recovery when stale discovery is unacceptable.
 
 Before publishing, ngit MUST:
 
@@ -782,6 +783,7 @@ per-server operation, status, and descriptor URL. Status is `stored` for HTTP
 earlier fail-fast error. Mirror URLs are operational results; only the primary
 URL is written to the kind `3063` event. A mutation without local files retains
 the same shape with a null server selection and an empty upload list.
+`blossom.server_selection.source` is `explicit`, `manifest`, or `kind_10063`.
 For APKs, each upload also contains `apk_platform_inference`, recording the
 derived platforms, whether native libraries were present, and any ABI names
 which ngit did not recognize.
@@ -861,6 +863,16 @@ schema: 1
 application: ngit
 channel: main
 commit: main
+publication:
+  blossom_servers:
+    - https://blossom.example.org
+    - https://mirror.example.org
+  relays:
+    - wss://releases.example.org
+  zapstore_relay: true
+  strict_metadata: true
+  allow_partial_platforms: false
+  add_application_platforms: false
 assets:
   - source: https://downloads.example.org/ngit/{version}/ngit-linux-x86_64.tar.gz
     platforms:
@@ -882,7 +894,22 @@ assets:
 ```
 
 Supported top-level fields are `schema`, `application`, `channel`, `notes`,
-release-wide `commit`, and `assets`. An asset supports:
+release-wide `commit`, `publication`, and `assets`. `publication` supports:
+
+- ordered `blossom_servers`;
+- additional discovery and publication `relays`;
+- `zapstore_relay` as the publication-only catalog shortcut;
+- `strict_metadata`;
+- `allow_partial_platforms`;
+- `add_application_platforms`.
+
+An explicit CLI Blossom list replaces the manifest list. CLI relays extend the
+manifest relays. Boolean manifest values and their CLI flags are combined with
+logical OR. The manifest deliberately cannot select a signer, provide secrets,
+set the release version or output mode, enable `--edit`, or set dynamic
+`released_at`/`tag` inputs.
+
+An asset supports:
 
 - exactly one of an HTTP(S) `source` URL or a local `file` path;
 - `identifier` and `version`, defaulting to the application identifier and
@@ -903,6 +930,11 @@ percent-encoded as URL components; filenames and local paths use the literal
 value. Relative local paths are resolved from the repository root and uploaded
 through the same ordered Blossom workflow as `--file`. No shell, environment
 variable, command, arbitrary template, or glob expansion is performed.
+
+The manifest's publication settings are used whenever that manifest is loaded.
+Automatic `.ngit/release.yaml` discovery remains limited to creation without
+direct asset flags. Callers combining CLI assets with a manifest, or editing an
+existing release, must pass `--manifest PATH` explicitly.
 
 A local APK is the one exception to the general requirement for an explicit
 `platforms` list: ngit derives its Android platforms from the exact stable

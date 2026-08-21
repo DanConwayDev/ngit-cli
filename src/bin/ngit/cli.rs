@@ -536,7 +536,8 @@ pub struct ReleasePublishArgs {
     /// Git commit represented by this release (defaults to HEAD when creating)
     #[arg(long, value_name = "COMMIT")]
     pub commit: Option<String>,
-    /// Release manifest; creation also discovers .ngit/release.yaml
+    /// Release assets and publication defaults; creation also discovers
+    /// .ngit/release.yaml
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
     /// Add a URL-backed asset as PLATFORM=URL (repeatable)

@@ -29,7 +29,27 @@ pub struct ReleaseManifest {
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub commit: Option<String>,
+    #[serde(default)]
+    pub publication: ReleaseManifestPublication,
     pub assets: Vec<ReleaseManifestAsset>,
+}
+
+/// Stable publication and policy defaults for CI release jobs.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseManifestPublication {
+    #[serde(default)]
+    pub blossom_servers: Vec<String>,
+    #[serde(default)]
+    pub relays: Vec<String>,
+    #[serde(default)]
+    pub zapstore_relay: bool,
+    #[serde(default)]
+    pub strict_metadata: bool,
+    #[serde(default)]
+    pub allow_partial_platforms: bool,
+    #[serde(default)]
+    pub add_application_platforms: bool,
 }
 
 /// One URL- or local-file-backed asset in a release manifest.
@@ -82,6 +102,7 @@ pub struct ResolvedReleaseManifest {
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub commit: Option<String>,
+    pub publication: ReleaseManifestPublication,
     pub assets: Vec<ResolvedReleaseManifestAsset>,
 }
 
@@ -268,6 +289,7 @@ impl ReleaseManifest {
             channel: self.channel.clone(),
             notes: self.notes.clone(),
             commit: self.commit.clone(),
+            publication: self.publication.clone(),
             assets,
         })
     }
@@ -293,11 +315,21 @@ impl ReleaseManifest {
             bail!("release manifest must contain at least one asset");
         }
 
+        self.publication.validate_and_normalize()?;
+
         for (index, asset) in self.assets.iter_mut().enumerate() {
             asset
                 .validate_and_normalize()
                 .with_context(|| format!("invalid assets[{index}]"))?;
         }
+        Ok(())
+    }
+}
+
+impl ReleaseManifestPublication {
+    fn validate_and_normalize(&mut self) -> Result<()> {
+        normalize_string_list("publication.blossom_servers", &mut self.blossom_servers)?;
+        normalize_string_list("publication.relays", &mut self.relays)?;
         Ok(())
     }
 }
@@ -568,6 +600,18 @@ application: ngit
 channel: main
 notes: Release notes
 commit: main
+publication:
+  blossom_servers:
+    - " https://blossom.example.com "
+    - https://blossom.example.com
+    - https://mirror.example.com
+  relays:
+    - " wss://relay.example.com "
+    - wss://relay.example.com
+  zapstore_relay: true
+  strict_metadata: true
+  allow_partial_platforms: true
+  add_application_platforms: true
 assets:
   - source: https://downloads.example.com/ngit/{version}/ngit-{tag}.tar.gz
     identifier: dev.ngit.cli
@@ -593,6 +637,15 @@ assets:
     fn parses_normalizes_and_resolves_complete_manifest() {
         let manifest = parse_release_manifest(COMPLETE_MANIFEST).unwrap();
         assert_eq!(manifest.commit.as_deref(), Some("main"));
+        assert_eq!(
+            manifest.publication.blossom_servers,
+            ["https://blossom.example.com", "https://mirror.example.com"]
+        );
+        assert_eq!(manifest.publication.relays, ["wss://relay.example.com"]);
+        assert!(manifest.publication.zapstore_relay);
+        assert!(manifest.publication.strict_metadata);
+        assert!(manifest.publication.allow_partial_platforms);
+        assert!(manifest.publication.add_application_platforms);
         assert_eq!(manifest.assets[0].platforms, ["linux-x86_64"]);
         assert_eq!(manifest.assets[0].supported_nips, ["34", "65"]);
         assert_eq!(
@@ -606,6 +659,7 @@ assets:
 
         let resolved = manifest.resolve("2.7.0/rc 1", Some("v2.7.0-rc.1")).unwrap();
         assert_eq!(resolved.commit.as_deref(), Some("main"));
+        assert_eq!(resolved.publication, manifest.publication);
         let asset = &resolved.assets[0];
         assert_eq!(
             asset.source,
@@ -637,6 +691,7 @@ assets:
             "schema: 1\nunknown: true\nassets: []\n",
             "schema: 1\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n    platfroms: [linux]\n",
             "schema: 1\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n    android:\n      certificate_sha: []\n",
+            "schema: 1\npublication:\n  blossom_server: https://example.com\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
         ] {
             let error = parse_release_manifest(yaml).unwrap_err();
             assert!(format!("{error:#}").contains("unknown field"));

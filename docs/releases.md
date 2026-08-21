@@ -88,6 +88,13 @@ schema: 1
 application: com.example.my-app
 channel: main
 notes: Maintenance and compatibility improvements.
+publication:
+  blossom_servers:
+    - https://blossom.example.com
+    - https://mirror.example.com
+  relays:
+    - wss://releases.example.com
+  zapstore_relay: true
 assets:
   - file: artifacts/my-app-{version}
     filename: my-app-{version}
@@ -112,7 +119,28 @@ Top-level fields are:
   unambiguous;
 - `channel`: defaults to `main` on creation;
 - `notes`: release notes;
+- `publication`: stable transport and release-policy defaults for CI;
 - `assets`: one or more asset objects.
+
+The optional `publication` block supports:
+
+- `blossom_servers`: ordered servers; the first receives the upload and the
+  remainder receive mirrors;
+- `relays`: additional discovery and publication relays;
+- `zapstore_relay`: add `wss://relay.zapstore.dev` as a publication-only
+  target;
+- `strict_metadata`: fail instead of publishing with metadata warnings;
+- `allow_partial_platforms`: allow a non-main release to cover only part of
+  the application's platform set;
+- `add_application_platforms`: extend the application when a main release
+  introduces platforms.
+
+An explicit `--blossom-server` list replaces `publication.blossom_servers`.
+Explicit `--relay` values are added to and deduplicated with the manifest
+relays. Boolean CLI flags and manifest values are enabling: if either is true,
+the policy is enabled. Version, signer credentials, `--released-at`, `--tag`,
+`--edit`, and output format remain runtime inputs so a committed manifest
+cannot supply secrets, silently replace an event, or freeze per-release data.
 
 Each asset has exactly one source:
 
@@ -156,7 +184,9 @@ Use `--manifest PATH` for a non-default manifest. Existing releases are never
 replaced by creation; publication requires `--edit` when editing an addressable
 release. See [the release API specification](release-api.md) for platform
 policy, application ownership, JSON shapes, recovery behavior, and the complete
-command reference.
+command reference. Default-manifest discovery is intentionally limited to
+creation without direct asset flags; pass `--manifest` explicitly when mixing a
+manifest with CLI assets or when editing.
 
 ## Using artifacts from ngit-ci
 
@@ -202,10 +232,13 @@ jobs:
 ```
 
 This expects `.ngit/release.yaml` to use `file: artifacts/my-app`. The release
-image must provide `ngit`, and the secret must belong to both a repository
-maintainer and the Software Application author. Restrict release workflows to
-trusted maintainer triggers; ngit-ci also withholds configured secrets from
-third-party pull requests.
+manifest may also own the ordered Blossom servers, relay targets, and stable
+publication policy through its `publication` block, leaving the CI job to
+supply only the version, signer, and output mode. The release image must provide
+`ngit`, and the secret must belong to both a repository maintainer and the
+Software Application author. Restrict release workflows to trusted maintainer
+triggers; ngit-ci also withholds configured secrets from third-party pull
+requests.
 
 `upload-artifact` does not remove the original build output. When building and
 publishing in one job, point `ngit release` directly at that original path and

@@ -15,6 +15,7 @@ use ngit::{
     },
     client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
+    git::{Repo, RepoActions},
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
         ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestSource,
@@ -49,6 +50,18 @@ use crate::{
 const BLOSSOM_RETRY_RECOVERY: &str = "Blossom blobs are content-addressed. Correct the server list and rerun the command; no NIP-82 event was signed or published.";
 const BLOSSOM_DOWNSTREAM_RECOVERY: &str = "Do not delete uploaded blobs automatically. Follow the original failure recovery first; the content-addressed blobs can be reused when the NIP-82 operation is safe to retry.";
 
+#[derive(Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+struct EffectivePublicationSettings {
+    blossom_servers: Vec<String>,
+    blossom_server_source: &'static str,
+    relays: Vec<String>,
+    zapstore_relay: bool,
+    strict_metadata: bool,
+    allow_partial_platforms: bool,
+    add_application_platforms: bool,
+}
+
 pub(super) async fn app_init(
     args: &ReleaseAppInitArgs,
     signer: SignerParams<'_>,
@@ -68,9 +81,12 @@ pub(super) async fn release_publish(
     args: &ReleasePublishArgs,
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
+    let repo = Repo::discover().context("failed to find a git repository")?;
+    let manifest = resolve_manifest(repo.get_path()?, args)?;
+    let publication = effective_publication_settings(args, manifest.as_ref());
     let mut context =
-        ReleaseContext::load_for_write(&args.relays, args.zapstore_relay, signer).await?;
-    let manifest = resolve_manifest(&context, args)?;
+        ReleaseContext::load_for_write(&publication.relays, publication.zapstore_relay, signer)
+            .await?;
     let app_selector = args.app.as_deref().or_else(|| {
         manifest
             .as_ref()
@@ -128,10 +144,10 @@ pub(super) async fn release_publish(
     });
     let has_local_files =
         manifest_has_files || !args.files.is_empty() || !args.platform_agnostic_files.is_empty();
-    if !args.blossom_servers.is_empty() && !has_local_files {
+    if !publication.blossom_servers.is_empty() && !has_local_files {
         return Err(coded_error(
             "blossom_server_without_file",
-            "--blossom-server requires a local file from --file, --platform-agnostic-file, or the release manifest",
+            "publication.blossom_servers or --blossom-server requires a local file from --file, --platform-agnostic-file, or the release manifest",
         ));
     }
 
@@ -267,7 +283,8 @@ pub(super) async fn release_publish(
     let blossom_selection = resolve_blossom_server_selection(
         &mut context,
         &application_target,
-        &args.blossom_servers,
+        &publication.blossom_servers,
+        publication.blossom_server_source,
         prepared_assets
             .iter()
             .any(|asset| matches!(asset, PreparedAsset::File(_))),
@@ -301,8 +318,8 @@ pub(super) async fn release_publish(
         &application_platforms,
         &release_platforms,
         &channel,
-        args.allow_partial_platforms,
-        args.add_application_platforms,
+        publication.allow_partial_platforms,
+        publication.add_application_platforms,
     )?;
     ensure_release_state_unchanged(
         &mut context,
@@ -315,9 +332,9 @@ pub(super) async fn release_publish(
     if existing_application.is_none() {
         let input =
             bootstrap_application_input(&context, &application_target, release_platforms.clone())?;
-        super::write_app::add_metadata_warnings(&mut context, &input, args.strict_metadata)?;
+        super::write_app::add_metadata_warnings(&mut context, &input, publication.strict_metadata)?;
     }
-    enforce_metadata_policy(&context, args.strict_metadata)?;
+    enforce_metadata_policy(&context, publication.strict_metadata)?;
     context.emit_human_warnings_before_signing(args.json);
 
     let signer = context
@@ -588,6 +605,7 @@ pub(super) async fn asset_add(
         &mut context,
         &application_target,
         &args.blossom_servers,
+        "explicit",
         matches!(prepared_asset, Some(PreparedAsset::File(_))),
     )
     .await?;
@@ -1126,7 +1144,7 @@ fn enforce_edit_guard(
 }
 
 fn resolve_manifest(
-    context: &ReleaseContext,
+    repository_root: &Path,
     args: &ReleasePublishArgs,
 ) -> Result<Option<ResolvedReleaseManifest>> {
     let has_direct_assets = !args.assets.is_empty()
@@ -1138,16 +1156,60 @@ fn resolve_manifest(
     let should_load = requested.is_some()
         || (!args.edit
             && !has_direct_assets
-            && resolve_release_manifest_path(context.git_repo_path()?, None)?.exists());
+            && resolve_release_manifest_path(repository_root, None)?.exists());
     if !should_load {
         return Ok(None);
     }
-    let loaded = load_release_manifest(context.git_repo_path()?, requested)?;
+    let loaded = load_release_manifest(repository_root, requested)?;
     Ok(Some(
         loaded
             .manifest
             .resolve(&args.release_version, args.tag.as_deref())?,
     ))
+}
+
+fn effective_publication_settings(
+    args: &ReleasePublishArgs,
+    manifest: Option<&ResolvedReleaseManifest>,
+) -> EffectivePublicationSettings {
+    let manifest_publication = manifest.map(|manifest| &manifest.publication);
+    let (blossom_servers, blossom_server_source) = if args.blossom_servers.is_empty() {
+        let servers = manifest_publication
+            .map(|publication| publication.blossom_servers.clone())
+            .unwrap_or_default();
+        let source = if servers.is_empty() {
+            "explicit"
+        } else {
+            "manifest"
+        };
+        (servers, source)
+    } else {
+        (args.blossom_servers.clone(), "explicit")
+    };
+
+    let mut relays = manifest_publication
+        .map(|publication| publication.relays.clone())
+        .unwrap_or_default();
+    for relay in &args.relays {
+        if !relays.contains(relay) {
+            relays.push(relay.clone());
+        }
+    }
+
+    EffectivePublicationSettings {
+        blossom_servers,
+        blossom_server_source,
+        relays,
+        zapstore_relay: args.zapstore_relay
+            || manifest_publication.is_some_and(|publication| publication.zapstore_relay),
+        strict_metadata: args.strict_metadata
+            || manifest_publication.is_some_and(|publication| publication.strict_metadata),
+        allow_partial_platforms: args.allow_partial_platforms
+            || manifest_publication.is_some_and(|publication| publication.allow_partial_platforms),
+        add_application_platforms: args.add_application_platforms
+            || manifest_publication
+                .is_some_and(|publication| publication.add_application_platforms),
+    }
 }
 
 fn release_notes(
@@ -1918,6 +1980,7 @@ async fn resolve_blossom_server_selection(
     context: &mut ReleaseContext,
     application: &ApplicationTarget,
     explicit_servers: &[String],
+    explicit_source: &'static str,
     required: bool,
 ) -> Result<Option<BlossomServerSelection>> {
     if !required {
@@ -1946,7 +2009,7 @@ async fn resolve_blossom_server_selection(
             }
         }
         return Ok(Some(BlossomServerSelection {
-            source: "explicit",
+            source: explicit_source,
             event_id: None,
             author: author.to_hex(),
             servers,
@@ -2563,6 +2626,8 @@ fn redacted_url(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
 
     fn values(values: &[&str]) -> Vec<String> {
@@ -2574,6 +2639,93 @@ mod tests {
             .downcast_ref::<super::super::support::ReleaseError>()
             .expect("platform policy returned an uncoded error")
             .code
+    }
+
+    fn publish_args(values: &[&str]) -> ReleasePublishArgs {
+        let cli = crate::cli::Cli::try_parse_from(
+            ["ngit", "release", "publish"]
+                .into_iter()
+                .chain(values.iter().copied()),
+        )
+        .expect("valid release publish arguments");
+        let Some(crate::cli::Commands::Release(release)) = cli.command else {
+            panic!("release command was not parsed");
+        };
+        let crate::cli::ReleaseCommands::Publish(args) = release.release_command else {
+            panic!("release publish command was not parsed");
+        };
+        args
+    }
+
+    #[test]
+    fn manifest_publication_settings_are_ci_defaults_with_cli_precedence() {
+        let manifest = ngit::release_manifest::parse_release_manifest(
+            r#"
+schema: 1
+publication:
+  blossom_servers:
+    - https://manifest-primary.example.com
+    - https://manifest-mirror.example.com
+  relays:
+    - wss://manifest.example.com
+  zapstore_relay: true
+  allow_partial_platforms: true
+assets:
+  - source: https://downloads.example.com/app
+    platform_agnostic: true
+"#,
+        )
+        .unwrap()
+        .resolve("1.0.0", None)
+        .unwrap();
+        let args = publish_args(&[
+            "1.0.0",
+            "--blossom-server",
+            "https://cli.example.com",
+            "--relay",
+            "wss://manifest.example.com",
+            "--relay",
+            "wss://cli.example.com",
+            "--strict-metadata",
+            "--add-application-platforms",
+        ]);
+
+        assert_eq!(
+            effective_publication_settings(&args, Some(&manifest)),
+            EffectivePublicationSettings {
+                blossom_servers: values(&["https://cli.example.com"]),
+                blossom_server_source: "explicit",
+                relays: values(&["wss://manifest.example.com", "wss://cli.example.com"]),
+                zapstore_relay: true,
+                strict_metadata: true,
+                allow_partial_platforms: true,
+                add_application_platforms: true,
+            }
+        );
+    }
+
+    #[test]
+    fn manifest_blossom_servers_are_reported_as_manifest_selected() {
+        let manifest = ngit::release_manifest::parse_release_manifest(
+            r#"
+schema: 1
+publication:
+  blossom_servers: [https://manifest.example.com]
+assets:
+  - file: dist/app
+    platforms: [linux-x86_64]
+"#,
+        )
+        .unwrap()
+        .resolve("1.0.0", None)
+        .unwrap();
+        let settings = effective_publication_settings(&publish_args(&["1.0.0"]), Some(&manifest));
+
+        assert_eq!(
+            settings.blossom_servers,
+            values(&["https://manifest.example.com"])
+        );
+        assert_eq!(settings.blossom_server_source, "manifest");
     }
 
     #[test]
