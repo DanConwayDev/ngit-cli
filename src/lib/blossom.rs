@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bitcoin_hashes::{HashEngine as _, sha256};
 use nostr::prelude::{Event, EventBuilder, EventId, Filter, Kind, PublicKey, Tag, Timestamp};
 use reqwest::{
@@ -549,6 +549,19 @@ async fn read_error_response_snippet(
     response: &mut reqwest::Response,
     deadline: tokio::time::Instant,
 ) -> String {
+    if response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/html"))
+        })
+    {
+        return "; server returned an HTML error page instead of a Blossom response".to_owned();
+    }
     let mut bytes = Vec::new();
     while bytes.len() < MAX_ERROR_BODY_BYTES {
         let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
@@ -615,7 +628,10 @@ async fn upload_authorization(snapshot: &FileSnapshot, signer: &NgitSigner) -> R
 
 fn authorization_header(event: &Event) -> Result<HeaderValue> {
     let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
-    HeaderValue::from_str(&format!("Nostr {}", URL_SAFE_NO_PAD.encode(event)))
+    // Padded standard Base64 is accepted by Base64url-capable reference
+    // servers and by deployed servers which have not yet adopted BUD-11's
+    // newer Base64url wording (notably blossom.primal.net).
+    HeaderValue::from_str(&format!("Nostr {}", STANDARD.encode(event)))
         .context("failed to construct the Blossom Authorization header")
 }
 
@@ -885,7 +901,7 @@ mod tests {
     };
 
     use anyhow::{Result, anyhow, bail};
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use nostr::prelude::{
         Event, EventBuilder, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
@@ -1046,6 +1062,23 @@ mod tests {
                 .then(|| values.get(1).map(String::as_str))
                 .flatten()
         })
+    }
+
+    #[test]
+    fn authorization_header_uses_padded_standard_base64() -> Result<()> {
+        let keys = Keys::generate();
+        let event = server_list_event(&keys, 1, "compatibility", []);
+        let event_json = serde_json::to_vec(&event)?;
+        let expected = STANDARD.encode(&event_json);
+        let header = authorization_header(&event)?;
+        let encoded = header
+            .to_str()?
+            .strip_prefix("Nostr ")
+            .context("authorization header omitted the Nostr scheme")?;
+
+        assert_eq!(encoded, expected);
+        assert_eq!(STANDARD.decode(encoded)?, event_json);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1353,7 +1386,7 @@ mod tests {
                 .context("upload omitted Authorization")?
                 .strip_prefix("Nostr ")
                 .context("upload authorization used the wrong scheme")?;
-            let event: Event = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(authorization)?)?;
+            let event: Event = serde_json::from_slice(&STANDARD.decode(authorization)?)?;
             event.verify()?;
             assert_eq!(event.kind, Kind::BlossomAuth);
             assert_eq!(event.pubkey, signer_keys.public_key());
@@ -1429,7 +1462,7 @@ mod tests {
                 .context("mirror omitted Authorization")?
                 .strip_prefix("Nostr ")
                 .context("mirror authorization used the wrong scheme")?;
-            let event: Event = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(authorization)?)?;
+            let event: Event = serde_json::from_slice(&STANDARD.decode(authorization)?)?;
             event.verify()?;
             assert_eq!(event.kind, Kind::BlossomAuth);
             assert_eq!(event.pubkey, signer_keys.public_key());
@@ -1803,6 +1836,37 @@ mod tests {
         assert!(!message.contains('\x1b'));
         assert!(!message.contains('\u{202e}'));
         assert!(!message.contains('\u{0007}'));
+        completed_request(server).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn html_error_pages_are_not_echoed_to_the_terminal() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let body = "<!doctype html><style>very long hosted-service page</style>";
+        let (server_url, server) = spawn_one_shot_server(move |_| TestResponse {
+            status: "404 Not Found",
+            headers: vec![(
+                "Content-Type".to_owned(),
+                "text/html; charset=utf-8".to_owned(),
+            )],
+            body: body.to_owned(),
+        })
+        .await?;
+
+        let error = upload_snapshot_with_timeout(
+            &server_url,
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+            TOTAL_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("HTML error page instead of a Blossom response"));
+        assert!(!message.contains("very long hosted-service page"));
         completed_request(server).await?;
         Ok(())
     }

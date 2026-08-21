@@ -1070,8 +1070,11 @@ credential-bearing URL are not printed in authorization events.
 
 For each request, ngit signs a short-lived kind `24242` authorization containing
 `t=upload`, `x=<lowercase sha256>`, and an expiration tag. The HTTP
-`Authorization` value is `Nostr ` followed by URL-safe, unpadded base64 of the
-signed event JSON. Authenticated PUT requests never follow redirects.
+`Authorization` value is `Nostr ` followed by padded standard base64 of the
+signed event JSON. This remains readable by Base64url-capable reference
+servers while retaining compatibility with deployed servers which only accept
+the standard alphabet and padding. Authenticated PUT requests never follow
+redirects.
 
 The primary request is `PUT /upload` with `Content-Length`, `Content-Type`, and
 `X-SHA-256` headers and the snapshot as its streaming body. A mirror request is
