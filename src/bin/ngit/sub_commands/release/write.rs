@@ -66,6 +66,25 @@ pub(super) async fn release_publish(
             .and_then(|manifest| manifest.application.as_deref())
     });
     let maintainers = context.repo_ref.maintainers.clone();
+
+    // A valid application found on any reachable route is sufficient to
+    // reject a signer who does not own it. Do that deterministic authority
+    // check before the fail-closed all-publication-relays preflight so an
+    // unrelated relay outage cannot obscure the more fundamental refusal.
+    if let Some(selector) = app_selector {
+        let warning_count = context.warnings.len();
+        let preliminary = load_applications(&mut context, maintainers.clone(), false).await?;
+        let preliminary_trusted = preliminary
+            .iter()
+            .filter(|application| context.application_is_trusted(application))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Ok(application) = select_application(&preliminary_trusted, Some(selector)) {
+            context.require_application_author(application)?;
+        }
+        context.warnings.truncate(warning_count);
+    }
+
     let discovered_applications = load_applications(&mut context, maintainers, true).await?;
     let trusted_applications = discovered_applications
         .iter()
