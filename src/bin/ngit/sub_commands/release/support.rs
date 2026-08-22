@@ -251,7 +251,8 @@ impl ReleaseContext {
         let git_repo = Repo::discover().context("failed to find a git repository")?;
         let git_repo_path = git_repo.get_path()?;
         let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-        let selected = get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &client).await?;
+        let selected =
+            get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
         if !offline {
             fetching_with_report(git_repo_path, &client, &selected.coordinate).await?;
         }
@@ -570,7 +571,7 @@ impl ReleaseContext {
                 &relays,
                 &filters,
             )
-            .await;
+            .await?;
             let failed: Vec<String> = results
                 .iter()
                 .filter_map(|(relay, result)| result.as_ref().err().map(|_| relay.to_string()))
