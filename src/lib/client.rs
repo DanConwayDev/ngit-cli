@@ -159,6 +159,7 @@ fn build_nostr_client(auth_policy: Arc<RelayAuthPolicy>) -> nostr_sdk::client::C
 }
 
 const SPINNER_EXPAND_DELAY_MS: u64 = 5000;
+const RELAY_FETCH_HEADING: &str = "Checking nostr relays...";
 
 static INVITED_MAINTAINER_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
 static VERSION_CHECK_STATE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -182,18 +183,229 @@ struct BarRevealState {
     deferred: Mutex<Vec<DeferredFinish>>,
 }
 
-/// Complete a direct relay event fetch before its caller emits more output.
-/// Successful per-relay details are transient; failed relay details remain
-/// visible so callers do not lose useful outage diagnostics.
-fn finish_direct_event_fetch(
-    relay_results: &[Result<Vec<Event>>],
-    progress_reporter: MultiProgress,
-) -> Result<()> {
-    if !relay_results.iter().any(Result::is_err) {
-        progress_reporter.clear()?;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayProgressMode {
+    Concise,
+    Detailed,
+    Hidden,
+}
+
+/// Owns the complete lifecycle of one multi-relay progress report.
+///
+/// Normal commands start with one concise spinner and reveal per-relay rows
+/// only after the shared delay. Successful rows are transient; failures keep
+/// the detailed report visible. Verbose commands show details immediately and
+/// silent or test commands never expose a renderer.
+pub struct RelayProgressReporter {
+    details: Option<MultiProgress>,
+    mode: RelayProgressMode,
+    _spinner_multi: Option<MultiProgress>,
+    spinner: Option<ProgressBar>,
+    heading: Option<ProgressBar>,
+    heading_message: String,
+    reveal_state: Option<Arc<BarRevealState>>,
+    timer_handle: Option<tokio::task::JoinHandle<()>>,
+    finished: bool,
+}
+
+#[derive(Clone)]
+pub struct RelayProgressHandle {
+    details: MultiProgress,
+    reveal_state: Option<Arc<BarRevealState>>,
+}
+
+impl RelayProgressHandle {
+    fn add(&self, progress_bar: ProgressBar) -> ProgressBar {
+        self.details.add(progress_bar)
     }
-    drop(progress_reporter);
-    Ok(())
+
+    fn finish_bar(&self, progress_bar: &ProgressBar, message: String) {
+        finish_bar(progress_bar, message, &self.reveal_state);
+    }
+}
+
+impl RelayProgressReporter {
+    fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
+        let heading_message = heading_message.into();
+        let mode = if silent || std::env::var("NGITTEST").is_ok() {
+            RelayProgressMode::Hidden
+        } else if is_verbose() || !animate {
+            RelayProgressMode::Detailed
+        } else {
+            RelayProgressMode::Concise
+        };
+        Self::with_mode(heading_message, mode)
+    }
+
+    /// Construct the standard relay-fetch report used by non-silent commands.
+    pub fn fetching() -> Self {
+        Self::new(RELAY_FETCH_HEADING, true, false)
+    }
+
+    /// Construct a hidden reporter for alternative [`Connect`]
+    /// implementations and queries which own no terminal UI.
+    pub fn hidden() -> Self {
+        Self::with_mode(String::new(), RelayProgressMode::Hidden)
+    }
+
+    fn with_mode(heading_message: String, mode: RelayProgressMode) -> Self {
+        let (spinner_multi, spinner) = if mode == RelayProgressMode::Concise {
+            let multi = MultiProgress::new();
+            let spinner = multi.add(
+                ProgressBar::new_spinner()
+                    .with_style(
+                        ProgressStyle::with_template("{spinner} {msg}")
+                            .unwrap()
+                            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
+                    )
+                    .with_message(heading_message.clone()),
+            );
+            spinner.enable_steady_tick(Duration::from_millis(100));
+            (Some(multi), Some(spinner))
+        } else {
+            (None, None)
+        };
+
+        let details = if mode == RelayProgressMode::Detailed {
+            MultiProgress::new()
+        } else {
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        };
+        let heading = (mode != RelayProgressMode::Hidden).then(|| {
+            details
+                .add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()))
+        });
+        if mode == RelayProgressMode::Detailed {
+            if let Some(heading) = &heading {
+                heading.finish_with_message(heading_message.clone());
+            }
+        }
+
+        let reveal_state = (mode == RelayProgressMode::Concise).then(|| {
+            Arc::new(BarRevealState {
+                revealed: AtomicBool::new(false),
+                deferred: Mutex::new(Vec::new()),
+            })
+        });
+        let timer_handle = if mode == RelayProgressMode::Concise {
+            let details_for_timer = details.clone();
+            let spinner_for_timer = spinner.clone();
+            let heading_for_timer = heading.clone();
+            let heading_message_for_timer = heading_message.clone();
+            let reveal_state_for_timer = reveal_state.clone().unwrap();
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
+                reveal_relay_progress(
+                    &details_for_timer,
+                    spinner_for_timer.as_ref(),
+                    heading_for_timer.as_ref(),
+                    &heading_message_for_timer,
+                    &reveal_state_for_timer,
+                );
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            details: Some(details),
+            mode,
+            _spinner_multi: spinner_multi,
+            spinner,
+            heading,
+            heading_message,
+            reveal_state,
+            timer_handle,
+            finished: false,
+        }
+    }
+
+    pub fn handle(&self) -> RelayProgressHandle {
+        RelayProgressHandle {
+            details: self.details.as_ref().unwrap().clone(),
+            reveal_state: self.reveal_state.clone(),
+        }
+    }
+
+    pub fn finish(mut self, has_errors: bool, concise_summary: Option<String>) -> Result<()> {
+        if let Some(handle) = self.timer_handle.take() {
+            handle.abort();
+        }
+        if self.mode == RelayProgressMode::Concise && has_errors {
+            reveal_relay_progress(
+                self.details.as_ref().unwrap(),
+                self.spinner.as_ref(),
+                self.heading.as_ref(),
+                &self.heading_message,
+                self.reveal_state.as_ref().unwrap(),
+            );
+        } else if let Some(spinner) = &self.spinner {
+            spinner.finish_and_clear();
+        }
+
+        let retain_details = retain_relay_progress_details(self.mode, has_errors);
+        let details = self.details.take().unwrap();
+        if !retain_details {
+            details.clear()?;
+        }
+        drop(details);
+
+        if self.mode == RelayProgressMode::Concise {
+            if let Some(summary) = concise_summary {
+                console::Term::stderr().write_line(&summary)?;
+            } else if has_errors {
+                console::Term::stderr().write_line("")?;
+            }
+        } else if self.mode == RelayProgressMode::Detailed && has_errors {
+            console::Term::stderr().write_line("")?;
+        }
+        self.finished = true;
+        Ok(())
+    }
+}
+
+fn retain_relay_progress_details(mode: RelayProgressMode, has_errors: bool) -> bool {
+    mode == RelayProgressMode::Detailed || (mode == RelayProgressMode::Concise && has_errors)
+}
+
+impl Drop for RelayProgressReporter {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(handle) = self.timer_handle.take() {
+            handle.abort();
+        }
+        if let Some(spinner) = &self.spinner {
+            spinner.finish_and_clear();
+        }
+        if let Some(details) = &self.details {
+            let _ = details.clear();
+        }
+    }
+}
+
+fn reveal_relay_progress(
+    details: &MultiProgress,
+    spinner: Option<&ProgressBar>,
+    heading: Option<&ProgressBar>,
+    heading_message: &str,
+    reveal_state: &BarRevealState,
+) {
+    let mut deferred = reveal_state.deferred.lock().unwrap();
+    if reveal_state.revealed.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+    details.set_draw_target(ProgressDrawTarget::stderr());
+    if let Some(heading) = heading {
+        heading.finish_with_message(heading_message.to_owned());
+    }
+    for finish in deferred.drain(..) {
+        finish.bar.finish_with_message(finish.message);
+    }
 }
 
 /// Finish a progress bar, deferring the operation if the detail view has not
@@ -296,8 +508,8 @@ pub trait Connect {
         &self,
         relays: Vec<RelayUrl>,
         filters: Vec<nostr::prelude::Filter>,
-        progress_reporter: MultiProgress,
-    ) -> Result<(Vec<Result<Vec<nostr::prelude::Event>>>, MultiProgress)>;
+        progress: RelayProgressHandle,
+    ) -> Result<Vec<Result<Vec<nostr::prelude::Event>>>>;
     async fn fetch_all<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -305,7 +517,7 @@ pub trait Connect {
         user_profiles: &HashSet<PublicKey>,
         private_relay_list_authors: &HashSet<PublicKey>,
         repository_relays_only: bool,
-    ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)>;
+    ) -> Result<(Vec<Result<FetchReport>>, RelayProgressReporter)>;
     async fn fetch_all_from_relay<'a>(
         &self,
         git_repo_path: Option<&'a Path>,
@@ -471,10 +683,11 @@ impl Connect for Client {
                 }
             })
             .collect::<Vec<RelayUrl>>();
-        let (relay_results, progress_reporter) = self
-            .get_events_per_relay(relay_urls, filters, MultiProgress::new())
+        let progress_reporter = RelayProgressReporter::hidden();
+        let relay_results = self
+            .get_events_per_relay(relay_urls, filters, progress_reporter.handle())
             .await?;
-        finish_direct_event_fetch(&relay_results, progress_reporter)?;
+        progress_reporter.finish(relay_results.iter().any(Result::is_err), None)?;
         // relay outages degrade to an empty result; callers that must not
         // mistake an outage for absent events consult their own caches or
         // use get_events_per_relay directly
@@ -488,8 +701,8 @@ impl Connect for Client {
         &self,
         relays: Vec<RelayUrl>,
         filters: Vec<nostr::prelude::Filter>,
-        progress_reporter: MultiProgress,
-    ) -> Result<(Vec<Result<Vec<nostr::prelude::Event>>>, MultiProgress)> {
+        progress: RelayProgressHandle,
+    ) -> Result<Vec<Result<Vec<nostr::prelude::Event>>>> {
         // add relays
         for relay in &relays {
             self.client
@@ -511,10 +724,10 @@ impl Connect for Client {
             .map(|r| (relays_map.get(r).unwrap(), filters.clone()))
             .map(|(relay, filters)| {
                 let static_timeout_clone = static_timeout.clone();
-                let progress_reporter_clone = progress_reporter.clone();
+                let progress = progress.clone();
                 async move {
                     let pb = if std::env::var("NGITTEST").is_err() {
-                        let pb = progress_reporter_clone.add(
+                        let pb = progress.add(
                             ProgressBar::new(1)
                                 .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
                                 .with_style(pb_style(static_timeout_clone)?),
@@ -524,30 +737,36 @@ impl Connect for Client {
                     } else {
                         None
                     };
-                    fn update_progress_bar_with_error(
+                    fn style_progress_bar_with_error(
                         relay_url: &RelayUrl,
-                        pb: Option<ProgressBar>,
+                        pb: &Option<ProgressBar>,
                         error: &anyhow::Error,
-                    ) {
+                    ) -> String {
+                        let message = console::style(
+                            error.to_string().replace("relay pool error:", "error:"),
+                        )
+                        .for_stderr()
+                        .red()
+                        .to_string();
                         if let Some(pb) = pb {
                             pb.set_style(pb_after_style(false));
                             pb.set_prefix(format!("{: <11}{}", "error", relay_url));
-                            pb.finish_with_message(
-                                console::style(
-                                    error.to_string().replace("relay pool error:", "error:"),
-                                )
-                                .for_stderr()
-                                .red()
-                                .to_string(),
-                            );
                         }
+                        message
                     }
                     if let Some(reason) = self.is_relay_skipped_for_session(relay.url()) {
-                        update_progress_bar_with_error(relay.url(), pb, &anyhow!("{reason}"));
+                        let message =
+                            style_progress_bar_with_error(relay.url(), &pb, &anyhow!("{reason}"));
+                        if let Some(pb) = &pb {
+                            progress.finish_bar(pb, message);
+                        }
                         bail!("{reason}");
                     }
                     if let Err(error) = ensure_onion_url_reachable(relay.url().as_str()) {
-                        update_progress_bar_with_error(relay.url(), pb, &error);
+                        let message = style_progress_bar_with_error(relay.url(), &pb, &error);
+                        if let Some(pb) = &pb {
+                            progress.finish_bar(pb, message);
+                        }
                         return Err(error);
                     }
                     #[allow(clippy::large_futures)]
@@ -557,18 +776,21 @@ impl Connect for Client {
                             if error.to_string().contains("connection timeout") {
                                 self.skip_relay_for_session(relay.url().clone(), error.to_string());
                             }
-                            update_progress_bar_with_error(relay.url(), pb, &error);
+                            let message = style_progress_bar_with_error(relay.url(), &pb, &error);
+                            if let Some(pb) = &pb {
+                                progress.finish_bar(pb, message);
+                            }
                             Err(error)
                         }
                         Ok(res) => {
-                            if let Some(pb) = pb {
+                            if let Some(pb) = &pb {
                                 pb.set_style(pb_after_style(true));
                                 pb.set_prefix(format!(
                                     "{: <11}{}",
                                     format!("{} events", res.len()),
                                     relay.url()
                                 ));
-                                pb.finish_with_message("");
+                                progress.finish_bar(pb, String::new());
                             }
                             Ok(res)
                         }
@@ -580,7 +802,7 @@ impl Connect for Client {
         let relay_results: Vec<Result<Vec<nostr::prelude::Event>>> =
             stream::iter(futures).buffer_unordered(15).collect().await;
 
-        Ok((relay_results, progress_reporter))
+        Ok(relay_results)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -591,7 +813,7 @@ impl Connect for Client {
         user_profiles: &HashSet<PublicKey>,
         private_relay_list_authors: &HashSet<PublicKey>,
         repository_relays_only: bool,
-    ) -> Result<(Vec<Result<FetchReport>>, MultiProgress)> {
+    ) -> Result<(Vec<Result<FetchReport>>, RelayProgressReporter)> {
         let relay_default_set = &self
             .relay_default_set
             .iter()
@@ -614,97 +836,8 @@ impl Connect for Client {
         )
         .await?;
 
-        let verbose = is_verbose();
-        let is_test = std::env::var("NGITTEST").is_ok();
-
-        // Set up the two-MultiProgress pattern:
-        // 1. A spinner MultiProgress shown immediately (concise mode only)
-        // 2. A detail MultiProgress that starts hidden and becomes visible after a
-        //    delay
-        let spinner_multi = if !verbose && !is_test {
-            let m = MultiProgress::new();
-            let spinner = m.add(
-                ProgressBar::new_spinner()
-                    .with_style(
-                        ProgressStyle::with_template("{spinner} {msg}")
-                            .unwrap()
-                            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-                    )
-                    .with_message("Checking nostr relays..."),
-            );
-            spinner.enable_steady_tick(Duration::from_millis(100));
-            Some((m, spinner))
-        } else {
-            None
-        };
-
-        let progress_reporter = if is_test {
-            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
-        } else if verbose {
-            MultiProgress::new()
-        } else {
-            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
-        };
-
-        // Pre-add a heading bar at position 0 so it has a reserved slot
-        // before any relay bars are added. It stays hidden (draw target is
-        // hidden) until the timer reveals it.
-        let heading_bar = if !verbose && !is_test {
-            let bar = progress_reporter.add(
-                ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()),
-            );
-            Some(bar)
-        } else {
-            None
-        };
-
-        // Track whether the detail view has been revealed. Bars that finish
-        // before reveal have their finish_with_message deferred so they render
-        // correctly once the draw target switches from hidden to stderr.
-        let reveal_state: Option<Arc<BarRevealState>> = if !verbose && !is_test {
-            Some(Arc::new(BarRevealState {
-                revealed: AtomicBool::new(false),
-                deferred: Mutex::new(Vec::new()),
-            }))
-        } else {
-            None
-        };
-
-        // Spawn a background timer that transitions from spinner to detail view
-        let detail_multi_for_timer = progress_reporter.clone();
-        let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
-        let reveal_state_for_timer = reveal_state.clone();
-        let heading_bar_for_timer = heading_bar.clone();
-        let timer_handle = if !verbose && !is_test {
-            let handle = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
-                // Transition: finish spinner, show heading, reveal detail bars
-                if let Some(spinner) = spinner_for_timer {
-                    spinner.finish_and_clear();
-                }
-                // Switch draw target to make bars visible
-                detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
-                // Finish the pre-added heading bar now that the draw target
-                // is visible so indicatif actually renders it.
-                if let Some(heading) = heading_bar_for_timer {
-                    heading.finish_with_message("Checking nostr relays...");
-                }
-                // Mark as revealed and flush all bars that finished while
-                // the draw target was hidden. Hold the lock across the flag
-                // update and drain so no bar can slip through unseen (see
-                // the corresponding lock in finish_bar).
-                if let Some(state) = reveal_state_for_timer {
-                    let mut deferred = state.deferred.lock().unwrap();
-                    state.revealed.store(true, Ordering::Release);
-                    for df in deferred.drain(..) {
-                        df.bar.finish_with_message(df.message);
-                    }
-                }
-            });
-            Some(handle)
-        } else {
-            None
-        };
+        let progress_reporter = RelayProgressReporter::fetching();
+        let progress = progress_reporter.handle();
 
         let success_count = Arc::new(AtomicU64::new(0));
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
@@ -766,9 +899,8 @@ impl Connect for Client {
                 .map(|request| {
                     let success_count_clone = success_count_for_loop.clone();
                     let current_timeout_clone = current_timeout_for_loop.clone();
-                    let progress_reporter_clone = progress_reporter.clone();
+                    let progress = progress.clone();
                     let total_relays_clone = total_relays;
-                    let reveal_state_clone = reveal_state.clone();
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -782,7 +914,7 @@ impl Connect for Client {
                         // multi. In test mode the multi has a hidden draw target
                         // so nothing is displayed. In concise mode the multi
                         // starts hidden and the background timer reveals it.
-                        let pb = progress_reporter_clone.add(
+                        let pb = progress.add(
                             ProgressBar::new(1)
                                 .with_prefix(
                                     format!(
@@ -831,7 +963,7 @@ impl Connect for Client {
                                 &anyhow!("{reason}"),
                             );
                             if let Some(ref bar) = pb {
-                                finish_bar(bar, msg, &reveal_state_clone);
+                                progress.finish_bar(bar, msg);
                             }
                             bail!("{reason}");
                         }
@@ -892,7 +1024,7 @@ impl Connect for Client {
                                     &error,
                                 );
                                 if let Some(ref bar) = pb {
-                                    finish_bar(bar, msg, &reveal_state_clone);
+                                    progress.finish_bar(bar, msg);
                                 }
                                 Err(error)
                             }
@@ -901,7 +1033,7 @@ impl Connect for Client {
                                 // by fetch_all_from_relay; finish it through
                                 // the deferred mechanism.
                                 if let Some(ref bar) = pb {
-                                    finish_bar(bar, String::new(), &reveal_state_clone);
+                                    progress.finish_bar(bar, String::new());
                                 }
                                 Ok(res)
                             }
@@ -952,16 +1084,6 @@ impl Connect for Client {
                 }
                 set
             };
-        }
-
-        // Cancel the background timer if it hasn't fired yet, and clean up
-        // the spinner. If the timer already fired, the abort is a no-op.
-        if let Some(handle) = timer_handle {
-            handle.abort();
-        }
-        // Clear the spinner (no-op if timer already cleared it)
-        if let Some((_, spinner)) = &spinner_multi {
-            spinner.finish_and_clear();
         }
 
         Ok((relay_reports, progress_reporter))
@@ -3371,11 +3493,6 @@ async fn fetching_with_report_policy_outcome(
     selected_maintainer_coordinate: &Nip19Coordinate,
     repository_relays_only: bool,
 ) -> Result<FetchOutcome> {
-    let verbose = is_verbose();
-    if verbose {
-        let term = console::Term::stderr();
-        term.write_line("Checking nostr relays...")?;
-    }
     let (relay_reports, progress_reporter) = client
         .fetch_all(
             Some(git_repo_path),
@@ -3385,10 +3502,8 @@ async fn fetching_with_report_policy_outcome(
             repository_relays_only,
         )
         .await?;
+    finish_fetch_progress(&relay_reports, progress_reporter)?;
     let outcome = consolidate_fetch_outcome(relay_reports);
-    if !outcome.had_errors {
-        let _ = progress_reporter.clear();
-    }
     // Route the summary to stderr so stdout stays clean for JSON-emitting
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
@@ -3413,11 +3528,6 @@ pub async fn fetching_quietly(
     selected_maintainer_coordinate: &Nip19Coordinate,
     private_discovery: &PrivateGitRelayDiscovery,
 ) -> Result<(FetchReport, bool)> {
-    let verbose = is_verbose();
-    if verbose {
-        let term = console::Term::stderr();
-        term.write_line("Checking nostr relays...")?;
-    }
     let cached_repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
             .await
@@ -3439,18 +3549,22 @@ pub async fn fetching_quietly(
             repository_relays_only,
         )
         .await?;
-    let had_errors = relay_reports.iter().any(std::result::Result::is_err);
-    if !had_errors {
-        let _ = progress_reporter.clear();
-    }
-    // Drop the MultiProgress now so all buffered stderr output is flushed
-    // before we write the separator blank line.
-    drop(progress_reporter);
-    if had_errors {
-        let _ = console::Term::stderr().write_line("");
-    }
+    let had_errors = finish_fetch_progress(&relay_reports, progress_reporter)?;
     let report = consolidate_fetch_reports(relay_reports);
     Ok((report, had_errors))
+}
+
+/// Finalize a repository fetch before its caller prints ordinary output.
+///
+/// Keeping this operation on the reporter makes successful cleanup, error
+/// retention, and output separation identical for every fetch caller.
+pub fn finish_fetch_progress<T>(
+    reports: &[Result<T>],
+    progress_reporter: RelayProgressReporter,
+) -> Result<bool> {
+    let had_errors = reports.iter().any(Result::is_err);
+    progress_reporter.finish(had_errors, None)?;
+    Ok(had_errors)
 }
 
 pub async fn get_issues_from_cache(
@@ -3784,93 +3898,13 @@ async fn send_events_with_cache_path(
         }
     }
 
-    let verbose = is_verbose();
-    let is_test = std::env::var("NGITTEST").is_ok();
-    let use_concise = !is_test && !verbose && !silent && animate;
-
     let events_description = describe_events(&events);
-
-    // Set up the two-MultiProgress pattern (same as fetch_all):
-    // 1. A spinner MultiProgress shown immediately (concise mode only)
-    // 2. A detail MultiProgress that starts hidden and becomes visible after a
-    //    delay
-    let spinner_multi = if use_concise {
-        let sm = MultiProgress::new();
-        let spinner = sm.add(
-            ProgressBar::new_spinner()
-                .with_style(
-                    ProgressStyle::with_template("{spinner} {msg}")
-                        .unwrap()
-                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-                )
-                .with_message(format!(
-                    "Publishing {events_description} to nostr relays..."
-                )),
-        );
-        spinner.enable_steady_tick(Duration::from_millis(100));
-        Some((sm, spinner))
-    } else {
-        None
-    };
-
-    let m = if silent || use_concise {
-        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
-    } else {
-        MultiProgress::new()
-    };
-
-    // Pre-add a heading bar at position 0 so it has a reserved slot
-    // before any relay bars are added.
-    let heading_bar = {
-        let bar =
-            m.add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()));
-        if !is_test {
-            bar.set_message(format!(
-                "Publishing {events_description} to nostr relays..."
-            ));
-        }
-        Some(bar)
-    };
-
-    let reveal_state: Option<Arc<BarRevealState>> = if use_concise {
-        Some(Arc::new(BarRevealState {
-            revealed: AtomicBool::new(false),
-            deferred: Mutex::new(Vec::new()),
-        }))
-    } else {
-        None
-    };
-
-    // Spawn a background timer that transitions from spinner to detail view
-    let detail_multi_for_timer = m.clone();
-    let spinner_for_timer = spinner_multi.as_ref().map(|(_, s)| s.clone());
-    let reveal_state_for_timer = reveal_state.clone();
-    let heading_bar_for_timer = heading_bar.clone();
-    let events_description_for_timer = events_description.clone();
-    let timer_handle = if use_concise {
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(SPINNER_EXPAND_DELAY_MS)).await;
-            if let Some(spinner) = spinner_for_timer {
-                spinner.finish_and_clear();
-            }
-            detail_multi_for_timer.set_draw_target(ProgressDrawTarget::stderr());
-            if let Some(heading) = heading_bar_for_timer {
-                heading.finish_with_message(format!(
-                    "Publishing {events_description_for_timer} to nostr relays..."
-                ));
-            }
-            if let Some(state) = reveal_state_for_timer {
-                let mut deferred = state.deferred.lock().unwrap();
-                state.revealed.store(true, Ordering::Release);
-                for df in deferred.drain(..) {
-                    df.bar.finish_with_message(df.message);
-                }
-            }
-        });
-        Some(handle)
-    } else {
-        None
-    };
+    let progress_reporter = RelayProgressReporter::new(
+        format!("Publishing {events_description} to nostr relays..."),
+        animate,
+        silent,
+    );
+    let progress = progress_reporter.handle();
 
     let pb_style = ProgressStyle::with_template(if animate {
         " {spinner} {prefix} {bar} {pos}/{len} {msg}"
@@ -3901,11 +3935,10 @@ async fn send_events_with_cache_path(
 
     #[allow(clippy::borrow_deref_ref)]
     let relay_results: Vec<(String, bool)> = join_all(relays.iter().map(|&relay| {
-        let reveal_state_clone = reveal_state.clone();
+        let progress = progress.clone();
         let my_write_relays = my_write_relays.clone();
         let repo_read_relays = repo_read_relays.clone();
         let fallback = fallback.clone();
-        let m = m.clone();
         let events = events.clone();
         let pb_style = pb_style.clone();
         let pb_after_style_failed = pb_after_style_failed.clone();
@@ -3940,7 +3973,7 @@ async fn send_events_with_cache_path(
                 },
                 relay_clean,
             );
-            let pb = m.add(
+            let pb = progress.add(
                 ProgressBar::new(events.len() as u64)
                     .with_prefix(details.to_string())
                     .with_style(pb_style.clone()),
@@ -3964,7 +3997,7 @@ async fn send_events_with_cache_path(
                         .for_stderr()
                         .red()
                         .to_string();
-                        finish_bar(&pb, msg, &reveal_state_clone);
+                        progress.finish_bar(&pb, msg);
                         failed = true;
                         break;
                     }
@@ -3972,18 +4005,12 @@ async fn send_events_with_cache_path(
             }
             if !failed {
                 pb.set_style(pb_after_style_succeeded.clone());
-                finish_bar(&pb, String::new(), &reveal_state_clone);
+                progress.finish_bar(&pb, String::new());
             }
             (relay_clean.to_string(), !failed)
         }
     }))
     .await;
-
-    // Cancel the background timer if it hasn't fired yet, and clean up
-    // the spinner. If the timer already fired, the abort is a no-op.
-    if let Some(handle) = timer_handle {
-        handle.abort();
-    }
 
     let succeeded_count = relay_results.iter().filter(|(_, ok)| *ok).count();
     let total_count = relay_results.len();
@@ -4012,10 +4039,7 @@ async fn send_events_with_cache_path(
         )
     };
 
-    if let Some((_, spinner)) = &spinner_multi {
-        spinner.set_style(ProgressStyle::with_template("{msg}").unwrap());
-        spinner.finish_with_message(finish_message);
-    }
+    progress_reporter.finish(succeeded_count != total_count, Some(finish_message))?;
 
     Ok(relay_results)
 }
@@ -4274,7 +4298,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_direct_event_fetch_clears_per_relay_progress() {
+    fn successful_relay_progress_is_cleared_centrally() {
         let clears = Arc::new(AtomicUsize::new(0));
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
             ClearTrackingTerm {
@@ -4288,13 +4312,46 @@ mod tests {
         bar.finish_with_message("0 events from mailbox relay");
         let clears_before_finish = clears.load(Ordering::Relaxed);
 
-        finish_direct_event_fetch(&[Ok(Vec::new())], progress)
-            .expect("successful direct fetch cleanup");
+        let reporter = RelayProgressReporter {
+            details: Some(progress),
+            mode: RelayProgressMode::Concise,
+            _spinner_multi: None,
+            spinner: None,
+            heading: None,
+            heading_message: RELAY_FETCH_HEADING.to_owned(),
+            reveal_state: None,
+            timer_handle: None,
+            finished: false,
+        };
 
+        let had_errors = finish_fetch_progress(&[Ok(FetchReport::default())], reporter)
+            .expect("successful progress cleanup");
+
+        assert!(!had_errors);
         assert!(
             clears.load(Ordering::Relaxed) > clears_before_finish,
             "successful direct relay reads must clear their transient detail lines"
         );
+    }
+
+    #[test]
+    fn relay_progress_completion_policy_is_shared_by_fetch_and_publish() {
+        assert!(!retain_relay_progress_details(
+            RelayProgressMode::Concise,
+            false
+        ));
+        assert!(retain_relay_progress_details(
+            RelayProgressMode::Concise,
+            true
+        ));
+        assert!(retain_relay_progress_details(
+            RelayProgressMode::Detailed,
+            false
+        ));
+        assert!(!retain_relay_progress_details(
+            RelayProgressMode::Hidden,
+            true
+        ));
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use indicatif::MultiProgress;
 use nostr::prelude::{
     Event, EventBuilder, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, ToBech32, Url,
     event::Tag,
@@ -24,7 +23,8 @@ use crate::client::MockConnect;
 use crate::{client::save_event_in_global_cache, get_dirs};
 use crate::{
     client::{
-        Connect, FetchReport, get_event_from_global_cache, is_verbose, sign_draft_event, sign_event,
+        Connect, RelayProgressReporter, finish_fetch_progress, get_event_from_global_cache,
+        is_verbose, sign_draft_event, sign_event,
     },
     git_events::{KIND_PRIVATE_GIT_RELAY_LIST, KIND_USER_GRASP_LIST},
 };
@@ -719,7 +719,8 @@ async fn read_private_relay_list_replacement_base<C: Connect + Sync>(
                 .with_context(|| format!("invalid private relay-list write relay URL: {relay}"))
         })
         .collect::<Result<Vec<_>>>()?;
-    let (results, _) = client
+    let progress_reporter = RelayProgressReporter::fetching();
+    let results = client
         .get_events_per_relay(
             relay_urls,
             vec![
@@ -728,10 +729,11 @@ async fn read_private_relay_list_replacement_base<C: Connect + Sync>(
                     .author(public_key)
                     .limit(10),
             ],
-            MultiProgress::new(),
+            progress_reporter.handle(),
         )
         .await
         .context("failed to read the private Git relay list from its write relays")?;
+    progress_reporter.finish(results.iter().any(Result::is_err), None)?;
     if !results.iter().any(Result::is_ok) {
         let errors = results
             .iter()
@@ -891,7 +893,7 @@ async fn get_user_details_with_private_relay_lists<C: Connect + Sync>(
                         false,
                     )
                     .await?;
-                finish_profile_fetch(&reports, progress_reporter)?;
+                finish_fetch_progress(&reports, progress_reporter)?;
                 if is_verbose() && !reports.iter().any(|report| report.is_err()) {
                     term.clear_last_lines(1)?;
                 }
@@ -924,7 +926,7 @@ async fn get_user_details_with_private_relay_lists<C: Connect + Sync>(
                     false,
                 )
                 .await?;
-            finish_profile_fetch(&reports, progress_reporter)?;
+            finish_fetch_progress(&reports, progress_reporter)?;
             if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, public_key).await {
                 Ok(user_ref)
             } else {
@@ -958,24 +960,6 @@ pub async fn refresh_user_and_private_git_relays<C: Connect + Sync>(
     let private_discovery =
         discover_private_git_relay_list_from_cache(client, signer, git_repo_path).await;
     Ok((user_ref, private_discovery))
-}
-
-/// Complete a profile fetch before its caller prints ordinary status text.
-/// Successful relay details are transient; errors remain visible and receive
-/// a separating newline so subsequent output cannot share the final bar line.
-fn finish_profile_fetch(
-    reports: &[Result<FetchReport>],
-    progress_reporter: indicatif::MultiProgress,
-) -> Result<()> {
-    let had_errors = reports.iter().any(Result::is_err);
-    if !had_errors {
-        progress_reporter.clear()?;
-    }
-    drop(progress_reporter);
-    if had_errors {
-        console::Term::stderr().write_line("")?;
-    }
-    Ok(())
 }
 
 pub async fn get_user_ref_from_cache(
@@ -1122,89 +1106,6 @@ pub fn extract_user_grasp_list(
         } else {
             Timestamp::from(0)
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        io,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
-
-    use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-
-    use super::finish_profile_fetch;
-    use crate::client::FetchReport;
-
-    #[derive(Debug)]
-    struct ClearTrackingTerm {
-        clears: Arc<AtomicUsize>,
-    }
-
-    impl TermLike for ClearTrackingTerm {
-        fn width(&self) -> u16 {
-            80
-        }
-
-        fn move_cursor_up(&self, _n: usize) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn move_cursor_down(&self, _n: usize) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn move_cursor_right(&self, _n: usize) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn move_cursor_left(&self, _n: usize) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn write_line(&self, _s: &str) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn write_str(&self, _s: &str) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn clear_line(&self) -> io::Result<()> {
-            self.clears.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn flush(&self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn successful_profile_fetch_clears_progress_without_a_profile() {
-        let clears = Arc::new(AtomicUsize::new(0));
-        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
-            ClearTrackingTerm {
-                clears: clears.clone(),
-            },
-        )));
-        let bar = progress.add(
-            ProgressBar::new(1)
-                .with_style(ProgressStyle::with_template("{msg}").expect("valid style")),
-        );
-        bar.finish_with_message("no new events");
-
-        finish_profile_fetch(&[Ok(FetchReport::default())], progress)
-            .expect("successful progress cleanup");
-
-        assert!(
-            clears.load(Ordering::Relaxed) > 0,
-            "a successful fetch must clear transient relay details even when no profile was found"
-        );
     }
 }
 
@@ -1381,7 +1282,7 @@ mod private_git_relay_list_tests {
         client
             .expect_get_events_per_relay()
             .once()
-            .return_once(|_, _, progress| Ok((vec![Ok(vec![])], progress)));
+            .return_once(|_, _, _| Ok(vec![Ok(vec![])]));
         client.expect_get_events().once().returning(move |_, _| {
             Ok(published_for_fetch
                 .lock()
@@ -1481,17 +1382,14 @@ mod private_git_relay_list_tests {
         client
             .expect_get_events_per_relay()
             .times(2)
-            .returning(move |_, _, progress| {
+            .returning(move |_, _, _| {
                 let mut call = base_call_for_read.lock().unwrap();
                 *call += 1;
-                Ok((
-                    vec![Ok(if *call == 1 {
-                        vec![]
-                    } else {
-                        vec![concurrent_for_base.clone()]
-                    })],
-                    progress,
-                ))
+                Ok(vec![Ok(if *call == 1 {
+                    vec![]
+                } else {
+                    vec![concurrent_for_base.clone()]
+                })])
             });
         client.expect_get_events().times(2).returning(move |_, _| {
             let mut call = verify_call_for_fetch.lock().unwrap();
@@ -1573,9 +1471,7 @@ mod private_git_relay_list_tests {
             .expect_get_events_per_relay()
             .once()
             .withf(move |relays, _, _| relays == std::slice::from_ref(&expected_outbox))
-            .return_once(|_, _, progress| {
-                Ok((vec![Err(anyhow::anyhow!("outbox unavailable"))], progress))
-            });
+            .return_once(|_, _, _| Ok(vec![Err(anyhow::anyhow!("outbox unavailable"))]));
         client.expect_get_events().never();
         client.expect_send_event_to().never();
 
@@ -1870,11 +1766,11 @@ mod private_git_relay_list_tests {
         client
             .expect_get_events_per_relay()
             .once()
-            .return_once(move |_, _, progress| {
-                Ok((
-                    vec![Err(anyhow::anyhow!("dead relay")), Ok(vec![existing_event])],
-                    progress,
-                ))
+            .return_once(move |_, _, _| {
+                Ok(vec![
+                    Err(anyhow::anyhow!("dead relay")),
+                    Ok(vec![existing_event]),
+                ])
             });
         client.expect_get_events().once().returning(move |_, _| {
             Ok(published_for_fetch
