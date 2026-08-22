@@ -15,7 +15,7 @@ use nostr::prelude::{PublicKey, ToBech32};
 use serde::Serialize;
 
 use crate::{
-    client::{Client, Connect},
+    client::{Client, Connect, finish_fetch_progress},
     git::{Repo, RepoActions},
 };
 
@@ -197,10 +197,7 @@ async fn load_accounts(
                 .fetch_all(git_repo_path, None, &public_keys, &HashSet::new(), false)
                 .await
             {
-                if reports.iter().all(Result::is_ok) {
-                    progress_reporter.clear()?;
-                }
-                drop(progress_reporter);
+                finish_fetch_progress(&reports, progress_reporter)?;
             }
         }
     }

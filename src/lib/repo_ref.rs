@@ -25,8 +25,8 @@ use crate::{
         Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms, PromptInputParms,
     },
     client::{
-        Connect, PrivateRelayProbeDecision, consolidate_fetch_outcome, get_repo_ref_from_cache,
-        private_relay_probe_decision,
+        Connect, PrivateRelayProbeDecision, consolidate_fetch_outcome, finish_fetch_progress,
+        get_repo_ref_from_cache, private_relay_probe_decision,
     },
     git::{
         Repo, RepoActions,
@@ -1211,10 +1211,8 @@ async fn get_repo_coordinate_from_user_prompt(
                         repository_relays_only,
                     )
                     .await?;
+                finish_fetch_progress(&relay_reports, progress_reporter)?;
                 let outcome = consolidate_fetch_outcome(relay_reports);
-                if !outcome.had_errors && !outcome.report.to_string().is_empty() {
-                    let _ = progress_reporter.clear();
-                }
                 if repository_relays_only {
                     let discovered_privacy =
                         get_repo_ref_from_cache(Some(git_repo_path), &coordinate)

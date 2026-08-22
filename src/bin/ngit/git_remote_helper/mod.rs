@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
-    get_repo_ref_from_cache, is_verbose, private_relay_probe_decision,
+    finish_fetch_progress, get_repo_ref_from_cache, is_verbose, private_relay_probe_decision,
     save_repository_privacy_to_git_config, warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
@@ -582,10 +582,8 @@ async fn fetching_with_report_for_helper(
                 repository_relays_only,
             )
             .await?;
+        finish_fetch_progress(&relay_reports, progress_reporter)?;
         let outcome = consolidate_fetch_outcome(relay_reports);
-        if !outcome.had_errors || !verbose {
-            let _ = progress_reporter.clear();
-        }
         if repository_relays_only && private_probe {
             let discovered_privacy =
                 get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate)
