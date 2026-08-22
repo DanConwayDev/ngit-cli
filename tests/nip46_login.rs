@@ -307,6 +307,63 @@ async fn paired_bunker_reuses_discovered_pubkey_for_real_signatures() {
 }
 
 #[tokio::test]
+async fn nbunksec_without_user_pubkey_fetches_identity_before_signing() {
+    let relay = LocalRelayBuilder::default().build();
+    let relay_url = relay.url().await;
+    relay.run().await.expect("local relay should start");
+
+    let client_keys = Keys::generate();
+    let signer_keys = Keys::generate();
+    let user_keys = Keys::generate();
+    let remote_signer = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: signer_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )
+    .expect("remote signer should be created");
+    let bunker_uri = remote_signer.bunker_uri().to_string();
+    let encoded =
+        ngit::login::nbunksec::encode(&bunker_uri, &client_keys.secret_key().to_secret_hex())
+            .expect("established connection should encode");
+    let connection = ngit::login::nbunksec::decode(&encoded).expect("nbunksec should decode");
+    let request_counts = Arc::new(RequestCounts::default());
+    let signer_actions = CountRequests(Arc::clone(&request_counts));
+    let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
+    wait_until_signer_ready(&relay_url, signer_keys.public_key()).await;
+
+    let connect = nostr_connect::client::NostrConnect::new(
+        NostrConnectUri::parse(connection.bunker_uri).expect("decoded bunker URI should parse"),
+        Keys::parse(&connection.client_key).expect("decoded client key should parse"),
+        Duration::from_secs(10),
+        None,
+    )
+    .expect("decoded connection should construct");
+    let signer = ngit::signer::NgitSigner::Connect(Arc::new(connect));
+    let public_key = tokio::time::timeout(Duration::from_secs(10), signer.get_public_key())
+        .await
+        .expect("identity request should finish before its deadline")
+        .expect("identity request should succeed");
+    let event = tokio::time::timeout(
+        Duration::from_secs(10),
+        signer.sign_event_builder(EventBuilder::new(Kind::TextNote, "real ngit event")),
+    )
+    .await
+    .expect("signing should finish before its deadline")
+    .expect("signing should succeed");
+    signer_task.abort();
+
+    assert_eq!(public_key, user_keys.public_key());
+    event.verify().expect("signature should verify");
+    assert_eq!(event.pubkey, user_keys.public_key());
+    assert_eq!(request_counts.get_public_key.load(Ordering::SeqCst), 1);
+    assert_eq!(request_counts.sign_event.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn sanitized_bunker_uri_reconnects_with_stored_client_key() {
     let relay = LocalRelayBuilder::default().build();
     let relay_url = relay.url().await;

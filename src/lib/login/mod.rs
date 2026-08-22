@@ -17,6 +17,7 @@ use crate::{
 pub mod credential_store;
 pub mod existing;
 mod key_encryption;
+pub mod nbunksec;
 use existing::{SignerInfoNotFound, load_existing_login};
 pub mod user;
 use user::UserRef;
@@ -73,6 +74,7 @@ pub fn require_account(error: anyhow::Error) -> anyhow::Error {
             &[
                 "ngit account login",
                 "ngit --nsec <your-nsec> <command>",
+                "ngit --nbunksec-file <path> <command>",
                 "ngit --bunker-uri <uri> --bunker-app-key <key> <command>",
             ],
         );

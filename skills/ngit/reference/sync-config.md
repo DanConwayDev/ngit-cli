@@ -21,6 +21,8 @@ ngit sync --ref-name main --json # sync specific ref
 | `--signer <ALIAS|NPUB|NOSTR-DISPLAY-NAME>` | Use a stored signer for one ngit command |
 | `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
 | `--nsec-file <PATH>`  | Read a one-shot key from a private file|
+| `--nbunksec <NBUNKSEC>` | Provide an established bunker session inline |
+| `--nbunksec-file <PATH>` | Read a one-shot bunker session from a private file |
 | `-f`, `--force`       | Bypass safety guards                   |
 | `-v`, `--verbose`     | Verbose output                         |
 

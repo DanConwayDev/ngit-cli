@@ -1775,6 +1775,7 @@ dependencies = [
  "async-trait",
  "auth-git2",
  "base64",
+ "bech32",
  "bitcoin_hashes 1.2.0",
  "chacha20poly1305",
  "chrono",

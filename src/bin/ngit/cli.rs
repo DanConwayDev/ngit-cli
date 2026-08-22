@@ -39,7 +39,7 @@ pub struct Cli {
         short,
         long,
         global = true,
-        conflicts_with_all = ["nsec_file", "signer"]
+        conflicts_with_all = ["nsec_file", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec: Option<String>,
     /// read an nsec or hex private key from a path resolving to a regular file
@@ -47,16 +47,53 @@ pub struct Cli {
         long,
         global = true,
         value_name = "PATH",
-        conflicts_with_all = ["nsec", "signer"]
+        conflicts_with_all = ["nsec", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec_file: Option<PathBuf>,
+    /// established remote signer connection encoded as nbunksec
+    #[arg(
+        long,
+        global = true,
+        value_name = "NBUNKSEC",
+        conflicts_with_all = [
+            "nsec",
+            "nsec_file",
+            "nbunksec_file",
+            "signer",
+            "bunker_uri",
+            "bunker_app_key"
+        ]
+    )]
+    pub nbunksec: Option<String>,
+    /// read an nbunksec connection from a path resolving to a regular file
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        conflicts_with_all = [
+            "nsec",
+            "nsec_file",
+            "nbunksec",
+            "signer",
+            "bunker_uri",
+            "bunker_app_key"
+        ]
+    )]
+    pub nbunksec_file: Option<PathBuf>,
     /// use a configured signer by npub, alias, or cached profile name for
     /// this command
     #[arg(
         long,
         global = true,
         value_name = "NPUB|ALIAS|NAME",
-        conflicts_with_all = ["nsec", "nsec_file", "bunker_uri", "bunker_app_key"]
+        conflicts_with_all = [
+            "nsec",
+            "nsec_file",
+            "nbunksec",
+            "nbunksec_file",
+            "bunker_uri",
+            "bunker_app_key"
+        ]
     )]
     pub signer: Option<String>,
     /// password to decrypt nsec
@@ -256,12 +293,26 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
     } else {
         None
     };
+    let nbunksec = if let Some(nbunksec) = &args.nbunksec {
+        Some(nbunksec.clone())
+    } else if let Some(path) = &args.nbunksec_file {
+        Some(read_nbunksec_file(path)?)
+    } else {
+        None
+    };
     if let Some(nsec) = nsec {
         Ok(Some(SignerInfo::Nsec {
             nsec,
             password: None,
             npub: None,
             verify_npub: false,
+        }))
+    } else if let Some(value) = nbunksec {
+        let connection = ngit::login::nbunksec::decode(&value).context("invalid nbunksec")?;
+        Ok(Some(SignerInfo::Bunker {
+            bunker_uri: connection.bunker_uri,
+            bunker_app_key: connection.client_key,
+            npub: None,
         }))
     } else if let Some(bunker_uri) = args.bunker_uri.clone() {
         if let Some(bunker_app_key) = args.bunker_app_key.clone() {
@@ -285,6 +336,14 @@ pub fn extract_signer_cli_arguments(args: &Cli) -> Result<Option<SignerInfo>> {
 }
 
 fn read_nsec_file(path: &Path) -> Result<String> {
+    read_secret_file(path, "nsec")
+}
+
+fn read_nbunksec_file(path: &Path) -> Result<String> {
+    read_secret_file(path, "nbunksec")
+}
+
+fn read_secret_file(path: &Path, label: &str) -> Result<String> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -292,38 +351,41 @@ fn read_nsec_file(path: &Path) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path).context("failed to open nsec file")?;
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {label} file"))?;
     let meta = file
         .metadata()
-        .context("failed to inspect open nsec file")?;
+        .with_context(|| format!("failed to inspect open {label} file"))?;
     if !meta.is_file() {
-        bail!("nsec file path must resolve to a regular file");
+        bail!("{label} file path must resolve to a regular file");
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if !matches!(meta.permissions().mode() & 0o777, 0o400 | 0o600) {
-            bail!("nsec file permissions must be 0400 or 0600");
+            bail!("{label} file permissions must be 0400 or 0600");
         }
     }
     if !(1..=4096).contains(&meta.len()) {
-        bail!("nsec file must contain 1 to 4096 bytes");
+        bail!("{label} file must contain 1 to 4096 bytes");
     }
-    let capacity = usize::try_from(meta.len()).context("nsec file size does not fit memory")?;
+    let capacity = usize::try_from(meta.len())
+        .with_context(|| format!("{label} file size does not fit memory"))?;
     let mut raw = Vec::with_capacity(capacity);
     file.take(4097)
         .read_to_end(&mut raw)
-        .context("failed to read nsec file")?;
+        .with_context(|| format!("failed to read {label} file"))?;
     if raw.len() > 4096 {
-        bail!("nsec file must contain 1 to 4096 bytes");
+        bail!("{label} file must contain 1 to 4096 bytes");
     }
-    let value = std::str::from_utf8(&raw).context("nsec file must be UTF-8")?;
+    let value = std::str::from_utf8(&raw).with_context(|| format!("{label} file must be UTF-8"))?;
     let value = value
         .strip_suffix("\r\n")
         .or_else(|| value.strip_suffix('\n'))
         .unwrap_or(value);
     if value.is_empty() || value.contains(['\r', '\n']) {
-        bail!("nsec file must contain exactly one non-empty line");
+        bail!("{label} file must contain exactly one non-empty line");
     }
     Ok(value.to_string())
 }
@@ -876,6 +938,20 @@ mod tests {
         }
     }
 
+    fn nbunksec_fixture() -> String {
+        use nostr::prelude::{Keys, NostrConnectUri, RelayUrl};
+
+        let remote = Keys::parse(&"1".repeat(64)).unwrap();
+        let client = Keys::parse(&"2".repeat(64)).unwrap();
+        let uri = NostrConnectUri::Bunker {
+            remote_signer_public_key: remote.public_key(),
+            relays: vec![RelayUrl::parse("wss://relay.example.com").unwrap()],
+            secret: None,
+        };
+        ngit::login::nbunksec::encode(&uri.to_string(), &client.secret_key().to_secret_hex())
+            .unwrap()
+    }
+
     #[test]
     fn nsec_file_parser_conflict_and_valid_line() {
         assert!(Cli::try_parse_from(["ngit", "--nsec", "x", "--nsec-file", "key"]).is_err());
@@ -886,6 +962,55 @@ mod tests {
         assert!(
             matches!(extract_signer_cli_arguments(&cli).unwrap(), Some(ngit::login::SignerInfo::Nsec { nsec, .. }) if nsec == "fixture")
         );
+    }
+
+    #[test]
+    fn nbunksec_and_file_parse_as_one_shot_bunker_signers() {
+        let value = nbunksec_fixture();
+        for args in [
+            vec!["ngit", "--nbunksec", &value, "issue", "create"],
+            vec!["ngit", "issue", "create", "--nbunksec", &value],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                extract_signer_cli_arguments(&cli).unwrap(),
+                Some(ngit::login::SignerInfo::Bunker { npub: None, .. })
+            ));
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("connection");
+        key_file(&path, format!("{value}\n").as_bytes());
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "--nbunksec-file",
+            path.to_str().unwrap(),
+            "issue",
+            "create",
+        ])
+        .unwrap();
+        assert!(matches!(
+            extract_signer_cli_arguments(&cli).unwrap(),
+            Some(ngit::login::SignerInfo::Bunker { npub: None, .. })
+        ));
+    }
+
+    #[test]
+    fn nbunksec_sources_conflict_with_other_signers() {
+        let value = nbunksec_fixture();
+        for args in [
+            vec!["ngit", "--nbunksec", &value, "--nsec", "key"],
+            vec!["ngit", "--nbunksec", &value, "--signer", "fred"],
+            vec![
+                "ngit",
+                "--nbunksec",
+                &value,
+                "--nbunksec-file",
+                "connection",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]
@@ -908,6 +1033,16 @@ mod tests {
                 "ngit",
                 "--signer",
                 "fred",
+                "--nbunksec",
+                &nbunksec_fixture()
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "--signer",
+                "fred",
                 "--bunker-uri",
                 "bunker://example"
             ])
@@ -920,6 +1055,8 @@ mod tests {
         for conflicting in [
             ["--nsec", "key"],
             ["--nsec-file", "key"],
+            ["--nbunksec", "key"],
+            ["--nbunksec-file", "key"],
             ["--signer", "fred"],
             ["--bunker-uri", "bunker://example"],
             ["--bunker-app-key", "key"],
@@ -958,7 +1095,7 @@ mod tests {
                 if matches!(args.account_command, AccountCommands::Login(_))
         ));
 
-        for conflicting in ["--signer", "--nsec", "--bunker-url"] {
+        for conflicting in ["--signer", "--nsec", "--nbunksec", "--bunker-url"] {
             assert!(
                 Cli::try_parse_from([
                     "ngit",

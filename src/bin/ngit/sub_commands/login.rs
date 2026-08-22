@@ -28,6 +28,8 @@ pub struct SubCommandArgs {
         conflicts_with_all = [
             "nsec",
             "nsec_file",
+            "nbunksec",
+            "nbunksec_file",
             "signer",
             "bunker_uri",
             "bunker_app_key",
@@ -55,6 +57,8 @@ pub struct SubCommandArgs {
             "account",
             "nsec",
             "nsec_file",
+            "nbunksec",
+            "nbunksec_file",
             "signer",
             "bunker_uri",
             "bunker_app_key"
@@ -93,31 +97,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         && command_args.bunker_url.is_none()
         && alias.is_none()
     {
-        use ngit::cli_interactor::cli_error;
-        return Err(cli_error(
-            "requires a new secret, a stored signer, or interactive login",
-            &[
-                (
-                    "ACCOUNT",
-                    "reactivate by full npub, alias, or exact Nostr profile name",
-                ),
-                ("--nsec <key>", "provide secret key (nsec or hex)"),
-                ("--bunker-url <url>", "bunker:// URL from signer app"),
-                (
-                    "--signer <alias|npub|nostr-display-name>",
-                    "reactivate a stored signer",
-                ),
-                ("--alias <alias>", "reactivate an existing stored alias"),
-                ("--interactive", "for interactive nostr connect login"),
-            ],
-            &[
-                "ngit account login <account>",
-                "ngit account login --nsec <your-nsec>",
-                "ngit account login --bunker-url <bunker-url>",
-                "ngit account login --local --alias <stored-alias>",
-                "ngit account create",
-            ],
-        ));
+        return Err(missing_login_error());
     }
 
     let git_repo = discover_login_repo(command_args.local)?;
@@ -179,6 +159,38 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         client.disconnect().await?;
     }
     Ok(())
+}
+
+fn missing_login_error() -> anyhow::Error {
+    ngit::cli_interactor::cli_error(
+        "requires a new secret, a stored signer, or interactive login",
+        &[
+            (
+                "ACCOUNT",
+                "reactivate by full npub, alias, or exact Nostr profile name",
+            ),
+            ("--nsec <key>", "provide secret key (nsec or hex)"),
+            (
+                "--nbunksec-file <path>",
+                "provide an established remote signer connection",
+            ),
+            ("--bunker-url <url>", "bunker:// URL from signer app"),
+            (
+                "--signer <alias|npub|nostr-display-name>",
+                "reactivate a stored signer",
+            ),
+            ("--alias <alias>", "reactivate an existing stored alias"),
+            ("--interactive", "for interactive nostr connect login"),
+        ],
+        &[
+            "ngit account login <account>",
+            "ngit account login --nsec <your-nsec>",
+            "ngit account login --nbunksec-file <path>",
+            "ngit account login --bunker-url <bunker-url>",
+            "ngit account login --local --alias <stored-alias>",
+            "ngit account create",
+        ],
+    )
 }
 
 fn positional_account_selection(command_args: &SubCommandArgs) -> Option<SignerInfo> {

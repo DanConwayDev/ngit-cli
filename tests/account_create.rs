@@ -18,7 +18,7 @@
 //! relay's real wire query.
 
 use anyhow::{Context, Result};
-use ngit::login::credential_store::SERVICE;
+use ngit::login::{credential_store::SERVICE, nbunksec};
 use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -52,6 +52,58 @@ async fn export_keys_without_account_suggests_login_or_creation() -> Result<()> 
     assert!(
         stderr.contains("ngit account login") && stderr.contains("ngit account create"),
         "expected login and account creation guidance, got: {stderr}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn export_keys_returns_nbunksec_for_a_bunker_account() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let user_keys = Keys::generate();
+    let remote_keys = Keys::generate();
+    let client_keys = Keys::generate();
+    let bunker_uri = NostrConnectUri::Bunker {
+        remote_signer_public_key: remote_keys.public_key(),
+        relays: vec![RelayUrl::parse("wss://relay.example.com")?],
+        secret: None,
+    }
+    .to_string();
+    let client_nsec = client_keys.secret_key().to_bech32()?;
+    let npub = user_keys.public_key().to_bech32()?;
+    for (key, value) in [
+        ("nostr.bunker-uri", bunker_uri.as_str()),
+        ("nostr.bunker-app-key", client_nsec.as_str()),
+        ("nostr.npub", npub.as_str()),
+    ] {
+        repo.git_ok(["config", "--local", key, value], "seed bunker login")
+            .await?;
+    }
+
+    let output = repo
+        .ngit(["account", "export-keys", "--json"])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "bunker export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(document["npub"], npub);
+    let encoded = document["nbunksec"]
+        .as_str()
+        .context("bunker export omitted nbunksec")?;
+    let connection = nbunksec::decode(encoded)?;
+    assert_eq!(connection.bunker_uri, bunker_uri);
+    assert_eq!(
+        connection.client_key,
+        client_keys.secret_key().to_secret_hex()
     );
     Ok(())
 }

@@ -196,4 +196,20 @@ bytes. On Unix, the target's mode must be 0400 or 0600. On Windows, filesystem
 ACLs control access and ngit does not audit the target's ACL. It conflicts with
 `--nsec`. Prefer `ngit account login` for reusable identities.
 
+Established NIP-46 connections have the equivalent `--nbunksec VALUE` and
+`--nbunksec-file PATH` forms. An `nbunksec` bundles the remote-signer pubkey,
+client/app secret key, relays, and optional original pairing secret using the
+Applesauce/nsyte TLV encoding. It does not contain the user's npub, so a
+one-shot command asks the remote signer for `get_public_key`. Logging in with
+`ngit account login --nbunksec-file PATH` associates that result with the
+stored connection; later commands use the stored npub and validate every
+returned event against it.
+
+`ngit account export-keys` exports the matching portable credential for the
+selected account: `npub` plus `nsec` for a local-key account, or `npub` plus
+`nbunksec` for a remote-signer account. The `nbunksec` is an established
+connection credential, not the remote user's identity secret. Use
+`ngit --signer <account> account export-keys` to select a non-default stored
+account.
+
 [`keyring`]: https://crates.io/crates/keyring
