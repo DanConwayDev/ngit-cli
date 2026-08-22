@@ -1294,8 +1294,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseAssetCommands,
-        ReleaseCommands,
+        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands,
         extract_signer_cli_arguments, read_nsec_file,
     };
 

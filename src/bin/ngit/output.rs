@@ -68,10 +68,16 @@ pub fn finish_success() {
 }
 
 pub fn finish_error(error: &anyhow::Error) {
-    let value = serde_json::json!({
-        "status": "error",
-        "error": format!("{error:#}"),
-    });
+    let value = JSON_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "status": "error",
+                "error": format!("{error:#}"),
+            })
+        });
     let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     std::println!("{rendered}");
 }
