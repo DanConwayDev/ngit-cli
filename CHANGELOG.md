@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add interoperable `--nbunksec` and private-file `--nbunksec-file`
+  inputs for one-shot or stored NIP-46 sessions. `ngit account export-keys`
+  now exports an established remote-signer connection as `nbunksec` alongside
+  its user npub, while local accounts continue to export `nsec`.
 - **Basic Buzz support**: clone Buzz repositories, view pull requests and their
   lifecycle status, and push new or updated pull requests and status changes
   through authenticated Buzz relay and Git transport. Normal branch and tag

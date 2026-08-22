@@ -50,7 +50,7 @@ pub async fn fresh_login_or_signup(
     alias: Option<&str>,
     selected_by: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
-    let (signer, public_key, signer_info, _) = loop {
+    let (signer, public_key, mut signer_info, _) = loop {
         if let Some(signer_info) = signer_info {
             let (signer, user_ref, source) = load_existing_login(
                 git_repo,
@@ -105,6 +105,14 @@ pub async fn fresh_login_or_signup(
         }
     };
     let npub = public_key.to_bech32()?;
+    if let SignerInfo::Bunker {
+        npub: signer_npub, ..
+    } = &mut signer_info
+    {
+        if signer_npub.is_none() {
+            *signer_npub = Some(npub.clone());
+        }
+    }
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
