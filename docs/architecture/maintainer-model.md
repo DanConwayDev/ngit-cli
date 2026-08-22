@@ -1,35 +1,33 @@
 # Maintainer Model
 
-> **Historical baseline:** this document describes maintainer behavior at the
-> `pr/indexed-maintainer-roles` merge-base, before ngit understood indexed
-> `M`, `m`, or `o` role tags. It is a comparison point for the changes that
-> follow, not a proposal for future behavior.
+This document describes the maintainer behavior implemented on the
+`pr/indexed-maintainer-roles` branch. It records current behavior rather than a
+future protocol or CLI design.
 
 ngit repositories are described by replaceable kind `30617` announcements.
 Clients start from one selected announcement coordinate, recursively discover
-every pubkey named by `maintainers` tags, and consolidate the announcements and
-repository events reachable from that coordinate.
+other listed pubkeys, and consolidate the announcements and repository events
+that are reachable from it.
 
 ## Everyday Mental Model
 
 - The **selected maintainer** is the pubkey in the `nostr://` URL or local
   `nostr.repo` coordinate from which discovery starts.
-- A **listed maintainer** is any pubkey recursively reachable through
-  `maintainers` tags. Every listed maintainer has repository authority,
-  whether or not they have published an announcement.
-- A **confirmed co-maintainer** belongs to the reciprocal graph containing the
-  selected maintainer. Confirmation affects presentation, not authority.
-- An **invited maintainer** is listed but has not established a path back to
-  the selected maintainer. The invitation label is social framing: invitees
-  already have the same repository authority as confirmed maintainers.
-- A **lead maintainer** is inferred when one confirmed maintainer receives more
-  maintainer listings than every other confirmed maintainer. Lead is an
-  informational coordination label and grants no additional authority.
+- A **lead maintainer** is the unique pubkey assigned an active `M` role by a
+  confirmed maintainer's announcement. A repository does not have a lead
+  unless such an assertion exists.
+- A **co-maintainer** is a confirmed member of the reciprocal maintainer graph.
+  Lead and co-maintainer have the same state, merge, and member-action
+  authority in ngit.
+- A **moderator** may perform issue and proposal management actions, but cannot
+  publish repository state or merge.
+- A role assignment is an **invitation** until the recipient's own announcement
+  acknowledges a confirmed member. Invitees are discovered but their events
+  are not authoritative.
 
-There are no explicit maintainer roles, moderators, role histories, or
-historical authorization intervals. The selected and inferred lead maintainers
-are independent. Selecting a different coordinate may produce a different
-recursive graph, confirmed group, or inferred lead.
+The selected maintainer and lead maintainer are independent. Selecting a
+different coordinate can produce a different discovered or confirmed graph;
+it does not change the lead asserted on the wire.
 
 ## Normal Workflows
 
@@ -39,30 +37,32 @@ recursive graph, confirmed group, or inferred lead.
 ngit init --name "My Project" --description "What it does" --defaults --json
 ```
 
-The publisher emits a `maintainers` tag containing themselves, writes their
-coordinate to `nostr.repo`, points `origin` at their `nostr://` URL, and returns
+Without `--lead-maintainer`, the publisher is emitted as an untimed `m` and the
+repository has no lead. `ngit init` writes the publisher's coordinate to
+`nostr.repo`, points `origin` at the publisher's `nostr://` URL, and returns
 that URL for sharing.
 
-A lone maintainer is not inferred as lead. Lead inference requires at least one
-maintainer-to-maintainer listing edge with a unique highest vote count.
+The publisher can explicitly make themselves lead:
+
+```bash
+ngit init --lead-maintainer <own-npub> --json
+```
+
+This keeps the resolved maintainer listing and emits the publisher as `M`.
 
 ### Invite another maintainer
 
-The publisher replaces their own non-empty maintainer listing with themselves
-and the npubs passed to `--other-maintainers`:
+The publisher replaces their own maintainer listing with themselves and the
+npubs passed to `--other-maintainers`:
 
 ```bash
 ngit repo edit --other-maintainers <bob-npub> --json
 ```
 
-Bob is immediately part of the recursive maintainer set. His state and member
-management events are authoritative even before he accepts or publishes a
-kind `30617` announcement. ngit nevertheless presents Bob as invited until his
-own announcement makes the relationship reciprocal.
-
-`--other-maintainers` describes the publisher's own outgoing listing. It does
-not edit any other maintainer's announcement and does not preview the resulting
-graph-wide authorization changes.
+The listed pubkey is invited until it publishes an announcement. If the
+publisher already asserted a lead and that pubkey remains in the resolved
+listing, the assertion is inherited without repeating `--lead-maintainer`.
+Otherwise every maintainer is emitted as `m`.
 
 ### Accept a maintainer invitation
 
@@ -70,161 +70,267 @@ graph-wide authorization changes.
 ngit repo accept --json
 ```
 
-The dedicated accept command is available when the user:
+`repo accept` publishes the invitee's own repository announcement. With a
+usable explicit lead, an ordinary invitee lists only themselves and that lead
+and reasserts the lead as `M`. If the invitee is themselves the asserted lead,
+they retain the complete consolidated membership. Without a usable lead, the
+command lists the invitee and the sole confirmed maintainer, falling back to
+the selected maintainer for an ambiguous graph.
 
-- is listed in the selected repository's recursive maintainer set;
-- is not the selected maintainer; and
-- has not already published a same-identifier repository announcement.
-
-Acceptance publishes the invitee's own announcement. The default listing is:
-
-1. the invitee;
-2. the sole confirmed maintainer, when there is only one;
-3. otherwise the unique inferred lead; or
-4. the selected maintainer when the graph has no unambiguous lead.
-
-Acceptance changes the relationship from invited to confirmed, but it does not
-grant rights: the directional invitation already granted them. The push path
-can automatically publish the same acceptance before the invitee's first state
-event.
-
-Dedicated acceptance leaves `nostr.repo` and existing remotes rooted at the
-inviter's coordinate. The broader `ngit init` acceptance path instead finishes
-like any init publication and re-roots local configuration on the signer.
-
-An invitee who already has a same-identifier announcement cannot use
-`repo accept`; they must update their announcement through `ngit repo edit` or
-`ngit init`.
+The push path can perform the same acceptance automatically before publishing
+the invitee's first repository state event.
 
 ### Update or remove maintainers
 
-Without `--other-maintainers`, a publisher retains the maintainers from their
-own previous announcement. Passing a non-empty `--other-maintainers` list
-replaces that publisher's outgoing listing, with the publisher inserted first.
+`--other-maintainers` supplies the publisher's desired listing. The publisher
+is always inserted first; omitted members are removed from that publisher's
+announcement. Role generation closes omitted members' active `M` or `m`
+records in that announcement.
 
-There is no membership-removal preview or maintainer-specific `--force` gate.
-Removing an outgoing edge does not necessarily remove a pubkey from the
-recursive set: another reachable announcement may continue to list them.
+There is no general before/after authorization preview for this operation. A
+special safety guard applies when `--lead-maintainer` names somebody other
+than the publisher; its current behavior is documented under Leadership
+Designation.
 
 ### Leave a repository
 
-There is no `ngit repo leave` command and no wire representation for ending a
-role. An announcement author is automatically inserted into their own
-maintainer listing even if the `maintainers` tag omits them, so publishing an
-empty or self-omitting list cannot express departure.
-
-## Maintainers on the Wire
-
-Current membership is carried by one deprecated NIP-34-style tag:
-
-```text
-["maintainers", "<pubkey-hex>", "<pubkey-hex>", ...]
+```bash
+ngit repo leave --json
 ```
 
-The parser applies these rules:
+Leaving closes every active `M`, `m`, and `o` entry naming the publisher in
+their own announcement. It removes the publisher from that announcement's
+typed maintainer and moderator sets and from the deprecated `maintainers`
+degradation tag.
 
-- every pubkey in the tag is a current maintainer;
-- the event author is inserted when the tag omits them;
-- without a usable maintainer entry, the author is the sole maintainer;
-- entries carry no role letter or time boundaries.
+An unaccepted maintainer invitation or unacknowledged moderator assignment has
+no role to end. Repeating `repo leave` after an earlier leave produces a
+distinct already-ended error. A lead may leave; ngit warns that the repository
+may become leadless but does not require `--force` or a prior transfer.
 
-Publication emits the effective current list as `maintainers`. Unknown tags
-round-trip through `extra_tags` unless `ngit init --clean` is used. At this
-baseline, `M`, `m`, and `o` are unknown tags: they may survive republishing but
-have no membership or authorization meaning.
+## Roles on the Wire
+
+Indexed role tags have the form:
+
+```text
+["M"|"m"|"o", "<pubkey>", <start>, <end>, <start>, <end>, ...]
+```
+
+- `M` is lead maintainer.
+- `m` is co-maintainer.
+- `o` is moderator.
+- Fewer than four elements, or an odd number of elements, makes the entry
+  currently active.
+- A pubkey may have one record per role letter so transitions can retain the
+  period spent in each role.
+
+Examples:
+
+```text
+["m", "<pubkey>"]                           # active from the beginning
+["m", "<pubkey>", "100"]                  # active since 100
+["m", "<pubkey>", "100", "200"]         # ended at 200
+["m", "<pubkey>", "100", "200", "300"] # active again since 300
+```
+
+If any `M`, `m`, or `o` tag is present, the deprecated `maintainers` tag is
+ignored entirely. This includes an announcement containing only `o` tags.
+Without indexed roles, `maintainers` is the fallback listing. If neither form
+adds a maintainer, the announcement author is the sole implicit maintainer.
+
+On publication, ngit emits generated `M` and `m` entries for the typed current
+maintainer list and also emits a deprecated `maintainers` tag containing that
+same list. Existing `o` tags pass through verbatim except when `repo leave`
+closes the publisher's self-role.
 
 ## Current Membership Resolution
 
-Discovery begins with the selected maintainer and repeatedly follows every
-outgoing `maintainers` edge until no new pubkey is found. Missing announcements
-do not remove their listed pubkeys from this recursive set.
+Each maintainer-authored announcement contributes active `M` and `m` listings
+to the recursive maintainer set. Role letters do not change maintainer
+authorization: both collapse into the same typed set.
 
-The complete recursive set is authoritative. Reciprocity produces a separate
-presentation view:
+An announcement author who has no role entry naming themselves is implicitly a
+maintainer. If role tags name the author but none is an active self-`M` or
+self-`m`, the author declines maintainership. This covers a member who ended
+their role and a moderator-only author acknowledging only `o`. The
+self-declaration takes precedence over active maintainer assignments in other
+announcements.
 
-1. the selected maintainer is confirmed;
-2. a discovered maintainer is confirmed when their announcement graph has a
-   path back to the selected maintainer;
-3. every other discovered maintainer is displayed as invited.
+Confirmation grows as a fixpoint rooted at the selected maintainer:
 
-Because every discovered pubkey is authoritative, a downstream cycle that
-does not connect back to the selected maintainer remains invited but retains
-maintainer rights. `confirmed_maintainers` and `invited_maintainers` do not
-form an authorization boundary at this baseline.
+1. The selected maintainer starts confirmed unless their own announcement
+   declines maintainership.
+2. A candidate must be listed by an already-confirmed maintainer.
+3. The candidate's own announcement must list an already-confirmed maintainer.
+4. Newly confirmed maintainers extend the frontier until no more candidates
+   qualify.
+
+A cycle made only from unconfirmed invitees does not bootstrap itself into
+authority. `RepoRef::is_authorized_maintainer` is true only for this confirmed
+set.
 
 ## Lead Resolution
 
-Lead is inferred entirely from the reciprocal listing graph:
+`RepoRef::lead_maintainer` scans confirmed maintainers' latest announcements
+for active `M` entries. It returns a lead only when those entries name one
+distinct pubkey that remains in the consolidated maintainer set.
 
-1. consider only confirmed maintainers;
-2. count each directed listing between distinct confirmed maintainers as one
-   vote for the listed pubkey;
-3. select the unique pubkey with the highest positive count;
-4. report no lead when the highest count is zero or shared by a tie.
+- The assigned pubkey need not have accepted yet; an invited pubkey can be
+  displayed as lead.
+- `M` from an unconfirmed announcement is ignored.
+- Two different active `M` targets produce no lead.
+- Announcements without `M` produce no lead.
+- A legacy `maintainers` graph never falls back to graph-vote inference, even
+  if one pubkey has the unique highest in-degree.
 
-A listing from an invited maintainer does not vote, and an invited pubkey
-cannot be inferred as lead. A lone repository has no inferred lead. The result
-is informational: inferred lead and confirmed co-maintainer have identical
-state, merge, and member-management authority.
+Human output displays role badges when they disambiguate the roster. JSON
+continues to expose `lead_maintainer`, but it does not expose whether a lead
+was absent, contested, or ignored because its asserting author was
+unconfirmed.
 
-The selected maintainer is not automatically a lead. Different selected
-coordinates can expose different reciprocal groups and therefore different
-vote results.
+## Role History
 
-## Maintainer History
+### Parsing and authorization
 
-There is no signed role history. The latest replaceable announcement available
-for an author supplies that author's complete current listing; replacing it
-can remove all evidence of an earlier relationship from relays and caches.
+The current implementation uses history boundaries only to decide whether an
+entry is active now. Ended intervals never grant retroactive authority to
+historic state, status, label, subject, or cover-note events. There is no
+repository-wide conflict-resolution algorithm for incompatible historical
+records.
 
-History does not constrain event authorization. A state, status, label,
-subject, or cover-note event is evaluated against the current recursive set,
-not the maintainers that were listed when the event was created.
+### Publishing from an existing announcement
 
-An existing `maintainers.yaml` file can record maintainer lists through Git
-commit history and remains a local coordinate fallback. It is neither a signed
-Nostr history nor an input to historical event authorization.
+History is sourced from the publisher's own prior announcement only. A
+publisher does not adopt another maintainer's historical view.
 
-## Inferred Leadership and Roster Changes
+If the prior announcement has no `M` or `m` history, ngit materializes untimed
+records from its deprecated maintainer listing before republishing. This lets a
+removed legacy member receive an explicit end boundary instead of disappearing
+without a record.
 
-There is no `--lead-maintainer` flag and no explicit leadership transfer.
-Clients display the unique graph-vote winner when one exists.
+For each role letter:
 
-A conventional lead-shaped graph can be formed when co-maintainers list only
-the coordinating maintainer and that maintainer lists the active roster. In a
-view rooted at the coordinator, removing a co-maintainer from the coordinator's
-announcement removes the only discovery edge to them unless another reachable
-announcement still lists them.
+- a continuing untimed member stays untimed;
+- a new member starts at the publication timestamp once role tags are in use;
+- a removed active member receives an end boundary;
+- a returning member appends a new start boundary;
+- promotion or demotion closes the old letter and opens the new one at the
+  same timestamp;
+- ended records under the other maintainer letter remain present;
+- moderator records pass through unchanged.
 
-This is a graph convention rather than a protected operation:
+`ngit init --clean` drops unknown tags but deliberately retains role tags so it
+does not discard moderators or restart the publisher's known history.
 
-- no command verifies that the inferred lead initiated the change;
-- no before/after graph simulation names lost maintainers;
-- `--force` is not required for roster changes;
-- another selected coordinate may retain a different view; and
-- there is no pending or accepted transfer state.
+Because each author retains only their own prior record, a replaceable event
+published by a legacy or history-unaware client can remove that author's
+historical boundaries from the latest event. Other maintainers do not
+automatically carry a redundant canonical copy.
+
+## Leadership Designation
+
+```bash
+ngit init --lead-maintainer <npub-or-hex> --json
+ngit repo edit --lead-maintainer <npub-or-hex> --json
+```
+
+The implementation accepts an npub or hexadecimal public key even though the
+CLI help describes an npub.
+
+### Naming yourself
+
+Specifying yourself keeps the complete resolved maintainer listing and emits
+you as `M`. Every other active maintainer is emitted as `m`.
+
+### Naming somebody else
+
+Specifying another pubkey collapses your announcement's current maintainer
+listing to exactly you and the designated lead. The lead is emitted as `M` and
+you as `m`. `--other-maintainers` containing any third pubkey is rejected;
+`--force` does not override that conflict.
+
+The designated lead's announcement is not modified and does not adopt your
+roster or history. The lead need not have an announcement or have accepted
+before the designation can be published.
+
+### Current force guard
+
+Without `--force`, ngit examines pubkeys present in your previous announcement
+that the `[you, lead]` collapse would omit. It exempts a pubkey when the lead's
+own announcement directly lists it and the lead either:
+
+- is already a confirmed maintainer; or
+- lists you, so the lead becomes reciprocal when your collapse is published.
+
+Every remaining dropped npub is named in the error and the command suggests
+rerunning with `--force`.
+
+This is a conservative direct-cover test, not an exact post-publication graph
+simulation:
+
+- it can gate a dropped invitee that did not have authority;
+- it can require force even when another surviving reciprocal path would keep
+  a maintainer confirmed;
+- it describes an unauthoritative lead's listing as absent even when the wire
+  contains it;
+- it does not compare or require retention of role history.
+
+With `--force`, the collapse proceeds and closes the dropped entries in the
+publisher's history. With no previous announcement, there are no previous
+outgoing listings to gate.
+
+### Local configuration after designation
+
+After publication, `ngit init` always writes the publisher's coordinate to
+`nostr.repo`, builds the `nostr://` URL from the publisher's `RepoRef`, and
+creates or rewrites `origin` to that URL. Output reports the publisher's share
+and clone URLs. Naming another lead does not migrate the checkout to the
+lead's coordinate.
+
+When `maintainers.yaml` already exists and differs, it is rewritten with the
+publisher first and the collapsed current listing after them. It is not a
+store of role history.
 
 ## Leadless Co-maintainership
 
-Leadless operation is ordinary. A fresh single-maintainer repository, a graph
-with no maintainer edges, and a tied vote all report no lead. There is no
-explicit marker distinguishing intentional co-maintainership from an
-incomplete or partitioned graph.
+Leadless operation is the default when no maintainer has emitted `M`. There is
+no `--no-lead` flag and no explicit marker distinguishing intentional
+co-maintainership from a legacy repository or an incomplete migration.
 
-Every listed maintainer still has equal authority. Leadlessness changes only
-the coordination label shown by clients.
+Every active `m` listing participates in recursive discovery. Reciprocity and
+the selected-maintainer fixpoint decide authority. Different selected
+coordinates can therefore produce different views of a partially connected
+graph.
 
 ## Moderators
 
-There is no moderator role. Repository-derived authority is all-or-nothing:
-listed maintainers may publish repository state, merge, and perform issue and
-proposal management actions. A non-maintainer may only perform actions granted
-to the author of the underlying issue or proposal.
+An active `o` entry in a confirmed maintainer's announcement assigns a
+moderator. An `o` entry authored by a moderator, invitee, or outsider does not
+assign another moderator.
+
+Assignment is an invitation. A moderator is confirmed when their own latest
+announcement:
+
+- has an active `o` self-entry; and
+- has an active role entry naming an already-confirmed member.
+
+Moderator confirmation grows as a fixpoint, allowing acknowledgement through
+another confirmed moderator. A moderator whose own announcement ends every
+self-`o` entry is removed despite another maintainer's continuing assignment.
+
+Confirmed moderators may author status, label, subject, and cover-note events.
+They cannot publish kind `30618` state, push protected branches, or merge.
+
+ngit discovers moderator announcements by following `o` assignments and
+includes moderator coordinates in proposal and issue tags. It has no command
+for assigning a moderator and no command that publishes the initial moderator
+acknowledgement. `repo leave` can end an acknowledged moderator role that was
+created by another client.
 
 ## Coordinates and Local Configuration
 
 A coordinate is `(kind, pubkey, identifier)`. Its pubkey is the selected
-maintainer and recursive discovery anchor.
+maintainer and discovery anchor.
 
 Local resolution priority is:
 
@@ -236,45 +342,43 @@ Local resolution priority is:
 6. `maintainers.yaml` only when no Nostr coordinate is configured.
 
 Before publishing a repo-scoped event, ngit prints the selected naddr and the
-source used to resolve it. Selection affects discovery and display but does
-not grant the selected maintainer more authority than another listed pubkey.
+source used to resolve it. The selected maintainer is listed first in proposal
+announcement tags but receives no extra authorization.
 
-`ngit init` publishes the signer's announcement and then writes the signer's
-coordinate to `nostr.repo` and `origin`. Dedicated `repo accept` and push-path
-acceptance deliberately leave local selection on the inviter so a later
-removal remains observable from that root.
+`ngit init` publishes the signer's announcement and then resets `nostr.repo`
+and `origin` to the signer. The dedicated `repo accept` command and push-path
+acceptance deliberately leave both untouched so the checkout continues to
+resolve from the inviter that can later remove the accepter. There is no
+`follow-lead` or selected-coordinate migration command.
 
-There is no command for following an inferred lead or adopting another
-maintainer's coordinate after a handoff.
+`maintainers.yaml` is a legacy coordinate fallback. Its first maintainer is
+the selected pubkey when that file is used for discovery.
 
 ## Consuming Repository Data
 
-The selected announcement starts recursive consolidation. All recursively
-listed maintainers, including invitees, contribute:
+For each author, consolidation first chooses the latest announcement using
+NIP-01 addressable-event rules: greatest `created_at`, then lowest event id on
+a tie. This prevents an older cached version from retaining a role that the
+author ended in a newer event.
 
-- repository authority;
-- relay URLs;
-- Git clone URLs; and
-- Blossom server URLs.
-
-Shared metadata (`name`, `description`, `web`, hashtags, and upstream metadata)
-comes from the newest reachable maintainer announcement. Repository privacy is
-true when any reachable announcement marks the repository private.
+The recursive maintainer set contributes a union of relay, clone, and Blossom
+infrastructure. Shared metadata (`name`, `description`, `web`, hashtags,
+upstream metadata, privacy, and forward-compatible unknown tags) follows the
+implemented per-field cascade across maintainer-authored announcements.
+Moderator-only announcements are fetched for acknowledgement and leave
+self-entries but do not expand membership, contribute shared metadata, or add
+infrastructure.
 
 Installed Git remote helpers may service clone URLs in signed maintainer
 announcements, subject to Git's transport policy. ngit blocks recursive
 `nostr` and internal `fd` helper URLs; `ws` and `wss` remain reserved for GRASP
 bases.
 
-Kind `30618` state and maintainer-authored status, label, subject, and cover
-note events are accepted from every pubkey in the flat recursive maintainer
-set. Confirmation and announcement existence are not required.
-
 ## Publishing Repository Data
 
 `ngit init` resolves fields from different sources.
 
-Shared metadata comes from the latest reachable maintainer event:
+Shared metadata comes from the latest maintainer event:
 
 - name;
 - description;
@@ -288,15 +392,12 @@ arguments, or configured defaults:
 
 - grasp servers;
 - additional relays;
-- Git servers.
+- Git servers;
+- Blossom servers.
 
-Blossom servers have no dedicated init flag at this baseline and are inherited
-from the latest reachable announcement when republishing.
-
-The publisher's maintainer listing comes from their own announcement. A fresh
-publisher lists themselves; a first-time co-maintainer lists themselves and
-the default acceptance target. `--other-maintainers` replaces that outgoing
-listing explicitly.
+The publisher's maintainer listing and role history come from their own
+announcement. They are not inherited from the selected maintainer or the
+repository-wide latest event.
 
 The identifier comes from the existing coordinate and cannot change without
 `--force`. The earliest unique commit cascades from the publisher's event, the
@@ -304,22 +405,25 @@ consolidated repository, and finally the local root commit.
 
 ## Repository Output
 
-`ngit repo` human output separates confirmed and invited maintainers. It can
-display selected and inferred-lead badges and shows each known maintainer's
-outgoing relationship summary. Its invitation note explicitly says invitees
-already have maintainer rights.
+`ngit repo` human output separates confirmed maintainers, invited maintainers,
+and moderators. It displays selected, lead, co-maintainer, and moderator badges
+where applicable and annotates assigned-but-unacknowledged moderators.
 
-`ngit repo --json` exposes the flat fields:
+`ngit repo --json` retains the existing flat fields and adds:
 
-- `maintainers`;
-- `selected_maintainer`;
-- `confirmed_maintainers`;
-- `invited_maintainers`;
-- `lead_maintainer`; and
-- `maintainer_edges`.
+- `moderators`: every assigned moderator;
+- `confirmed_moderators`: the acknowledged subset;
+- `members`: one deduplicated object per member.
 
-There are no `moderators`, `confirmed_moderators`, or structured `members`
-entries, and output has no role source or historical intervals.
+Each `members` entry contains:
+
+- `pubkey`;
+- `role`: `lead`, `co-maintainer`, or `moderator`;
+- `status`: `confirmed` or `invited`;
+- `source`: `role_tag`, `maintainers_tag`, or `implicit`.
+
+An invited designated lead is reported with role `lead`. A pubkey listed as
+both maintainer and moderator appears once as a maintainer.
 
 ## Announcement Tag Ordering
 
@@ -327,87 +431,98 @@ Proposal announcement tags are ordered:
 
 1. selected maintainer;
 2. other confirmed maintainers;
-3. invited maintainers.
+3. confirmed moderators;
+4. invited maintainers and assigned-but-unacknowledged moderators.
 
-Invitees are included because they are already authoritative. Putting the
-selected maintainer first provides a stable discovery anchor and does not grant
-greater authority.
+Issue and status event coordinate sets also cover moderators, but use an
+unordered set.
 
 ## Authorization Summary
 
 | Actor | Repository state | Merge | Status/labels/subject/cover note |
 | --- | --- | --- | --- |
-| Inferred lead | yes | yes | yes |
+| Confirmed lead | yes | yes | yes |
 | Confirmed co-maintainer | yes | yes | yes |
-| Invited maintainer | yes | yes | yes |
+| Confirmed moderator | no | no | yes |
+| Invitee | no | no | no |
 | Outsider | no | no | no |
 
 Issue and proposal authors retain the author-specific actions granted by their
 event type. This table covers authority derived from repository membership.
 
-## Baseline Edge-case Behavior
+## Current Edge-case Behavior
 
-### Directional invitations grant authority
+### Legacy announcements
 
-Alice listing Bob is sufficient for Bob's same-identifier repository events to
-be accepted. Bob's announcement is required to display him as confirmed, not
-to activate his rights. Directly published Bob events can therefore be
-authoritative even if Bob never runs `repo accept`.
+The deprecated `maintainers` tag supplies current co-maintainers only when an
+announcement has no indexed role tags. It supplies no lead and no explicit
+history. A later role-aware publication materializes untimed history from the
+publisher's own legacy listing.
 
-### Same identifier, unrelated repositories
+### Partial indexed-role migration
 
-A scammer can publish an announcement for an unrelated repository with the
-same identifier and list a reputable maintainer. The reputable maintainer's
-real same-identifier state or member-management events then fall inside the
-scammer's recursive authorization set despite the maintainer never
-acknowledging that repository. The UI labels the maintainer invited, but the
-authorization layer does not prevent the attribution.
+One maintainer publishing `m` tags does not cause another author's legacy
+announcement to be parsed as role-aware. Each event independently decides
+whether its own `maintainers` fallback applies. There is no repository-level
+migration state and no legacy lead inference.
 
-### Removal depends on every reachable edge
+### Conflicting explicit leads
 
-Omitting a maintainer from one replacement announcement does not remove them
-while another reachable maintainer still lists them. Conversely, removing the
-last discovery edge can discard the member and every downstream announcement,
-server, relay, and metadata contribution reachable only through them. No
-diagnostic previews those secondary effects.
+If confirmed announcements name different active `M` targets,
+`lead_maintainer` returns none. Read and write operations continue under the
+confirmed-maintainer authorization model; there is no conflict-specific
+mutation guard.
 
-### Existing but non-reciprocal invitee announcement
+### A legacy client replaces a role-aware event
 
-`repo accept` refuses when the invitee already has a same-identifier
-announcement, even if it does not connect back to the selected group. The user
-must republish through the general edit/init flow to alter their relationship.
+NIP-01 selects the newer legacy event for that author. Its indexed history is
+no longer available from that author's current announcement. Other
+maintainers' events retain only their own historical views, so they are not an
+automatic redundant copy.
 
-### Replaceable announcements erase relationship history
+### Leadership transfer before acceptance
 
-A newer announcement supersedes its author's older listing. Relays do not
-retain a canonical repository-wide history, and another maintainer's event is
-not a redundant copy of the replaced author's old relationships.
+A maintainer can designate an invited pubkey as lead. The publisher's listing
+collapses immediately to `[publisher, lead]` if the force guard permits it.
+The designated lead's event and local configuration remain unchanged. There
+is no pending-transfer state or automatic finalization after acceptance.
 
 ### Two repositories with different histories
 
-ngit does not merge maintainership histories or choose a canonical historical
-view. It resolves current recursive membership from whichever coordinate the
-checkout selected.
+ngit does not merge or choose between repository-wide historical records.
+Current membership is resolved from active entries reachable from the selected
+coordinate. Ended history is retained per publisher but is not consulted for
+historic event authorization.
 
-## Baseline Implementation Invariants
+### Same identifier, unrelated repositories
 
-The merge-base implementation and tests establish these behaviors:
+Reciprocity prevents a repository from treating an unsolicited invitee's
+same-identifier state and member-action events as authoritative. The invitee
+must publish an announcement acknowledging the selected confirmed group.
 
-1. Kind `30617` membership is read and written through `maintainers` only.
-2. An announcement author is always a member of their own listing.
-3. Every recursively discovered maintainer is authoritative, including an
-   invitee with no announcement.
-4. Reciprocity divides confirmed from invited members for presentation only.
-5. A unique positive in-degree winner among confirmed maintainers is displayed
-   as lead; ties, zero-edge graphs, and lone repositories have no lead.
-6. Lead, co-maintainer, and invitee have identical repository-derived rights.
-7. Dedicated acceptance publishes a reciprocal announcement but does not
-   change local coordinate selection.
-8. Push may automatically publish acceptance before the invitee's state event.
-9. There is no moderator role, leave command, explicit lead designation, or
-   role-history syntax.
-10. Maintainer removal has no exact authorization-loss preview or force gate.
-11. Shared metadata follows the newest reachable announcement while personal
-    infrastructure originates with each publisher and is unioned for readers.
-12. Authorization is current-state-only and is not bounded by historical
-    maintainership intervals.
+## Current Implementation Invariants
+
+The branch's tests pin these behaviors:
+
+1. Fresh init emits `m` unless the publisher passes `--lead-maintainer`.
+2. A lead is read only from a unique authoritative active `M`; graph structure
+   never supplies a fallback.
+3. Maintainer confirmation grows from the selected maintainer as a reciprocal
+   fixpoint.
+4. Invited maintainers cannot author authoritative state or member actions.
+5. Confirmed moderators can author member actions but cannot publish state or
+   merge.
+6. An active self-`o` does not imply maintainership, and an ended self-role
+   takes precedence over assignments in other announcements.
+7. `repo accept` under a lead lists only the accepter and the lead; an
+   accepting lead keeps the full consolidated roster.
+8. Setting another lead collapses the publisher's listing immediately and uses
+   a conservative direct-cover `--force` gate.
+9. Each publisher preserves only the history in their own previous
+   announcement.
+10. History boundaries affect current activeness but not retroactive event
+    authorization.
+11. `ngit init` keeps local selection anchored to the signer even when it
+    designates somebody else as lead.
+12. `repo leave` ends the publisher's active self-roles and permits a lead to
+    leave with a warning.
