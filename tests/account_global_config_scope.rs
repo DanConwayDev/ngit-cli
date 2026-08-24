@@ -19,6 +19,7 @@
 
 use anyhow::{Context, Result};
 use nostr::prelude::{Keys, ToBech32};
+use serde_json::Value;
 use test_harness::Harness;
 
 #[tokio::test]
@@ -117,6 +118,72 @@ async fn global_logout_leaves_the_invoking_users_login_alone() -> Result<()> {
         Some(home_nsec.as_str()),
         "logout reached the invoking user's own global config"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn global_signer_from_a_gitdir_conditional_include_is_visible() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let global_config = harness.home().join(".gitconfig");
+    let included_config = harness.home().join("conditional.gitconfig");
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32()?;
+    let nsec = keys.secret_key().to_bech32()?;
+
+    for (key, value) in [
+        ("nostr.signer", "conditional"),
+        ("nostr.signer-alias.conditional", npub.as_str()),
+        ("nostr.npub", npub.as_str()),
+        ("nostr.nsec", nsec.as_str()),
+    ] {
+        write_config(&included_config, key, value)?;
+    }
+    std::fs::write(
+        &global_config,
+        format!(
+            "[includeIf \"gitdir/i:{}/**\"]\n\tpath = {}\n",
+            repo.dir().display(),
+            included_config.display()
+        ),
+    )?;
+
+    for use_global_override in [false, true] {
+        let mut command = repo.ngit(["account", "whoami", "--offline", "--json"]);
+        command.env_remove("NGITTEST");
+        if !use_global_override {
+            command.env_remove("GIT_CONFIG_GLOBAL");
+        }
+        let output = command
+            .output()
+            .await
+            .context("failed to spawn ngit account whoami")?;
+        assert!(
+            output.status.success(),
+            "account whoami failed with global override {use_global_override}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let document: Value = serde_json::from_slice(&output.stdout)?;
+        let account = document["accounts"]
+            .as_array()
+            .context("accounts must be an array")?
+            .iter()
+            .find(|account| account["npub"] == npub)
+            .with_context(|| {
+                format!(
+                    "conditionally included account is missing with global override {use_global_override}"
+                )
+            })?;
+        assert_eq!(account["active"], true);
+        assert_eq!(account["scopes"], serde_json::json!(["global"]));
+        assert_eq!(account["aliases"], serde_json::json!(["conditional"]));
+    }
     Ok(())
 }
 
