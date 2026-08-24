@@ -1501,6 +1501,20 @@ pub fn get_git_config_item(git_repo: &Option<&Repo>, item: &str) -> Result<Optio
     }
 }
 
+/// Read an item from the global Git-config scope in the current repository
+/// context, so conditional includes such as `includeIf.gitdir` are applied.
+pub(crate) fn get_git_config_item_global(
+    git_repo: &Option<&Repo>,
+    item: &str,
+) -> Result<Option<String>> {
+    for config in open_global_configs_for_repo(git_repo)? {
+        if let Some(value) = config_entry_value(&config, item) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 /// Read a config item from the system-level git config only (e.g.
 /// /etc/gitconfig).
 pub fn get_git_config_item_system(item: &str) -> Result<Option<String>> {
@@ -1596,6 +1610,49 @@ pub fn open_global_config() -> Result<git2::Config> {
             .open_global()
             .context("failed to open global git config"),
     }
+}
+
+/// Open Git's user config scopes for reads made from a repository.
+///
+/// A repository-owned config evaluates path-sensitive conditional includes.
+/// When `GIT_CONFIG_GLOBAL` redirects the global file, reopen the repository
+/// with libgit2's environment-aware flag so the override and the repository
+/// context are both preserved. Writes continue to use [`open_global_config`]
+/// because they must target the configured global file itself, not one of its
+/// includes.
+pub(crate) fn open_global_configs_for_repo(git_repo: &Option<&Repo>) -> Result<Vec<git2::Config>> {
+    let Some(git_repo) = git_repo else {
+        return Ok(vec![open_global_config()?]);
+    };
+
+    let config = if global_config_override().is_none() {
+        git_repo
+            .git_repo
+            .config()
+            .context("failed to open git config")?
+    } else {
+        git2::Repository::open_ext(
+            git_repo.git_repo.path(),
+            git2::RepositoryOpenFlags::FROM_ENV,
+            &[] as &[&std::ffi::OsStr],
+        )
+        .context("failed to reopen git repository with environment overrides")?
+        .config()
+        .context("failed to open git config")?
+    };
+
+    let mut user_configs = Vec::with_capacity(2);
+    for level in [git2::ConfigLevel::Global, git2::ConfigLevel::XDG] {
+        match config.open_level(level) {
+            Ok(config) => user_configs.push(config),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => {}
+            Err(error) => return Err(error).context("failed to open user-level git config"),
+        }
+    }
+    if user_configs.is_empty() {
+        user_configs.push(open_global_config()?);
+    }
+    Ok(user_configs)
 }
 
 /// A config instance backed by exactly one file. A missing file is not an

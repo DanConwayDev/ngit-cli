@@ -82,6 +82,9 @@ branches, and a skill installer/upgrader.
 
 ### Fixed
 
+- Global signer identities and aliases selected through Git `includeIf`
+  `gitdir` conditions are now resolved in repository context, so conditional
+  logins work for `ngit account whoami` and ordinary signed commands.
 - ngit now honours `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM` when resolving Git config scopes outside the repository. libgit2 does not apply these to the config ngit opens, so a login stored, read or removed with `--global` (or any global-scope read, such as the secret-storage policy) previously went to `~/.gitconfig` regardless of the redirect, silently overwriting the real global login of anyone who sandboxes ngit with the documented variables.
 - Keep `--json` output parseable by sending relay-fetch summaries such as `no updates` and `updates: ...` to stderr instead of stdout.
 - `git push --force-with-lease` now works with `nostr://` remotes: matching leases authorize guarded non-fast-forward updates, while stale leases reject the push before a conflicting repository state can be published.

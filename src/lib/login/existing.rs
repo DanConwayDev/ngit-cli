@@ -24,7 +24,10 @@ use crate::client::MockConnect;
 use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
     client::{fetch_public_key, get_event_from_global_cache},
-    git::{Repo, RepoActions, get_git_config_item, get_git_config_item_system},
+    git::{
+        Repo, RepoActions, get_git_config_item, get_git_config_item_global,
+        get_git_config_item_system, open_global_configs_for_repo,
+    },
 };
 
 #[derive(Debug)]
@@ -116,7 +119,7 @@ pub fn selected_alias(
             let repo = git_repo.context("cannot read local signer alias without a repository")?;
             get_git_config_item(&Some(repo), "nostr.signer")?
         }
-        SignerInfoSource::GitGlobal => get_git_config_item(&None, "nostr.signer")?,
+        SignerInfoSource::GitGlobal => get_git_config_item_global(git_repo, "nostr.signer")?,
         SignerInfoSource::GitSystem => get_git_config_item_system("nostr.signer")?,
     };
     Ok(selector.filter(|selector| {
@@ -175,7 +178,7 @@ pub async fn get_signer_info(
                                     .is_ok_and(|value| value.is_some())
                             }),
                             SignerInfoSource::GitGlobal => {
-                                get_git_config_item(&None, "nostr.signer")
+                                get_git_config_item_global(git_repo, "nostr.signer")
                                     .is_ok_and(|value| value.is_some())
                             }
                             SignerInfoSource::GitSystem => {
@@ -257,7 +260,7 @@ pub async fn get_signer_info(
             }
         }
         Some(SignerInfoSource::GitGlobal) => {
-            if let Some(selector) = get_git_config_item(&None, "nostr.signer")
+            if let Some(selector) = get_git_config_item_global(git_repo, "nostr.signer")
                 .context("failed to get global git config")?
             {
                 let resolved = resolve_selection(git_repo, &selector, password, false).await?;
@@ -266,7 +269,7 @@ pub async fn get_signer_info(
                     SignerInfoSource::GitGlobal,
                     resolved.alias,
                 )
-            } else if let Some(nsec) = get_git_config_item(&None, "nostr.nsec")
+            } else if let Some(nsec) = get_git_config_item_global(git_repo, "nostr.nsec")
                 .context("failed to get global git config")?
             {
                 let nsec = resolve_config_secret(&None, &nsec, true, true)?;
@@ -274,21 +277,22 @@ pub async fn get_signer_info(
                     SignerInfo::Nsec {
                         nsec: nsec.to_string(),
                         password: password.clone(),
-                        npub: get_git_config_item(&None, "nostr.npub")
+                        npub: get_git_config_item_global(git_repo, "nostr.npub")
                             .context("failed to get global git config")?,
                         verify_npub: false,
                     },
                     SignerInfoSource::GitGlobal,
                     None,
                 )
-            } else if let Some(bunker_uri) = get_git_config_item(&None, "nostr.bunker-uri")
-                .context("failed to get global git config")?
+            } else if let Some(bunker_uri) =
+                get_git_config_item_global(git_repo, "nostr.bunker-uri")
+                    .context("failed to get global git config")?
             {
                 (SignerInfo::Bunker {
-                    bunker_uri, bunker_app_key: resolve_config_secret(&None, &get_git_config_item(&None, "nostr.bunker-app-key")
-                    .context("failed get local git config")?
+                    bunker_uri, bunker_app_key: resolve_config_secret(&None, &get_git_config_item_global(git_repo, "nostr.bunker-app-key")
+                    .context("failed to get global git config")?
                     .context("git global config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
-                    npub: get_git_config_item(&None, "nostr.npub")
+                    npub: get_git_config_item_global(git_repo, "nostr.npub")
                         .context("failed get global git config")?,
                 }, SignerInfoSource::GitGlobal, None)
             } else {
@@ -388,10 +392,13 @@ fn config_alias_names(git_repo: &Option<&Repo>, scope: ConfigScope) -> Result<BT
             .context("failed to open local Git config")?
             .open_level(git2::ConfigLevel::Local)
             .context("failed to isolate local Git config")?,
-        ConfigScope::Global => git2::Config::open_default()
-            .context("failed to open Git config")?
-            .open_global()
-            .context("failed to open global Git config")?,
+        ConfigScope::Global => {
+            let mut aliases = BTreeSet::new();
+            for config in open_global_configs_for_repo(git_repo)? {
+                aliases.extend(alias_names_in_config(&config)?);
+            }
+            return Ok(aliases);
+        }
         ConfigScope::System => {
             let config = git2::Config::open_default().context("failed to open Git config")?;
             let mut aliases = BTreeSet::new();
@@ -438,7 +445,9 @@ pub async fn configured_signer_npub(
         }),
         SignerInfoSource::GitGlobal => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
             .iter()
-            .any(|key| get_git_config_item(&None, key).is_ok_and(|value| value.is_some())),
+            .any(|key| {
+                get_git_config_item_global(git_repo, key).is_ok_and(|value| value.is_some())
+            }),
         SignerInfoSource::GitSystem => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
             .iter()
             .any(|key| get_git_config_item_system(key).is_ok_and(|value| value.is_some())),
@@ -491,7 +500,7 @@ fn config_value(git_repo: &Option<&Repo>, scope: ConfigScope, key: &str) -> Resu
             get_git_config_item(&Some(repo), key).context("failed to read local git config")
         }
         ConfigScope::Global => {
-            get_git_config_item(&None, key).context("failed to read global git config")
+            get_git_config_item_global(git_repo, key).context("failed to read global git config")
         }
         ConfigScope::System => {
             get_git_config_item_system(key).context("failed to read system git config")
