@@ -28,11 +28,13 @@ The roles are:
 
 - **Sole maintainer:** creates the repository. No role option or role tag is
   needed while nobody else is involved.
-- **Lead maintainer:** coordinates the roster and provides the normal place to
-  clone. The lead has no additional signing or merge authority.
+- **Lead maintainer:** coordinates membership and provides the normal place to
+  clone. In a lead-shaped repository, the lead runs `--add-maintainer` and
+  `--remove-maintainer`; ngit rejects those roster changes from co-maintainers.
+  This coordination role adds no Git-state or merge authority.
 - **Co-maintainer:** has the same authority as the lead to publish Git state,
-  merge, and moderate issues and proposals. ngit still coordinates roster
-  changes through the lead in the normal lead-shaped workflow.
+  merge, and moderate issues and proposals. To add or remove somebody, a
+  co-maintainer asks the lead to run the corresponding command.
 - **Invitee:** has no maintainer authority until they accept. Joining always
   requires statements from both sides.
 - **Moderator:** may help manage issues and proposals, but is not authorized to
