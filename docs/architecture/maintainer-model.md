@@ -203,7 +203,7 @@ lead. A co-maintainer receives an actionable error instead of publishing a
 third-party edge:
 
 ```text
-only the resolved lead can add maintainers to this repository
+only the resolved lead should add maintainers to this repository
 ask <alice-npub> to run:
   ngit repo edit --add-maintainer <carol-npub>
 ```
