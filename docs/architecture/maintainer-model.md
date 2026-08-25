@@ -30,12 +30,13 @@ The roles are:
   needed while nobody else is involved.
 - **Lead maintainer:** coordinates the roster and provides the normal place to
   clone. The lead has no additional signing or merge authority.
-- **Co-maintainer:** has the same power as the lead to publish Git state,
-  merge, and manage the repository.
+- **Co-maintainer:** has the same authority as the lead to publish Git state,
+  merge, and moderate issues and proposals. ngit still coordinates roster
+  changes through the lead in the normal lead-shaped workflow.
 - **Invitee:** has no maintainer authority until they accept. Joining always
   requires statements from both sides.
-- **Moderator:** may help manage issues and proposals, but cannot publish
-  repository state or merge.
+- **Moderator:** may help manage issues and proposals, but is not authorized to
+  publish repository state or merge.
 
 The usual path is simple: Alice creates a repository, invites Bob, becomes lead
 automatically as the inviter, and Bob accepts as a co-maintainer.
@@ -69,9 +70,9 @@ After selecting or cloning Alice's repository, Bob runs:
 ngit repo accept
 ```
 
-Bob accepts only the offered co-maintainer role. He cannot use acceptance to
-make himself lead, add another person, or replace Alice's relationships. Once
-his announcement is published, he has the same repository authority as Alice.
+`ngit repo accept` accepts only the offered co-maintainer role. It does not make
+Bob lead, add another person, or replace Alice's relationships. Once his
+announcement is published, he has the same repository authority as Alice.
 
 #### 4. Alice records Bob's acceptance
 
@@ -118,10 +119,10 @@ or leaves. History replication is not a lead-only job.
 #### 6. The repository continues normally
 
 Alice or Bob can publish state, merge, and perform ordinary maintainer actions.
-In a lead-shaped repository, the lead performs membership changes and a
-co-maintainer asks the lead to invite or remove somebody. In a deliberately
-leadless repository, any confirmed maintainer may make the change with the
-required `--no-lead-maintainer` choice. All adds remain subject to the
+In a lead-shaped repository, ngit directs membership changes through the
+resolved lead: a co-maintainer asks the lead to invite or remove somebody. In a
+deliberately leadless repository, any confirmed maintainer may make the change
+with the required `--no-lead-maintainer` choice. All adds remain subject to the
 repository-join checks described below.
 
 ### Everyday commands
@@ -563,8 +564,8 @@ degradation available.
 
 If the projection disagrees with the active `M` and `m` records, the indexed
 records win. The mismatch is nevertheless a repository-health error in the
-author's announcement and must be repaired as described under “Edge cases and
-failure rules.”
+author's announcement. ngit requires the author to repair it before another
+repository edit, as described under “Edge cases and failure rules.”
 
 The happy-path announcements progress like this. Alice's first invitation at
 `T1` automatically establishes Alice as lead and creates Bob's pending edge:
@@ -1146,9 +1147,9 @@ themselves. Copied moderator history belonging to other people uses `open`. In
 a leadless repository, an active `o` from a confirmed maintainer can assign the
 invitation. Moderator relationships never extend maintainer authority.
 
-Confirmed moderators may author status, label, subject, and cover-note events.
-They cannot publish kind `30618` state, push protected branches, or merge. A
-moderator cannot assign third-party roles.
+Confirmed moderators are authorized to author status, label, subject, and
+cover-note events. They have no authority to publish kind `30618` state, push
+protected branches, merge, or confer third-party roles.
 
 The first membership API need not expose moderator assignment. Every
 maintainer mutation preserves existing `o` role and history records, and
