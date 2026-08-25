@@ -37,8 +37,10 @@ The roles are:
   co-maintainer asks the lead to run the corresponding command.
 - **Invitee:** has no maintainer authority until they accept. Joining always
   requires statements from both sides.
-- **Moderator:** may help manage issues and proposals, but is not authorized to
-  publish repository state or merge.
+- **Moderator:** may manage issues and proposals, including publishing a
+  `merge` status for a merge commit already present in the repository. That
+  authority does not extend to publishing kind `30618` repository state or
+  creating or pushing the merge itself.
 
 The usual path is simple: Alice creates a repository, invites Bob, becomes lead
 automatically as the inviter, and Bob accepts as a co-maintainer.
@@ -1150,8 +1152,12 @@ a leadless repository, an active `o` from a confirmed maintainer can assign the
 invitation. Moderator relationships never extend maintainer authority.
 
 Confirmed moderators are authorized to author status, label, subject, and
-cover-note events. They have no authority to publish kind `30618` state, push
-protected branches, merge, or confer third-party roles.
+cover-note events. This includes a `merge` status that records a merge commit
+already present in state published by a confirmed maintainer, such as when the
+maintainer's tooling pushed the commit but did not publish the corresponding
+status. The moderator's status does not authorize them to create or push that
+merge. Clients reject kind `30618` state from an author confirmed only as a
+moderator, and moderator-authored role tags do not confer third-party roles.
 
 The first membership API need not expose moderator assignment. Every
 maintainer mutation preserves existing `o` role and history records, and
@@ -1501,7 +1507,7 @@ coordinate from affecting those users.
 
 ### Authorization summary
 
-| Actor | Repository state | Merge | Status/labels/subject/cover note |
+| Actor | Repository state (`30618`) | Create/push merge commit | Status/labels/subject/cover note |
 | --- | --- | --- | --- |
 | Resolved lead | yes | yes | yes |
 | Confirmed co-maintainer | yes | yes | yes |
@@ -1510,7 +1516,10 @@ coordinate from affecting those users.
 | Outsider | no | no | no |
 
 Issue and proposal authors retain author-specific NIP-34 actions. The table
-covers authority derived from repository roles.
+covers authority derived from repository roles. A `merge` status belongs in
+the final column: it may record a merge already present in authorized
+repository state, but it does not authorize its publisher to create that state
+or perform the merge.
 
 ### Required client invariants
 
