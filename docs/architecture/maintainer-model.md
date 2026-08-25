@@ -249,10 +249,10 @@ does not disguise this sequence as a successful removal or generic force
 override.
 
 Once the removal is observed, other co-maintainers are shown `ngit repo
-follow-lead` to record Bob's end time. Their previously open historical copies
-never delay the current removal. Bob sees a repository-health error explaining
-that the lead no longer assigns him and directing him to the same command; his
-maintainer operations remain blocked until his announcement ends his self-role.
+follow-lead` to record Bob's end time. Their deferred history copies never delay
+the current removal. Bob sees a repository-health error explaining that the lead
+no longer assigns him and directing him to the same command; his maintainer
+operations remain blocked until his announcement ends his self-role.
 
 ### Inspecting a repository
 
@@ -318,8 +318,8 @@ ngit repo edit --lead-maintainer <bob-npub>
 
 Alice becomes a co-maintainer. Her replacement retains the full history, keeps
 only her self-`m` and direct `M:Bob` relationship active, and changes every
-other still-open interval to historical-only. The chain is now Alice → Bob →
-Bob, so Bob is the resolved lead.
+other interval without a known end to historical-only. The chain is now Alice →
+Bob → Bob, so Bob is the resolved lead.
 
 Alice and every other co-maintainer are then repeatedly shown:
 
@@ -329,10 +329,10 @@ ngit repo follow-lead
 
 For a confirmed maintainer, that command first republishes their complete
 historical view with an active self-`m` and Bob, rather than Alice, as their
-active direct `M`. Every still-open third-party role copied from the resolved
-history uses `open`, so it should not retain a person whom Bob removes. An
-unexpected active third-party `m` is handled by the guarded repair below. The
-command then switches the local `nostr://` coordinate and `nostr.repo` after
+active direct `M`. Every third-party role copied from the resolved history
+without a known end uses `defer`, so it should not retain a person whom Bob
+removes. An unexpected active third-party `m` is handled by the guarded repair
+below. The command then switches the local `nostr://` coordinate and `nostr.repo` after
 verifying that Bob's rooted view contains the same membership and Git state. A
 non-maintainer runs the same command but changes only local configuration
 unless their own stale announcement must first record a removal as described
@@ -458,8 +458,8 @@ self-`m` and points to the lead with an active `M`.
 3. **The API expresses intent.** ngit changes one relationship and preserves
    unrelated edges, intervals, metadata, and unknown tags.
 4. **Current edges and historical copies are distinct.** Both use the NIP-34
-   role record, but an explicit `open` sentinel marks a retained open interval
-   as historical-only so it never authorizes its subject.
+   role record, but an explicit `defer` sentinel marks a retained interval with
+   no known numeric end as historical-only so it never authorizes its subject.
 5. **Membership writes fail closed.** An unexpected graph join, partition, or
    state replacement is not published.
 6. **Signed disagreement remains visible.** Other clients may omit or rewrite
@@ -506,9 +506,9 @@ Indexed role tags have this form:
 - `o` assigns or acknowledges a moderator.
 - With ordinary numeric boundaries, a tag is active when it has fewer than
   four elements or an odd number of elements: its final boundary is a start.
-- A literal `open` in an end position retains a last-known-open interval as
-  historical-only. Its even-length tag is inactive for authorization or lead
-  forwarding.
+- A literal `defer` in an end position retains an interval with no known numeric
+  end as historical-only. Its even-length tag is inactive for authorization or
+  lead forwarding.
 - A pubkey may have one record for each role letter. A role transition closes
   the old letter and starts the new one rather than rewriting the past.
 
@@ -519,7 +519,7 @@ Examples:
 ["m", "<pubkey>", "100"]                  # active since 100
 ["m", "<pubkey>", "100", "200"]         # ended at 200
 ["m", "<pubkey>", "100", "200", "300"] # active again since 300
-["m", "<pubkey>", "300", "open"]        # historical copy, not active
+["m", "<pubkey>", "300", "defer"]        # historical copy, not active
 ```
 
 The author is part of the fact. Alice's `m:Bob` is Alice's outgoing
@@ -532,19 +532,19 @@ recommended active roster. A co-maintainer's minimum active shape reciprocates
 with the relationships needed to accept that assignment: an `M` naming the
 lead and an `m` naming themselves.
 
-A co-maintainer also publishes the complete resolved `M`, `m`, and `o` history,
-and every last-known-open third-party interval copied solely as history ends in
-`open`. Their active self-`m` is the signed acceptance of their assigned role,
-and their active `M` identifies and reciprocates with the lead. A current
+A co-maintainer also publishes the complete resolved `M`, `m`, and `o` history.
+Every third-party interval copied solely as history without a known numeric end
+ends in `defer`. Their active self-`m` is the signed acceptance of their assigned
+role, and their active `M` identifies and reciprocates with the lead. A current
 co-maintainer announcement that ends either of those two required records in
-`open` is invalid as an acceptance: clients treat the record only as history
+`defer` is invalid as an acceptance: clients treat the record only as history
 and do not grant authority from it.
 
-The `open` convention is a statement of intent, not a protocol restriction. A
+The `defer` convention is a statement of intent, not a protocol restriction. A
 third-party client may publish an active `m` from a co-maintainer to somebody
 else. That record is a real assignment or invitation, participates in
 reciprocal graph resolution, and appears in `maintainers`; clients must not
-silently reinterpret it as `open`. ngit does not create this shape in a
+silently reinterpret it as `defer`. ngit does not create this shape in a
 lead-shaped repository and treats it as the recoverable edge case specified
 below.
 
@@ -553,9 +553,9 @@ active roster, confirmed co-maintainers use active reciprocal `m` assignments.
 Those edges have normal authorization and repository-join consequences.
 
 The sibling NIP-34 draft should retain its recommendation that a co-maintainer
-actively list themselves and the lead. It must add the `open` extension for
-last-known-open records copied for other maintainers and moderators. Those
-copies retain history without becoming assignments.
+actively list themselves and the lead. It must add the `defer` extension for
+records copied for other maintainers and moderators whose numeric end is not
+known. Those copies retain history without becoming assignments.
 
 If an announcement has no `M`, `m`, `o`, or legacy `maintainers` tag, its
 author is the implicit sole maintainer. This is the preferred one-person wire
@@ -568,7 +568,7 @@ deprecated `maintainers` tag is only a compatibility projection. Otherwise
 A role-aware announcement always emits exactly one `maintainers` tag containing
 the subjects of every active `M` and `m` record, and no others. This is exact set
 equality: it includes active invitations as well as confirmed assignments, but
-excludes numeric-ended records, records ending in `open`, moderators, and
+excludes numeric-ended records, records ending in `defer`, moderators, and
 duplicates. An empty projection is emitted as `["maintainers"]`. The legacy tag
 cannot preserve the distinction between an invitation and a confirmed role;
 older clients receive the active assignment roster as the least misleading
@@ -607,19 +607,20 @@ The role tags in the sibling NIP-34 draft already carry start/end history and
 define precedence between conflicting copies. Effective membership history is
 therefore replicated in `M`, `m`, and `o`; it does not need another tag type.
 
-The missing distinction is how a maintainer can retain a still-open interval
-for somebody they are not currently assigning. This proposal reserves the
-literal `open` in an end position:
+The missing distinction is how a maintainer can retain an interval with no known
+numeric end for somebody they are not currently assigning. This proposal
+reserves the literal `defer` in an end position:
 
 ```text
-["m", "<bob-pubkey>", "200", "open"]
+["m", "<bob-pubkey>", "200", "defer"]
 ```
 
 This says: “my historical view has Bob confirmed from time 200 with no known
-end, but this record is not my current assignment.” The record has an even
-number of elements, so current ngit and clients following the existing parity
-rule treat it as inactive. A numeric end replaces `open` when the end is
-observed:
+numeric end, but I make no current assignment through this record.” Current
+status is resolved from the active maintainer graph, normally rooted at the
+resolved lead. The record has an even number of elements, so current ngit and
+clients following the existing parity rule treat it as inactive. A numeric end
+replaces `defer` when the end is observed:
 
 ```text
 ["m", "<bob-pubkey>", "200", "300"]
@@ -627,16 +628,16 @@ observed:
 
 The sibling NIP-34 draft must be clarified so a valid history boundary may be
 this literal sentinel as well as a Unix timestamp. Clients must never parse
-`open` as an end time or as an active role assignment.
+`defer` as an end time or as an active role assignment.
 
 The lead uses an ordinary omitted end for real current assignments. A current
 co-maintainer does the same for their lead `M` and self-`m`, because those two
-active records are their reciprocal acceptance. They use `open` only for
-last-known-open intervals belonging to other people. If a co-maintainer becomes
-lead, they close their former lead `M` and self-`m`, open an active self-`M`, and
-publish the full active roster. A former lead becoming a co-maintainer keeps an
-active `M` to the new lead and active self-`m`, while changing relationships
-covered by the prepared lead into historical-only copies.
+active records are their reciprocal acceptance. They use `defer` only for
+intervals belonging to other people whose numeric end is not known. If a
+co-maintainer becomes lead, they close their former lead `M` and self-`m`, start
+an active self-`M`, and publish the full active roster. A former lead becoming a
+co-maintainer keeps an active `M` to the new lead and active self-`m`, while
+changing relationships covered by the prepared lead into historical-only copies.
 
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
@@ -654,13 +655,13 @@ An invitation is not effective maintainership. Alice initially publishes
 Alice changes the beginning of that first interval to `T2`: she is now signing
 her observation that Bob became a maintainer then, rather than claiming he was
 one from the invitation time. Other maintainers without a real Bob edge retain
-the same effective start using the inactive `open` form:
+the same effective start using the inactive `defer` form:
 
 ```text
 T1  Alice publishes m:Bob,T1             Bob is invited
 T2  Bob publishes M:Alice,T2 + m:Bob,T2  Bob becomes confirmed
 T3  Alice records m:Bob,T2                accepted start retained
-T4  Carol follows the lead               copies m:Bob,T2,open
+T4  Carol follows the lead               copies m:Bob,T2,defer
 ```
 
 Alice sees the acknowledgement command at the first ngit command that observes
@@ -702,14 +703,14 @@ Current authority in a lead-shaped repository is the reciprocal fixpoint seeded
 by the lead's active roster. An externally authored active `m` from a confirmed
 co-maintainer can extend that fixpoint when its subject publishes an active
 self-`m` plus active `M` path back to the same lead. A deliberately leadless
-repository uses its active reciprocal graph without that seed. An `open`
+repository uses its active reciprocal graph without that seed. A `defer`
 historical copy is always inactive for authorization and routing, regardless of
 which author published it.
 
 When a lead removes Bob in the ordinary lead-shaped graph, the lead closes its
 edge and effective interval at the removal time. Bob leaves immediately only
 when no confirmed co-maintainer deliberately assigns him. Other maintainers may
-still carry `open` historical copies until they acknowledge the removal; those
+still carry `defer` historical copies until they acknowledge the removal; those
 copies cannot delay it. A real active alternative edge can retain Bob, so
 ngit's removal command fails before publication and invokes the guarded
 lead-cover-then-follow recovery instead of silently removing either signer.
@@ -738,7 +739,7 @@ For the normal lead-shaped topology:
    contains an active self-`m` and an active `M` path to the same lead.
 4. Add every subject of a confirmed maintainer's active third-party `m` to the
    candidate roster and repeat confirmation to a fixpoint. Records ending in
-   `open` never enter this step.
+   `defer` never enter this step.
 5. A candidate whom a confirmed maintainer lists without that signed
    acknowledgement remains invited. A numeric self-role end is an explicit
    departure and takes precedence over the assignment.
@@ -751,7 +752,7 @@ This remains reciprocal: a confirmed maintainer assigns the role and the
 candidate signs an active acknowledgement bound to that repository. A
 co-maintainer's active lead `M` and self-`m` confirm the minimum relationship.
 An active third-party `m` may extend the roster and import its subject's state
-after reciprocity even though ngit flags that shape for convergence; an `open`
+after reciprocity even though ngit flags that shape for convergence; a `defer`
 copy cannot.
 
 The deliberately leadless topology has no active lead roster, so it retains
@@ -776,7 +777,7 @@ coordinate. It follows each announcement's one active `M`. A lead points to
 themselves; a co-maintainer or former maintainer preserving a redirect points
 to the lead. If the target points onward, resolution continues. A confirmed
 maintainer whose active `M` points to themselves is the terminal lead. An `M`
-ending in `open` is historical-only and cannot participate in this walk.
+ending in `defer` is historical-only and cannot participate in this walk.
 
 ```text
 Carol → Alice → Bob → Bob
@@ -813,7 +814,7 @@ Resolution has seven results:
 Legacy vote inference remains while the selected announcement is legacy.
 Listings from legacy members and active `M` views still contribute to its vote
 count, so one member migrating does not erase an established lead. Historical
-`M` records ending in `open` do not vote. Once the selected maintainer
+`M` records ending in `defer` do not vote. Once the selected maintainer
 deliberately publishes indexed `m` without `M`, inference stops for that rooted
 view. This makes `--no-lead-maintainer` expressible while preserving
 repositories that have not opted into the new role model.
@@ -827,7 +828,7 @@ to authorize all reciprocal members.
 
 Active `M` views outside the selected pointer path do not create a global
 conflict merely because they name another lead. They affect views rooted at
-coordinates that reach them. Numeric-ended and `open` historical `M` intervals
+coordinates that reach them. Numeric-ended and `defer` historical `M` intervals
 never enter the walk.
 
 Human and JSON output expose the source:
@@ -1066,8 +1067,8 @@ rules. Conflicting identity, `u`, history, or refs block.
 the publisher names themselves, they become a prepared lead by publishing an
 active self-`M` and the complete active roster. If they name somebody else,
 they become a co-maintainer: their active `M` names the proposed lead, their
-active self-`m` accepts their own role, and every other last-known-open role
-ends in `open` as replicated history.
+active self-`m` accepts their own role, and every other role without a known
+numeric end uses `defer` as replicated history.
 
 This convention does not give the target protocol ownership of the roster,
 but it changes which event actively assigns the roster. The target must already
@@ -1078,7 +1079,7 @@ then let the old lead point to them.”
 ngit therefore simulates the exact post-declaration graph. If Bob's prepared
 roster omits Carol and Alice is her only active assigner, reducing Alice's
 active relationships to Bob and herself would remove Carol. The same rule
-protects outstanding invitations. Co-maintainer `open` histories cannot cover
+protects outstanding invitations. Co-maintainer `defer` histories cannot cover
 the omission because they never authorize their subjects. An externally
 authored active third-party edge can cover Carol, in which case the preview
 reports that real path; it does not misclassify the edge as replicated history.
@@ -1140,14 +1141,14 @@ The membership mutation that adopts indexed roles republishes the selected
 announcement with `M`, `m`, and any preserved `o` records. It also emits the
 deprecated `maintainers` degradation tag containing exactly the active `M` and
 `m` subjects. This includes pending assignments and excludes every inactive or
-`open` history record. Role-aware clients use the indexed records; older clients
+`defer` history record. Role-aware clients use the indexed records; older clients
 retain the best representation available to them. Other authors' announcements
 remain unchanged until those authors publish their own role or history mutation.
 
 The `maintainers` fallback applies only when an announcement contains no
 indexed `M`, `m`, or `o`. During partial migration, active indexed `M` views
 from other members can still vote while the selected announcement is legacy;
-historical `M` records ending in `open` cannot. Indexed `m` without `M` in the
+historical `M` records ending in `defer` cannot. Indexed `m` without `M` in the
 selected announcement is the explicit no-lead boundary.
 
 ### Moderators
@@ -1155,7 +1156,7 @@ selected announcement is the explicit no-lead boundary.
 In a lead-shaped repository, the lead's active `o` assigns a moderator
 invitation. The recipient acknowledges it with an active self-`o`; confirmation
 still requires the lead's assignment, so the recipient cannot appoint
-themselves. Copied moderator history belonging to other people uses `open`. In
+themselves. Copied moderator history belonging to other people uses `defer`. In
 a leadless repository, an active `o` from a confirmed maintainer can assign the
 invitation. Moderator relationships never extend maintainer authority.
 
@@ -1207,7 +1208,7 @@ Active `M` and `m` records remain authoritative when the deprecated
 subjects, or otherwise differs from their exact set. Resolution and
 authorization must not fall back to the contradictory tag. For example, given
 active `M:Alice` and `m:Bob`, an
-`open` `m:Carol`, and ended `m:Dave`, the only valid compatibility values are
+`defer` `m:Carol`, and ended `m:Dave`, the only valid compatibility values are
 Alice and Bob. Bob is included even while invited; Carol and Dave are excluded.
 If the tag instead contains Alice, Carol, and Dave, the warning below describes
 both sides of the mismatch.
@@ -1245,9 +1246,9 @@ never a membership operation.
 #### A claimed acceptance makes its required roles historical-only
 
 A current co-maintainer announcement is invalid as an acceptance if its lead
-`M` or self-`m` ends in `open`. Both records must be active. Clients may retain
+`M` or self-`m` ends in `defer`. Both records must be active. Clients may retain
 the records as history, but they do not treat the author as confirmed, accept
-kind `30618` state from them, or use an `open` `M` for forwarding.
+kind `30618` state from them, or use a `defer` `M` for forwarding.
 
 If the resolved lead still has an active invitation, every repository command
 for that signer reports the malformed acceptance and directs them to publish a
@@ -1277,7 +1278,7 @@ though ngit must not create it in a lead-shaped repository:
 Bob's active `m:Carol` is a real invitation. If Carol accepts, it extends the
 reciprocal graph and can retain Carol even when Alice removes or never lists
 her. Clients must resolve that graph honestly; they cannot treat the record as
-`open` merely because Bob is not lead.
+`defer` merely because Bob is not lead.
 
 The shape is nevertheless a repository-health error because it bypasses the
 normal lead-coordinated roster. Bob and Alice are warned after every ngit or Git
@@ -1306,14 +1307,14 @@ then repair your announcement with:
 
 Every `ngit repo edit` from Bob other than `repo follow-lead` fails and repeats
 the applicable recovery. Once Alice actively covers every third-party subject,
-`repo follow-lead` converts Bob's active assignments to `open` copies, rebuilds
+`repo follow-lead` converts Bob's active assignments to `defer` copies, rebuilds
 `maintainers` from Bob's remaining active lead/self roles, and preserves all
 history and unrelated fields:
 
 ```text
 ["M", "<alice-pubkey>", "T2"]
 ["m", "<bob-pubkey>", "T2"]
-["m", "<carol-pubkey>", "T3", "open"]
+["m", "<carol-pubkey>", "T3", "defer"]
 ["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
 ```
 
@@ -1353,12 +1354,12 @@ own acceptance active and copies Carol's current interval as historical-only:
 ```text
 ["M", "<alice-pubkey>", "T2"]
 ["m", "<bob-pubkey>", "T2"]
-["m", "<carol-pubkey>", "T3", "open"]
+["m", "<carol-pubkey>", "T3", "defer"]
 ["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
 ```
 
 Alice removes Carol at `T4`. Carol loses authority as soon as Alice's active
-roster closes her assignment; Bob's copied `open` interval cannot retain her.
+roster closes her assignment; Bob's copied `defer` interval cannot retain her.
 Bob is prompted to run `ngit repo follow-lead`, producing:
 
 ```text
@@ -1370,13 +1371,13 @@ Bob is prompted to run `ngit repo follow-lead`, producing:
 
 Every repository command Carol runs reports that Alice no longer assigns her
 and directs her to `ngit repo follow-lead`. Pushes and other maintainer-only
-operations fail. Following ends Carol's self-role, replaces a copied `open`
+operations fail. Following ends Carol's self-role, replaces a copied `defer`
 with a numeric end when the lead supplies one, retains other still-current
-third-party records as `open`, and keeps Alice as an active redirect:
+third-party records as `defer`, and keeps Alice as an active redirect:
 
 ```text
 ["M", "<alice-pubkey>", "T2"]
-["m", "<bob-pubkey>", "T2", "open"]
+["m", "<bob-pubkey>", "T2", "defer"]
 ["m", "<carol-pubkey>", "T3", "T4"]
 ["maintainers", "<alice-pubkey>"]
 ```
@@ -1388,7 +1389,7 @@ Carol must accept again by appending the new start, here `T5`:
 
 ```text
 ["M", "<alice-pubkey>", "T2"]
-["m", "<bob-pubkey>", "T2", "open"]
+["m", "<bob-pubkey>", "T2", "defer"]
 ["m", "<carol-pubkey>", "T3", "T4", "T5"]
 ["maintainers", "<alice-pubkey>", "<carol-pubkey>"]
 ```
@@ -1449,7 +1450,7 @@ and recovery before exposing an explicit merge action.
 
 The latest event controls the author's current statement. Its omission of a
 role-history record does not erase copies retained by other confirmed
-maintainers, including inactive records ending in `open`. The preferred
+maintainers, including inactive records ending in `defer`. The preferred
 history resolver falls through to those copies and reports disagreement or
 uncertainty.
 
@@ -1543,7 +1544,7 @@ The implementation and tests must make these statements true:
    conflicting lead path blocks instead of treating the flag as an override.
 4. Acceptance records an active `M` naming the inviter and an active self-`m`
    naming the invitee. Both are required for current co-maintainer authority;
-   ending either in `open` cannot accept an invitation. Acceptance cannot add
+   ending either in `defer` cannot accept an invitation. Acceptance cannot add
    unrelated people or self-promote.
 5. Discovering acceptance promptly shows the lead
    `--acknowledge-maintainer-change` and shows other co-maintainers
@@ -1551,8 +1552,8 @@ The implementation and tests must make these statements true:
    structured data.
 6. Every confirmed maintainer can replicate effective start and end intervals
    in `M`, `m`, or `o`. A co-maintainer keeps their lead `M` and self-`m`
-   active, while every last-known-open third-party interval ends in `open` in
-   the normal ngit shape. An externally authored active third-party `m` remains
+   active, while every third-party interval with no known numeric end uses
+   `defer` in the normal ngit shape. An externally authored active third-party `m` remains
    authoritative until the guarded repair converts it safely. Departure timing
    prefers an explicit signed role end, then a signed deletion request, then a
    clearly labelled observation estimate.
@@ -1563,22 +1564,22 @@ The implementation and tests must make these statements true:
    confirmed co-maintainer reciprocates with an active lead `M` plus active
    self-`m`. An active third-party `m` from any confirmed maintainer can extend
    the fixpoint even though ngit treats that wire shape as an edge case; a
-   third-party `open` history cannot. Explicit no-lead uses the reciprocal
+   third-party `defer` history cannot. Explicit no-lead uses the reciprocal
    active-`m` fixpoint without a lead seed.
 9. Lead resolution starts at the selected coordinate, follows one active `M`
    per announcement, and terminates only at a confirmed active self-`M`. An
    active pointer can preserve a removed maintainer's coordinate redirect, but
-   an `M` ending in `open` cannot route. Different targets outside that path do
+   an `M` ending in `defer` cannot route. Different targets outside that path do
    not create a global conflict.
 10. Legacy listing-vote inference remains while the selected announcement is
     legacy, and active indexed `M` views still count as votes. Historical `M`
-    records ending in `open` do not. Selected indexed `m` without `M` expresses
+    records ending in `defer` do not. Selected indexed `m` without `M` expresses
     the no-lead choice. A membership mutation migrates the selected event to
     indexed roles while retaining the active-role degradation `maintainers`
     projection.
 11. Every role-aware announcement's `maintainers` values equal exactly the
     subjects of its active `M` and `m` records, including invitations and
-    excluding ended or `open` records. Indexed roles win on disagreement. The
+    excluding ended or `defer` records. Indexed roles win on disagreement. The
     author sees a warning after every ngit or Git command in the checkout, and
     every other `repo edit` fails until the standalone `--fix-maintainers`
     repair republishes only the corrected projection.
@@ -1598,7 +1599,7 @@ The implementation and tests must make these statements true:
     third-party assignment. If another client does, every command warns both
     co-maintainer and lead. The co-maintainer may run only `repo follow-lead`;
     the lead may run only the required one-at-a-time adds. Follow refuses until
-    the lead covers every subject, then converts those edges to `open` without
+    the lead covers every subject, then converts those edges to `defer` without
     changing membership.
 16. A proposed lead publishes an active self-`M` and complete roster before the
     old lead points to them. A missing confirmed maintainer or invitation emits
@@ -1620,7 +1621,7 @@ The implementation and tests must make these statements true:
     changing its lead cannot transfer or revoke that control.
 23. Metadata-only edits do not migrate legacy membership.
 24. A historical copy can never authorize its subject or route lead resolution
-    when its final interval is `open`.
+    when its final interval is `defer`.
 25. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically and recommend
@@ -1633,11 +1634,11 @@ history, and state fixture plus an integration test for the published
 announcement, selected coordinate, and resulting authorization. Tests wait on
 observable relay or Git state with bounded deadlines and never use fixed
 sleeps. The compatibility-roster fixture specifically covers an active
-invitation, a record ending in `open`, an ended record, absent and contradictory
+invitation, a record ending in `defer`, an ended record, absent and contradictory
 projections, a mismatch warning, the edit gate, and a repair that leaves all
 indexed role tags byte-for-byte unchanged. The reciprocal-lifecycle fixtures
-cover active lead/self acceptance, rejection of `open` in either required
-record, passive third-party `open` copies, correct resolution of externally
+cover active lead/self acceptance, rejection of `defer` in either required
+record, passive third-party `defer` copies, correct resolution of externally
 authored active third-party `m` assignments, warnings to co-maintainer and lead,
 both edit gates, refusal to follow before lead coverage, safe conversion after
 coverage, rejection of a lead removal while such an edge retains its subject,
