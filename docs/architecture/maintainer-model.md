@@ -952,7 +952,9 @@ Membership operations fail before publication when they would:
 - withdraw an invitation as an accidental side effect;
 - connect another same-identifier maintainer component;
 - select a different earliest unique commit or fork relationship;
-- make a different kind `30618` state authoritative; or
+- make a different kind `30618` state authoritative, including state authored
+  before its signer was invited into this component;
+- make a previously ignored maintainer or moderator action authoritative; or
 - make branches or tags appear, disappear, or change OID unexpectedly.
 
 Errors name the affected people, coordinates, and refs. A repository merge or
@@ -965,15 +967,19 @@ applies one relationship delta plus, when required, one explicit governance
 choice. Before signing, every membership mutation must:
 
 1. fetch the latest announcements and state reachable from the selected
-   component and every named pubkey;
+   component, every named pubkey, and every component reachable from those
+   pubkeys;
 2. preserve unrelated roles, relationship intervals, replicated history,
    metadata, unknown tags, and personal infrastructure;
 3. construct the proposed replacement event in memory;
 4. resolve confirmed maintainers and moderators before and after the change;
 5. resolve repository identity and state, including the `r` earliest unique
-   commit, informational `u` fork links, and every Git ref/OID;
+   commit, informational `u` fork links, every candidate kind `30618` event,
+   and every Git ref/OID;
 6. display the intended and consequential changes;
-7. fail if the fetched predecessor changes before publication; and
+7. recheck the event IDs used for every affected announcement and state view,
+   and fail if any fetched predecessor or candidate changes before
+   publication; and
 8. publish and verify that the resulting graph matches the preview.
 
 The comparison reports:
@@ -986,20 +992,86 @@ The comparison reports:
 - lead resolution changes;
 - pending history acknowledgements;
 - a different earliest unique commit or `u` relationship;
-- competing kind `30618` state and refs that would appear, disappear, or
-  change OID; and
+- every kind `30618` event that becomes eligible or ceases to be eligible,
+  which event would supply the resolved state, and refs that would appear,
+  disappear, or change OID;
+- newly authorized maintainer or moderator events whose effect remains
+  current;
+- state OIDs that cannot be fetched from the post-change component's
+  advertised Git servers; and
 - selected-coordinate changes.
 
 Ordinary success requires that graph effects match the command's name and no
 conflicting state is selected. Human errors and JSON output expose exact npubs,
 refs, and coordinates.
 
+### Confirmation can activate pre-existing state
+
+Confirmation changes authorization, not only the role display. Bob may have
+published a kind `30618` event while his same-identifier coordinate belonged to
+a different virtual repository. When an add or acceptance makes Bob confirmed,
+that existing event can immediately become eligible for state resolution even
+though the membership command publishes no new kind `30618` event. Its age does
+not by itself make the transition safe.
+
+The invitation event is not a state lock. Preflight uses the latest eligible
+announcement and state events at the confirmation boundary, including anything
+published after the invitation.
+
+The collision works in both directions. Bob's event could replace Alice's
+resolved refs, or Alice's component could replace the state Bob previously saw
+through his coordinate. A client must compare the pre-change view from each
+component with the simulated post-change view. It must not describe one side as
+the repository and silently discard the other merely because that side wins
+the normal event-ordering rule.
+
+For an ordinary add or acceptance, state is compatible only when the
+post-change resolution preserves the same repository identity, earliest unique
+commit, fork relationship, default branch, and complete ref/OID map. Every
+resolved OID must also remain fetchable. A ref addition, deletion, rename, or
+OID change is reconciliation work, not an acceptance side effect. Equivalent
+state events may have different authors or event IDs; that difference is safe
+only when their resolved repository data are otherwise identical.
+
+When state is incompatible, the user must choose and complete one of these
+actions before retrying:
+
+1. **Keep the repositories separate.** Publish the invitee's repository,
+   state, and required Git objects under a new identifier, verify that the new
+   coordinate works, and then retire or reconcile the invitee's old
+   same-identifier relationships and state.
+2. **Adopt the inviting repository's state.** First preserve any wanted refs
+   under a new identifier or as refs deliberately incorporated by the target
+   maintainers. Then explicitly replace or delete the invitee's conflicting
+   same-identifier state and refetch the inviting component. Acceptance is
+   retried only after its preflight finds no state displacement.
+3. **Merge the repositories deliberately.** Reconcile Git history and refs,
+   repository identity, fork metadata, membership history, and every imported
+   member before creating the reciprocal edge. Until a dedicated merge
+   workflow exists, ngit refuses this choice rather than approximating it with
+   add, accept, or `--force`.
+
+Publishing reconciled state or a signed deletion request for old state is a
+separate decision. The `repo accept` command must never do either implicitly.
+If the invitee's old component has other confirmed members, the invitee also
+cannot treat that component as disposable on everybody else's behalf. They
+must first transfer, re-identify, or deliberately merge it with those members'
+participation.
+
 ### Adding a maintainer can join repositories
 
 `--add-maintainer Bob` is not always just an invitation. Bob may already have a
-same-identifier announcement that lists Alice and Tom. Alice's new edge can
-confirm Bob immediately, import Tom's reciprocal component, and make its kind
-`30618` events authoritative in Alice's view.
+same-identifier announcement that actively acknowledges Alice. In that case
+Alice's new edge completes reciprocity immediately: the add is also the
+acceptance boundary, without Bob running `repo accept`. The command must run
+the same state and component preflight as an explicit acceptance before Alice
+publishes anything.
+
+Bob may also list Tom, who may list Carol, with reciprocal relationships of
+their own. The preflight walks that complete confirmed fixpoint rather than
+checking Bob alone. Alice's new edge can otherwise import Tom and Carol, their
+role histories, and every eligible kind `30618` event into Alice's view. It can
+also make Alice's state displace the state previously resolved by all three.
 
 Preflight distinguishes:
 
@@ -1007,17 +1079,36 @@ Preflight distinguishes:
    Only an invitation is added.
 2. **Expected confirmation.** Bob already acknowledges the same component, the
    acknowledgement is not tied to an earlier closed assignment interval, and
-   no extra member, identity, history, or state conflict enters. The preview
-   reports that Bob becomes confirmed.
+   no extra member, invitation, identity, history, event authorization, or
+   state conflict enters. The preview reports that Bob becomes confirmed
+   immediately rather than describing the operation as a pending invitation.
 3. **Repository join.** The operation adds an unexpected confirmed pubkey,
    connects another component, changes identity or fork metadata, introduces
-   conflicting history, or changes resolved refs. It fails before publishing.
+   conflicting history, changes resolved refs, or changes which state event is
+   authoritative. It fails before publishing.
+
+For example:
+
+```text
+cannot add <bob-npub> safely
+
+their existing announcement already acknowledges this repository, so this
+add would confirm them immediately and change resolved repository state:
+  refs/heads/main  <alice-oid>  would become <bob-oid>
+
+their active relationships would also import:
+  <tom-npub> via <bob-npub> -> <tom-npub>
+
+ask <bob-npub> to preserve their repository under a new identifier or
+reconcile its membership and state with this repository before retrying
+--force is not available for a repository join
+```
 
 A join error shows both components, the connecting edges, history differences,
-and a ref-by-ref state comparison. It never suggests `--force`. Operators must
-first reconcile Git history, membership history, and the signed repository
-state, then use a dedicated repository-merge workflow. Until that workflow
-exists, ngit conservatively refuses the join.
+every transitively imported pubkey, and a ref-by-ref state comparison in both
+directions. It never suggests `--force`. Operators use one of the explicit
+separate, adopt, or merge choices above. Until the required workflow exists,
+ngit conservatively refuses the join.
 
 ### Accepting with an existing repository
 
@@ -1025,6 +1116,13 @@ exists, ngit conservatively refuses the join.
 identifier. It may also join reciprocal components. This is dangerous when Bob
 already uses the identifier for an experimental fork with his own `u` upstream
 tag, earliest unique commit, membership history, or kind `30618` state.
+
+It is equally dangerous when Bob's current announcement has active
+relationships to Tom or another same-identifier component. Acceptance must
+preserve those signed relationships while simulating the result; it cannot
+silently omit them or rewrite them to `defer` just to make Alice's invitation
+safe. If they would join another person or repository, acceptance fails and
+names every imported path.
 
 Before acceptance, ngit resolves:
 
@@ -1034,7 +1132,9 @@ Before acceptance, ngit resolves:
 
 It previews the post-acceptance graph and existing state-selection result. It
 shows whether Bob's fork relationship, earliest unique commit, history, or
-refs would be retained, replaced, or imported into the joined component.
+refs would be retained, replaced, or imported into the joined component. The
+comparison includes Bob's latest state even when it predates the invitation
+and includes every state reachable through Bob's active relationships.
 
 If either repository's state would displace the other's refs, acceptance ends
 with a destructive-consequence warning and a non-zero error:
@@ -1051,8 +1151,9 @@ and select the inviting repository state:
   refs/heads/experiment  <bob-oid>  would no longer be in resolved state
   refs/heads/main        <old-oid>  would become <alice-oid>
 
-reconcile the repositories and their state before accepting; --force is not
-available for a repository merge
+preserve the fork under a new identifier, explicitly adopt the inviting
+state, or reconcile both repositories before accepting; --force is not
+available for any of these choices
 ```
 
 The reverse direction is reported when Bob's state would displace Alice's.
@@ -1061,8 +1162,17 @@ event is not a recovery guarantee.
 
 Acceptance is safe when Bob has no same-identifier repository, is already in
 the same component, or both components, identity metadata, histories, and
-state are compatible. Cosmetic metadata can follow the ordinary shared-field
-rules. Conflicting identity, `u`, history, or refs block.
+state are compatible and no unexpected person becomes confirmed. Cosmetic
+metadata can follow the ordinary shared-field rules. Conflicting identity,
+`u`, history, authorization, or refs block.
+
+A successful acceptance, or an add that confirms Bob immediately, invalidates
+state and membership caches derived from Bob's former component. Before Bob can
+push or run any command that could publish kind `30618`, the client fetches the
+accepted component and compares his local refs with its resolved state.
+Divergent local work is preserved on a new identifier or incorporated through
+an explicit target-repository change; it is never published merely because no
+conflicting Bob-authored state event existed during confirmation.
 
 ### Lead declaration safety
 
@@ -1443,11 +1553,42 @@ then add a desired direct edge or remove each intended person explicitly.
 
 #### Two same-identifier repositories meet
 
-Neither add nor accept is a repository-merge command. They fail before an edge
-joins components with distinct membership, history, or state. A future
-reconciliation design must cover Git history, earliest unique commits, `u`
+Neither add nor accept is a repository-merge command. One reciprocal edge can
+join an entire transitive component, so the client compares every reachable
+member and state event rather than only the two people named by the command.
+It fails before an edge joins components with distinct membership, history, or
+state. The operator must keep one repository under a new identifier, make one
+component explicitly adopt the other's reconciled state, or use a future merge
+workflow. A merge design must cover Git history, earliest unique commits, `u`
 fork relationships, ref conflicts, membership histories, local coordinates,
-and recovery before exposing an explicit merge action.
+object availability, and recovery before exposing an explicit merge action.
+
+#### A local repository diverges without a state event
+
+The absence of an invitee-authored kind `30618` event does not prove that their
+checkout is safe to use after confirmation. Bob may have unpublished branches
+or stale local refs from his old same-identifier repository. Acceptance, or an
+add that confirms him immediately, can complete after the signed-state checks
+pass, but it invalidates the old cache and places state publication from that
+checkout behind a synchronization gate.
+
+Before Bob's next push or any automatic state publication, the client fetches
+the accepted component and compares every local ref that the operation would
+publish. If the comparison differs, it refuses and tells Bob to preserve the
+work under a new identifier or ask the target maintainers to incorporate the
+refs explicitly. It never turns the first post-acceptance push into an implicit
+choice of Bob's local state.
+
+#### Pre-existing role-scoped actions become newly visible
+
+An acceptance's effective start prevents an earlier issue, proposal, or
+moderation event from becoming valid merely because its author is a maintainer
+now. A component join can nevertheless import role history containing an
+earlier active interval. The preflight therefore evaluates newly reachable
+maintainer and moderator events at their creation times and reports any status,
+label, subject, or cover-note result that would change. Such a change blocks the
+ordinary membership command and requires the same deliberate history or
+component reconciliation as a state collision.
 
 #### A history-unaware client replaces an announcement
 
@@ -1471,17 +1612,22 @@ hostile clients.
 
 #### Concurrent membership edits
 
-A command rechecks the publisher's latest event and affected graph before
-signing. If either changed after preview, it aborts and asks the user to rerun
-the intent. Addressable-event last-write-wins must not discard a concurrent
-membership action silently.
+A command rechecks the publisher's latest event, every announcement used by the
+affected graph, and every candidate kind `30618` event before signing. If any
+event ID changed after preview, it aborts and asks the user to rerun the intent.
+This includes new state published by an invitee after the invitation or during
+acceptance preflight. Addressable-event last-write-wins must not discard a
+concurrent membership or state action silently.
 
 #### Relay disagreement
 
 If the client cannot establish a sufficiently complete announcement and state
 set to decide whether a write joins or partitions a repository, it fails
-closed. Reads may show partial information; membership writes require more
-complete evidence.
+closed. The absence of an invitee's state from one relay is not proof that no
+state exists, and a locally cached older event is not proof that it is still
+latest. Signed deletion requests are included when determining whether an old
+state remains eligible. Reads may show partial information; membership writes
+require more complete evidence from the configured relay set.
 
 #### The lead key is unavailable
 
@@ -1609,27 +1755,43 @@ The implementation and tests must make these statements true:
     the required named prepare-first/remove-first error.
 17. Force cannot combine lead declaration with removal or turn add/accept into
     a repository merge.
-18. Add resolves the named pubkey's existing component, history, and state
-    before publishing an edge.
+18. Add resolves the named pubkey's complete reachable component, history, and
+    state before publishing an edge. A pre-existing reciprocal acknowledgement
+    makes the add an immediate confirmation and receives the same preflight as
+    explicit acceptance.
 19. Accept compares the invitee's existing announcement, earliest unique
-    commit, `u` relationships, history, component, and refs.
-20. An unexpected component join or conflict blocks before signing and reports
-    which state would otherwise win.
-21. A lead transfer never rewrites announcements or local coordinates
+    commit, `u` relationships, history, component, refs, and every state event
+    reachable through active third-party relationships. It does not drop or
+    defer those relationships as an acceptance side effect.
+20. Confirmation cannot change either component's repository identity, default
+    branch, complete ref/OID map, or resolved state event. All post-change OIDs
+    must be fetchable. Equivalent state from a different author is allowed only
+    when the resolved data are otherwise identical.
+21. Successful confirmation, including an immediately confirming add,
+    invalidates state derived from the invitee's former component. No push or
+    automatic kind `30618` publication is allowed until a fresh fetch verifies
+    the accepted state against the local refs.
+22. Membership preflight rechecks every announcement and kind `30618` event ID
+    used by the preview immediately before signing. A concurrent graph or state
+    change aborts the operation.
+23. An unexpected component join, newly authorized role-scoped action, or state
+    conflict blocks before signing and reports both directions of displacement
+    and every transitively imported pubkey.
+24. A lead transfer never rewrites announcements or local coordinates
     automatically. Human-facing commands repeatedly offer `repo follow-lead`
     until each co-maintainer has an active direct `M` to the new lead, an active
     self-`m`, and a local coordinate that follows it; non-maintainers update
     only local configuration.
-22. A coordinate remains controllable by every holder of its signing key;
+25. A coordinate remains controllable by every holder of its signing key;
     changing its lead cannot transfer or revoke that control.
-23. Metadata-only edits do not migrate legacy membership.
-24. A historical copy can never authorize its subject or route lead resolution
+26. Metadata-only edits do not migrate legacy membership.
+27. A historical copy can never authorize its subject or route lead resolution
     when its final interval is `defer`.
-25. ngit exposes no command to abandon a removed maintainer's redirect or turn
+28. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically and recommend
     a new identifier for a friendly fork.
-26. Current authorization remains defined when exact history is missing or
+29. Current authorization remains defined when exact history is missing or
     disputed.
 
 Each normal workflow and destructive edge case needs a unit-level graph,
@@ -1649,3 +1811,11 @@ immediate removal without such an edge, the removed-author warning and follow
 repair, reinvitation requiring a new self-role start, a dead coordinate after
 an externally authored redirect end, and an externally authored
 same-identifier self-led fork.
+
+The state-collision fixtures cover an invitee's older state winning, the
+inviting state winning, an add that confirms immediately, a transitive
+invitee-to-third-party component import, compatible state with distinct event
+authors, unavailable Git objects, divergent local refs without a published
+state event, a candidate state change after preview, and incomplete relay
+visibility. Every blocking case verifies that no announcement or state event
+was published.
