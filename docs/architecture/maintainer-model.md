@@ -496,11 +496,23 @@ If an announcement has no `M`, `m`, `o`, or legacy `maintainers` tag, its
 author is the implicit sole maintainer. This is the preferred one-person wire
 format.
 
-If any `M`, `m`, or `o` tag is present, the deprecated `maintainers` tag in that
-announcement is ignored. Otherwise `maintainers` supplies legacy listings.
-Role-aware publishers may still emit a degradation `maintainers` tag containing
-their current accepted `M` and `m` subjects for older clients. Invitations are
-carried by indexed roles and are not asserted as accepted in that fallback.
+If any `M`, `m`, or `o` tag is present, indexed roles are authoritative and the
+deprecated `maintainers` tag is only a compatibility projection. Otherwise
+`maintainers` supplies legacy listings.
+
+A role-aware announcement always emits exactly one `maintainers` tag containing
+the subjects of every active `M` and `m` record, and no others. This is exact set
+equality: it includes active invitations as well as confirmed assignments, but
+excludes numeric-ended records, records ending in `open`, moderators, and
+duplicates. An empty projection is emitted as `["maintainers"]`. The legacy tag
+cannot preserve the distinction between an invitation and a confirmed role;
+older clients receive the active assignment roster as the least misleading
+degradation available.
+
+If the projection disagrees with the active `M` and `m` records, the indexed
+records win. The mismatch is nevertheless a repository-health error in the
+author's announcement and must be repaired as described under “Edge cases and
+failure rules.”
 
 The happy-path announcements progress like this. Alice's first invitation at
 `T1` automatically establishes Alice as lead and creates Bob's pending edge:
@@ -508,7 +520,7 @@ The happy-path announcements progress like this. Alice's first invitation at
 ```text
 ["M", "<alice-pubkey>", "T1"]
 ["m", "<bob-pubkey>", "T1"]
-["maintainers", "<alice-pubkey>"]
+["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
 ```
 
 Bob's acceptance at `T2` acknowledges his own role and Alice's lead while
@@ -517,12 +529,13 @@ keeping both records non-authorizing:
 ```text
 ["M", "<alice-pubkey>", "T2", "open"]
 ["m", "<bob-pubkey>", "T2", "open"]
-["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
+["maintainers"]
 ```
 
 When Alice acknowledges the acceptance, her replacement changes Bob's first
-start from `T1` to the effective start `T2` and adds Bob to her accepted
-degradation fallback. Her active `M:Alice` record remains otherwise unchanged.
+start from `T1` to the effective start `T2`. Her active roster and degradation
+projection remain Alice and Bob, and her active `M:Alice` record is otherwise
+unchanged.
 
 ### Replicated role history
 
@@ -789,6 +802,11 @@ coordinate, inferred state, and exceptional consequences visible.
 - Report a newly confirmed start or end as soon as it is observed and repeat
   the exact `--acknowledge-maintainer-change` command until it is run. Do not
   open an interactive prompt or publish the acknowledgement automatically.
+- When the logged-in signer authored a role-aware announcement whose
+  `maintainers` projection differs from its active `M`/`m` roster, use the
+  indexed roles, warn after every ngit or Git command in that checkout, and
+  offer only `ngit repo edit --fix-maintainers` as the immediate repair. Report
+  the same repository-health error as structured data in JSON output.
 - In JSON mode, expose structured pending actions and exact commands. Include
   `lead_path`,
   `recommended_coordinate`, and `follow_lead_command` on every response where
@@ -1009,10 +1027,11 @@ not silently reinterpret a working legacy graph.
 
 The membership mutation that adopts indexed roles republishes the selected
 announcement with `M`, `m`, and any preserved `o` records. It also emits the
-deprecated `maintainers` degradation tag containing only current accepted `M`
-and `m` subjects. Role-aware clients ignore that fallback; older clients retain
-the best representation available to them. Other authors' announcements remain
-unchanged until those authors publish their own role or history mutation.
+deprecated `maintainers` degradation tag containing exactly the active `M` and
+`m` subjects. This includes pending assignments and excludes every inactive or
+`open` history record. Role-aware clients use the indexed records; older clients
+retain the best representation available to them. Other authors' announcements
+remain unchanged until those authors publish their own role or history mutation.
 
 The `maintainers` fallback applies only when an announcement contains no
 indexed `M`, `m`, or `o`. During partial migration, current indexed `M` views
@@ -1062,6 +1081,48 @@ also republishes their non-authorizing history with a direct current `M` view
 of that lead; for other users it changes only local configuration.
 
 ### Edge cases and failure rules
+
+#### The compatibility roster contradicts indexed roles
+
+Active `M` and `m` records remain authoritative when the deprecated
+`maintainers` tag is absent, duplicated, missing subjects, includes inactive
+subjects, or otherwise differs from their exact set. Resolution and
+authorization must not fall back to the contradictory tag. For example, given
+active `M:Alice` and `m:Bob`, an
+`open` `m:Carol`, and ended `m:Dave`, the only valid compatibility values are
+Alice and Bob. Bob is included even while invited; Carol and Dave are excluded.
+If the tag instead contains Alice, Carol, and Dave, the warning below describes
+both sides of the mismatch.
+
+When the logged-in signer is the author of the bad announcement, every
+ngit or Git command in the checkout warns until it is repaired. The warning
+names missing and incorrectly included pubkeys and gives one immediate command:
+
+```text
+your repository announcement has an inconsistent `maintainers` compatibility tag
+indexed `M` and `m` roles are authoritative
+
+missing active roles: <bob-npub>
+listed without an active role: <carol-npub> <dave-npub>
+
+repair only the compatibility tag with:
+  ngit repo edit --fix-maintainers
+
+this repair does not add or remove active maintainers
+```
+
+`--fix-maintainers` must be run alone. It republishes the announcement with the
+projection derived from active `M` and `m`, preserving every indexed role,
+history boundary, metadata field, and unknown tag. Any other `ngit repo edit`
+fails before evaluating its requested change and repeats the repair command.
+This prevents an unrelated edit from silently choosing whether the legacy or
+indexed roster was intended.
+
+After repairing the projection, the author may run an explicit
+`--add-maintainer` or `--remove-maintainer` action if the graph permits it. If
+the resolved lead's active roster itself needs to change, a co-maintainer asks
+that lead to add or remove the named person first. The compatibility repair is
+never a membership operation.
 
 #### A stale acknowledgement reinstates a maintainer
 
@@ -1203,36 +1264,45 @@ The implementation and tests must make these statements true:
     legacy, and current indexed `M` views still count as votes even when they
     end in `open`. Selected indexed `m` without `M` expresses the no-lead
     choice. A membership mutation migrates the selected event to indexed roles
-    while retaining the accepted `M`/`m` degradation `maintainers` fallback.
-11. Every mutation preserves unrelated relationships, role intervals,
+    while retaining the active-role degradation `maintainers` projection.
+11. Every role-aware announcement's `maintainers` values equal exactly the
+    subjects of its active `M` and `m` records, including invitations and
+    excluding ended or `open` records. Indexed roles win on disagreement. The
+    author sees a warning after every ngit or Git command in the checkout, and
+    every other `repo edit` fails until the standalone `--fix-maintainers`
+    repair republishes only the corrected projection.
+12. Every mutation preserves unrelated relationships, role intervals,
     replicated history, metadata, and unknown tags.
-12. Removing one maintainer fails if that person remains confirmed or the
+13. Removing one maintainer fails if that person remains confirmed or the
     graph loses anyone else.
-13. A proposed lead publishes an active self-`M` and complete roster before the
+14. A proposed lead publishes an active self-`M` and complete roster before the
     old lead points to them. A missing confirmed maintainer or invitation emits
     the required named prepare-first/remove-first error.
-14. Force cannot combine lead declaration with removal or turn add/accept into
+15. Force cannot combine lead declaration with removal or turn add/accept into
     a repository merge.
-15. Add resolves the named pubkey's existing component, history, and state
+16. Add resolves the named pubkey's existing component, history, and state
     before publishing an edge.
-16. Accept compares the invitee's existing announcement, earliest unique
+17. Accept compares the invitee's existing announcement, earliest unique
     commit, `u` relationships, history, component, and refs.
-17. An unexpected component join or conflict blocks before signing and reports
+18. An unexpected component join or conflict blocks before signing and reports
     which state would otherwise win.
-18. A lead transfer never rewrites announcements or local coordinates
+19. A lead transfer never rewrites announcements or local coordinates
     automatically. Human-facing commands repeatedly offer `repo follow-lead`
     until each co-maintainer points directly to the new lead and their local
     coordinate follows it; non-maintainers update only local configuration.
-19. A coordinate remains controllable by every holder of its signing key;
+20. A coordinate remains controllable by every holder of its signing key;
     changing its lead cannot transfer or revoke that control.
-20. Metadata-only edits do not migrate legacy membership.
-21. A historical copy can never authorize its subject, even when its final
+21. Metadata-only edits do not migrate legacy membership.
+22. A historical copy can never authorize its subject, even when its final
     interval is `open`; one current `open` `M` view may route lead resolution.
-22. Current authorization remains defined when exact history is missing or
+23. Current authorization remains defined when exact history is missing or
     disputed.
 
 Each normal workflow and destructive edge case needs a unit-level graph,
 history, and state fixture plus an integration test for the published
 announcement, selected coordinate, and resulting authorization. Tests wait on
 observable relay or Git state with bounded deadlines and never use fixed
-sleeps.
+sleeps. The compatibility-roster fixture specifically covers an active
+invitation, a record ending in `open`, an ended record, absent and contradictory
+projections, a mismatch warning, the edit gate, and a repair that leaves all
+indexed role tags byte-for-byte unchanged.
