@@ -193,6 +193,12 @@ ngit repo edit \
 Every mutation accepts `--json` for machine-readable previews, results, and
 errors.
 
+`--force` has one narrow add/accept meaning: after a state-only collision is
+reported, it keeps the complete ref state of the checkout running the command
+and replaces the other view. It is not needed in the normal workflow and never
+overrides additional membership, identity, history, or object-availability
+errors.
+
 ### Adding a maintainer
 
 ```bash
@@ -946,11 +952,13 @@ place. It does not regain maintainer authority.
 
 ### Required safety posture
 
-Membership operations fail before publication when they would:
+Without the narrow state-replacement override below, membership operations
+fail before publication when they would:
 
 - remove or add people beyond the named action;
 - withdraw an invitation as an accidental side effect;
-- connect another same-identifier maintainer component;
+- connect a same-identifier component containing anybody beyond the named
+  invitee;
 - select a different earliest unique commit or fork relationship;
 - make a different kind `30618` state authoritative, including state authored
   before its signer was invited into this component;
@@ -959,6 +967,10 @@ Membership operations fail before publication when they would:
 
 Errors name the affected people, coordinates, and refs. A repository merge or
 several removals are separate decisions, not meanings assigned to `--force`.
+For add and accept only, `--force` may override a conflict limited to kind
+`30618` refs by choosing the command runner's current repository state. It does
+not override identity, graph, role-history, or event-authorization failures,
+nor a failure to make every chosen OID fetchable.
 
 ### Membership mutation contract
 
@@ -975,8 +987,11 @@ choice. Before signing, every membership mutation must:
 4. resolve confirmed maintainers and moderators before and after the change;
 5. resolve repository identity and state, including the `r` earliest unique
    commit, informational `u` fork links, every candidate kind `30618` event,
-   and every Git ref/OID;
-6. display the intended and consequential changes;
+   every Git ref/OID, and the complete local ref map of the checkout running
+   the command;
+6. display the intended and consequential changes, including the exact local
+   ref changes that would align conflicting state and the inverse ref changes
+   that a forced replacement would impose;
 7. recheck the event IDs used for every affected announcement and state view,
    and fail if any fetched predecessor or candidate changes before
    publication; and
@@ -1000,6 +1015,14 @@ The comparison reports:
 - state OIDs that cannot be fetched from the post-change component's
   advertised Git servers; and
 - selected-coordinate changes.
+
+For a state mismatch, human output classifies each difference as a branch or
+tag to add, update, or remove in the repository controlled by the command
+runner. It reports a default-branch change separately. JSON exposes the same
+two directional comparisons as structured ref actions: align the runner's
+repository with the other component, or replace the other component with the
+runner's state. An annotated tag and its peeled `^{}` companion are reported as
+one tag action rather than as two changes the user must decipher.
 
 Ordinary success requires that graph effects match the command's name and no
 conflicting state is selected. Human errors and JSON output expose exact npubs,
@@ -1025,13 +1048,13 @@ component with the simulated post-change view. It must not describe one side as
 the repository and silently discard the other merely because that side wins
 the normal event-ordering rule.
 
-For an ordinary add or acceptance, state is compatible only when the
-post-change resolution preserves the same repository identity, earliest unique
-commit, fork relationship, default branch, and complete ref/OID map. Every
-resolved OID must also remain fetchable. A ref addition, deletion, rename, or
-OID change is reconciliation work, not an acceptance side effect. Equivalent
-state events may have different authors or event IDs; that difference is safe
-only when their resolved repository data are otherwise identical.
+Without `--force`, state is compatible only when the post-change resolution
+preserves the same repository identity, earliest unique commit, fork
+relationship, default branch, and complete ref/OID map. Every resolved OID must
+also remain fetchable. A ref addition, deletion, rename, or OID change blocks
+the command. Equivalent state events may have different authors or event IDs;
+that difference is safe only when their resolved repository data are otherwise
+identical.
 
 When state is incompatible, the user must choose and complete one of these
 actions before retrying:
@@ -1040,23 +1063,66 @@ actions before retrying:
    state, and required Git objects under a new identifier, verify that the new
    coordinate works, and then retire or reconcile the invitee's old
    same-identifier relationships and state.
-2. **Adopt the inviting repository's state.** First preserve any wanted refs
-   under a new identifier or as refs deliberately incorporated by the target
-   maintainers. Then explicitly replace or delete the invitee's conflicting
-   same-identifier state and refetch the inviting component. Acceptance is
-   retried only after its preflight finds no state displacement.
-3. **Merge the repositories deliberately.** Reconcile Git history and refs,
+2. **Align the command runner's repository.** Apply the reported branch, tag,
+   and default-branch changes to the checkout used for the add or acceptance,
+   publish that aligned state, and retry. For add, the instructions change the
+   inviter's repository to match the invitee's state. For accept, they change
+   the invitee's repository to match the inviting state.
+3. **Replace the other state.** Rerun the same add or acceptance with
+   `--force`. This explicitly keeps the command runner's complete current ref
+   map and makes it the post-confirmation repository state. The preview lists
+   the branches and tags this will add, update, or remove from the other view.
+4. **Merge the repositories deliberately.** Reconcile Git history and refs,
    repository identity, fork metadata, membership history, and every imported
    member before creating the reciprocal edge. Until a dedicated merge
    workflow exists, ngit refuses this choice rather than approximating it with
-   add, accept, or `--force`.
+   add, accept, or the state-replacement meaning of `--force`.
 
-Publishing reconciled state or a signed deletion request for old state is a
-separate decision. The `repo accept` command must never do either implicitly.
-If the invitee's old component has other confirmed members, the invitee also
-cannot treat that component as disposable on everybody else's behalf. They
-must first transfer, re-identify, or deliberately merge it with those members'
-participation.
+For example, an accept whose only conflict is Git state fails with an error
+like this:
+
+```text
+cannot accept this maintainer invitation: repository state differs
+
+to align the repository you control before accepting:
+  add branch     refs/heads/release at <alice-release-oid>
+  update branch  refs/heads/main from <bob-oid> to <alice-oid>
+  remove tag     refs/tags/experiment at <bob-tag-oid>
+  set default branch from experiment to main
+
+publish the aligned state, then run:
+  ngit repo accept
+
+or keep your current branches and tags and replace the joined state with:
+  ngit repo accept --force
+
+--force would update refs/heads/main to <bob-oid>, remove
+refs/heads/release, add refs/tags/experiment at <bob-tag-oid>, and set the
+default branch to experiment for the joined repository
+```
+
+The add error uses the same format but tells the inviter how to align the
+repository they control and shows
+`ngit repo edit --add-maintainer <npub> --force` as the override. The action
+list is computed against the command runner's complete ref map; it never tells
+them to mutate somebody else's checkout.
+
+`--force` is valid only when the sole unresolved difference is kind `30618`
+state. It cannot import an unexpected maintainer or moderator, discard an
+invitation, choose between conflicting role histories, change `r` or `u`, or
+refer to unavailable Git objects. Before publishing, ngit uploads every object
+needed by the chosen refs, publishes a fresh state event signed by the command
+runner that orders after every candidate used by the preview, and verifies that
+the post-confirmation resolved state exactly matches the forced preview. If it
+cannot establish that order safely, it fails. The flag is non-interactive and
+the JSON result records that state replacement was explicitly forced.
+
+Without `--force`, publishing reconciled state or a signed deletion request for
+old state is a separate decision; `repo accept` must never do either
+implicitly. If the invitee's old component has other confirmed members, the
+invitee also cannot treat that component as disposable on everybody else's
+behalf. They must first transfer, re-identify, or deliberately merge it with
+those members' participation.
 
 ### Adding a maintainer can join repositories
 
@@ -1082,10 +1148,15 @@ Preflight distinguishes:
    no extra member, invitation, identity, history, event authorization, or
    state conflict enters. The preview reports that Bob becomes confirmed
    immediately rather than describing the operation as a pending invitation.
-3. **Repository join.** The operation adds an unexpected confirmed pubkey,
-   connects another component, changes identity or fork metadata, introduces
-   conflicting history, changes resolved refs, or changes which state event is
-   authoritative. It fails before publishing.
+3. **State replacement required.** Bob would be the only newly confirmed
+   person and repository identity and history agree, but the kind `30618` ref
+   maps differ. The command fails with the two directional ref lists above;
+   Alice may align her repository and retry or explicitly keep it with
+   `--force`.
+4. **Repository join.** The operation adds an unexpected confirmed pubkey,
+   connects another component with other members, changes identity or fork
+   metadata, introduces conflicting history, or newly authorizes role-scoped
+   actions. It fails before publishing and `--force` cannot change that result.
 
 For example:
 
@@ -1106,9 +1177,10 @@ reconcile its membership and state with this repository before retrying
 
 A join error shows both components, the connecting edges, history differences,
 every transitively imported pubkey, and a ref-by-ref state comparison in both
-directions. It never suggests `--force`. Operators use one of the explicit
-separate, adopt, or merge choices above. Until the required workflow exists,
-ngit conservatively refuses the join.
+directions. It suggests `--force` only when removing the state difference would
+leave an otherwise ordinary confirmation of Bob alone. Operators with a real
+component join use one of the separate, align, or merge choices above. Until
+the required workflow exists, ngit conservatively refuses that join.
 
 ### Accepting with an existing repository
 
@@ -1136,8 +1208,10 @@ refs would be retained, replaced, or imported into the joined component. The
 comparison includes Bob's latest state even when it predates the invitation
 and includes every state reachable through Bob's active relationships.
 
-If either repository's state would displace the other's refs, acceptance ends
-with a destructive-consequence warning and a non-zero error:
+When differing refs are the only conflict, ordinary acceptance ends with the
+alignment error above and offers `ngit repo accept --force`. When repository
+identity, fork metadata, history, or additional members also conflict, the
+error explains why state replacement cannot make the acceptance safe:
 
 ```text
 cannot accept this maintainer invitation safely
@@ -1151,9 +1225,9 @@ and select the inviting repository state:
   refs/heads/experiment  <bob-oid>  would no longer be in resolved state
   refs/heads/main        <old-oid>  would become <alice-oid>
 
-preserve the fork under a new identifier, explicitly adopt the inviting
-state, or reconcile both repositories before accepting; --force is not
-available for any of these choices
+preserve the fork under a new identifier or reconcile both repositories
+before accepting
+--force cannot override an earliest-unique-commit or fork-identity conflict
 ```
 
 The reverse direction is reported when Bob's state would displace Alice's.
@@ -1164,7 +1238,9 @@ Acceptance is safe when Bob has no same-identifier repository, is already in
 the same component, or both components, identity metadata, histories, and
 state are compatible and no unexpected person becomes confirmed. Cosmetic
 metadata can follow the ordinary shared-field rules. Conflicting identity,
-`u`, history, authorization, or refs block.
+`u`, history, or authorization always blocks. Conflicting refs block unless
+they are the only difference and Bob explicitly chooses the scoped `--force`
+state replacement.
 
 A successful acceptance, or an add that confirms Bob immediately, invalidates
 state and membership caches derived from Bob's former component. Before Bob can
@@ -1556,28 +1632,30 @@ then add a desired direct edge or remove each intended person explicitly.
 Neither add nor accept is a repository-merge command. One reciprocal edge can
 join an entire transitive component, so the client compares every reachable
 member and state event rather than only the two people named by the command.
-It fails before an edge joins components with distinct membership, history, or
-state. The operator must keep one repository under a new identifier, make one
-component explicitly adopt the other's reconciled state, or use a future merge
-workflow. A merge design must cover Git history, earliest unique commits, `u`
-fork relationships, ref conflicts, membership histories, local coordinates,
-object availability, and recovery before exposing an explicit merge action.
+It fails before an edge joins components with distinct membership, identity,
+or history. When refs are the only difference, `--force` deliberately replaces
+the other component's state with the command runner's current ref map; this is
+a state choice, not a merge. Otherwise the operator must keep one repository
+under a new identifier, align one component, or use a future merge workflow. A
+merge design must cover Git history, earliest unique commits, `u` fork
+relationships, ref conflicts, membership histories, local coordinates, object
+availability, and recovery before exposing an explicit merge action.
 
 #### A local repository diverges without a state event
 
 The absence of an invitee-authored kind `30618` event does not prove that their
-checkout is safe to use after confirmation. Bob may have unpublished branches
-or stale local refs from his old same-identifier repository. Acceptance, or an
-add that confirms him immediately, can complete after the signed-state checks
-pass, but it invalidates the old cache and places state publication from that
-checkout behind a synchronization gate.
+checkout is safe. Bob may have unpublished branches or stale local refs from
+his old same-identifier repository. An explicit `repo accept` compares those
+local refs before confirmation and gives the same add/update/remove guidance;
+`--force` may deliberately choose them when no non-state conflict exists.
 
-Before Bob's next push or any automatic state publication, the client fetches
-the accepted component and compares every local ref that the operation would
-publish. If the comparison differs, it refuses and tells Bob to preserve the
-work under a new identifier or ask the target maintainers to incorporate the
-refs explicitly. It never turns the first post-acceptance push into an implicit
-choice of Bob's local state.
+An immediately confirming add runs in Alice's checkout and cannot inspect an
+offline Bob's local refs. It therefore invalidates Bob's old cache. Before
+Bob's next push or automatic state publication, his client fetches the accepted
+component and compares every local ref the operation would publish. If they
+differ, it refuses and tells Bob to preserve the work under a new identifier or
+ask the target maintainers to incorporate it. Bob's first later push never
+becomes an implicit state choice.
 
 #### Pre-existing role-scoped actions become newly visible
 
@@ -1617,7 +1695,8 @@ affected graph, and every candidate kind `30618` event before signing. If any
 event ID changed after preview, it aborts and asks the user to rerun the intent.
 This includes new state published by an invitee after the invitation or during
 acceptance preflight. Addressable-event last-write-wins must not discard a
-concurrent membership or state action silently.
+concurrent membership or state action silently. `--force` fixes the intended
+state direction; it does not waive this recheck.
 
 #### Relay disagreement
 
@@ -1627,7 +1706,8 @@ closed. The absence of an invitee's state from one relay is not proof that no
 state exists, and a locally cached older event is not proof that it is still
 latest. Signed deletion requests are included when determining whether an old
 state remains eligible. Reads may show partial information; membership writes
-require more complete evidence from the configured relay set.
+require more complete evidence from the configured relay set. `--force` cannot
+turn incomplete discovery into evidence that overwriting is safe.
 
 #### The lead key is unavailable
 
@@ -1754,19 +1834,24 @@ The implementation and tests must make these statements true:
     old lead points to them. A missing confirmed maintainer or invitation emits
     the required named prepare-first/remove-first error.
 17. Force cannot combine lead declaration with removal or turn add/accept into
-    a repository merge.
+    a repository merge. On add or accept it may only choose the command
+    runner's complete current kind `30618` ref map when that state difference
+    is the sole remaining conflict.
 18. Add resolves the named pubkey's complete reachable component, history, and
     state before publishing an edge. A pre-existing reciprocal acknowledgement
     makes the add an immediate confirmation and receives the same preflight as
     explicit acceptance.
 19. Accept compares the invitee's existing announcement, earliest unique
     commit, `u` relationships, history, component, refs, and every state event
-    reachable through active third-party relationships. It does not drop or
-    defer those relationships as an acceptance side effect.
-20. Confirmation cannot change either component's repository identity, default
-    branch, complete ref/OID map, or resolved state event. All post-change OIDs
-    must be fetchable. Equivalent state from a different author is allowed only
-    when the resolved data are otherwise identical.
+    reachable through active third-party relationships, as well as the
+    command checkout's local refs. It does not drop or defer those relationships
+    as an acceptance side effect.
+20. Without force, confirmation cannot change either component's repository
+    identity, default branch, complete ref/OID map, or resolved state event.
+    A state-only mismatch reports every branch and tag to add, update, or remove
+    in the command runner's repository and the inverse changes force would
+    impose. All post-change OIDs must be fetchable, and a forced state event
+    must order after every state candidate used by the preview.
 21. Successful confirmation, including an immediately confirming add,
     invalidates state derived from the invitee's former component. No push or
     automatic kind `30618` publication is allowed until a fresh fetch verifies
@@ -1774,9 +1859,11 @@ The implementation and tests must make these statements true:
 22. Membership preflight rechecks every announcement and kind `30618` event ID
     used by the preview immediately before signing. A concurrent graph or state
     change aborts the operation.
-23. An unexpected component join, newly authorized role-scoped action, or state
-    conflict blocks before signing and reports both directions of displacement
-    and every transitively imported pubkey.
+23. An unexpected component join or newly authorized role-scoped action always
+    blocks before signing and reports every transitively imported pubkey. A
+    state-only conflict blocks unless `--force` publishes and verifies the
+    command runner's previewed state without changing membership beyond the
+    named confirmation or changing repository identity.
 24. A lead transfer never rewrites announcements or local coordinates
     automatically. Human-facing commands repeatedly offer `repo follow-lead`
     until each co-maintainer has an active direct `M` to the new lead, an active
@@ -1818,4 +1905,9 @@ invitee-to-third-party component import, compatible state with distinct event
 authors, unavailable Git objects, divergent local refs without a published
 state event, a candidate state change after preview, and incomplete relay
 visibility. Every blocking case verifies that no announcement or state event
-was published.
+was published. State-only failures verify the exact branch, tag, and default-
+branch alignment actions in both directions. Forced cases verify that add and
+accept publish the command runner's complete state, while force remains rejected
+for extra members, identity or history conflicts, missing objects, concurrent
+changes, inability to order the replacement after every candidate, and
+incomplete discovery.
