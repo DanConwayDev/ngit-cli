@@ -24,19 +24,18 @@ co-maintainers. ngit resolves the lead automatically during discovery, so the
 coordinate and forwarding details later in this document rarely affect the
 ordinary workflow.
 
-Lead and co-maintainers have identical authority to publish Git state, create or
-push merge commits, and moderate issues and proposals. The lead label does not
-grant additional authorization for those actions.
-
 The roles are:
 
 - **Sole maintainer:** creates the repository. No role option or role tag is
   needed while nobody else is involved.
-- **Co-maintainer:** participates as an ordinary confirmed maintainer.
-- **Lead maintainer:** additionally coordinates membership and provides the
-  normal clone coordinate. In a lead-shaped repository, ngit directs
-  `--add-maintainer` and `--remove-maintainer` through the resolved lead and
-  tells co-maintainers to ask the lead to make those changes.
+- **Lead maintainer:** in addition to the co-maintainer role, the lead is
+  responsible for managing the roster and provides the normal clone coordinate.
+  When a lead is present, each co-maintainer's repository announcement points
+  forward to the lead.
+- **Co-maintainer:** may publish Git state, create or push merge commits, and
+  moderate issues and proposals. In a lead-shaped repository, a co-maintainer
+  asks the lead to add or remove somebody; ngit rejects those roster commands
+  from the co-maintainer.
 - **Invitee:** has no maintainer authority until they accept. Joining always
   requires statements from both sides.
 - **Moderator:** may manage issues and proposals, including publishing a
@@ -440,11 +439,11 @@ pubkey as lead and let clients explicitly follow it. The old organization
 coordinate remains controlled by every party that still possesses its secret
 and can later revoke or redirect its own forward.
 
-One wire-format distinction is useful before the protocol details: lead and
-co-maintainer are alternative current roles, not cumulative ones. A lead's
-active self-`M` both confirms their maintainer role and declares them as lead;
-they do not also need an active self-`m`. A co-maintainer instead acknowledges
-their role with an active self-`m` and points to the lead with an active `M`.
+Although a lead conceptually adds roster responsibility to the co-maintainer
+role, the wire declarations are not cumulative. A lead's active self-`M` both
+confirms their maintainer role and declares them as lead; they do not also need
+an active self-`m`. A co-maintainer instead acknowledges their role with an
+active self-`m` and points to the lead with an active `M`.
 
 ## Protocol Model
 
