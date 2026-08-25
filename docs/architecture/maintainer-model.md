@@ -118,9 +118,11 @@ or leaves. History replication is not a lead-only job.
 #### 6. The repository continues normally
 
 Alice or Bob can publish state, merge, and perform ordinary maintainer actions.
-A confirmed maintainer may invite another person, subject to the repository-join
-checks described below. The normal UI should direct routine membership
-coordination through the lead to avoid crossed invitations.
+In a lead-shaped repository, the lead performs membership changes and a
+co-maintainer asks the lead to invite or remove somebody. In a deliberately
+leadless repository, any confirmed maintainer may make the change with the
+required `--no-lead-maintainer` choice. All adds remain subject to the
+repository-join checks described below.
 
 ### Everyday commands
 
@@ -196,6 +198,20 @@ lead relationship. When she accepts, the lead is shown the acknowledgement
 command and other co-maintainers are shown `ngit repo follow-lead` as they next
 use ngit.
 
+In a lead-shaped repository, ngit accepts this command only from the resolved
+lead. A co-maintainer receives an actionable error instead of publishing a
+third-party edge:
+
+```text
+only the resolved lead can add maintainers to this repository
+ask <alice-npub> to run:
+  ngit repo edit --add-maintainer <carol-npub>
+```
+
+Clients must still interpret active third-party relationships authored by
+other software; the recovery is specified under “Edge cases and failure
+rules.”
+
 An add can do more than expected when Carol already has a same-identifier
 repository. ngit therefore previews the resulting membership and Git state.
 It refuses instead of silently joining repositories; the detailed rule is in
@@ -216,6 +232,14 @@ would also disconnect Carol, ngit refuses and names the relevant people and
 paths. The operator must add a relationship that should retain them or remove
 each intended person explicitly. There is no `--force` shortcut for combining
 several membership decisions.
+
+This includes a co-maintainer's deliberate assignment. If Bob actively lists
+Carol, Alice cannot remove Carol while retaining Bob: Bob's edge keeps Carol in
+the reciprocal graph. The safe repair is for Alice to add Carol if necessary,
+then ask Bob to run `ngit repo follow-lead`. Once Bob's edge is historical-only,
+Alice can keep Carol or remove her with a separate ordinary command. The tool
+does not disguise this sequence as a successful removal or generic force
+override.
 
 Once the removal is observed, other co-maintainers are shown `ngit repo
 follow-lead` to record Bob's end time. Their previously open historical copies
@@ -298,12 +322,14 @@ ngit repo follow-lead
 
 For a confirmed maintainer, that command first republishes their complete
 historical view with an active self-`m` and Bob, rather than Alice, as their
-active direct `M`. Every other still-open role is copied with `open`, so the
-co-maintainer cannot retain a third person whom Bob removes. It then switches
-the local `nostr://` coordinate and `nostr.repo` after verifying that Bob's
-rooted view contains the same membership and Git state. A non-maintainer runs
-the same command but changes only local configuration unless their own stale
-announcement must first record a removal as described below.
+active direct `M`. Every still-open third-party role copied from the resolved
+history uses `open`, so it should not retain a person whom Bob removes. An
+unexpected active third-party `m` is handled by the guarded repair below. The
+command then switches the local `nostr://` coordinate and `nostr.repo` after
+verifying that Bob's rooted view contains the same membership and Git state. A
+non-maintainer runs the same command but changes only local configuration
+unless their own stale announcement must first record a removal as described
+below.
 
 Until every maintainer follows, an old pointer such as Carol → Alice → Bob can
 still resolve the repository, but clients show Carol's convergence action as
@@ -433,9 +459,9 @@ and can later revoke or redirect its own forward.
   `nostr.repo`, naddr, or explicit `--repo` coordinate where discovery starts.
 - A **maintainer listing** is an active `M` or `m` tag, or an entry in the
   legacy `maintainers` fallback.
-- A **confirmed maintainer** is actively assigned by the resolved lead and has
-  signed a matching acknowledgement, or is admitted by the reciprocal fixpoint
-  of a deliberately leadless repository.
+- A **confirmed maintainer** is actively assigned by a confirmed maintainer in
+  the selected component and has signed a matching acknowledgement. In the
+  normal topology the resolved lead's roster seeds this reciprocal fixpoint.
 - An **invited maintainer** is listed by the discovered graph but has not made
   the acknowledgement needed to join it.
 - The **maintainer graph** contains active assignments, reciprocal self-role
@@ -489,19 +515,25 @@ The same subject in two events is not one shared record.
 
 Active `M` and `m` records have identical maintainer authorization weight. In
 the normal lead-shaped topology, the lead publishes an active self-`M` and the
-complete active roster. A co-maintainer reciprocates with exactly the active
-relationships needed to accept that assignment: an `M` naming the lead and an
-`m` naming themselves.
+recommended active roster. A co-maintainer's minimum active shape reciprocates
+with the relationships needed to accept that assignment: an `M` naming the
+lead and an `m` naming themselves.
 
 A co-maintainer also publishes the complete resolved `M`, `m`, and `o` history,
-but every last-known-open interval for somebody other than themselves or their
-lead ends in `open`. Those third-party copies are historical-only. Their active
-self-`m` is the signed acceptance of their assigned role, and their active `M`
-identifies and reciprocates with the lead. A current co-maintainer announcement
-that ends either of those two required records in `open` is invalid as an
-acceptance: clients treat the record only as history and do not grant authority
-from it. This lets all maintainers retain history without a stale
-co-maintainer event retaining a third person whom the lead removed.
+and every last-known-open third-party interval copied solely as history ends in
+`open`. Their active self-`m` is the signed acceptance of their assigned role,
+and their active `M` identifies and reciprocates with the lead. A current
+co-maintainer announcement that ends either of those two required records in
+`open` is invalid as an acceptance: clients treat the record only as history
+and do not grant authority from it.
+
+The `open` convention is a statement of intent, not a protocol restriction. A
+third-party client may publish an active `m` from a co-maintainer to somebody
+else. That record is a real assignment or invitation, participates in
+reciprocal graph resolution, and appears in `maintainers`; clients must not
+silently reinterpret it as `open`. ngit does not create this shape in a
+lead-shaped repository and treats it as the recoverable edge case specified
+below.
 
 The deliberately leadless topology is different: because no lead publishes an
 active roster, confirmed co-maintainers use active reciprocal `m` assignments.
@@ -590,8 +622,8 @@ active records are their reciprocal acceptance. They use `open` only for
 last-known-open intervals belonging to other people. If a co-maintainer becomes
 lead, they close their former lead `M` and self-`m`, open an active self-`M`, and
 publish the full active roster. A former lead becoming a co-maintainer keeps an
-active `M` to the new lead and active self-`m`, while changing other open roles
-to historical-only copies.
+active `M` to the new lead and active self-`m`, while changing relationships
+covered by the prepared lead into historical-only copies.
 
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
@@ -599,8 +631,10 @@ assignment, every ngit command shows
 `--acknowledge-maintainer-change <npub>`. When a co-maintainer observes a
 missing start or end, commands show `ngit repo follow-lead`; this idempotently
 synchronizes replicated history without changing their active self-role or
-resolved lead. Neither history action adds, removes, or accepts a third-party
-relationship.
+resolved lead. If the announcement unexpectedly contains an active third-party
+assignment, the command enters the guarded repair workflow instead of treating
+it as ordinary history. Neither history action silently adds, removes, or
+accepts a third-party relationship.
 
 An invitation is not effective maintainership. Alice initially publishes
 `m:Bob` with `T1` so the invitation is discoverable. Once Bob accepts at `T2`,
@@ -651,18 +685,21 @@ replacement interval corrects the preferred view; omission falls through to a
 retained copy.
 
 This precedence applies only to historical display and past-event filtering.
-Current authority in a lead-shaped repository requires the lead's active
-assignment and the candidate's active self-`m` plus active `M` path back to that
-lead. A deliberately leadless repository uses its active reciprocal graph. An
-`open` historical copy is always inactive for authorization and routing,
-regardless of which author published it.
+Current authority in a lead-shaped repository is the reciprocal fixpoint seeded
+by the lead's active roster. An externally authored active `m` from a confirmed
+co-maintainer can extend that fixpoint when its subject publishes an active
+self-`m` plus active `M` path back to the same lead. A deliberately leadless
+repository uses its active reciprocal graph without that seed. An `open`
+historical copy is always inactive for authorization and routing, regardless of
+which author published it.
 
-When a lead removes Bob in the ordinary lead-shaped graph, the lead closes the
-real edge and effective interval at the removal time. Bob leaves immediately.
-Other maintainers may still carry `open` historical copies until they
-acknowledge the removal; those copies cannot delay it. In a leadless or
-malformed topology, a real active alternative edge can retain Bob and causes
-the removal command to fail, as described above.
+When a lead removes Bob in the ordinary lead-shaped graph, the lead closes its
+edge and effective interval at the removal time. Bob leaves immediately only
+when no confirmed co-maintainer deliberately assigns him. Other maintainers may
+still carry `open` historical copies until they acknowledge the removal; those
+copies cannot delay it. A real active alternative edge can retain Bob, so
+ngit's removal command fails before publication and invokes the guarded
+lead-cover-then-follow recovery instead of silently removing either signer.
 
 A leadership transfer cannot complete while the proposed lead's history is
 missing resolved transitions or their active roster omits a confirmed member
@@ -683,24 +720,26 @@ For the normal lead-shaped topology:
 
 1. Starting from the selected coordinate, follow its active `M` view until an
    active self-`M` identifies the lead.
-2. The lead's active `M`, `m`, and `o` records are the candidate current
-   roster. A co-maintainer's active self-`m` and lead `M` can reciprocate with
-   that roster but cannot add another candidate.
+2. Seed the candidate roster with the lead's active `M`, `m`, and `o` records.
 3. A candidate maintainer is confirmed only when their latest announcement
    contains an active self-`m` and an active `M` path to the same lead.
-4. A candidate whom the lead lists without that signed acknowledgement remains
-   invited. A numeric self-role end is an explicit departure and takes
-   precedence over the lead's assignment.
-5. When the lead closes and later restarts a candidate's assignment, the new
-   interval is a new invitation. An acknowledgement of the earlier interval
-   cannot accept it; the candidate must append the new start to their active
-   self-`m`.
+4. Add every subject of a confirmed maintainer's active third-party `m` to the
+   candidate roster and repeat confirmation to a fixpoint. Records ending in
+   `open` never enter this step.
+5. A candidate whom a confirmed maintainer lists without that signed
+   acknowledgement remains invited. A numeric self-role end is an explicit
+   departure and takes precedence over the assignment.
+6. When an assigning maintainer closes and later restarts a candidate's
+   assignment, the new interval is a new invitation. An acknowledgement of the
+   earlier interval cannot accept it; the candidate must append the new start
+   to their active self-`m`.
 
-This remains reciprocal: the lead assigns the role and the candidate signs an
-active acknowledgement bound to that repository. A co-maintainer's active
-lead `M` and self-`m` confirm only the lead and themselves. Their `open`
-third-party records cannot confirm consent, retain another maintainer, extend
-the roster, or import that person's state.
+This remains reciprocal: a confirmed maintainer assigns the role and the
+candidate signs an active acknowledgement bound to that repository. A
+co-maintainer's active lead `M` and self-`m` confirm the minimum relationship.
+An active third-party `m` may extend the roster and import its subject's state
+after reciprocity even though ngit flags that shape for convergence; an `open`
+copy cannot.
 
 The deliberately leadless topology has no active lead roster, so it retains
 the reciprocal active-`m` fixpoint rooted at the selected maintainer. A cycle
@@ -812,10 +851,11 @@ coordinate, inferred state, and exceptional consequences visible.
 - Never rewrite an announcement or local coordinate automatically. For a
   confirmed maintainer, an explicit follow first preserves the full history
   while keeping an active self-`m`, changing the active `M` pointer, and making
-  copied third-party intervals historical-only. It then anchors the checkout
-  at the lead coordinate. For a removed maintainer it ends the self-role while
-  retaining that pointer. For users who never held a role it changes only local
-  configuration.
+  third-party copies historical-only. An unexpected active third-party
+  assignment invokes the safe convergence checks below. The command then
+  anchors the checkout at the lead coordinate. For a removed maintainer it ends
+  the self-role while retaining that pointer. For users who never held a role
+  it changes only local configuration.
 - Stop recommending an old target as soon as the selected signer withdraws or
   changes that pointer. Do not follow a target named only by unrelated
   announcements.
@@ -826,6 +866,9 @@ coordinate, inferred state, and exceptional consequences visible.
 - On every add or remove in an explicitly leadless repository, require exactly
   one of `--lead-maintainer <npub>` or `--no-lead-maintainer`. Require the same
   choice when a multi-maintainer legacy view has no explicit lead declaration.
+- In a lead-shaped repository, reject `--add-maintainer` and
+  `--remove-maintainer` from co-maintainers and identify the resolved lead who
+  should perform the action.
 - Present a unilateral listing as an invitation. Do not call the invitee a
   maintainer or accept their state until reciprocity confirms them.
 - Report a newly confirmed start or end as soon as it is observed. Show the
@@ -837,6 +880,10 @@ coordinate, inferred state, and exceptional consequences visible.
   resolved lead, reject maintainer operations and report the removal after
   every ngit or Git command in the checkout. Allow `ngit repo follow-lead` to
   end the self-role while retaining the lead redirect and copied history.
+- Resolve externally authored active third-party `m` edges from co-maintainers,
+  but report them to both co-maintainer and lead after every ngit or Git command.
+  Gate `repo edit` until the lead covers every subject and the co-maintainer
+  runs the safe `repo follow-lead` repair.
 - When the logged-in signer authored a role-aware announcement whose
   `maintainers` projection differs from its active `M`/`m` roster, use the
   indexed roles, warn after every ngit or Git command in that checkout, and
@@ -1016,10 +1063,14 @@ acknowledge history, let the proposed lead publish the complete active roster,
 then let the old lead point to them.”
 
 ngit therefore simulates the exact post-declaration graph. If Bob's prepared
-roster omits Carol, reducing Alice's active relationships to Bob and herself
-would remove Carol. The same rule protects outstanding invitations. Old or
-other co-maintainer `open` histories cannot cover the omission because they
-never authorize their subjects.
+roster omits Carol and Alice is her only active assigner, reducing Alice's
+active relationships to Bob and herself would remove Carol. The same rule
+protects outstanding invitations. Co-maintainer `open` histories cannot cover
+the omission because they never authorize their subjects. An externally
+authored active third-party edge can cover Carol, in which case the preview
+reports that real path; it does not misclassify the edge as replicated history.
+Bob must still absorb or explicitly reconcile it before claiming a complete
+prepared roster.
 
 That operation fails even if an earlier implementation offered `--force`:
 
@@ -1193,6 +1244,88 @@ accept the current invitation with: ngit repo accept
 
 If there is no current invitation, the client reports that fact instead of
 offering a command that could manufacture one.
+
+#### A co-maintainer actively assigns a third party
+
+The wire protocol permits a co-maintainer announcement such as this, even
+though ngit must not create it in a lead-shaped repository:
+
+```text
+["M", "<alice-pubkey>", "T2"]
+["m", "<bob-pubkey>", "T2"]
+["m", "<carol-pubkey>", "T3"]
+["maintainers", "<alice-pubkey>", "<bob-pubkey>", "<carol-pubkey>"]
+```
+
+Bob's active `m:Carol` is a real invitation. If Carol accepts, it extends the
+reciprocal graph and can retain Carol even when Alice removes or never lists
+her. Clients must resolve that graph honestly; they cannot treat the record as
+`open` merely because Bob is not lead.
+
+The shape is nevertheless a repository-health error because it bypasses the
+normal lead-coordinated roster. Bob and Alice are warned after every ngit or Git
+command until Bob converges. Other commands continue according to their normal
+authorization, but announcement edits are gated as described below.
+
+When Alice already lists Carol, Bob sees:
+
+```text
+your announcement directly assigns <carol-npub> in a lead-shaped repository
+let <alice-npub> manage the co-maintainer roster by running:
+  ngit repo follow-lead
+```
+
+If Alice does not list Carol, converting Bob's edge to history would remove an
+invitation or confirmed maintainer. `repo follow-lead` therefore refuses to
+publish, and Bob instead sees:
+
+```text
+your announcement directly assigns <carol-npub>, but the lead does not
+ask <alice-npub> to run:
+  ngit repo edit --add-maintainer <carol-npub>
+then repair your announcement with:
+  ngit repo follow-lead
+```
+
+Every `ngit repo edit` from Bob other than `repo follow-lead` fails and repeats
+the applicable recovery. Once Alice actively covers every third-party subject,
+`repo follow-lead` converts Bob's active assignments to `open` copies, rebuilds
+`maintainers` from Bob's remaining active lead/self roles, and preserves all
+history and unrelated fields:
+
+```text
+["M", "<alice-pubkey>", "T2"]
+["m", "<bob-pubkey>", "T2"]
+["m", "<carol-pubkey>", "T3", "open"]
+["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
+```
+
+Alice is also warned after every ngit or Git command. When her roster is
+missing a subject, the warning tells her to run the displayed
+`--add-maintainer` command and then ask Bob to run `ngit repo follow-lead`.
+When she already covers every subject, it tells her only to ask Bob to run that
+command. Every other `ngit repo edit` from Alice fails until Bob converges; the
+required one-at-a-time adds are the only lead-side exception.
+
+For example, once Alice covers Carol the lead-side warning is:
+
+```text
+<bob-npub> directly assigns <carol-npub> instead of following your lead roster
+ask <bob-npub> to repair their announcement with:
+  ngit repo follow-lead
+```
+
+Before Alice covers Carol, the same warning prefixes that instruction with:
+
+```text
+first retain <carol-npub> through the lead roster with:
+  ngit repo edit --add-maintainer <carol-npub>
+```
+
+After convergence Alice may keep Carol or remove her with an ordinary separate
+lead action. Until convergence, Alice cannot remove Carol while retaining Bob,
+because Bob's active edge remains authoritative. A force flag cannot rewrite
+Bob's signed event or pretend that edge is historical.
 
 #### Removal, replicated history, and reinvitation
 
@@ -1398,16 +1531,20 @@ The implementation and tests must make these statements true:
    structured data.
 6. Every confirmed maintainer can replicate effective start and end intervals
    in `M`, `m`, or `o`. A co-maintainer keeps their lead `M` and self-`m`
-   active, while every last-known-open third-party interval ends in `open`.
-   Departure timing prefers an explicit signed role end, then a signed deletion
-   request, then a clearly labelled observation estimate.
+   active, while every last-known-open third-party interval ends in `open` in
+   the normal ngit shape. An externally authored active third-party `m` remains
+   authoritative until the guarded repair converts it safely. Departure timing
+   prefers an explicit signed role end, then a signed deletion request, then a
+   clearly labelled observation estimate.
 7. The selected maintainer's history wins and omissions continue through the
    sibling NIP-34 distance and pubkey precedence.
 8. Active `M` and `m` have identical maintainer authority. In a lead-shaped
-   repository, the lead's active roster supplies candidates and each confirmed
-   co-maintainer reciprocates with an active lead `M` plus active self-`m`.
-   Third-party `open` histories cannot extend that roster. Explicit no-lead
-   retains the reciprocal active-`m` fixpoint.
+   repository, the lead's active roster seeds a reciprocal fixpoint and each
+   confirmed co-maintainer reciprocates with an active lead `M` plus active
+   self-`m`. An active third-party `m` from any confirmed maintainer can extend
+   the fixpoint even though ngit treats that wire shape as an edge case; a
+   third-party `open` history cannot. Explicit no-lead uses the reciprocal
+   active-`m` fixpoint without a lead seed.
 9. Lead resolution starts at the selected coordinate, follows one active `M`
    per announcement, and terminates only at a confirmed active self-`M`. An
    active pointer can preserve a removed maintainer's coordinate redirect, but
@@ -1427,38 +1564,48 @@ The implementation and tests must make these statements true:
     repair republishes only the corrected projection.
 12. Every mutation preserves unrelated relationships, role intervals,
     replicated history, metadata, and unknown tags.
-13. Removing a candidate from the lead roster removes them immediately even
-    while their old self-`m` and lead `M` remain active. Their commands report
-    the removal and direct `repo follow-lead` to end the self-role while
-    preserving the redirect. A later invitation requires a new self-role start.
+13. Removing a candidate from the lead roster removes them immediately when no
+    other confirmed maintainer actively assigns them, even while their old
+    self-`m` and lead `M` remain active. Their commands report the removal and
+    direct `repo follow-lead` to end the self-role while preserving the
+    redirect. A later invitation requires a new self-role start.
 14. Removing one maintainer fails if that person remains confirmed through a
-    different real relationship or the graph loses anyone else.
-15. A proposed lead publishes an active self-`M` and complete roster before the
+    different real relationship or the graph loses anyone else. An active
+    third-party `m` names its author and directs the lead to cover its subject,
+    ask the author to run `repo follow-lead`, and then retry any desired
+    removal as a separate action.
+15. In a lead-shaped repository ngit never authors a co-maintainer's active
+    third-party assignment. If another client does, every command warns both
+    co-maintainer and lead. The co-maintainer may run only `repo follow-lead`;
+    the lead may run only the required one-at-a-time adds. Follow refuses until
+    the lead covers every subject, then converts those edges to `open` without
+    changing membership.
+16. A proposed lead publishes an active self-`M` and complete roster before the
     old lead points to them. A missing confirmed maintainer or invitation emits
     the required named prepare-first/remove-first error.
-16. Force cannot combine lead declaration with removal or turn add/accept into
+17. Force cannot combine lead declaration with removal or turn add/accept into
     a repository merge.
-17. Add resolves the named pubkey's existing component, history, and state
+18. Add resolves the named pubkey's existing component, history, and state
     before publishing an edge.
-18. Accept compares the invitee's existing announcement, earliest unique
+19. Accept compares the invitee's existing announcement, earliest unique
     commit, `u` relationships, history, component, and refs.
-19. An unexpected component join or conflict blocks before signing and reports
+20. An unexpected component join or conflict blocks before signing and reports
     which state would otherwise win.
-20. A lead transfer never rewrites announcements or local coordinates
+21. A lead transfer never rewrites announcements or local coordinates
     automatically. Human-facing commands repeatedly offer `repo follow-lead`
     until each co-maintainer has an active direct `M` to the new lead, an active
     self-`m`, and a local coordinate that follows it; non-maintainers update
     only local configuration.
-21. A coordinate remains controllable by every holder of its signing key;
+22. A coordinate remains controllable by every holder of its signing key;
     changing its lead cannot transfer or revoke that control.
-22. Metadata-only edits do not migrate legacy membership.
-23. A historical copy can never authorize its subject or route lead resolution
+23. Metadata-only edits do not migrate legacy membership.
+24. A historical copy can never authorize its subject or route lead resolution
     when its final interval is `open`.
-24. ngit exposes no command to abandon a removed maintainer's redirect or turn
+25. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically and recommend
     a new identifier for a friendly fork.
-25. Current authorization remains defined when exact history is missing or
+26. Current authorization remains defined when exact history is missing or
     disputed.
 
 Each normal workflow and destructive edge case needs a unit-level graph,
@@ -1470,7 +1617,11 @@ invitation, a record ending in `open`, an ended record, absent and contradictory
 projections, a mismatch warning, the edit gate, and a repair that leaves all
 indexed role tags byte-for-byte unchanged. The reciprocal-lifecycle fixtures
 cover active lead/self acceptance, rejection of `open` in either required
-record, third-party `open` copies, immediate lead removal, the removed-author
-warning and follow repair, reinvitation requiring a new self-role start, a dead
-coordinate after an externally authored redirect end, and an externally
-authored same-identifier self-led fork.
+record, passive third-party `open` copies, correct resolution of externally
+authored active third-party `m` assignments, warnings to co-maintainer and lead,
+both edit gates, refusal to follow before lead coverage, safe conversion after
+coverage, rejection of a lead removal while such an edge retains its subject,
+immediate removal without such an edge, the removed-author warning and follow
+repair, reinvitation requiring a new self-role start, a dead coordinate after
+an externally authored redirect end, and an externally authored
+same-identifier self-led fork.
