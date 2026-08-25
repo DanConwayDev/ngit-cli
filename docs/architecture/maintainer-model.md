@@ -318,8 +318,8 @@ ngit repo edit --lead-maintainer <bob-npub>
 
 Alice becomes a co-maintainer. Her replacement retains the full history, keeps
 only her self-`m` and direct `M:Bob` relationship active, and changes every
-other interval without a known end to historical-only. The chain is now Alice →
-Bob → Bob, so Bob is the resolved lead.
+other current interval to historical-only. The chain is now Alice → Bob → Bob,
+so Bob is the resolved lead.
 
 Alice and every other co-maintainer are then repeatedly shown:
 
@@ -329,10 +329,10 @@ ngit repo follow-lead
 
 For a confirmed maintainer, that command first republishes their complete
 historical view with an active self-`m` and Bob, rather than Alice, as their
-active direct `M`. Every third-party role copied from the resolved history
-without a known end uses `defer`, so it should not retain a person whom Bob
-removes. An unexpected active third-party `m` is handled by the guarded repair
-below. The command then switches the local `nostr://` coordinate and `nostr.repo` after
+active direct `M`. Every current third-party role copied from the resolved
+history uses `defer`, so it should not retain a person whom Bob removes. An
+unexpected active third-party `m` is handled by the guarded repair below. The
+command then switches the local `nostr://` coordinate and `nostr.repo` after
 verifying that Bob's rooted view contains the same membership and Git state. A
 non-maintainer runs the same command but changes only local configuration
 unless their own stale announcement must first record a removal as described
@@ -458,8 +458,8 @@ self-`m` and points to the lead with an active `M`.
 3. **The API expresses intent.** ngit changes one relationship and preserves
    unrelated edges, intervals, metadata, and unknown tags.
 4. **Current edges and historical copies are distinct.** Both use the NIP-34
-   role record, but an explicit `defer` sentinel marks a retained interval with
-   no known numeric end as historical-only so it never authorizes its subject.
+   role record, but an explicit `defer` sentinel retains an interval as
+   historical-only without making a current assignment through that record.
 5. **Membership writes fail closed.** An unexpected graph join, partition, or
    state replacement is not published.
 6. **Signed disagreement remains visible.** Other clients may omit or rewrite
@@ -506,9 +506,9 @@ Indexed role tags have this form:
 - `o` assigns or acknowledges a moderator.
 - With ordinary numeric boundaries, a tag is active when it has fewer than
   four elements or an odd number of elements: its final boundary is a start.
-- A literal `defer` in an end position retains an interval with no known numeric
-  end as historical-only. Its even-length tag is inactive for authorization or
-  lead forwarding.
+- A literal `defer` in an end position retains an interval as historical-only
+  without asserting a numeric end. Its even-length tag is inactive for
+  authorization or lead forwarding.
 - A pubkey may have one record for each role letter. A role transition closes
   the old letter and starts the new one rather than rewriting the past.
 
@@ -533,12 +533,13 @@ with the relationships needed to accept that assignment: an `M` naming the
 lead and an `m` naming themselves.
 
 A co-maintainer also publishes the complete resolved `M`, `m`, and `o` history.
-Every third-party interval copied solely as history without a known numeric end
-ends in `defer`. Their active self-`m` is the signed acceptance of their assigned
-role, and their active `M` identifies and reciprocates with the lead. A current
-co-maintainer announcement that ends either of those two required records in
-`defer` is invalid as an acceptance: clients treat the record only as history
-and do not grant authority from it.
+Every third-party interval copied solely as history, rather than as this
+author's assignment, ends in `defer` unless the author records a numeric end.
+Their active self-`m` is the signed acceptance of their assigned role, and their
+active `M` identifies and reciprocates with the lead. A current co-maintainer
+announcement that ends either of those two required records in `defer` is
+invalid as an acceptance: clients treat the record only as history and do not
+grant authority from it.
 
 The `defer` convention is a statement of intent, not a protocol restriction. A
 third-party client may publish an active `m` from a co-maintainer to somebody
@@ -554,8 +555,9 @@ Those edges have normal authorization and repository-join consequences.
 
 The sibling NIP-34 draft should retain its recommendation that a co-maintainer
 actively list themselves and the lead. It must add the `defer` extension for
-records copied for other maintainers and moderators whose numeric end is not
-known. Those copies retain history without becoming assignments.
+records copied for other maintainers and moderators when the author makes no
+current assignment through them. Those copies retain history without becoming
+assignments.
 
 If an announcement has no `M`, `m`, `o`, or legacy `maintainers` tag, its
 author is the implicit sole maintainer. This is the preferred one-person wire
@@ -607,20 +609,20 @@ The role tags in the sibling NIP-34 draft already carry start/end history and
 define precedence between conflicting copies. Effective membership history is
 therefore replicated in `M`, `m`, and `o`; it does not need another tag type.
 
-The missing distinction is how a maintainer can retain an interval with no known
-numeric end for somebody they are not currently assigning. This proposal
-reserves the literal `defer` in an end position:
+The missing distinction is how a maintainer can retain an interval without
+currently assigning its subject or asserting that the interval ended. This
+proposal reserves the literal `defer` in an end position:
 
 ```text
 ["m", "<bob-pubkey>", "200", "defer"]
 ```
 
-This says: “my historical view has Bob confirmed from time 200 with no known
-numeric end, but I make no current assignment through this record.” Current
-status is resolved from the active maintainer graph, normally rooted at the
-resolved lead. The record has an even number of elements, so current ngit and
-clients following the existing parity rule treat it as inactive. A numeric end
-replaces `defer` when the end is observed:
+This says: “my historical view has Bob confirmed from time 200, but I neither
+assign him now nor assert a numeric end.” Other active role records may or may
+not assign Bob; current status is resolved from the active maintainer graph,
+normally rooted at the resolved lead. The record has an even number of elements,
+so current ngit and clients following the existing parity rule treat it as
+inactive. A numeric end replaces `defer` when the author records one:
 
 ```text
 ["m", "<bob-pubkey>", "200", "300"]
@@ -633,11 +635,12 @@ this literal sentinel as well as a Unix timestamp. Clients must never parse
 The lead uses an ordinary omitted end for real current assignments. A current
 co-maintainer does the same for their lead `M` and self-`m`, because those two
 active records are their reciprocal acceptance. They use `defer` only for
-intervals belonging to other people whose numeric end is not known. If a
-co-maintainer becomes lead, they close their former lead `M` and self-`m`, start
-an active self-`M`, and publish the full active roster. A former lead becoming a
-co-maintainer keeps an active `M` to the new lead and active self-`m`, while
-changing relationships covered by the prepared lead into historical-only copies.
+intervals belonging to other people whose current assignment they defer to the
+active graph. If a co-maintainer becomes lead, they close their former lead `M`
+and self-`m`, start an active self-`M`, and publish the full active roster. A
+former lead becoming a co-maintainer keeps an active `M` to the new lead and
+active self-`m`, while changing relationships covered by the prepared lead into
+historical-only copies.
 
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
@@ -1067,8 +1070,8 @@ rules. Conflicting identity, `u`, history, or refs block.
 the publisher names themselves, they become a prepared lead by publishing an
 active self-`M` and the complete active roster. If they name somebody else,
 they become a co-maintainer: their active `M` names the proposed lead, their
-active self-`m` accepts their own role, and every other role without a known
-numeric end uses `defer` as replicated history.
+active self-`m` accepts their own role, and every other current role uses
+`defer` as replicated history.
 
 This convention does not give the target protocol ownership of the roster,
 but it changes which event actively assigns the roster. The target must already
@@ -1552,11 +1555,11 @@ The implementation and tests must make these statements true:
    structured data.
 6. Every confirmed maintainer can replicate effective start and end intervals
    in `M`, `m`, or `o`. A co-maintainer keeps their lead `M` and self-`m`
-   active, while every third-party interval with no known numeric end uses
-   `defer` in the normal ngit shape. An externally authored active third-party `m` remains
-   authoritative until the guarded repair converts it safely. Departure timing
-   prefers an explicit signed role end, then a signed deletion request, then a
-   clearly labelled observation estimate.
+   active, while every third-party interval whose current assignment they defer
+   uses `defer` in the normal ngit shape. An externally authored active
+   third-party `m` remains authoritative until the guarded repair converts it
+   safely. Departure timing prefers an explicit signed role end, then a signed
+   deletion request, then a clearly labelled observation estimate.
 7. The selected maintainer's history wins and omissions continue through the
    sibling NIP-34 distance and pubkey precedence.
 8. Active `M` and `m` have identical maintainer authority. In a lead-shaped
