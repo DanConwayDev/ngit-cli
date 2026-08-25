@@ -35,8 +35,8 @@ The roles are:
 - **Lead maintainer:** has the same protocol permissions as a co-maintainer and
   is additionally responsible for managing the maintainer and moderator roster.
   When a lead is present, lead-aware tooling normally restricts roster
-  management to them and expects each co-maintainer's repository announcement
-  to point to them, so the co-maintainer's coordinate forwards to the lead.
+  management to them and expects each co-maintainer's coordinate to forward to
+  the lead.
 - **Invitee:** has no maintainer authority until they accept. Joining always
   requires statements from both sides.
 - **Moderator:** may manage issues and proposals, including publishing a
