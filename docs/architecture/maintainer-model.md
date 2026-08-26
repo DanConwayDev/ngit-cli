@@ -3,7 +3,8 @@
 > **Proposal:** this document defines the intended maintainer model and public
 > CLI. It differs from both the pre-role model and parts of the current
 > indexed-role implementation. The two preceding revisions of this file record
-> those earlier snapshots.
+> those earlier snapshots. The next-major delivery boundary is recorded in the
+> [implementation plan](maintainer-model-implementation-plan.md).
 
 This document has three layers:
 
