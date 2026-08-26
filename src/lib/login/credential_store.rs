@@ -117,7 +117,7 @@ pub fn policy(git_repo: &Option<&crate::git::Repo>) -> SecretStorage {
         }
     }
     for key in ["nostr.secret-storage", "nostr.credential-store"] {
-        if let Some(policy) = crate::git::get_git_config_item(&None, key)
+        if let Some(policy) = crate::git::get_git_config_item_global(git_repo, key)
             .ok()
             .flatten()
             .as_deref()
