@@ -272,7 +272,7 @@ pub async fn get_signer_info(
             } else if let Some(nsec) = get_git_config_item_global(git_repo, "nostr.nsec")
                 .context("failed to get global git config")?
             {
-                let nsec = resolve_config_secret(&None, &nsec, true, true)?;
+                let nsec = resolve_config_secret(git_repo, &nsec, true, true)?;
                 (
                     SignerInfo::Nsec {
                         nsec: nsec.to_string(),
@@ -289,7 +289,7 @@ pub async fn get_signer_info(
                     .context("failed to get global git config")?
             {
                 (SignerInfo::Bunker {
-                    bunker_uri, bunker_app_key: resolve_config_secret(&None, &get_git_config_item_global(git_repo, "nostr.bunker-app-key")
+                    bunker_uri, bunker_app_key: resolve_config_secret(git_repo, &get_git_config_item_global(git_repo, "nostr.bunker-app-key")
                     .context("failed to get global git config")?
                     .context("git global config item nostr.bunker-uri exists but nostr.bunker-app-key doesn't")?, false, true)?,
                     npub: get_git_config_item_global(git_repo, "nostr.npub")
@@ -515,10 +515,10 @@ fn resolve_scope_secret(
     is_nsec: bool,
 ) -> Result<String> {
     resolve_config_secret(
-        if matches!(scope, ConfigScope::Local) {
-            git_repo
-        } else {
+        if matches!(scope, ConfigScope::System) {
             &None
+        } else {
+            git_repo
         },
         value,
         is_nsec,

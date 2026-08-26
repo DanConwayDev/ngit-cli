@@ -187,6 +187,79 @@ async fn global_signer_from_a_gitdir_conditional_include_is_visible() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn conditional_global_secret_storage_policy_controls_local_login() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let home_global = harness.home().join(".gitconfig");
+    let xdg_global = harness.home().join(".config/git/config");
+    std::fs::create_dir_all(
+        xdg_global
+            .parent()
+            .context("XDG global config must have a parent")?,
+    )?;
+
+    for policy_key in ["nostr.secret-storage", "nostr.credential-store"] {
+        for config_source in ["home", "xdg", "override"] {
+            std::fs::write(&home_global, "")?;
+            std::fs::write(&xdg_global, "")?;
+
+            let repo = harness.fresh_repo()?;
+            let included_config = harness.home().join(format!(
+                "conditional-policy-{config_source}-{policy_key}.gitconfig"
+            ));
+            write_config(&included_config, policy_key, "git-config")?;
+            let global_config = match config_source {
+                "home" => home_global.clone(),
+                "xdg" => xdg_global.clone(),
+                "override" => harness.home().join("redirected-policy.gitconfig"),
+                _ => unreachable!("the config-source cases are exhaustive"),
+            };
+            std::fs::write(
+                &global_config,
+                format!(
+                    "[includeIf \"gitdir/i:{}/**\"]\n\tpath = {}\n",
+                    repo.dir().display(),
+                    included_config.display()
+                ),
+            )?;
+
+            let credentials = tempfile::NamedTempFile::new()?;
+            let nsec = Keys::generate().secret_key().to_bech32()?;
+            let mut command =
+                repo.ngit(["account", "login", "--local", "--offline", "--nsec", &nsec]);
+            command
+                .env_remove("NGIT_SECRET_STORAGE")
+                .env_remove("NGIT_CREDENTIAL_STORE")
+                .env("NGIT_KEYRING_FILE", credentials.path());
+            if config_source == "override" {
+                command.env("GIT_CONFIG_GLOBAL", &global_config);
+            } else {
+                command.env_remove("GIT_CONFIG_GLOBAL");
+            }
+            let output = command
+                .output()
+                .await
+                .context("failed to spawn ngit account login")?;
+            assert!(
+                output.status.success(),
+                "local login failed with {policy_key} in {config_source} global config: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                repo.config("nostr.nsec").await?.as_deref(),
+                Some(nsec.as_str()),
+                "conditional {policy_key} was ignored for {config_source} global config"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Write one key straight to a config file, without inheriting any scope.
 fn write_config(path: &std::path::Path, key: &str, value: &str) -> Result<()> {
     git2::Config::open(path)
