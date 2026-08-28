@@ -993,6 +993,110 @@ impl RepoRef {
         }
     }
 
+    /// Merge the resolved lead's retained history into this maintainer's
+    /// view before following a new lead.
+    ///
+    /// The author's own role and their previous direct `M` relationship stay
+    /// active long enough for [`RepoRef::generate_role_tags`] to perform the
+    /// numeric transition. Other current assignments become `defer` copies.
+    /// For a maintainer removed by the lead, the lead's numeric self-role end
+    /// replaces the stale active self record.
+    pub fn role_history_for_follow_lead(
+        &self,
+        canonical_lead: &RepoRef,
+        author: PublicKey,
+        old_lead: PublicKey,
+        new_lead: PublicKey,
+        author_is_active: bool,
+    ) -> Result<Vec<Tag>> {
+        fn key(parts: &[String]) -> Option<(String, String)> {
+            let name = parts.first()?;
+            let subject = parts.get(1)?;
+            is_role_tag_name(name).then(|| (name.clone(), subject.clone()))
+        }
+
+        let author_hex = author.to_string();
+        let old_lead_hex = old_lead.to_string();
+        let new_lead_hex = new_lead.to_string();
+        let author_declined = self.events.values().any(|event| {
+            event.pubkey == author && announcement_author_declines_maintainership(event)
+        }) || (!self.maintainers.contains(&author)
+            && self.role_tags.iter().any(|tag| {
+                let slice = tag.as_slice();
+                slice.get(1) == Some(&author_hex)
+                    && matches!(slice.first().map(String::as_str), Some("M" | "m"))
+            }));
+
+        let mut records: Vec<(Vec<String>, bool)> = self
+            .role_history_for_republish()
+            .into_iter()
+            .map(|tag| (tag.as_slice().to_vec(), true))
+            .collect();
+        for tag in canonical_lead.role_history_for_republish() {
+            let parts = tag.as_slice().to_vec();
+            let Some(record_key) = key(&parts) else {
+                continue;
+            };
+            let subject = &record_key.1;
+            let relationship_subject = [
+                author_hex.as_str(),
+                old_lead_hex.as_str(),
+                new_lead_hex.as_str(),
+            ]
+            .contains(&subject.as_str());
+            let replace_author = subject == &author_hex && !author_is_active && !author_declined;
+            if let Some(index) = records
+                .iter()
+                .position(|(existing, _)| key(existing).as_ref() == Some(&record_key))
+            {
+                if replace_author || !relationship_subject {
+                    records[index] = (parts, false);
+                }
+            } else {
+                records.push((parts, false));
+            }
+        }
+
+        for (parts, from_author) in &mut records {
+            if !role_entry_is_active(parts) {
+                continue;
+            }
+            let name = parts.first().map(String::as_str);
+            let subject = parts.get(1).map(String::as_str);
+            let keep_active = *from_author
+                && matches!(name, Some("M" | "m"))
+                && ((author_is_active && subject == Some(&author_hex))
+                    || (name == Some("M")
+                        && matches!(subject, Some(value) if value == old_lead_hex || value == new_lead_hex)));
+            if keep_active {
+                continue;
+            }
+            if parts.len().is_multiple_of(2) {
+                parts.push("0".to_string());
+            }
+            parts.push("defer".to_string());
+        }
+
+        if !author_is_active {
+            let has_numeric_self_end = records.iter().any(|(parts, _)| {
+                parts.get(1) == Some(&author_hex)
+                    && matches!(parts.first().map(String::as_str), Some("M" | "m"))
+                    && role_boundaries(parts).is_some_and(|boundaries| {
+                        boundaries.len().is_multiple_of(2)
+                            && matches!(boundaries.last(), Some(RoleBoundary::Timestamp(_)))
+                    })
+            });
+            if !has_numeric_self_end {
+                bail!("the lead view has no numeric end for your maintainer role");
+            }
+        }
+
+        Ok(records
+            .into_iter()
+            .map(|(parts, _)| Tag::parse(parts).unwrap())
+            .collect())
+    }
+
     /// Record the target author's signed acceptance or departure boundary in
     /// this announcement's existing relationship to them.
     ///
@@ -4992,6 +5096,102 @@ mod tests {
                 assert!(history.contains(&tag(&["m", &bob.to_string(), "110"])));
                 assert!(history.contains(&tag(&["m", &carol.to_string(), "120", "defer"])));
                 assert!(history.contains(&tag(&["o", &moderator.to_string(), "130", "defer"])));
+            }
+
+            #[test]
+            fn follower_keeps_self_and_old_lead_for_numeric_transition() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let dave = nostr::prelude::Keys::generate().public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "150", "defer"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &dave.to_string(), "250"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, true)
+                    .unwrap();
+                carol_ref.maintainers = vec![carol, bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200"])));
+                assert!(generated.contains(&tag(&[
+                    "M",
+                    &alice.to_string(),
+                    "200",
+                    &NOW.to_string()
+                ])));
+                assert!(generated.iter().any(|role| {
+                    role.first().map(String::as_str) == Some("M")
+                        && role.get(1) == Some(&bob.to_string())
+                        && role.len() % 2 == 1
+                }));
+                assert!(generated.contains(&tag(&["m", &dave.to_string(), "250", "defer"])));
+            }
+
+            #[test]
+            fn removed_follower_adopts_the_leads_numeric_self_end() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200", "400"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, false)
+                    .unwrap();
+                carol_ref.maintainers = vec![bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200", "400"])));
+                assert!(!generated.iter().any(|role| {
+                    role.get(1) == Some(&carol.to_string()) && role.len() % 2 == 1
+                }));
             }
         }
 

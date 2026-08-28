@@ -826,6 +826,12 @@ pub enum RepoCommands {
             the repository's authorized member set even while others still list you."
     )]
     Leave(sub_commands::repo::leave::SubCommandArgs),
+    /// follow the repository's resolved lead maintainer
+    #[command(
+        name = "follow-lead",
+        long_about = "follow the repository's resolved lead maintainer\n\nupdates retained role history when applicable, then switches the selected repository coordinate and matching nostr remotes"
+    )]
+    FollowLead(sub_commands::repo::follow_lead::SubCommandArgs),
 }
 
 #[cfg(test)]
@@ -1223,5 +1229,10 @@ mod tests {
             .is_err(),
             "the history acknowledgement must be standalone",
         );
+    }
+
+    #[test]
+    fn repo_follow_lead_is_non_interactive() {
+        assert!(Cli::try_parse_from(["ngit", "repo", "follow-lead"]).is_ok());
     }
 }

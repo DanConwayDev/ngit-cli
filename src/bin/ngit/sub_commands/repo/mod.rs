@@ -1,5 +1,6 @@
 pub mod accept;
 pub mod edit;
+pub mod follow_lead;
 pub mod leave;
 
 use std::{collections::HashSet, path::Path};
@@ -38,6 +39,7 @@ pub async fn launch(
         Some(RepoCommands::Edit(args)) => edit::launch(cli_args, args, signer).await,
         Some(RepoCommands::Accept(args)) => accept::launch(args, signer).await,
         Some(RepoCommands::Leave(args)) => leave::launch(args, signer).await,
+        Some(RepoCommands::FollowLead(args)) => follow_lead::launch(args, signer).await,
         None => show_info(offline, json, signer).await,
     }
 }
