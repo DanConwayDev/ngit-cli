@@ -68,10 +68,16 @@ pub fn finish_success() {
 }
 
 pub fn finish_error(error: &anyhow::Error) {
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "status": "error",
         "error": format!("{error:#}"),
     });
+    if let Some(category) = error
+        .downcast_ref::<ngit::cli_interactor::CliError>()
+        .and_then(ngit::cli_interactor::CliError::category)
+    {
+        value["category"] = serde_json::Value::String(category.to_string());
+    }
     let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     std::println!("{rendered}");
 }

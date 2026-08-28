@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::Path};
 use anyhow::{Context, Result};
 use clap::ArgGroup;
 use ngit::{
-    cli_interactor::cli_error,
+    cli_interactor::{cli_error, cli_error_with_category},
     client::{
         Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
     },
@@ -301,12 +301,14 @@ fn relationship_governance(
             }
             Ok(requested_lead)
         }
-        LeadSource::Pending => Err(cli_error(
+        LeadSource::Pending => Err(cli_error_with_category(
+            "lead_pending",
             "the repository lead transition is pending",
             &[],
             &["complete or reconcile the lead transition before changing the roster"],
         )),
-        LeadSource::Conflict => Err(cli_error(
+        LeadSource::Conflict => Err(cli_error_with_category(
+            "lead_conflict",
             "the repository has conflicting lead declarations",
             &[],
             &["reconcile the lead declarations before changing the roster"],
@@ -448,7 +450,8 @@ pub async fn launch(
     if let Some(value) = &args.add_maintainer {
         let target = parse_pubkey("--add-maintainer", value)?;
         if target == my_pubkey || maintainers.contains(&target) {
-            return Err(cli_error(
+            return Err(cli_error_with_category(
+                "maintainer_already_listed",
                 "that pubkey is already in your active maintainer roster",
                 &[],
                 &[],
@@ -496,7 +499,8 @@ pub async fn launch(
             ));
         }
         if !maintainers.contains(&target) {
-            return Err(cli_error(
+            return Err(cli_error_with_category(
+                "maintainer_not_listed",
                 "that pubkey is not in your active maintainer roster",
                 &[],
                 &[],

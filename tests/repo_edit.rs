@@ -187,12 +187,25 @@ async fn reciprocal_add_refuses_divergent_state_without_publishing() -> Result<(
 
     let before = latest_announcement(&harness, alice, &published.identifier).await?;
     let output = publisher
-        .ngit(["repo", "edit", "--add-maintainer", &bob.to_bech32()?])
+        .ngit([
+            "--json",
+            "repo",
+            "edit",
+            "--add-maintainer",
+            &bob.to_bech32()?,
+        ])
         .output()
         .await?;
     assert!(
         !output.status.success(),
         "an auto-confirming divergent state must block the invitation",
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(error["category"], "membership_state_conflict");
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
     );
     assert_eq!(
         latest_announcement(&harness, alice, &published.identifier)

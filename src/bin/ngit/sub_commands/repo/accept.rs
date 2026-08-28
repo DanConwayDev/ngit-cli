@@ -6,7 +6,7 @@ use ngit::{
         accept_maintainership_with_defaults, acceptance_lead, default_acceptance_maintainers,
         wait_for_grasp_servers,
     },
-    cli_interactor::cli_error,
+    cli_interactor::{cli_error, cli_error_with_category},
     client::{Params, get_repo_ref_from_cache, send_events},
     git::nostr_url::NostrUrlDecoded,
     login::user::publish_private_git_relay_list,
@@ -149,7 +149,8 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
 
     if !repo_ref.maintainers.contains(&my_pubkey) {
         let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
-        return Err(cli_error(
+        return Err(cli_error_with_category(
+            "maintainer_invitation_missing",
             "you have not been invited as a maintainer of this repository",
             &[("selected maintainer", selected_npub.as_str())],
             &["the selected maintainer must add your npub to their announcement first"],

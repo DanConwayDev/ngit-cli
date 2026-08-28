@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use ngit::{
-    cli_interactor::cli_error,
+    cli_interactor::cli_error_with_category,
     client::{
         Client, Connect, STATE_KIND, get_event_from_global_cache, get_events_from_local_cache,
     },
@@ -191,7 +191,8 @@ pub async fn require_equivalent_activating_state(
         (&incoming.state, existing.as_ref().map(|state| &state.state))
     } else {
         let Some(existing) = existing.as_ref() else {
-            return Err(cli_error(
+            return Err(cli_error_with_category(
+                "membership_state_conflict",
                 "this invitation would immediately activate pre-existing repository state",
                 &[(
                     "incoming refs",
@@ -203,7 +204,8 @@ pub async fn require_equivalent_activating_state(
         (&existing.state, Some(&incoming.state))
     };
     let Some(required) = required else {
-        return Err(cli_error(
+        return Err(cli_error_with_category(
+            "membership_state_conflict",
             "accepting would activate pre-existing state where the invited repository has no authoritative state",
             &[(
                 "remove",
@@ -222,7 +224,8 @@ pub async fn require_equivalent_activating_state(
     } else {
         "reconcile these refs before retrying; --force is reserved but does not override this collision yet"
     };
-    Err(cli_error(
+    Err(cli_error_with_category(
+        "membership_state_conflict",
         "this membership change would immediately activate divergent repository state",
         &[
             ("add", &format_refs(&difference.add)),
@@ -254,7 +257,8 @@ pub fn require_no_joined_component(
     if extra.is_empty() {
         return Ok(());
     }
-    Err(cli_error(
+    Err(cli_error_with_category(
+        "membership_component_join",
         "this membership change would join another same-identifier repository component",
         &[("additional maintainers", &extra.join(", "))],
         &["reconcile the repositories under separate identifiers before retrying"],
