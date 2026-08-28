@@ -699,6 +699,7 @@ fn validate_pre_fetch(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_post_fetch(
     cli: &Cli,
     args: &SubCommandArgs,
@@ -1856,7 +1857,6 @@ async fn publish_and_finalize(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     launch_with_mode(cli_args, args, signer, LaunchMode::Init).await
 }
@@ -1869,6 +1869,7 @@ pub(crate) async fn launch_repo_edit(
     launch_with_mode(cli_args, args, signer, LaunchMode::RepoEdit).await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn launch_with_mode(
     cli_args: &Cli,
     args: &SubCommandArgs,
