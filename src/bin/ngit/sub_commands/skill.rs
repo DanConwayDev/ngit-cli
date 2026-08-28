@@ -3,7 +3,11 @@ use ngit::{
     agent_guidance,
     client::get_repo_ref_from_cache,
     git::{Repo, RepoActions},
-    login::{SignerInfo, existing::resolve_selection, get_likely_logged_in_user},
+    login::{
+        SignerInfo,
+        existing::{command_signer_public_key, resolve_selection},
+        get_likely_logged_in_user,
+    },
 };
 use serde::Serialize;
 
@@ -207,12 +211,15 @@ async fn resolve_account(
     context: &SkillContext,
     auth: SignerParams<'_>,
 ) -> Result<Option<nostr::prelude::PublicKey>> {
-    if let Some(SignerInfo::Selection { selector }) = auth.info {
-        let selected =
-            resolve_selection(&Some(&context.repo), selector, auth.password, true).await?;
-        return nostr::prelude::PublicKey::parse(&selected.npub)
-            .context("selected signer has an invalid npub")
-            .map(Some);
+    if let Some(signer_info) = auth.info {
+        if let SignerInfo::Selection { selector } = signer_info {
+            let selected =
+                resolve_selection(&Some(&context.repo), selector, auth.password, true).await?;
+            return nostr::prelude::PublicKey::parse(&selected.npub)
+                .context("selected signer has an invalid npub")
+                .map(Some);
+        }
+        return command_signer_public_key(signer_info, auth.password);
     }
     get_likely_logged_in_user(&context.root).await
 }
@@ -306,6 +313,64 @@ mod tests {
             .await
             .unwrap(),
             Some(configured.public_key())
+        );
+    }
+
+    #[tokio::test]
+    async fn command_nsec_overrides_the_configured_account() {
+        let (repo, root) = repository();
+        let configured = Keys::generate();
+        let selected = Keys::generate();
+        repo.save_git_config_item("nostr.npub", &configured.public_key().to_string(), false)
+            .unwrap();
+        let context = SkillContext { repo, root };
+        let info = Some(SignerInfo::Nsec {
+            nsec: selected.secret_key().to_secret_hex(),
+            password: None,
+            npub: None,
+            verify_npub: false,
+        });
+        let password = None;
+
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &info,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            Some(selected.public_key())
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_command_bunker_does_not_use_the_configured_account() {
+        let (repo, root) = repository();
+        let configured = Keys::generate();
+        repo.save_git_config_item("nostr.npub", &configured.public_key().to_string(), false)
+            .unwrap();
+        let context = SkillContext { repo, root };
+        let info = Some(SignerInfo::Bunker {
+            bunker_uri: "unused".to_string(),
+            bunker_app_key: "unused".to_string(),
+            npub: None,
+        });
+        let password = None;
+
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &info,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            None
         );
     }
 
