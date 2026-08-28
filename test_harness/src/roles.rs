@@ -69,16 +69,35 @@ impl RoleLetter {
 /// `["M"|"m"|"o", <pubkey-hex>, <alternating start/end unix timestamps>...]`.
 ///
 /// Per NIP-34 an entry is currently **active** when the tag has fewer than
-/// four elements or an odd element count; an even count of four or more is
-/// **ended**. The constructors cover the common shapes; arbitrary histories
-/// go through [`RoleEntry::with_boundaries`].
+/// four elements or a numeric history ends with a start boundary. A final
+/// `defer` is an inactive historical copy. The constructors cover the common
+/// shapes; arbitrary histories go through [`RoleEntry::with_boundaries`] or
+/// [`RoleEntry::with_role_boundaries`].
 #[derive(Clone, Debug)]
 pub struct RoleEntry {
     pub letter: RoleLetter,
     pub pubkey: PublicKey,
-    /// Alternating start/end unix timestamps, rendered verbatim after the
-    /// pubkey slot. Empty means "active from the beginning" (untimed).
-    pub boundaries: Vec<u64>,
+    /// Alternating start/end boundaries, rendered verbatim after the pubkey
+    /// slot. Empty means "active from the beginning" (untimed).
+    pub boundaries: Vec<RoleBoundary>,
+}
+
+/// One fabricated role-history boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleBoundary {
+    Timestamp(u64),
+    /// Historical-only interval whose current assignment is deferred to
+    /// another announcement.
+    Defer,
+}
+
+impl std::fmt::Display for RoleBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timestamp(value) => value.fmt(f),
+            Self::Defer => f.write_str("defer"),
+        }
+    }
 }
 
 impl RoleEntry {
@@ -113,14 +132,47 @@ impl RoleEntry {
     /// `.with_boundaries(vec![0, ended_at])` for a founding member who was
     /// removed, or `vec![start, end, second_start]` for a returning one.
     pub fn with_boundaries(mut self, boundaries: Vec<u64>) -> Self {
+        self.boundaries = boundaries
+            .into_iter()
+            .map(RoleBoundary::Timestamp)
+            .collect();
+        self
+    }
+
+    /// Retain one historical interval without creating a current assignment.
+    pub fn with_deferred_interval(mut self, start: u64) -> Self {
+        self.boundaries = vec![RoleBoundary::Timestamp(start), RoleBoundary::Defer];
+        self
+    }
+
+    /// Replace the complete boundary sequence, including an optional final
+    /// [`RoleBoundary::Defer`].
+    pub fn with_role_boundaries(mut self, boundaries: Vec<RoleBoundary>) -> Self {
         self.boundaries = boundaries;
         self
     }
 
     fn to_tag(&self) -> Tag {
         let mut values: Vec<String> = vec![self.pubkey.to_string()];
-        values.extend(self.boundaries.iter().map(u64::to_string));
+        values.extend(self.boundaries.iter().map(ToString::to_string));
         Tag::custom(self.letter.tag_name(), values)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_interval_renders_the_literal_boundary() {
+        let pubkey = Keys::generate().public_key();
+        assert_eq!(
+            RoleEntry::co_maintainer(pubkey)
+                .with_deferred_interval(123)
+                .to_tag()
+                .as_slice(),
+            ["m", &pubkey.to_string(), "123", "defer"],
+        );
     }
 }
 

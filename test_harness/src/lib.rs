@@ -80,7 +80,7 @@ pub use nostr_sdk::local_relay::LocalRelayBuilderNip42;
 pub use port::UnavailableTcpEndpoint;
 pub use relay::VanillaRelay;
 pub use repo::Repo;
-pub use roles::{FabricateAnnouncementOpts, RoleEntry, RoleGraph, RoleLetter};
+pub use roles::{FabricateAnnouncementOpts, RoleBoundary, RoleEntry, RoleGraph, RoleLetter};
 pub use scenarios::{
     ArrangedInitStateA, ArrangedInitStateB, ArrangedInitStateC, CloneLogin, PublishPatchSeriesOpts,
     PublishPrOpts, PublishRepoOpts, PublishStateEventOpts, PublishStateEventTarget,

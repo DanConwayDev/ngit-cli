@@ -121,6 +121,17 @@ pub enum RoleSource {
     Implicit,
 }
 
+/// One boundary in an indexed `M`, `m`, or `o` role history.
+///
+/// Numeric boundaries alternate between starts and ends. `Defer` is valid
+/// only as the final value in an end position; it retains a historical
+/// interval without asserting a current assignment or a numeric end time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleBoundary {
+    Timestamp(u64),
+    Defer,
+}
+
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
 /// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
 /// (consumed by a typed field, with duplicates collapsed on re-emission) or
@@ -150,12 +161,39 @@ pub fn is_known_tag_name(name: &str) -> bool {
     )
 }
 
+/// Parse the history boundaries of a NIP-34 indexed role tag.
+///
+/// `defer` is accepted only as the final value in an end position. Any other
+/// non-numeric boundary makes the record invalid and therefore unable to
+/// grant authority.
+fn role_boundaries(slice: &[String]) -> Option<Vec<RoleBoundary>> {
+    if slice.len() < 2 {
+        return None;
+    }
+    let raw = &slice[2..];
+    let mut boundaries = Vec::with_capacity(raw.len());
+    for (index, value) in raw.iter().enumerate() {
+        if value == "defer" {
+            let is_final_end = index % 2 == 1 && index + 1 == raw.len();
+            if !is_final_end {
+                return None;
+            }
+            boundaries.push(RoleBoundary::Defer);
+        } else {
+            boundaries.push(RoleBoundary::Timestamp(value.parse().ok()?));
+        }
+    }
+    Some(boundaries)
+}
+
 /// Whether a NIP-34 indexed role tag entry is currently active. A role tag
 /// lists a pubkey followed by optional alternating start/end history
-/// timestamps; the entry is active when the tag has fewer than four elements
-/// or an odd number of elements (its last boundary is a start).
+/// boundaries. An empty history is untimed and active; a numeric history is
+/// active when its final boundary is a start. A valid record ending in
+/// `defer` is inactive.
 fn role_entry_is_active(slice: &[String]) -> bool {
-    slice.len() < 4 || slice.len() % 2 == 1
+    role_boundaries(slice)
+        .is_some_and(|boundaries| boundaries.is_empty() || boundaries.len() % 2 == 1)
 }
 
 /// Whether the name is a NIP-34 indexed role tag consumed by the role-tag
@@ -169,6 +207,19 @@ fn is_role_tag_name(name: &str) -> bool {
 fn close_role_entry(entry: &mut Vec<String>, now: u64) {
     if entry.len().is_multiple_of(2) {
         entry.push("0".to_string());
+    }
+    entry.push(now.to_string());
+}
+
+/// Start a new interval on an inactive role record.
+///
+/// A numeric-ended record simply gains a new start. A deferred interval has
+/// no numeric end, so the new assignment supplies `now` as both the previous
+/// interval's end and the new interval's start instead of leaving `defer` in
+/// a non-final position.
+fn restart_role_entry(entry: &mut Vec<String>, now: u64) {
+    if entry.last().is_some_and(|value| value == "defer") {
+        *entry.last_mut().unwrap() = now.to_string();
     }
     entry.push(now.to_string());
 }
@@ -653,6 +704,9 @@ impl RepoRef {
                 moderator_tags.push(tag.clone());
                 continue;
             }
+            if role_boundaries(slice).is_none() {
+                continue;
+            }
             let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
                 continue;
             };
@@ -690,7 +744,7 @@ impl RepoRef {
                 if !role_entry_is_active(entry) {
                     // stopped record under this letter: start again now (a
                     // re-add, or a transition back to this letter)
-                    parts.push(now.to_string());
+                    restart_role_entry(&mut parts, now);
                 }
             } else if other_record.is_some() || (!first_use_of_role_tags && pk_hex != author_hex) {
                 // the record under this letter opens now: a per-letter
@@ -2945,21 +2999,25 @@ mod tests {
         }
 
         #[test]
-        fn entry_activeness_follows_element_count() {
+        fn entry_activeness_parses_numeric_history_and_defer() {
             let keys = nostr::prelude::Keys::generate();
             let author = keys.public_key();
             let other = nostr::prelude::Keys::generate().public_key();
             let other_hex = other.to_string();
 
-            // (history values after the pubkey, expected active)
-            // Tag element counts: 2 -> active, 3 -> active, 4 -> ended,
-            // 5 -> active, 6 -> ended.
+            // History values after the pubkey and their expected current
+            // activeness. `defer` is a valid final end but never an active
+            // assignment. Malformed boundary sequences also fail closed.
             let cases: Vec<(Vec<&str>, bool)> = vec![
                 (vec![], true),
                 (vec!["100"], true),
                 (vec!["100", "200"], false),
                 (vec!["100", "200", "300"], true),
                 (vec!["100", "200", "300", "400"], false),
+                (vec!["100", "defer"], false),
+                (vec!["defer"], false),
+                (vec!["100", "defer", "300"], false),
+                (vec!["100", "not-a-timestamp"], false),
             ];
 
             for (history, expected_active) in cases {
@@ -2974,6 +3032,31 @@ mod tests {
                     "history {history:?} expected active={expected_active}"
                 );
             }
+        }
+
+        #[test]
+        fn deferred_self_or_lead_records_do_not_accept_an_invitation() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let deferred_self = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string(), "100"]),
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                ],
+            );
+            assert!(announcement_author_declines_maintainership(&deferred_self));
+
+            let deferred_lead = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string(), "100", "defer"]),
+                    tag(&["m", &author.to_string(), "100"]),
+                ],
+            );
+            assert_eq!(RepoRef::try_from((deferred_lead, None)).unwrap().lead, None);
         }
 
         #[test]
@@ -3782,6 +3865,46 @@ mod tests {
                     vec![
                         tag(&["m", &author.to_string()]),
                         tag(&["m", &former.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn deferred_records_are_preserved_while_inactive() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let historical = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &historical.to_string(), "100", "defer"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &historical.to_string(), "100", "defer"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn restarting_a_deferred_record_closes_and_reopens_it_now() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &returning.to_string(), "100", "defer"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "100", &now(), &now()]),
                     ],
                 );
             }
