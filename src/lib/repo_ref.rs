@@ -962,6 +962,44 @@ impl RepoRef {
         history
     }
 
+    /// Build the role-history source for a confirmed co-maintainer preparing
+    /// to receive the lead.
+    ///
+    /// The current lead's moderator records are canonical for the active
+    /// roster, including pending moderator invitations. They replace the
+    /// candidate's deferred copies of the same records. Candidate-only ended
+    /// moderator history is retained so preparation does not erase a signed
+    /// historical view.
+    pub fn role_history_for_prepared_lead(&self, current_lead: &RepoRef) -> Vec<Tag> {
+        let lead_history = current_lead.role_history_for_republish();
+        let lead_moderator_subjects: HashSet<String> = lead_history
+            .iter()
+            .filter_map(|tag| {
+                let slice = tag.as_slice();
+                (slice.first().map(String::as_str) == Some("o"))
+                    .then(|| slice.get(1).cloned())
+                    .flatten()
+            })
+            .collect();
+        let mut history: Vec<Tag> = self
+            .role_history_for_republish()
+            .into_iter()
+            .filter(|tag| {
+                let slice = tag.as_slice();
+                slice.first().map(String::as_str) != Some("o")
+                    || slice
+                        .get(1)
+                        .is_none_or(|subject| !lead_moderator_subjects.contains(subject))
+            })
+            .collect();
+        history.extend(
+            lead_history
+                .into_iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("o")),
+        );
+        history
+    }
+
     /// Retain all known role history while delegating current third-party
     /// assignments to a lead.
     ///
@@ -5241,6 +5279,50 @@ mod tests {
                         tag(&["M", &lead.to_string(), &NOW.to_string()]),
                     ],
                 );
+            }
+
+            #[test]
+            fn prepared_lead_activates_canonical_moderators_and_keeps_ended_history() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let lead = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let candidate = RepoRef::try_from((
+                    role_event(
+                        &bob_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "110"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120", "defer"]),
+                            tag(&["o", &former.to_string(), "10", "20"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = candidate
+                    .role_history_for_prepared_lead(&lead)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "120"])));
+                assert!(history.contains(&tag(&["o", &former.to_string(), "10", "20"])));
+                assert!(!history.contains(&tag(&["o", &moderator.to_string(), "120", "defer",])));
             }
 
             #[test]

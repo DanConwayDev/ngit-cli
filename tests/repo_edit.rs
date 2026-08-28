@@ -38,8 +38,7 @@ async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn publish_to_default(harness: &Harness, events: &[&Event]) -> Result<()> {
-    let relay_url = harness.relay("default").url();
+async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {
     let client = Client::default();
     client.add_relay(relay_url).await?;
     client.connect().await;
@@ -183,7 +182,7 @@ async fn reciprocal_add_refuses_divergent_state_without_publishing() -> Result<(
             ])?,
         ])
         .finalize(&bob_keys)?;
-    publish_to_default(&harness, &[&announcement, &state]).await?;
+    publish_to_relay(harness.relay("default").url(), &[&announcement, &state]).await?;
 
     let before = latest_announcement(&harness, alice, &published.identifier).await?;
     let output = publisher
@@ -252,7 +251,7 @@ async fn reciprocal_add_refuses_joining_another_maintainer_component() -> Result
             ])?,
         ])
         .finalize(&bob_keys)?;
-    publish_to_default(&harness, &[&announcement]).await?;
+    publish_to_relay(harness.relay("default").url(), &[&announcement]).await?;
 
     let before = latest_announcement(&harness, alice, &published.identifier).await?;
     let output = publisher
@@ -308,7 +307,7 @@ async fn indirect_auto_confirmation_refuses_before_publication() -> Result<()> {
             Tag::parse(["maintainers", &bob.to_string(), &carol.to_string()])?,
         ])
         .finalize(&bob_keys)?;
-    publish_to_default(&harness, &[&bob_announcement]).await?;
+    publish_to_relay(harness.relay("default").url(), &[&bob_announcement]).await?;
 
     let before = latest_announcement(&harness, alice, &published.identifier).await?;
     let output = alice_repo
@@ -408,7 +407,30 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
     let bob_keys = published.additional_maintainer_keys[0].clone();
     let bob = bob_keys.public_key();
     let carol = published.additional_maintainer_keys[1].public_key();
+    let moderator = Keys::generate().public_key();
     let bob_npub = bob.to_bech32()?;
+    let initial = latest_announcement(&harness, alice, &published.identifier).await?;
+    let mut roster_tags: Vec<Tag> = initial.tags.iter().cloned().collect();
+    roster_tags.push(Tag::parse([
+        "o",
+        &moderator.to_string(),
+        &Timestamp::now().as_secs().to_string(),
+    ])?);
+    let roster_with_moderator = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags(roster_tags)
+        .custom_created_at(Timestamp::from_secs(initial.created_at.as_secs() + 1))
+        .finalize(&published.maintainer_keys)?;
+    publish_to_relay(harness.relay("default").url(), &[&roster_with_moderator]).await?;
+    publish_to_relay(
+        &harness.grasp("repo").relay_url(),
+        &[&roster_with_moderator],
+    )
+    .await?;
+    let visible_roster = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        visible_roster.id, roster_with_moderator.id,
+        "the moderator-bearing roster must be the current lead event",
+    );
     harness.publish_user_relay_list(&bob_keys).await?;
     let bob_repo = harness
         .clone_published_repo_as(&published, &bob_keys)
@@ -422,6 +444,19 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
             String::from_utf8_lossy(&accepted.stderr),
         );
     }
+    let before_prepare = bob_repo
+        .ngit(["repo", "--json"])
+        .output()
+        .await
+        .context("failed to inspect moderator roster before preparation")?;
+    assert!(before_prepare.status.success());
+    let before_prepare: serde_json::Value = serde_json::from_slice(&before_prepare.stdout)?;
+    assert!(
+        before_prepare["moderators"]
+            .as_array()
+            .is_some_and(|moderators| !moderators.is_empty()),
+        "the moderator assignment must resolve before preparation: {before_prepare}",
+    );
     let bob_origin = bob_repo
         .config("remote.origin.url")
         .await?
@@ -467,6 +502,29 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
         "the candidate should actively list the complete current roster",
     );
     assert!(active_role_start(&prepared, "M", bob).is_some());
+    let prepared_moderator = prepared
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .find(|tag| {
+            tag.first().map(String::as_str) == Some("o")
+                && tag.get(1) == Some(&moderator.to_string())
+        })
+        .with_context(|| {
+            format!(
+                "prepared lead omitted the moderator assignment: {:?}",
+                prepared
+                    .tags
+                    .iter()
+                    .map(|tag| tag.as_slice())
+                    .collect::<Vec<_>>()
+            )
+        })?;
+    assert_eq!(
+        prepared_moderator.len() % 2,
+        1,
+        "prepared lead must actively retain the moderator assignment",
+    );
 
     edit_ok(&alice_repo, &["--lead-maintainer", &bob_npub]).await?;
     let handed_over = latest_announcement(&harness, alice, &published.identifier).await?;

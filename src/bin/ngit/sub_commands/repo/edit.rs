@@ -330,6 +330,7 @@ fn require_safe_named_removal(
 
 fn require_prepared_lead(
     current_roster: &[PublicKey],
+    current_moderators: &[PublicKey],
     proposed_lead: PublicKey,
     proposed_ref: Option<&RepoRef>,
     author: PublicKey,
@@ -366,6 +367,31 @@ fn require_prepared_lead(
             "the proposed lead announcement contains additional active maintainers",
             &[("additional maintainers", &extra.join(", "))],
             &["reconcile the proposed lead's roster before retrying the handover"],
+        ));
+    }
+    let current_moderators: HashSet<PublicKey> = current_moderators.iter().copied().collect();
+    let proposed_moderators: HashSet<PublicKey> = proposed_ref
+        .map(|repo_ref| repo_ref.moderators.iter().copied().collect())
+        .unwrap_or_default();
+    let missing_moderators = npubs(current_moderators.difference(&proposed_moderators).copied());
+    if !missing_moderators.is_empty() {
+        let lead = proposed_lead
+            .to_bech32()
+            .unwrap_or_else(|_| proposed_lead.to_hex());
+        return Err(cli_error(
+            "the proposed lead has not retained the complete moderator roster",
+            &[("missing moderators", &missing_moderators.join(", "))],
+            &[&format!(
+                "ask {lead} to run `ngit repo edit --lead-maintainer {lead}` first"
+            )],
+        ));
+    }
+    let extra_moderators = npubs(proposed_moderators.difference(&current_moderators).copied());
+    if !extra_moderators.is_empty() {
+        return Err(cli_error(
+            "the proposed lead announcement contains additional active moderators",
+            &[("additional moderators", &extra_moderators.join(", "))],
+            &["reconcile the proposed lead's moderator roster before retrying the handover"],
         ));
     }
     let prepared = proposed_ref.is_some_and(|repo_ref| {
@@ -590,7 +616,7 @@ pub async fn launch(
         && requested_lead == Some(my_pubkey)
         && resolution.source == LeadSource::Explicit
         && resolution.lead != Some(my_pubkey);
-    let mut maintainers = if preparing_to_lead {
+    let (mut maintainers, prepared_role_tags) = if preparing_to_lead {
         if !repo_ref.confirmed_maintainers().contains(&my_pubkey) {
             return Err(cli_error(
                 "only a confirmed maintainer can prepare to receive the lead",
@@ -603,16 +629,21 @@ pub async fn launch(
             .context("the resolved lead announcement is missing")?;
         let canonical: HashSet<PublicKey> = lead_ref.maintainers.iter().copied().collect();
         let discovered: HashSet<PublicKey> = repo_ref.maintainers.iter().copied().collect();
-        if canonical != discovered {
+        let canonical_moderators: HashSet<PublicKey> =
+            lead_ref.moderators.iter().copied().collect();
+        let discovered_moderators: HashSet<PublicKey> =
+            repo_ref.assigned_moderators().into_iter().collect();
+        if canonical != discovered || canonical_moderators != discovered_moderators {
             return Err(cli_error(
-                "the discovered maintainer graph does not match the lead's active roster",
+                "the discovered member graph does not match the lead's active roster",
                 &[],
                 &["run `ngit repo follow-lead` before preparing a handover"],
             ));
         }
-        lead_ref.maintainers
+        let role_tags = my_ref.role_history_for_prepared_lead(&lead_ref);
+        (lead_ref.maintainers, Some(role_tags))
     } else {
-        my_ref.maintainers.clone()
+        (my_ref.maintainers.clone(), None)
     };
     if !maintainers.contains(&my_pubkey) {
         maintainers.insert(0, my_pubkey);
@@ -689,11 +720,19 @@ pub async fn launch(
         None
     };
 
-    let mut role_tags = acknowledgement.map(|_| my_ref.role_tags.clone());
+    let mut role_tags = acknowledgement
+        .map(|_| my_ref.role_tags.clone())
+        .or(prepared_role_tags);
     if args.lead_maintainer.is_some() && requested_lead.is_some_and(|lead| lead != my_pubkey) {
         let lead = requested_lead.unwrap();
         let proposed_ref = announcement_by(&repo_ref, lead);
-        require_prepared_lead(&maintainers, lead, proposed_ref.as_ref(), my_pubkey)?;
+        require_prepared_lead(
+            &maintainers,
+            &repo_ref.assigned_moderators(),
+            lead,
+            proposed_ref.as_ref(),
+            my_pubkey,
+        )?;
         my_ref.defer_third_party_roles(my_pubkey, lead);
         role_tags = Some(my_ref.role_tags.clone());
     }
@@ -822,6 +861,25 @@ mod tests {
         assert_eq!(
             immediate_confirmation_sources(&repo_ref, alice, &[alice, carol, bob], &bob_event,),
             vec![carol],
+        );
+    }
+
+    #[test]
+    fn prepared_lead_must_retain_every_active_moderator_assignment() {
+        let alice = Keys::generate().public_key();
+        let bob_keys = Keys::generate();
+        let bob = bob_keys.public_key();
+        let moderator = Keys::generate().public_key();
+        let proposed = RepoRef::try_from((
+            role_event(&bob_keys, vec![tag("M", bob), tag("m", alice)]),
+            None,
+        ))
+        .unwrap();
+
+        assert!(
+            require_prepared_lead(&[alice, bob], &[moderator], bob, Some(&proposed), alice)
+                .is_err(),
+            "handover preparation must reject a missing moderator assignment",
         );
     }
 
