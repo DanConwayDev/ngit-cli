@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use console::Style;
 use nostr::prelude::{
-    FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url, nip01::Coordinate,
+    Event, FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url, nip01::Coordinate,
     nip19::Nip19Coordinate,
 };
 use serde::{Deserialize, Serialize};
@@ -119,6 +119,46 @@ pub enum RoleSource {
     /// implicitly a maintainer, and an announcement without role tags
     /// implies its author regardless of the deprecated tag.
     Implicit,
+}
+
+/// How lead resolution concluded for the selected repository coordinate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeadSource {
+    ImplicitSole,
+    Explicit,
+    LegacyInferred,
+    ExplicitNone,
+    None,
+    Pending,
+    Conflict,
+}
+
+impl LeadSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ImplicitSole => "implicit_sole",
+            Self::Explicit => "explicit",
+            Self::LegacyInferred => "legacy_inferred",
+            Self::ExplicitNone => "explicit_none",
+            Self::None => "none",
+            Self::Pending => "pending",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// Lead resolution rooted at [`RepoRef::selected_maintainer`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeadResolution {
+    /// Terminal lead for a completed implicit, explicit, or legacy-inferred
+    /// resolution. Pending, absent, and conflicting paths have no lead.
+    pub lead: Option<PublicKey>,
+    pub source: LeadSource,
+    /// Selected maintainer followed by each explicit pointer target. Legacy
+    /// inference appends its winner when that differs from the selected
+    /// maintainer.
+    pub path: Vec<PublicKey>,
 }
 
 /// One boundary in an indexed `M`, `m`, or `o` role history.
@@ -1171,44 +1211,222 @@ impl RepoRef {
         self.confirmed_members().contains(pubkey)
     }
 
-    /// The repository's lead, read directly from `M` role tags: the unique
-    /// pubkey a confirmed member's announcement assigns an active `M` entry.
-    ///
-    /// Only members' events are authoritative, so `M` assignments in
-    /// unconfirmed announcements are ignored — an outsider cannot make
-    /// themselves lead by self-assertion. The assigned pubkey itself need
-    /// not be confirmed yet: a freshly designated lead who has not accepted
-    /// is still the lead (and invited), but a pubkey outside the current
-    /// maintainer set — e.g. one whose own announcement declines
-    /// maintainership — never is. Announcements without `M` tags assert no
-    /// lead; in particular the deprecated `maintainers` fallback has none.
-    /// When confirmed members disagree (active `M` assignments for two
-    /// different pubkeys) no lead is reported, so UIs omit the lead
-    /// indication rather than asserting a contested one.
-    pub fn lead_maintainer(&self) -> Option<PublicKey> {
-        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
-        let mut leads: Vec<PublicKey> = Vec::new();
-        for event in self.events.values() {
-            if !confirmed.contains(&event.pubkey) {
-                continue;
-            }
+    /// Resolve the lead by walking active `M` pointers from the selected
+    /// coordinate, with legacy vote inference only when that rooted view has
+    /// not adopted indexed roles.
+    pub fn lead_resolution(&self) -> LeadResolution {
+        fn event_for<'a>(repo_ref: &'a RepoRef, pubkey: &PublicKey) -> Option<&'a Event> {
+            repo_ref
+                .events
+                .values()
+                .find(|event| event.pubkey == *pubkey)
+        }
+
+        fn active_leads(event: &Event) -> Vec<PublicKey> {
+            let mut leads = Vec::new();
             for tag in event.tags.iter() {
                 let slice = tag.as_slice();
                 if slice.first().map(String::as_str) != Some("M") || !role_entry_is_active(slice) {
                     continue;
                 }
-                let Some(pk) = slice
+                if let Some(pubkey) = slice
                     .get(1)
                     .and_then(|value| PublicKey::from_str(value).ok())
-                else {
-                    continue;
-                };
-                if self.maintainers.contains(&pk) && !leads.contains(&pk) {
-                    leads.push(pk);
+                {
+                    if !leads.contains(&pubkey) {
+                        leads.push(pubkey);
+                    }
                 }
             }
+            leads
         }
-        if leads.len() == 1 { leads.pop() } else { None }
+
+        fn has_indexed_roles(event: &Event) -> bool {
+            event.tags.iter().any(|tag| {
+                tag.as_slice()
+                    .first()
+                    .is_some_and(|name| is_role_tag_name(name))
+            })
+        }
+
+        fn has_indexed_maintainer_role(event: &Event) -> bool {
+            event
+                .tags
+                .iter()
+                .any(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("M" | "m")))
+        }
+
+        fn has_legacy_listing(event: &Event) -> bool {
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers"))
+        }
+
+        fn legacy_resolution(repo_ref: &RepoRef, confirmed: &HashSet<PublicKey>) -> LeadResolution {
+            let selected = repo_ref.selected_maintainer;
+            let mut votes: HashMap<PublicKey, usize> = HashMap::new();
+            for event in repo_ref.events.values() {
+                if !confirmed.contains(&event.pubkey) {
+                    continue;
+                }
+                if has_indexed_roles(event) {
+                    for target in active_leads(event) {
+                        if target != event.pubkey && confirmed.contains(&target) {
+                            *votes.entry(target).or_default() += 1;
+                        }
+                    }
+                    continue;
+                }
+                for tag in event.tags.iter() {
+                    let slice = tag.as_slice();
+                    if slice.first().map(String::as_str) != Some("maintainers") {
+                        continue;
+                    }
+                    for target in slice
+                        .iter()
+                        .skip(1)
+                        .filter_map(|value| PublicKey::from_str(value).ok())
+                    {
+                        if target != event.pubkey && confirmed.contains(&target) {
+                            *votes.entry(target).or_default() += 1;
+                        }
+                    }
+                }
+            }
+
+            let Some(highest) = votes.values().copied().max() else {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            };
+            let winners: Vec<PublicKey> = votes
+                .into_iter()
+                .filter_map(|(pubkey, count)| (count == highest).then_some(pubkey))
+                .collect();
+            if winners.len() != 1 {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            }
+            let lead = winners[0];
+            let mut path = vec![selected];
+            if lead != selected {
+                path.push(lead);
+            }
+            LeadResolution {
+                lead: Some(lead),
+                source: LeadSource::LegacyInferred,
+                path,
+            }
+        }
+
+        let selected = self.selected_maintainer;
+        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
+        let Some(selected_event) = event_for(self, &selected) else {
+            return LeadResolution {
+                lead: None,
+                source: LeadSource::Pending,
+                path: vec![selected],
+            };
+        };
+
+        let selected_leads = active_leads(selected_event);
+        if selected_leads.is_empty() {
+            if has_indexed_maintainer_role(selected_event) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::ExplicitNone,
+                    path: vec![selected],
+                };
+            }
+            if has_indexed_roles(selected_event) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            }
+            if !has_legacy_listing(selected_event)
+                && confirmed.len() == 1
+                && confirmed.contains(&selected)
+            {
+                return LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::ImplicitSole,
+                    path: vec![selected],
+                };
+            }
+            return legacy_resolution(self, &confirmed);
+        }
+
+        let mut path = vec![selected];
+        let mut visited: HashSet<PublicKey> = HashSet::from([selected]);
+        let mut current = selected;
+        loop {
+            let Some(event) = event_for(self, &current) else {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::Pending,
+                    path,
+                };
+            };
+            let leads = active_leads(event);
+            if leads.len() != 1 {
+                return LeadResolution {
+                    lead: None,
+                    source: if leads.is_empty() {
+                        LeadSource::Pending
+                    } else {
+                        LeadSource::Conflict
+                    },
+                    path,
+                };
+            }
+            let target = leads[0];
+            if target == current {
+                return if confirmed.contains(&target) {
+                    LeadResolution {
+                        lead: Some(target),
+                        source: LeadSource::Explicit,
+                        path,
+                    }
+                } else {
+                    LeadResolution {
+                        lead: None,
+                        source: LeadSource::Pending,
+                        path,
+                    }
+                };
+            }
+            path.push(target);
+            if !visited.insert(target) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path,
+                };
+            }
+            if !confirmed.contains(&target) {
+                return LeadResolution {
+                    lead: None,
+                    source: event_for(self, &target)
+                        .filter(|event| announcement_author_declines_maintainership(event))
+                        .map_or(LeadSource::Pending, |_| LeadSource::Conflict),
+                    path,
+                };
+            }
+            current = target;
+        }
+    }
+
+    /// Terminal lead for callers which do not need source or path details.
+    pub fn lead_maintainer(&self) -> Option<PublicKey> {
+        self.lead_resolution().lead
     }
 
     /// How `pubkey`'s membership is recorded across the announcements in
@@ -2496,6 +2714,8 @@ mod tests {
     }
 
     mod maintainer_order {
+        use nostr::prelude::{EventBuilder, event::FinalizeEvent};
+
         use super::*;
 
         #[tokio::test]
@@ -2684,8 +2904,36 @@ mod tests {
             repo_ref.to_event(&signer).await.unwrap()
         }
 
+        fn raw_announcement(
+            keys: &nostr::prelude::Keys,
+            tags: Vec<Vec<String>>,
+        ) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("123412341")];
+            event_tags.extend(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()));
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        fn legacy_announcement(
+            keys: &nostr::prelude::Keys,
+            listed: &[PublicKey],
+        ) -> nostr::prelude::Event {
+            raw_announcement(
+                keys,
+                vec![
+                    [
+                        vec!["maintainers".to_string()],
+                        listed.iter().map(ToString::to_string).collect(),
+                    ]
+                    .concat(),
+                ],
+            )
+        }
+
         #[tokio::test]
-        async fn lead_is_read_from_a_confirmed_members_active_m_tag() {
+        async fn explicit_lead_is_pending_until_the_target_accepts() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let lead = TEST_KEY_2_KEYS.public_key();
             let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, lead], vec![]);
@@ -2694,66 +2942,153 @@ mod tests {
                 announcement_with_lead(&TEST_KEY_1_KEYS, vec![selected, lead], Some(lead)).await,
             );
 
-            // a freshly designated lead who has not announced yet is still
-            // the lead (and an invited maintainer)
-            assert_eq!(repo_ref.lead_maintainer(), Some(lead));
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Pending,
+                    path: vec![selected, lead],
+                }
+            );
 
             insert_event(
                 &mut repo_ref,
                 announcement_with_lead(&TEST_KEY_2_KEYS, vec![lead, selected], Some(lead)).await,
             );
-            assert_eq!(repo_ref.lead_maintainer(), Some(lead));
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(lead),
+                    source: LeadSource::Explicit,
+                    path: vec![selected, lead],
+                }
+            );
         }
 
         #[tokio::test]
-        async fn graph_structure_alone_infers_no_lead() {
-            // the graph that the retired in-degree inference reported a lead
-            // for: without any `M` tag on the wire there is no lead
+        async fn explicit_pointer_walk_resolves_from_the_selected_coordinate() {
             let selected = TEST_KEY_1_KEYS.public_key();
-            let listed_most = TEST_KEY_2_KEYS.public_key();
+            let intermediate_keys = &*TEST_KEY_2_KEYS;
+            let intermediate = intermediate_keys.public_key();
+            let lead_keys = nostr::prelude::Keys::generate();
+            let lead = lead_keys.public_key();
+            let roster = vec![selected, intermediate, lead];
+            let mut repo_ref = create_repo_ref_for_maintainer_order(roster.clone(), vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, roster.clone(), Some(intermediate)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(intermediate_keys, roster.clone(), Some(lead)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&lead_keys, roster, Some(lead)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(lead),
+                    source: LeadSource::Explicit,
+                    path: vec![selected, intermediate, lead],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn legacy_listings_retain_the_unique_vote_winner() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let winner_keys = &*TEST_KEY_2_KEYS;
+            let winner = winner_keys.public_key();
             let third_keys = nostr::prelude::Keys::generate();
             let third = third_keys.public_key();
             let mut repo_ref =
-                create_repo_ref_for_maintainer_order(vec![selected, listed_most, third], vec![]);
+                create_repo_ref_for_maintainer_order(vec![selected, winner, third], vec![]);
             insert_event(
                 &mut repo_ref,
-                announcement(&TEST_KEY_1_KEYS, vec![selected, listed_most, third]).await,
+                legacy_announcement(&TEST_KEY_1_KEYS, &[winner, third]),
             );
-            insert_event(
-                &mut repo_ref,
-                announcement(&TEST_KEY_2_KEYS, vec![listed_most, selected]).await,
-            );
-            insert_event(
-                &mut repo_ref,
-                announcement(&third_keys, vec![third, listed_most]).await,
-            );
+            insert_event(&mut repo_ref, legacy_announcement(winner_keys, &[selected]));
+            insert_event(&mut repo_ref, legacy_announcement(&third_keys, &[winner]));
 
-            assert_eq!(repo_ref.lead_maintainer(), None);
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(winner),
+                    source: LeadSource::LegacyInferred,
+                    path: vec![selected, winner],
+                }
+            );
         }
 
-        #[tokio::test]
-        async fn unconfirmed_m_assignments_do_not_create_a_lead() {
+        #[test]
+        fn tied_legacy_votes_remain_leadless() {
             let selected = TEST_KEY_1_KEYS.public_key();
-            let outsider_keys = nostr::prelude::Keys::generate();
-            let outsider = outsider_keys.public_key();
-            let mut repo_ref =
-                create_repo_ref_for_maintainer_order(vec![selected, outsider], vec![]);
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
             insert_event(
                 &mut repo_ref,
-                announcement(&TEST_KEY_1_KEYS, vec![selected, outsider]).await,
+                legacy_announcement(&TEST_KEY_1_KEYS, &[other]),
             );
-            // the invited outsider asserts themselves lead without ever
-            // acknowledging a confirmed member: not authoritative
             insert_event(
                 &mut repo_ref,
-                announcement_with_lead(&outsider_keys, vec![outsider], Some(outsider)).await,
+                legacy_announcement(&TEST_KEY_2_KEYS, &[selected]),
             );
 
-            assert_eq!(repo_ref.lead_maintainer(), None);
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[test]
+        fn bare_sole_maintainer_is_the_implicit_lead() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected], vec![]);
+            insert_event(&mut repo_ref, raw_announcement(&TEST_KEY_1_KEYS, vec![]));
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::ImplicitSole,
+                    path: vec![selected],
+                }
+            );
         }
 
         #[tokio::test]
-        async fn conflicting_m_assignments_yield_no_lead() {
+        async fn indexed_m_without_an_active_m_uppercase_is_explicitly_leadless() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, other]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![other, selected]).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::ExplicitNone,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn off_path_lead_views_do_not_override_the_selected_path() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let other = TEST_KEY_2_KEYS.public_key();
             let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
@@ -2767,7 +3102,102 @@ mod tests {
                 announcement_with_lead(&TEST_KEY_2_KEYS, vec![other, selected], Some(other)).await,
             );
 
-            assert_eq!(repo_ref.lead_maintainer(), None);
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::Explicit,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[test]
+        fn multiple_active_leads_in_one_announcement_conflict() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let third = nostr::prelude::Keys::generate().public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, other, third], vec![]);
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_1_KEYS,
+                    vec![
+                        vec!["M".to_string(), other.to_string()],
+                        vec!["M".to_string(), third.to_string()],
+                        vec!["m".to_string(), selected.to_string()],
+                    ],
+                ),
+            );
+
+            assert_eq!(repo_ref.lead_resolution().source, LeadSource::Conflict);
+        }
+
+        #[tokio::test]
+        async fn explicit_pointer_cycle_conflicts() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let roster = vec![selected, other];
+            let mut repo_ref = create_repo_ref_for_maintainer_order(roster.clone(), vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, roster.clone(), Some(other)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_2_KEYS, roster, Some(selected)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path: vec![selected, other, selected],
+                }
+            );
+        }
+
+        #[test]
+        fn pointer_to_a_maintainer_who_explicitly_left_conflicts() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let former = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, former], vec![]);
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_1_KEYS,
+                    vec![
+                        vec!["M".to_string(), former.to_string()],
+                        vec!["m".to_string(), selected.to_string()],
+                    ],
+                ),
+            );
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_2_KEYS,
+                    vec![
+                        vec!["M".to_string(), selected.to_string()],
+                        vec![
+                            "m".to_string(),
+                            former.to_string(),
+                            "1".to_string(),
+                            "2".to_string(),
+                        ],
+                    ],
+                ),
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path: vec![selected, former],
+                }
+            );
         }
     }
 
