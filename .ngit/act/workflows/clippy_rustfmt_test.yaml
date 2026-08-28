@@ -6,6 +6,10 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Incremental state grows quickly and is not useful once workspace
+      # artifacts are removed from the reusable dependency cache below.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
@@ -15,19 +19,41 @@ jobs:
         continue-on-error: true
         uses: nix-community/cache-nix-action@v7
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-      - name: Restore Rust build cache
+          # Reuse older shells only while the locked package universe is the
+          # same, then bound the store before the post-job archive is created.
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/*.nix') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+          gc-max-store-size-linux: 12G
+      - name: Restore Cargo source cache
         continue-on-error: true
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-            target
-          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'flake.lock') }}
+          key: cargo-sources-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            rust-${{ runner.os }}-
+            cargo-sources-${{ runner.os }}-
+      - name: Restore Rust dependency build cache
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+          # Compiled artifacts are compatible only with this exact toolchain
+          # and dependency graph. Source-only changes can reuse the cache.
+          key: rust-target-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', '**/Cargo.toml', 'Cargo.lock') }}
+      - name: Build and root Nix development shell
+        run: >-
+          nix build --out-link "$RUNNER_TEMP/ngit-ci-dev-shell"
+          .#devShells.x86_64-linux.default
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test
+      - name: Prune Rust build cache
+        if: ${{ always() }}
+        run: |
+          if [ -d target ]; then
+            nix develop --command cargo clean --package ngit --package test_harness
+            rm -rf target/debug/incremental target/tmp
+          fi
