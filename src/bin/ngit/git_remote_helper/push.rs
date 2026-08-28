@@ -2480,11 +2480,7 @@ async fn get_proposal_and_revision_root_from_patch_or_pr_or_pr_update(
                 &proposal_or_revision
                     .tags
                     .iter()
-                    .find(|t| {
-                        Nip10Tag::parse(t.as_slice())
-                            .ok()
-                            .is_some_and(|n| n.is_reply())
-                    })
+                    .find(|t| Nip10Tag::parse(t.as_slice()).is_ok_and(|n| n.is_reply()))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "revision-root patch event {} missing reply tag",
@@ -2539,17 +2535,17 @@ async fn get_proposal_or_revision_event(git_repo: &Repo, event: &Event) -> Resul
         return Ok(event.clone());
     }
     let proposal_or_revision_id = EventId::parse(
-        &if let Some(t) = event.tags.iter().find(|t| {
-            Nip10Tag::parse(t.as_slice())
-                .ok()
-                .is_some_and(|n| n.is_root())
-        }) {
+        &if let Some(t) = event
+            .tags
+            .iter()
+            .find(|t| Nip10Tag::parse(t.as_slice()).is_ok_and(|n| n.is_root()))
+        {
             t.clone()
-        } else if let Some(t) = event.tags.iter().find(|t| {
-            Nip10Tag::parse(t.as_slice())
-                .ok()
-                .is_some_and(|n| n.is_reply())
-        }) {
+        } else if let Some(t) = event
+            .tags
+            .iter()
+            .find(|t| Nip10Tag::parse(t.as_slice()).is_ok_and(|n| n.is_reply()))
+        {
             t.clone()
         } else {
             Tag::event(event.id)

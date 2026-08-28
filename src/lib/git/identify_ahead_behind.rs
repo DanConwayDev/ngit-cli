@@ -80,7 +80,7 @@ mod tests {
             identify_ahead_behind(&git_repo, &Some(branch_name.to_string()), &None)
                 .unwrap_err()
                 .to_string(),
-            format!("failed to find from_branch '{}'", &branch_name),
+            format!("failed to find from_branch '{}'", branch_name),
         );
         Ok(())
     }
@@ -96,7 +96,7 @@ mod tests {
             identify_ahead_behind(&git_repo, &None, &Some(branch_name.to_string()))
                 .unwrap_err()
                 .to_string(),
-            format!("failed to find to_branch '{}'", &branch_name),
+            format!("failed to find to_branch '{}'", branch_name),
         );
         Ok(())
     }

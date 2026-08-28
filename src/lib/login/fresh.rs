@@ -904,18 +904,12 @@ async fn save_to_git_config(
 
         eprintln!("Error: {error:?}");
         match signer_info {
-            SignerInfo::Nsec {
-                nsec,
-                password: _,
-                npub: _,
-                ..
-            } => {
+            SignerInfo::Nsec { nsec, .. } => {
                 eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
             }
             SignerInfo::Bunker {
                 bunker_uri,
                 bunker_app_key,
-                npub: _,
                 ..
             } => {
                 eprintln!("consider manually setting git config as follows:");
@@ -1247,12 +1241,7 @@ fn protect_secrets(
         return Ok(signer_info.clone());
     }
     let stored = match signer_info {
-        SignerInfo::Nsec {
-            nsec,
-            password,
-            npub: _,
-            ..
-        } => {
+        SignerInfo::Nsec { nsec, password, .. } => {
             let Ok(keys) = nostr::prelude::Keys::parse(nsec) else {
                 return Ok(signer_info.clone());
             };

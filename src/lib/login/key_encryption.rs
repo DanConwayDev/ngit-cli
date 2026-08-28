@@ -64,8 +64,12 @@ mod tests {
         let decrypted_key = decrypt_key(TEST_KEY_1_ENCRYPTED, TEST_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", TEST_KEY_1_KEYS.secret_key().to_bech32().unwrap()),
-            format!("{}", decrypted_key.secret_key().to_bech32().unwrap()),
+            TEST_KEY_1_KEYS
+                .secret_key()
+                .to_bech32()
+                .unwrap()
+                .to_string(),
+            decrypted_key.secret_key().to_bech32().unwrap().to_string(),
         );
         Ok(())
     }
@@ -76,8 +80,12 @@ mod tests {
         let decrypted_key = decrypt_key(TEST_KEY_1_ENCRYPTED_WEAK, TEST_WEAK_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", TEST_KEY_1_KEYS.secret_key().to_bech32().unwrap()),
-            format!("{}", decrypted_key.secret_key().to_bech32().unwrap()),
+            TEST_KEY_1_KEYS
+                .secret_key()
+                .to_bech32()
+                .unwrap()
+                .to_string(),
+            decrypted_key.secret_key().to_bech32().unwrap().to_string(),
         );
         Ok(())
     }
@@ -89,8 +97,8 @@ mod tests {
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", key.secret_key().to_bech32().unwrap()),
-            format!("{}", newkey.secret_key().to_bech32().unwrap()),
+            key.secret_key().to_bech32().unwrap().to_string(),
+            newkey.secret_key().to_bech32().unwrap().to_string(),
         );
         Ok(())
     }
@@ -102,8 +110,8 @@ mod tests {
         let newkey = decrypt_key(s.as_str(), TEST_PASSWORD)?;
 
         assert_eq!(
-            format!("{}", key.secret_key().to_bech32().unwrap()),
-            format!("{}", newkey.secret_key().to_bech32().unwrap()),
+            key.secret_key().to_bech32().unwrap().to_string(),
+            newkey.secret_key().to_bech32().unwrap().to_string(),
         );
         Ok(())
     }

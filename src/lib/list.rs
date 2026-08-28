@@ -224,7 +224,7 @@ pub async fn list_from_remotes(
                                     .with_prefix(
                                         console::style(format!(
                                             "{: <server_column_width$} connecting",
-                                            &server_name
+                                            server_name
                                         ))
                                         .for_stderr()
                                         .yellow()
@@ -246,7 +246,7 @@ pub async fn list_from_remotes(
                                 .with_prefix(
                                     console::style(format!(
                                         "{: <server_column_width$} connecting",
-                                        &server_name
+                                        server_name
                                     ))
                                     .for_stderr()
                                     .yellow()
@@ -414,7 +414,7 @@ pub async fn list_from_remotes(
                         if let Some(pb) = pb {
                             pb.set_style(git_server_pb_after_style(is_success));
                             pb.set_prefix(
-                                console::style(format!("{: <server_column_width$}", &server_name))
+                                console::style(format!("{: <server_column_width$}", server_name))
                                     .for_stderr()
                                     .dim()
                                     .to_string(),

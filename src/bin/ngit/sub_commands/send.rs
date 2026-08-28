@@ -686,15 +686,13 @@ pub async fn launch(
             println!(
                 "{}",
                 dim.apply_to(format!(
-                    "view in gitworkshop.dev: https://gitworkshop.dev/{}",
-                    &event_bech32,
+                    "view in gitworkshop.dev: https://gitworkshop.dev/{event_bech32}",
                 ))
             );
             println!(
                 "{}",
                 dim.apply_to(format!(
-                    "view in another client:  https://njump.me/{}",
-                    &event_bech32,
+                    "view in another client:  https://njump.me/{event_bech32}",
                 ))
             );
         }

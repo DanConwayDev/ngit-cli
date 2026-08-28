@@ -892,7 +892,6 @@ pub fn canonicalize_blossom_server_root(value: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Read as _,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -901,7 +900,7 @@ mod tests {
     };
 
     use anyhow::{Result, anyhow, bail};
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::engine::general_purpose::STANDARD;
     use nostr::prelude::{
         Event, EventBuilder, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},

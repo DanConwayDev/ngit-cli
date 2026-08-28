@@ -12,76 +12,69 @@ keywords = ["nostr", "git"]
 categories = ["command-line-utilities","development-tools"]
 
 [dependencies]
-anyhow = "1.0.98"
-async-trait = "0.1.88"
+anyhow = "1.0.104"
+async-trait = "0.1.92"
 auth-git2 = "0.6.0"
 # `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its
 # NIP-34 API still takes `bitcoin_hashes::sha1::Hash`. Keep this in step with
 # the version `nostr` depends on so the two `Sha1Hash` types stay identical.
 # `nostr` 0.45.0 moved from `bitcoin_hashes` 0.14 to 1.x.
-bitcoin_hashes = "1.1"
-base64 = "0.22.1"
+bitcoin_hashes = "1.2"
+base64 = "0.23.1"
 bech32 = "0.12.0"
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = "0.11.0"
 chrono = "0.4"
-clap = { version = "4.6.1", features = ["derive"] }
-console = "0.16.3"
+clap = { version = "4.6.6", features = ["derive"] }
+console = "0.16.4"
 crossterm = "0.29.0"
 dialoguer = "0.12.0"
 directories = "6.0.0"
-futures = "0.3.31"
+futures = "0.3.34"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
-indicatif = "0.18.0"
-# Backend features must be listed explicitly: `keyring`'s default feature set
-# is empty, which compiles to an in-memory mock store rather than failing the
-# build. These four arrived via feature unification from `nostr-keyring` until
-# that wrapper was inlined into `src/lib/login/credential_store.rs`; dropping
-# them would silently demote every user to ngit's file store.
-keyring = { version = "3.6.3", features = [
-    "apple-native",
-    "linux-native",
-    "linux-native-sync-persistent",
-    "windows-native",
-] }
+indicatif = "0.18.6"
+# `keyring` 4's default `v1` feature provides persistent native stores on
+# macOS, Windows, and Unix (Secret Service). Keep defaults enabled: disabling
+# them makes `keyring` reject the build instead of selecting a real store.
+keyring = "4.1.6"
 mailparse = "0.16.1"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.
-nostr = { version = "0.45.0", features = ["nip44", "nip49"] }
-nostr-connect = "0.45.0"
-nostr-database = "0.45.0"
-nostr-lmdb = "0.45.0"
-nostr-memory = "0.45.0"
-nostr-sdk = "0.45.0"
-passwords = "3.1.16"
+nostr = { version = "0.45.3", features = ["nip44", "nip49"] }
+nostr-connect = "0.45.1"
+nostr-database = "0.45.1"
+nostr-lmdb = "0.45.2"
+nostr-memory = "0.45.1"
+nostr-sdk = "0.45.2"
+passwords = "3.1.18"
 qrcode = { version = "0.14.1", default-features = false }
-reqwest = { version = "0.12.28", features = ["json", "stream"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 scrypt = "0.12.0"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 serde_yaml = "0.9.34"
-tempfile = "3.20.0"
-tokio = { version = "1.52.3", features = ["full"] }
-tokio-util = { version = "0.7.18", features = ["io"] }
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
 urlencoding = "2.1.3"
-zip = { version = "6.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-zeroize = "1.8.1"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-assert_cmd = "2.0.17"
-mockall = "0.14.0"
-once_cell = "1.21.3"
+assert_cmd = "2.2.2"
+mockall = "0.15.0"
+once_cell = "1.21.4"
 rstest = "0.26"
-serial_test = "3.4.0"
+serial_test = "4.0.1"
 test_harness = { path = "test_harness" }
 # `test-util` is not part of tokio's `full` feature. It provides the paused
 # test clock the CI identity-resolution deadline is asserted on, which is how
 # that test measures a five-second budget without any wall-clock time passing.
 # Resolver 2 keeps a dev-dependency feature out of normal builds.
-tokio = { version = "1.52.3", features = ["test-util"] }
+tokio = { version = "1.53.1", features = ["test-util"] }
 
 [workspace]
 members = [

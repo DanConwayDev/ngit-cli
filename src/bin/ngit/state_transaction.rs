@@ -653,9 +653,8 @@ fn eligible_git_servers(
             // outright — counts as rejection, because pushing anyway
             // would create git data whose state the relay will never
             // announce.
-            let relay_accepted = format_grasp_server_url_as_relay_url(&git_server_url)
-                .ok()
-                .is_some_and(|relay_url| {
+            let relay_accepted =
+                format_grasp_server_url_as_relay_url(&git_server_url).is_ok_and(|relay_url| {
                     initial_state_relay_results
                         .iter()
                         .any(|(url, succeeded)| *succeeded && relay_urls_match(url, &relay_url))

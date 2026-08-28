@@ -73,9 +73,7 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
             let nbunksec = login::nbunksec::encode(&bunker_uri, &bunker_app_key)?;
             export_interactive(&logged_in_msg, &npub, "nbunksec", &nbunksec)
         }
-        SignerInfo::Nsec {
-            nsec, password: _, ..
-        } => export_interactive(&logged_in_msg, &npub, "nsec", &nsec),
+        SignerInfo::Nsec { nsec, .. } => export_interactive(&logged_in_msg, &npub, "nsec", &nsec),
         SignerInfo::Selection { .. } => {
             anyhow::bail!("internal error: unresolved signer selection during key export")
         }

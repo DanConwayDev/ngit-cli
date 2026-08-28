@@ -489,7 +489,7 @@ impl CloneUrl {
                 ServerProtocol::Unspecified => "https://",
                 _ => bail!("unsupported protocol"),
             },
-            &self.host
+            self.host
         ))
         .context("Failed to parse base URL")?; // Start with the specified scheme
 

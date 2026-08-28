@@ -6,19 +6,19 @@ publish = false
 description = "Integration test harness for ngit."
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = "1.0.104"
 # Kept in step with the root crate: the CI fixture builder hashes workflow
 # file content for the `w` tag with the same SHA-256 implementation ngit
 # verifies it against.
-bitcoin_hashes = "1.1"
+bitcoin_hashes = "1.2"
 git2 = "0.21.0"
 http-body-util = "0.1"
-hyper = { version = "1.4", features = ["full"] }
+hyper = { version = "1.11", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 # Kept in step with the root crate — see the note in ../Cargo.toml.
-nostr = "0.45.0"
+nostr = "0.45.3"
 # `nostr-relay-builder` was merged into `nostr-sdk` behind the `local-relay`
 # feature; `LocalRelay` now lives at `nostr_sdk::local_relay`.
-nostr-sdk = { version = "0.45.0", features = ["local-relay"] }
-tempfile = "3.10"
-tokio = { version = "1.52.3", features = ["full"] }
+nostr-sdk = { version = "0.45.2", features = ["local-relay"] }
+tempfile = "3.27"
+tokio = { version = "1.53.1", features = ["full"] }

@@ -1093,8 +1093,8 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                         format!(
                             "manually run `git pull` on '{main_branch_name}' and select proposal again"
                         ),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
+                        "apply to current branch with `git am`".to_string(),
+                        "download to ./patches".to_string(),
                         "back".to_string(),
                     ],
                 ))? {
@@ -1137,8 +1137,8 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                     proposal_behind_main_len,
                 ),
-                format!("apply to current branch with `git am`"),
-                format!("download to ./patches"),
+                "apply to current branch with `git am`".to_string(),
+                "download to ./patches".to_string(),
                 "back".to_string(),
             ]))? {
                 0 => {
@@ -1194,8 +1194,8 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                             most_recent_proposal_patch_chain_or_pr_or_pr_update.len(),
                             proposal_behind_main_len,
                         ),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
+                        "apply to current branch with `git am`".to_string(),
+                        "download to ./patches".to_string(),
                         "back".to_string(),
                     ]),
             )? {
@@ -1240,9 +1240,9 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 PromptChoiceParms::default()
                     .with_default(0)
                     .with_choices(vec![
-                        format!("checkout proposal branch and apply {} appendments", &index,),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
+                        format!("checkout proposal branch and apply {} appendments", index,),
+                        "apply to current branch with `git am`".to_string(),
+                        "download to ./patches".to_string(),
                         "back".to_string(),
                     ]),
             )? {
@@ -1298,10 +1298,10 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 PromptChoiceParms::default()
                     .with_default(0)
                     .with_choices(vec![
-                        format!("checkout and overwrite existing proposal branch"),
-                        format!("checkout existing outdated proposal branch"),
-                        format!("apply to current branch with `git am`"),
-                        format!("download to ./patches"),
+                        "checkout and overwrite existing proposal branch".to_string(),
+                        "checkout existing outdated proposal branch".to_string(),
+                        "apply to current branch with `git am`".to_string(),
+                        "download to ./patches".to_string(),
                         "back".to_string(),
                     ]),
             )? {
@@ -1435,10 +1435,10 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
             PromptChoiceParms::default()
                 .with_default(0)
                 .with_choices(vec![
-                    format!("checkout local branch with unpublished changes"),
-                    format!("discard unpublished changes and checkout new revision",),
-                    format!("apply to current branch with `git am`"),
-                    format!("download to ./patches"),
+                    "checkout local branch with unpublished changes".to_string(),
+                    "discard unpublished changes and checkout new revision".to_string(),
+                    "apply to current branch with `git am`".to_string(),
+                    "download to ./patches".to_string(),
                     "back".to_string(),
                 ]),
         )? {
@@ -1535,7 +1535,7 @@ fn save_patches_to_dir(mut patches: Vec<nostr::prelude::Event>, git_repo: &Repo)
     for (i, patch) in patches.iter().enumerate() {
         let path = path.join(format!(
             "{}-{:0>4}-{}.patch",
-            &id,
+            id,
             i.add(&1),
             commit_msg_from_patch_oneliner(patch)?
         ));

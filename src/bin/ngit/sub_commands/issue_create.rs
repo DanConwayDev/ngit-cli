@@ -146,8 +146,7 @@ pub async fn launch(
     println!(
         "{}",
         dim.apply_to(format!(
-            "view in gitworkshop.dev: https://gitworkshop.dev/{}",
-            &event_bech32,
+            "view in gitworkshop.dev: https://gitworkshop.dev/{event_bech32}",
         ))
     );
     Ok(())

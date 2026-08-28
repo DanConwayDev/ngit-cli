@@ -22,7 +22,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
-        ngitGraspRevision = "ba25b3a4630a20171742b4e148d4db51ae6260a1";
+        ngitGraspRevision = "bce30ef039ecbc8c2371008e1bd00eedd79bbccf";
         # The pinned repository contains Gitlinks without .gitmodules entries.
         # Nix 2.34 and 2.35 disagree about whether their empty directories are
         # retained in a flake Git input, producing different NAR hashes for the
@@ -30,12 +30,12 @@
         ngitGraspSource = pkgs.fetchgit {
           url = "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
           rev = ngitGraspRevision;
-          hash = "sha256-Zrd8V/b2cu7868uu4XodZBzJlgf2nwOTy4GOnfbQE38=";
+          hash = "sha256-oWXeMPoT1QmP2u5NB8pZWdTy8GMoDvqSrgS/vmOsicc=";
           fetchSubmodules = false;
         };
         ngit-grasp-pkg = pkgs.rustPlatform.buildRustPackage {
           pname = "ngit-grasp";
-          version = "2.1.2";
+          version = "3.0.0";
           src = ngitGraspSource;
           NGIT_BUILD_REVISION = ngitGraspRevision;
           cargoLock.lockFile = "${ngitGraspSource}/Cargo.lock";
@@ -47,7 +47,7 @@
           # exercises the resulting binary instead.
           doCheck = false;
         };
-        buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.isLinux [
+        buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           buzz.packages.${system}.buzz-relay
           pkgs.postgresql_17
           pkgs.redis
@@ -61,7 +61,7 @@
             # ideally this wouldn't be pinned to a specific nightly version but
             # selectLatestNightlyWith isn't support with mixed toolchains
             # https://github.com/oxalica/rust-overlay/issues/136
-            (lib.hiPrio rust-bin.nightly."2026-06-11".rustfmt)
+            (lib.hiPrio rust-bin.nightly."2026-08-27".rustfmt)
             # (rust-bin.stable.latest.override { extensions = [ "rust-analyzer" ]; })
             rust-bin.stable.latest.default
           ];
@@ -85,7 +85,7 @@
             # Point the test harness at the exact pinned ngit-grasp binary.
             export NGIT_GRASP_BIN=${ngit-grasp-pkg}/bin/ngit-grasp
 
-          '' + lib.optionalString stdenv.isLinux ''
+          '' + lib.optionalString stdenv.hostPlatform.isLinux ''
             # Run the Buzz integration test against the exact Nix-built
             # binaries from the pinned PR revision.
             export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-relay}/bin/buzz-relay

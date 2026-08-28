@@ -714,11 +714,11 @@ impl RepoActions for Repo {
     ) -> Result<String> {
         let c = self
             .git_repo
-            .find_commit(Oid::from_bytes(commit.as_byte_array()).context(format!(
-                "failed to convert commit_id format for {}",
-                &commit
-            ))?)
-            .context(format!("failed to find commit {}", &commit))?;
+            .find_commit(
+                Oid::from_bytes(commit.as_byte_array())
+                    .context(format!("failed to convert commit_id format for {}", commit))?,
+            )
+            .context(format!("failed to find commit {}", commit))?;
         let mut options = git2::EmailCreateOptions::default();
         // Explicitly set a/b prefixes so that the user's `diff.noprefix` git
         // config (or any other prefix override) does not affect the generated
@@ -729,7 +729,7 @@ impl RepoActions for Repo {
             options.subject_prefix(format!("PATCH {n}/{total}"));
         }
         let patch = git2::Email::from_commit(&c, &mut options)
-            .context(format!("failed to create patch from commit {}", &commit))?;
+            .context(format!("failed to create patch from commit {}", commit))?;
 
         Ok(std::str::from_utf8(patch.as_slice())
             .context("patch content could not be converted to a utf8 string")?
@@ -761,10 +761,8 @@ impl RepoActions for Repo {
     }
 
     fn extract_commit_pgp_signature(&self, commit: &Sha1Hash) -> Result<String> {
-        let oid = Oid::from_bytes(commit.as_byte_array()).context(format!(
-            "failed to convert commit_id format for {}",
-            &commit
-        ))?;
+        let oid = Oid::from_bytes(commit.as_byte_array())
+            .context(format!("failed to convert commit_id format for {}", commit))?;
 
         let (sign, _data) = self
             .git_repo
@@ -2770,7 +2768,7 @@ index ce01362..a21e91c 100644\n\
             let test_repo = GitTestRepo::default();
             test_repo.populate()?;
             let git_repo = Repo::from_path(&test_repo.dir)?;
-            println!("{:?}", &patch_event);
+            println!("{:?}", patch_event);
             git_repo.create_commit_from_patch(&patch_event, None)?;
             let commit_id = tag_value(&patch_event, "commit")?;
             // does commit with id exist?

@@ -922,7 +922,7 @@ impl Connect for Client {
                                 .with_prefix(
                                     format!(
                                         "{: <relay_column_width$} connecting",
-                                        &relay_url
+                                        relay_url
                                     )
                                     .to_string(),
                                 )
@@ -951,7 +951,7 @@ impl Connect for Client {
                                 pb.set_prefix(
                                     Style::new()
                                         .color256(247)
-                                        .apply_to(format!("{: <relay_column_width$}", &relay_url))
+                                        .apply_to(format!("{: <relay_column_width$}", relay_url))
                                         .to_string(),
                                 );
                             }
@@ -1177,7 +1177,7 @@ impl Connect for Client {
                 pb.set_prefix(
                     dim.apply_to(format!(
                         "{: <relay_column_width$} {}",
-                        &relay_url,
+                        relay_url,
                         if report.to_string().is_empty() {
                             "fetching".to_string()
                         } else {
@@ -1269,7 +1269,7 @@ impl Connect for Client {
             pb.set_style(pb_after_style(true));
             pb.set_prefix(format!(
                 "{} {}",
-                dim.apply_to(format!("{: <relay_column_width$}", &relay_url))
+                dim.apply_to(format!("{: <relay_column_width$}", relay_url))
                     .for_stderr(),
                 if report.to_string().is_empty() {
                     "no new events".to_string()

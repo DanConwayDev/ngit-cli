@@ -1780,7 +1780,7 @@ impl Harness {
         // announcement. The "-coord-only" suffix mirrors legacy's
         // `-consider-it-random` shape so anyone reading the d tag in a
         // test failure immediately sees this came from a State B fixture.
-        let coordinate_identifier = format!("{}-coord-only", &state_a.root_oid);
+        let coordinate_identifier = format!("{}-coord-only", state_a.root_oid);
 
         // Default relay is reachable (so ngit's lookup actually
         // completes its REQ rather than hanging on a dead connection)
@@ -2138,7 +2138,7 @@ impl Harness {
         maintainers_hex: &[String],
         identifier_suffix: &str,
     ) -> Result<(Event, String, String, String, String, Vec<String>, String)> {
-        let coordinate_identifier = format!("{}-{}", &state_a.root_oid, identifier_suffix);
+        let coordinate_identifier = format!("{}-{}", state_a.root_oid, identifier_suffix);
 
         // Coordinate points at the *selected maintainer*, not the
         // publisher — that is what makes the next `ngit init` route
