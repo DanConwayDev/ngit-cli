@@ -869,13 +869,6 @@ fn resolve_signer_for_npub(
     Ok(None)
 }
 
-/// Resolve a command-line signer selector to its canonical public key without
-/// loading secret material or contacting a signer.
-pub fn resolve_selector_public_key(git_repo: &Option<&Repo>, selector: &str) -> Result<PublicKey> {
-    let npub = resolve_selector_npub(git_repo, selector)?;
-    PublicKey::parse(&npub).context("selected signer has an invalid npub")
-}
-
 fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
     if selector.starts_with("npub1") {
         return PublicKey::parse(selector)

@@ -3,7 +3,7 @@ use ngit::{
     agent_guidance,
     client::get_repo_ref_from_cache,
     git::{Repo, RepoActions},
-    login::{SignerInfo, existing::resolve_selector_public_key, get_likely_logged_in_user},
+    login::{SignerInfo, existing::resolve_selection, get_likely_logged_in_user},
 };
 use serde::Serialize;
 
@@ -208,7 +208,11 @@ async fn resolve_account(
     auth: SignerParams<'_>,
 ) -> Result<Option<nostr::prelude::PublicKey>> {
     if let Some(SignerInfo::Selection { selector }) = auth.info {
-        return resolve_selector_public_key(&Some(&context.repo), selector).map(Some);
+        let selected =
+            resolve_selection(&Some(&context.repo), selector, auth.password, true).await?;
+        return nostr::prelude::PublicKey::parse(&selected.npub)
+            .context("selected signer has an invalid npub")
+            .map(Some);
     }
     get_likely_logged_in_user(&context.root).await
 }
@@ -271,6 +275,8 @@ mod tests {
             false,
         )
         .unwrap();
+        repo.save_git_config_item("nostr.nsec", &selected.secret_key().to_secret_hex(), false)
+            .unwrap();
         let context = SkillContext { repo, root };
         let info = Some(SignerInfo::Selection {
             selector: "selected".to_string(),
