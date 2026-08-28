@@ -1,10 +1,10 @@
 # Maintainer Model
 
-> **Proposal:** this document defines the intended maintainer model and public
-> CLI. It differs from both the pre-role model and parts of the current
-> indexed-role implementation. The two preceding revisions of this file record
-> those earlier snapshots. The next-major delivery boundary is recorded in the
-> [implementation plan](maintainer-model-implementation-plan.md).
+> **Status:** this is the desired final maintainer model and public API. The
+> current implementation does not yet provide every client protection and
+> edge-case workflow described here; remaining work is tracked in
+> [follow-up actions](maintainer-model-follow-up-actions.md). The two preceding
+> revisions of this file record the pre-role and initial indexed-role models.
 
 This document has three layers:
 
