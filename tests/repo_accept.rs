@@ -28,6 +28,18 @@ use test_harness::{
     tag_values_multiple,
 };
 
+fn role_entries(event: &Event, letter: &str, subject: PublicKey) -> Vec<Vec<String>> {
+    let subject = subject.to_string();
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| {
+            tag.first().map(String::as_str) == Some(letter) && tag.get(1) == Some(&subject)
+        })
+        .collect()
+}
+
 /// Publish a repo with one invited (announcement-less) co-maintainer, clone
 /// it, and log the clone in as that co-maintainer.
 async fn arrange_invited_clone(
@@ -371,13 +383,12 @@ async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
 }
 
 /// Under a wire-asserted lead, a non-lead accepter follows NIP-34's
-/// SHOULD: their acceptance announcement lists only themselves (`m`) and
-/// the lead (re-asserted as `M`) — not the other co-maintainers — so the
-/// lead can change or remove co-maintainers unilaterally. The arrange uses
-/// a real `ngit init --lead-maintainer <self>` announcement listing the
-/// lead, another co-maintainer, and the invited accepter.
+/// SHOULD: their acceptance announcement actively lists only themselves
+/// (`m`) and the lead (re-asserted as `M`). Other roster history is retained
+/// with `defer`, so the lead can change or remove co-maintainers
+/// unilaterally.
 #[tokio::test]
-async fn accept_under_lead_lists_only_self_and_lead() -> Result<()> {
+async fn accept_under_lead_activates_self_and_lead_and_defers_others() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -433,16 +444,19 @@ async fn accept_under_lead_lists_only_self_and_lead() -> Result<()> {
         .find(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
         .context("no acceptance announcement was published on repo accept")?;
 
-    assert_eq!(
-        tag_values_multiple(announcement, "M"),
-        vec![lead_pubkey.to_string()],
-        "the acceptance must re-assert the wire lead as M",
-    );
-    assert_eq!(
-        tag_values_multiple(announcement, "m"),
-        vec![invited_pubkey.to_string()],
-        "a non-lead accepter lists only themselves as m",
-    );
+    let lead_entries = role_entries(announcement, "M", lead_pubkey);
+    assert_eq!(lead_entries.len(), 1);
+    assert_eq!(lead_entries[0].len(), 3, "the lead role must be active");
+    assert!(lead_entries[0][2].parse::<u64>().is_ok());
+
+    let self_entries = role_entries(announcement, "m", invited_pubkey);
+    assert_eq!(self_entries.len(), 1);
+    assert_eq!(self_entries[0].len(), 3, "the self role must be active");
+    assert!(self_entries[0][2].parse::<u64>().is_ok());
+
+    let other_entries = role_entries(announcement, "m", other_co_pubkey);
+    assert_eq!(other_entries.len(), 1);
+    assert_eq!(other_entries[0].last().map(String::as_str), Some("defer"));
     let maintainers = tag_values(announcement, "maintainers");
     assert_eq!(
         {
@@ -457,14 +471,6 @@ async fn accept_under_lead_lists_only_self_and_lead() -> Result<()> {
         },
         "the degradation tag carries exactly [me, lead]",
     );
-    assert!(
-        !announcement
-            .tags
-            .iter()
-            .any(|t| t.as_slice().contains(&other_co_pubkey.to_string())),
-        "the other co-maintainer must not appear anywhere on the acceptance",
-    );
-
     Ok(())
 }
 

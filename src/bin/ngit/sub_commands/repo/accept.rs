@@ -3,7 +3,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ngit::{
     accept_maintainership::{
-        accept_maintainership_with_defaults, default_acceptance_maintainers, wait_for_grasp_servers,
+        accept_maintainership_with_defaults, acceptance_lead, default_acceptance_maintainers,
+        wait_for_grasp_servers,
     },
     cli_interactor::cli_error,
     client::{Params, get_repo_ref_from_cache, send_events},
@@ -12,7 +13,7 @@ use ngit::{
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
-use nostr::prelude::{RelayUrl, ToBech32, nip19::Nip19Coordinate};
+use nostr::prelude::{RelayUrl, Timestamp, ToBech32, nip19::Nip19Coordinate};
 
 use crate::{
     cli::SignerParams,
@@ -240,10 +241,10 @@ async fn accept_with_grasp_servers(
     // per NIP-34 the acceptance re-asserts the repository's wire lead as
     // `M`; the guard is defensive — a lead reported by lead_maintainer()
     // always ends up in the default listing
-    let lead = repo_ref
-        .lead_maintainer()
-        .filter(|lead| maintainers.contains(lead));
+    let lead = acceptance_lead(repo_ref, *my_pubkey).filter(|lead| maintainers.contains(lead));
 
+    let now = Timestamp::now().as_secs();
+    let role_tags = repo_ref.role_history_for_acceptance(my_pubkey, &maintainers, lead, now);
     let my_repo_ref = RepoRef {
         identifier: identifier.clone(),
         name,
@@ -262,7 +263,7 @@ async fn accept_with_grasp_servers(
         events: std::collections::HashMap::new(),
         nostr_git_url: None,
         extra_tags: vec![],
-        role_tags: vec![],
+        role_tags,
         moderators: vec![],
         lead,
     };

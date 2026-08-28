@@ -21,7 +21,7 @@ use std::{
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use nostr::prelude::{Event, PublicKey, RelayUrl};
+use nostr::prelude::{Event, PublicKey, RelayUrl, Timestamp};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -54,6 +54,17 @@ pub struct MaintainerAcceptance {
     private_signer: Option<Arc<NgitSigner>>,
 }
 
+/// Lead relationship an acceptance may safely acknowledge.
+///
+/// A resolved lead is preferred. A pending direct `M` may be completed only
+/// by that named pubkey accepting; an ordinary invitee must not confirm an
+/// unaccepted third-party lead.
+pub fn acceptance_lead(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Option<PublicKey> {
+    repo_ref
+        .lead_maintainer()
+        .or_else(|| repo_ref.lead.filter(|lead| *lead == my_pubkey))
+}
+
 /// Maintainers to list when accepting without an explicit relationship choice.
 ///
 /// Follows NIP-34's SHOULD: when `M` is used, `m` and `o` authors list only
@@ -66,7 +77,7 @@ pub struct MaintainerAcceptance {
 /// sole confirmed maintainer, retaining the selected maintainer for
 /// backwards-compatible, non-interactive operation on ambiguous graphs.
 pub fn default_acceptance_maintainers(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Vec<PublicKey> {
-    let lead = repo_ref.lead_maintainer();
+    let lead = acceptance_lead(repo_ref, my_pubkey);
     if lead == Some(my_pubkey) {
         let mut maintainers = vec![my_pubkey];
         for maintainer in &repo_ref.maintainers {
@@ -168,12 +179,16 @@ pub async fn build_maintainership_acceptance_with_defaults(
     // per NIP-34 the acceptance re-asserts the repository's wire lead as
     // `M`; the guard is defensive — a lead reported by lead_maintainer()
     // always ends up in the default listing
-    let lead = repo_ref
-        .lead_maintainer()
-        .filter(|lead| maintainers.contains(lead));
+    let lead = acceptance_lead(repo_ref, *my_pubkey).filter(|lead| maintainers.contains(lead));
 
     // --- Step 4: build RepoRef ---
 
+    let role_tags = repo_ref.role_history_for_acceptance(
+        my_pubkey,
+        &maintainers,
+        lead,
+        Timestamp::now().as_secs(),
+    );
     let my_repo_ref = RepoRef {
         identifier: identifier.clone(),
         name: name.clone(),
@@ -192,7 +207,7 @@ pub async fn build_maintainership_acceptance_with_defaults(
         events: HashMap::new(),
         nostr_git_url: None,
         extra_tags: vec![],
-        role_tags: vec![],
+        role_tags,
         moderators: vec![],
         lead,
     };

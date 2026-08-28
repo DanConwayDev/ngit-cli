@@ -892,6 +892,68 @@ impl RepoRef {
         tags
     }
 
+    /// Build the accepting maintainer's first indexed role view.
+    ///
+    /// The relationships the accepter confirms start at `now`. Other role
+    /// records from the resolved lead (or selected maintainer when there is
+    /// no lead) are retained as history, but a currently-active record ends
+    /// in `defer` so this announcement does not assign that third party.
+    pub fn role_history_for_acceptance(
+        &self,
+        author: &PublicKey,
+        maintainers: &[PublicKey],
+        lead: Option<PublicKey>,
+        now: u64,
+    ) -> Vec<Tag> {
+        let history_author = lead.unwrap_or(self.selected_maintainer);
+        let source = self
+            .events
+            .values()
+            .find(|event| event.pubkey == history_author)
+            .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
+        let source_history = source
+            .as_ref()
+            .map_or_else(Vec::new, RepoRef::role_history_for_republish);
+
+        let active_subjects: HashSet<String> =
+            maintainers.iter().map(PublicKey::to_string).collect();
+        debug_assert!(maintainers.contains(author));
+        let mut history = Vec::new();
+        for tag in source_history {
+            let slice = tag.as_slice();
+            let Some(name @ ("M" | "m" | "o")) = slice.first().map(String::as_str) else {
+                continue;
+            };
+            let Some(subject) = slice.get(1) else {
+                continue;
+            };
+            if active_subjects.contains(subject) && name != "o" {
+                continue;
+            }
+            let mut parts = slice.to_vec();
+            if role_entry_is_active(&parts) {
+                if parts.len().is_multiple_of(2) {
+                    parts.push("0".to_string());
+                }
+                parts.push("defer".to_string());
+            }
+            history.push(Tag::parse(parts).unwrap());
+        }
+
+        for maintainer in maintainers {
+            let letter = if lead == Some(*maintainer) { "M" } else { "m" };
+            history.push(
+                Tag::parse(vec![
+                    letter.to_string(),
+                    maintainer.to_string(),
+                    now.to_string(),
+                ])
+                .unwrap(),
+            );
+        }
+        history
+    }
+
     /// End the author's own self-role in this announcement, per NIP-34's "a
     /// member MAY leave by ending their self-role": every active role entry
     /// naming `author` — `M`, `m` and `o` alike — is closed with `now` as an
@@ -4656,6 +4718,50 @@ mod tests {
                     vec![
                         tag(&["m", &author.to_string()]),
                         tag(&["m", &dropped.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+        }
+
+        mod acceptance_history {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            #[test]
+            fn confirms_self_and_lead_while_deferring_other_current_roles() {
+                let lead_keys = nostr::prelude::Keys::generate();
+                let lead = lead_keys.public_key();
+                let accepter = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &lead_keys,
+                    vec![
+                        tag(&["M", &lead.to_string(), "100"]),
+                        tag(&["m", &accepter.to_string(), "110"]),
+                        tag(&["m", &other.to_string(), "120"]),
+                        tag(&["m", &former.to_string(), "0", "90"]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                );
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+
+                let history = parsed
+                    .role_history_for_acceptance(&accepter, &[accepter, lead], Some(lead), NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    history,
+                    vec![
+                        tag(&["m", &other.to_string(), "120", "defer"]),
+                        tag(&["m", &former.to_string(), "0", "90"]),
+                        tag(&["o", &moderator.to_string(), "0", "defer"]),
+                        tag(&["m", &accepter.to_string(), &NOW.to_string()]),
+                        tag(&["M", &lead.to_string(), &NOW.to_string()]),
                     ],
                 );
             }
