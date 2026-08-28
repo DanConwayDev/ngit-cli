@@ -2,10 +2,10 @@
 //! stranded in a GRASP server's purgatory after their local branch names are
 //! deleted.
 //!
-//! The repair crosses the ngit/ngit-grasp boundary. `ngit init` must re-sign
-//! the cached snapshot, source deleted branches directly from their object
-//! IDs, and establish the candidate through the shared state transaction.
-//! Once ngit-grasp promotes that candidate it prunes superseded,
+//! The repair crosses the ngit/ngit-grasp boundary. `ngit repo edit` must
+//! re-sign the cached snapshot, source deleted branches directly from their
+//! object IDs, and establish the candidate through the shared state
+//! transaction. Once ngit-grasp promotes that candidate it prunes superseded,
 //! unreconstructable same-author states. The repository must then support
 //! ordinary updates, deletions, and a fresh clone without manual branch
 //! recreation.
@@ -22,7 +22,7 @@ const DISPLAY_NAME: &str = "Init stale purgatory recovery";
 const STATE_KIND: Kind = Kind::Custom(30618);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn init_recovers_deleted_state_refs_and_leaves_repo_usable() -> Result<()> {
+async fn repo_edit_recovers_deleted_state_refs_and_leaves_repo_usable() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -107,15 +107,14 @@ async fn init_recovers_deleted_state_refs_and_leaves_repo_usable() -> Result<()>
     assert_local_topics_absent(&publisher)?;
 
     // This is the operation that required manual branch recreation in the
-    // original report. Current init recovers both refs from their raw OIDs and
-    // does not recreate the local branch names.
-    let init = publisher
+    // original report. The repository edit recovers both refs from their raw
+    // OIDs and does not recreate the local branch names.
+    let edit = publisher
         .ngit([
-            "init",
+            "repo",
+            "edit",
             "--name",
             DISPLAY_NAME,
-            "--identifier",
-            IDENTIFIER,
             "--grasp-server",
             &grasp_url,
             "--relay",
@@ -124,8 +123,8 @@ async fn init_recovers_deleted_state_refs_and_leaves_repo_usable() -> Result<()>
         ])
         .output()
         .await
-        .context("spawn repeat ngit init")?;
-    require_success("repeat ngit init", &init)?;
+        .context("spawn ngit repo edit")?;
+    require_success("ngit repo edit", &edit)?;
     assert_local_topics_absent(&publisher)?;
 
     let bare_repo = grasp
