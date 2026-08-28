@@ -195,7 +195,7 @@ async fn resolve_maintainer(context: &SkillContext) -> Option<bool> {
         .await
         .ok()?;
     let account = get_likely_logged_in_user(&context.root).await.ok()??;
-    Some(repo_ref.maintainers.contains(&account))
+    Some(repo_ref.is_authorized_maintainer(&account))
 }
 
 #[cfg(test)]

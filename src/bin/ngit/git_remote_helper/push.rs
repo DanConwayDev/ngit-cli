@@ -748,9 +748,8 @@ async fn process_proposal_refspecs(
                     .map(|base| base.commit)
                     .or(preserved_base),
             };
-            if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
-                .concat()
-                .contains(&user_ref.public_key)
+            if proposal.pubkey == user_ref.public_key
+                || repo_ref.is_authorized_maintainer(&user_ref.public_key)
             {
                 if refspec.starts_with('+') {
                     // force push
@@ -1783,11 +1782,11 @@ async fn get_issue_resolution_status_events(
                         continue;
                     }
 
-                    // Match command-level permissions: only issue author or
-                    // confirmed repository maintainers can change issue
-                    // status.
+                    // Match command-level permissions: only the issue author
+                    // or a confirmed repository member can change issue
+                    // status. Confirmed moderators therefore count here.
                     if issue.pubkey != signer_pubkey
-                        && !repo_ref.is_authorized_maintainer(&signer_pubkey)
+                        && !repo_ref.is_authorized_member(&signer_pubkey)
                     {
                         term.write_line(
                             format!(

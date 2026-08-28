@@ -365,7 +365,7 @@ async fn get_open_and_draft_proposals_state(
                 }
                 Err(error) => {
                     if let Ok(Some(public_key)) = get_curent_user(git_repo) {
-                        if repo_ref.maintainers.contains(&public_key)
+                        if repo_ref.is_authorized_maintainer(&public_key)
                             || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
                         {
                             term.write_line(
