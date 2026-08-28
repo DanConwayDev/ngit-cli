@@ -1,10 +1,14 @@
 # Maintainer Model
 
 > **Status:** this is the desired final maintainer model and public API. The
-> current implementation does not yet provide every client protection and
-> edge-case workflow described here; remaining work is tracked in
+> ngit client does not yet provide every protection and edge-case workflow
+> described here; remaining client work is tracked in
 > [follow-up actions](maintainer-model-follow-up-actions.md). The two preceding
 > revisions of this file record the pre-role and initial indexed-role models.
+> The ngit-ci coordinator implements the coordinator-relevant current
+> read-side model: validated indexed roles, explicit lead forwarding, legacy
+> and leadless reciprocity, former-coordinate redirects, and fail-closed
+> repository state, controls, relay confidence, cache, and secret authority.
 
 This document has three layers:
 
@@ -1778,6 +1782,20 @@ covers authority derived from repository roles. A `merge` status belongs in
 the final column: it may record a merge already present in authorized
 repository state, but it does not authorize its publisher to create that state
 or perform the merge.
+
+ngit-ci applies the same current-role boundary to continuous integration. A
+configured repository coordinate first resolves its valid active `M` path,
+then the terminal lead or selected leadless/legacy author seeds the reciprocal
+maintainer fixpoint. A former maintainer's coordinate may therefore keep CI
+attached to the current repository after a handover, but that forwarding
+signer is not restored to the member set. Their kind `30618` state, global
+Service Controls, build-cache trust, relays for freshness confidence, and
+secret scopes remain unauthorized. Missing, conflicting, or cyclic explicit
+paths seed no CI authority. Moderators receive no CI authority because ngit-ci
+does not consume the status, label, subject, or cover-note events their role
+permits. Legacy lead inference does not change CI permissions: `M` and `m`
+remain equal authority edges, so the selected-rooted reciprocal component is
+the relevant coordinator view.
 
 ### Required client invariants
 
