@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
-    accept_maintainership::{
-        build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
-    },
     client::{Params, send_events},
     content_tags::{dedup_tags, tags_from_content},
     git_events::{KIND_COVER_NOTE, process_cover_note},
@@ -127,20 +124,6 @@ async fn publish_set_cover_note_event(
         }
     }
 
-    let maintainer_acceptance = if repo_ref
-        .maintainers_without_annoucnement
-        .as_ref()
-        .is_some_and(|ms| ms.contains(&user_pubkey))
-    {
-        Some(
-            build_maintainership_acceptance_with_defaults(&repo_ref, &user_ref, &client, &signer)
-                .await
-                .context("failed to auto-accept co-maintainership")?,
-        )
-    } else {
-        None
-    };
-
     // Build the kind-1624 cover note event.
     //
     // Shape:
@@ -193,36 +176,16 @@ async fn publish_set_cover_note_event(
     let mut client = client;
     client.set_signer(signer).await;
 
-    let mut events = maintainer_acceptance
-        .as_ref()
-        .map(|acceptance| acceptance.event.clone())
-        .into_iter()
-        .collect::<Vec<_>>();
-    events.push(cover_note_event);
-
-    let mut relay_targets = repo_ref.relays.clone();
-    if let Some(acceptance) = &maintainer_acceptance {
-        for relay in &acceptance.relays {
-            if !relay_targets.contains(relay) {
-                relay_targets.push(relay.clone());
-            }
-        }
-    }
-
     send_events(
         &client,
         Some(git_repo_path),
-        events,
+        vec![cover_note_event],
         user_ref.relays.write(),
-        relay_targets,
+        repo_ref.relays.clone(),
         true,
         false,
     )
     .await?;
-
-    if let Some(acceptance) = &maintainer_acceptance {
-        finalize_maintainership_acceptance(&git_repo, acceptance).await?;
-    }
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({

@@ -17,7 +17,6 @@ use git_events::{
 };
 use git2::{Oid, Repository};
 use ngit::{
-    accept_maintainership::accept_maintainership_with_defaults,
     client::{self, Client, get_event_from_cache_by_id, get_filter_state_events},
     git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
@@ -440,18 +439,27 @@ async fn create_events_and_proposals(
         "authentication required; run 'ngit account login' or 'ngit account create', then try again",
     )?;
 
-    let listed_maintainer = repo_ref.maintainers.contains(&user_ref.public_key);
-    if !listed_maintainer {
+    let authorized_maintainer = repo_ref.is_authorized_maintainer(&user_ref.public_key);
+    if !authorized_maintainer {
+        let rejection = if repo_ref
+            .invited_maintainers()
+            .contains(&user_ref.public_key)
+        {
+            "you are invited as a maintainer but have not accepted; run `ngit repo accept` first"
+                .to_string()
+        } else {
+            format!(
+                "your nostr account {} is not a confirmed maintainer of the repo",
+                user_ref.metadata.name
+            )
+        };
         for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
             // `error <dst> <why>` is the remote-helper protocol response on
             // stdout — like the out-of-sync and stale-lease rejections — so
             // git reports the ref as rejected and exits non-zero. A stderr
             // message would leave git believing nothing needed pushing.
-            println!(
-                "error {to} your nostr account {} isn't listed as a maintainer of the repo",
-                user_ref.metadata.name
-            );
+            println!("error {to} {rejection}");
         }
         if proposal_refspecs.is_empty() {
             return Ok(PushEventsPlan {
@@ -464,19 +472,6 @@ async fn create_events_and_proposals(
                 repo_relay_only: false,
             });
         }
-    } else if repo_ref
-        .maintainers_without_annoucnement
-        .clone()
-        .is_some_and(|ms| ms.contains(&user_ref.public_key))
-    {
-        // Auto-accept co-maintainership: publish the user's own announcement
-        // with defaults before proceeding with the push. The announcement is
-        // required (not just for consent, but to prevent scammers from
-        // attributing a person's state events to a fake project with the same
-        // identifier). See docs/design/co-maintainer-announcement-rationale.md.
-        accept_maintainership_with_defaults(git_repo, repo_ref, &user_ref, client, &signer)
-            .await
-            .context("failed to auto-accept co-maintainership")?;
     }
 
     let mut events = vec![];
@@ -490,7 +485,7 @@ async fn create_events_and_proposals(
     // A rejected pusher's branch refspecs produce no state candidate, no
     // merge/issue status events and no maintainers.yaml update; only their
     // proposal refspecs are processed below.
-    if listed_maintainer && !git_server_refspecs.is_empty() {
+    if authorized_maintainer && !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
 
         let store_state =
@@ -628,7 +623,7 @@ async fn create_events_and_proposals(
 
     Ok(PushEventsPlan {
         rejected_proposal_refspecs,
-        rejected_git_server_refspecs: if listed_maintainer {
+        rejected_git_server_refspecs: if authorized_maintainer {
             vec![]
         } else {
             git_server_refspecs.clone()

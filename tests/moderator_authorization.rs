@@ -237,8 +237,8 @@ async fn moderator_cannot_push_state() -> Result<()> {
     )
     .to_lowercase();
     assert!(
-        combined.contains("isn't listed as a maintainer"),
-        "the rejected push should cite the maintainer-listing check, got: {combined}",
+        combined.contains("not a confirmed maintainer"),
+        "the rejected push should cite the confirmed-maintainer check, got: {combined}",
     );
 
     let state_events = harness
@@ -327,8 +327,8 @@ async fn moderator_mixed_push_rejects_branch_but_delivers_proposal() -> Result<(
     )
     .to_lowercase();
     assert!(
-        combined.contains("isn't listed as a maintainer"),
-        "the branch refspec should be rejected by the maintainer-listing check, got: {combined}",
+        combined.contains("not a confirmed maintainer"),
+        "the branch refspec should be rejected by the confirmed-maintainer check, got: {combined}",
     );
 
     // The proposal refspec pushed alongside the rejected branch still

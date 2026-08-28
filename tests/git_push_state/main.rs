@@ -43,9 +43,8 @@
 //!   covers the cloner-consumes-and-pushes side.
 //! - [`auto_accept_maintainership`] — a user listed in another maintainer's
 //!   announcement, but without their own kind-30617 yet, clones the repo and
-//!   pushes a normal branch. Asserts the push path auto-publishes their
-//!   co-maintainer announcement and records the branch in a state event signed
-//!   by that co-maintainer.
+//!   attempts to push a normal branch. Asserts the push is rejected until
+//!   explicit acceptance and publishes neither an announcement nor state.
 //! - [`vanilla_server_noop`] — a no-op push against a vanilla (non-GRASP) git
 //!   server whose bare repo can be mutated out-of-band: a tag already pushed to
 //!   the server directly produces an empty per-server plan, and the nostr push
