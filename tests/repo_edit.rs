@@ -271,6 +271,73 @@ async fn reciprocal_add_refuses_joining_another_maintainer_component() -> Result
 }
 
 #[tokio::test]
+async fn indirect_auto_confirmation_refuses_before_publication() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (alice_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("indirect-auto-confirmation".into()),
+            additional_maintainer_count: 1,
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let carol_keys = published.additional_maintainer_keys[0].clone();
+    let carol = carol_keys.public_key();
+    harness.publish_user_relay_list(&carol_keys).await?;
+    let carol_repo = harness
+        .clone_published_repo_as(&published, &carol_keys)
+        .await?;
+    let accepted = carol_repo.ngit(["repo", "accept"]).output().await?;
+    assert!(accepted.status.success(), "Carol must be confirmed first");
+
+    let bob_keys = Keys::generate();
+    let bob = bob_keys.public_key();
+    let started = Timestamp::now().as_secs().to_string();
+    let bob_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse(["m", &bob.to_string(), &started])?,
+            Tag::parse(["m", &carol.to_string(), &started])?,
+            Tag::parse(["maintainers", &bob.to_string(), &carol.to_string()])?,
+        ])
+        .finalize(&bob_keys)?;
+    publish_to_default(&harness, &[&bob_announcement]).await?;
+
+    let before = latest_announcement(&harness, alice, &published.identifier).await?;
+    let output = alice_repo
+        .ngit([
+            "--json",
+            "repo",
+            "edit",
+            "--add-maintainer",
+            &bob.to_bech32()?,
+        ])
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "an indirect auto-confirmation must fail closed",
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(error["category"], "membership_indirect_confirmation");
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        before.id,
+        "a refused indirect confirmation must publish nothing",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn acknowledgement_adopts_the_confirmed_acceptance_start() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),

@@ -12,7 +12,9 @@ use ngit::{
         LeadSource, MaintainerAcknowledgement, RepoRef, announcement_author_declines_maintainership,
     },
 };
-use nostr::prelude::{Event, Filter, Kind, PublicKey, ToBech32};
+use nostr::prelude::{
+    Event, Filter, Kind, PublicKey, ToBech32, nip01::Coordinate, nip19::Nip19Coordinate,
+};
 
 use crate::{
     cli::{Cli, SignerParams},
@@ -156,6 +158,63 @@ fn npubs(pubkeys: impl IntoIterator<Item = PublicKey>) -> Vec<String> {
         .into_iter()
         .map(|pubkey| pubkey.to_bech32().unwrap_or_else(|_| pubkey.to_hex()))
         .collect()
+}
+
+fn immediate_confirmation_sources(
+    repo_ref: &RepoRef,
+    author: PublicKey,
+    replacement_maintainers: &[PublicKey],
+    candidate_event: &Event,
+) -> Vec<PublicKey> {
+    let candidate = candidate_event.pubkey;
+    let before: HashSet<PublicKey> = repo_ref.confirmed_maintainers().into_iter().collect();
+    if before.contains(&candidate) {
+        return Vec::new();
+    }
+
+    let mut simulated = repo_ref.clone();
+    simulated.events.insert(
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: candidate,
+                identifier: repo_ref.identifier.clone(),
+            },
+            relays: vec![],
+        },
+        candidate_event.clone(),
+    );
+    let (after, _) =
+        simulated.membership_after_author_change(author, replacement_maintainers, true, None);
+    if !after.contains(&candidate) {
+        return Vec::new();
+    }
+
+    let mut sources: Vec<PublicKey> = simulated
+        .maintainer_edges()
+        .into_iter()
+        .filter(|edge| edge.from == candidate && before.contains(&edge.to))
+        .map(|edge| edge.to)
+        .collect();
+    sources.sort_by_key(PublicKey::to_hex);
+    sources.dedup();
+    sources
+}
+
+fn refuse_indirect_confirmation(candidate: PublicKey, sources: &[PublicKey]) -> anyhow::Error {
+    let candidate = candidate.to_bech32().unwrap_or_else(|_| candidate.to_hex());
+    let sources = npubs(sources.iter().copied()).join(", ");
+    cli_error_with_category(
+        "membership_indirect_confirmation",
+        &format!(
+            "adding {candidate} would immediately confirm them through another current maintainer"
+        ),
+        &[("confirmation path", &sources)],
+        &[
+            "this indirect component transition is not supported in this release",
+            "keep the same-identifier repositories separate until their membership and state are reconciled",
+        ],
+    )
 }
 
 fn require_safe_named_removal(
@@ -568,6 +627,8 @@ pub async fn launch(
                 &[],
             ));
         }
+        let mut proposed_maintainers = maintainers.clone();
+        proposed_maintainers.push(target);
         let discovered =
             super::preflight::discover_candidate_events(&client, &repo_ref, target).await?;
         if let Some(event) = super::preflight::latest_announcement(
@@ -578,15 +639,20 @@ pub async fn launch(
         )
         .await
         {
-            let candidate = RepoRef::try_from((event, None))
+            let candidate = RepoRef::try_from((event.clone(), None))
                 .context("failed to parse the invitee's same-identifier announcement")?;
-            if candidate.maintainers.contains(&my_pubkey) {
+            let confirmation_sources =
+                immediate_confirmation_sources(&repo_ref, my_pubkey, &proposed_maintainers, &event);
+            if !confirmation_sources.is_empty() {
                 super::preflight::require_no_joined_component(
                     &candidate,
                     &my_ref.maintainers,
                     my_pubkey,
                     target,
                 )?;
+                if !confirmation_sources.contains(&my_pubkey) {
+                    return Err(refuse_indirect_confirmation(target, &confirmation_sources));
+                }
                 super::preflight::require_equivalent_activating_state(
                     git_repo_path,
                     &repo_ref,
@@ -598,7 +664,7 @@ pub async fn launch(
                 .await?;
             }
         }
-        maintainers.push(target);
+        maintainers = proposed_maintainers;
     }
     let removed_target = if let Some(value) = &args.remove_maintainer {
         let target = parse_pubkey("--remove-maintainer", value)?;
@@ -715,6 +781,48 @@ mod tests {
 
     fn tag(letter: &str, pubkey: PublicKey) -> Vec<String> {
         vec![letter.to_string(), pubkey.to_string()]
+    }
+
+    #[test]
+    fn direct_reciprocity_is_detected_as_immediate_confirmation() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let bob = bob_keys.public_key();
+        let repo_ref =
+            RepoRef::try_from((role_event(&alice_keys, vec![tag("M", alice)]), None)).unwrap();
+        let bob_event = role_event(&bob_keys, vec![tag("M", alice), tag("m", bob)]);
+
+        assert_eq!(
+            immediate_confirmation_sources(&repo_ref, alice, &[alice, bob], &bob_event),
+            vec![alice],
+        );
+    }
+
+    #[test]
+    fn leadless_indirect_reciprocity_names_the_confirming_member() {
+        let alice_keys = Keys::generate();
+        let carol_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let carol = carol_keys.public_key();
+        let bob = bob_keys.public_key();
+        let mut repo_ref = RepoRef::try_from((
+            role_event(&alice_keys, vec![tag("m", alice), tag("m", carol)]),
+            None,
+        ))
+        .unwrap();
+        insert(
+            &mut repo_ref,
+            role_event(&carol_keys, vec![tag("m", carol), tag("m", alice)]),
+        );
+        repo_ref.maintainers = vec![alice, carol];
+        let bob_event = role_event(&bob_keys, vec![tag("m", bob), tag("m", carol)]);
+
+        assert_eq!(
+            immediate_confirmation_sources(&repo_ref, alice, &[alice, carol, bob], &bob_event,),
+            vec![carol],
+        );
     }
 
     #[test]
