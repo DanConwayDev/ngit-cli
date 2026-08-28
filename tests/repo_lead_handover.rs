@@ -1,13 +1,11 @@
-//! `ngit repo edit --lead-maintainer <someone else>` — the NIP-34 listing
-//! collapse safety gate, end-to-end against fabricated
-//! announcements.
+//! `ngit repo edit --lead-maintainer <someone else>` — safe lead handover
+//! end-to-end against fabricated announcements.
 //!
 //! Designating another pubkey as lead follows NIP-34's SHOULD: the
-//! author's announcement then lists only themselves and the lead. When the
-//! collapse would drop a pubkey the author's current announcement lists
-//! without authoritative cover from the lead's own announcement, that
-//! pubkey would lose authorized-maintainer status, so the edit must identify
-//! that person and refuse the unnamed removal. There is no force override.
+//! author's announcement then keeps only themselves and the lead active. If
+//! the proposed lead does not cover another current maintainer, that person
+//! would lose authorized-maintainer status, so the edit must identify them
+//! and refuse the unnamed removal. There is no force override.
 //!
 //! Same error-message-substring caveat as `tests/init_state_fresh.rs`:
 //! asserting on a stable stderr fragment is the tolerated shortcut for
@@ -125,7 +123,7 @@ async fn arrange_three_member_announcement(
 }
 
 #[tokio::test]
-async fn collapse_without_lead_cover_names_and_refuses_the_dropped_member() -> Result<()> {
+async fn handover_to_unprepared_lead_names_and_refuses_uncovered_member() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -150,7 +148,7 @@ async fn collapse_without_lead_cover_names_and_refuses_the_dropped_member() -> R
         .context("failed to spawn ngit repo edit --lead-maintainer")?;
     assert!(
         !out.status.success(),
-        "collapse dropping an uncovered maintainer must fail\nstdout: {}\nstderr: {}",
+        "handover removing an uncovered maintainer must fail\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -177,7 +175,7 @@ async fn collapse_without_lead_cover_names_and_refuses_the_dropped_member() -> R
 }
 
 #[tokio::test]
-async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
+async fn handover_to_prepared_lead_preserves_the_active_graph() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -216,10 +214,10 @@ async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
         .output()
         .await
         .context("failed to spawn ngit repo edit --lead-maintainer")?;
-    // The prepared lead covers every existing maintainer, so the collapse
+    // The prepared lead covers every existing maintainer, so the handover
     // publishes straight away (then the inert git-data push fails).
     expect_announcement_published_but_push_failed(
-        "ngit repo edit --lead-maintainer (covered drop)",
+        "ngit repo edit --lead-maintainer (prepared handover)",
         &out,
     )?;
 
@@ -238,11 +236,11 @@ async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
     let maintainers = tag_values(&announcement, "maintainers");
     assert!(
         maintainers.contains(&me.to_string()) && maintainers.contains(&lead.to_string()),
-        "the collapsed listing is [me, lead]; got {maintainers:?}",
+        "the active projection should contain me and the lead; got {maintainers:?}",
     );
     assert!(
         !maintainers.contains(&third.to_string()),
-        "the covered member is still dropped from *my* listing; got {maintainers:?}",
+        "the covered member should move to deferred history in my announcement; got {maintainers:?}",
     );
     let third_history = role_entries(&announcement, "m", &third);
     assert_eq!(third_history.len(), 1);

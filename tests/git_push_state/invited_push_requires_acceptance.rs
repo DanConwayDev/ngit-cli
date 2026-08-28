@@ -25,8 +25,8 @@ async fn invited_co_maintainer_must_accept_before_pushing_state() -> Result<()> 
 
     let (_maintainer_repo, published) = harness
         .publish_repo(PublishRepoOpts {
-            display_name: Some("auto-accept branch push".into()),
-            identifier: Some("auto-accept-branch-push".into()),
+            display_name: Some("invited branch push".into()),
+            identifier: Some("invited-branch-push".into()),
             additional_maintainer_count: 1,
             ..Default::default()
         })

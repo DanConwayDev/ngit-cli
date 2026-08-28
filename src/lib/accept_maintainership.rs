@@ -1,14 +1,13 @@
-//! Auto-accept co-maintainership when publishing maintainer events.
+//! Explicit co-maintainer acceptance and announcement publication.
 //!
 //! When a user has been offered co-maintainership (they appear in another
 //! maintainer's `maintainers` tag but have never published their own
-//! Kind:30617 announcement), pushing would normally fail. This module
-//! provides helpers to publish the co-maintainer's announcement with sensible
-//! defaults before, or batched with, the maintainer's own event.
+//! Kind:30617 announcement), maintainer operations remain unavailable until
+//! they accept. This module builds and publishes the acceptance announcement
+//! used by `ngit repo accept`.
 //!
-//! See `docs/design/co-maintainer-announcement-rationale.md` for why the
-//! announcement is required (scam-protection) even though the fetch/read side
-//! already trusts state events from all listed maintainers.
+//! Reciprocal acceptance prevents an unsolicited invitation from making the
+//! invitee's repository state or role-scoped actions authoritative.
 use std::{
     collections::HashMap,
     sync::{
@@ -110,8 +109,8 @@ pub fn default_acceptance_maintainers(repo_ref: &RepoRef, my_pubkey: PublicKey) 
 /// Build the co-maintainer's own Kind:30617 announcement with defaults.
 ///
 /// The caller is responsible for publishing `MaintainerAcceptance::event` to
-/// `MaintainerAcceptance::relays`, optionally batched with another event, and
-/// then calling `finalize_maintainership_acceptance`.
+/// `MaintainerAcceptance::relays` and then calling
+/// `finalize_maintainership_acceptance`.
 pub async fn build_maintainership_acceptance_with_defaults(
     repo_ref: &RepoRef,
     user_ref: &UserRef,
@@ -253,10 +252,12 @@ pub async fn finalize_maintainership_acceptance(
     // resolution on the accepter's own announcement — which always lists
     // them as a maintainer — would make it impossible to observe the
     // inviter removing them later. Keeping resolution on the inviter's
-    // coordinate means removal surfaces naturally; only `ngit repo edit` /
-    // `ngit init` may change the resolved coordinate deliberately.
+    // coordinate means removal surfaces naturally. `ngit repo follow-lead`
+    // is the explicit way to move the checkout to the resolved lead.
 
-    eprintln!("info: co-maintainership accepted. run `ngit init` to customise your announcement.");
+    eprintln!(
+        "info: co-maintainership accepted. run `ngit repo edit` to customise your announcement."
+    );
 
     Ok(())
 }
@@ -267,10 +268,10 @@ pub async fn finalize_maintainership_acceptance(
 /// repository keeps resolving from the inviter's coordinate (see
 /// `finalize_maintainership_acceptance`).
 ///
-/// This is called automatically from the push path when the pushing user is
-/// listed as a maintainer but has not yet published their own announcement.
-/// No interactive prompts are shown — all values come from the existing
-/// announcement and the user's saved grasp server / relay preferences.
+/// This is called by `ngit repo accept` after its invitation and state
+/// preflight. No interactive prompts are shown: all values come from the
+/// existing announcement and the user's saved grasp server and relay
+/// preferences.
 pub async fn accept_maintainership_with_defaults(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -297,7 +298,7 @@ pub async fn accept_maintainership_with_defaults(
         vec![acceptance.event.clone()],
         user_ref.relays.write(),
         acceptance.relays.clone(),
-        false, // no spinner — we are mid-push
+        false, // the explicit acceptance command reports its own progress
         true,  // silent
     )
     .await

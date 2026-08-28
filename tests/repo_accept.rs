@@ -8,8 +8,8 @@
 //! lists them as a maintainer — the accepter could never observe the inviter
 //! removing them later. Both accept paths (defaults and explicit
 //! `--grasp-server`) must therefore leave `remote.origin.url` byte-for-byte
-//! unchanged and `nostr.repo` unwritten; only `ngit repo edit` / `ngit init`
-//! may change the resolved coordinate deliberately.
+//! unchanged and `nostr.repo` unwritten. `ngit repo follow-lead` is the
+//! explicit command for moving the checkout to its resolved lead coordinate.
 //!
 //! ## Why the announcement is asserted on the vanilla relay + grasp disk
 //!

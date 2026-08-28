@@ -764,9 +764,7 @@ async fn print_repo_info(
         }
         println!(
             "  {}",
-            dim.apply_to(
-                "invited maintainers have maintainer rights; acceptance is reciprocal framing"
-            )
+            dim.apply_to("invited maintainers have no authority until they accept")
         );
     }
     println!();

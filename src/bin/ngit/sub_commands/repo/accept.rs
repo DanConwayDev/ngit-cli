@@ -358,8 +358,8 @@ async fn accept_with_grasp_servers(
     // resolution on the accepter's own announcement — which always lists
     // them as a maintainer — would make it impossible to observe the
     // inviter removing them later. Keeping resolution on the inviter's
-    // coordinate means removal surfaces naturally; only `ngit repo edit` /
-    // `ngit init` may change the resolved coordinate deliberately.
+    // coordinate means removal surfaces naturally. `ngit repo follow-lead`
+    // is the explicit way to move the checkout to the resolved lead.
 
     Ok(())
 }

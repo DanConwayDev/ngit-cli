@@ -176,9 +176,9 @@ struct ResolvedFields {
 /// assertion is carried forward while that pubkey remains in the listing.
 /// Specifying yourself keeps the full listing and emits you as `M`.
 /// Specifying someone else follows NIP-34's SHOULD — the announcement then
-/// lists only the author and the lead. When that collapse would drop a
-/// pubkey the author's current announcement lists without authoritative
-/// cover from the lead's own announcement, refuse the unnamed removal.
+/// keeps only the author and lead active. When that change would remove a
+/// pubkey from the active graph because the lead does not cover them, refuse
+/// the unnamed removal.
 fn apply_lead_to_maintainers(
     lead_arg: Option<PublicKey>,
     my_pubkey: &PublicKey,
@@ -196,11 +196,16 @@ fn apply_lead_to_maintainers(
         return Ok((maintainers, Some(lead)));
     }
     let listing = vec![*my_pubkey, lead];
-    let dropped: Vec<String> =
-        drops_losing_authorized_status(&listing, &lead, my_pubkey, my_ref, consolidated)
-            .iter()
-            .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
-            .collect();
+    let dropped: Vec<String> = members_losing_authorized_status_after_lead_change(
+        &listing,
+        &lead,
+        my_pubkey,
+        my_ref,
+        consolidated,
+    )
+    .iter()
+    .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
+    .collect();
     if !dropped.is_empty() {
         let lead_npub = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
         let mut suggestions = vec![format!(
@@ -225,12 +230,11 @@ fn apply_lead_to_maintainers(
     Ok((listing, Some(lead)))
 }
 
-/// Pubkeys my current announcement lists that collapsing the listing to
-/// `[me, lead]` would drop, excluding those the lead's own announcement
-/// keeps listed *with authority*: per NIP-34 only members' events are
-/// authoritative, so the lead's listing counts as cover only when the lead
-/// is already a confirmed member, or their announcement acknowledges me —
-/// making the relationship reciprocal the moment my collapsed listing is
+/// Pubkeys that would lose authorized status when the author's active roles
+/// change to `[me, lead]`, excluding those the lead's own announcement keeps
+/// listed *with authority*. Per NIP-34, the lead's listing counts as cover
+/// only when the lead is already confirmed or their announcement acknowledges
+/// the author, making the relationship reciprocal when this update is
 /// published. An unconfirmed, non-reciprocal lead's announcement covers
 /// nobody.
 ///
@@ -238,7 +242,7 @@ fn apply_lead_to_maintainers(
 /// member's announcement still gates even though that listing may keep the
 /// pubkey confirmed. Under a lead, non-lead members SHOULD list only
 /// themselves and the lead, so such cover is transitional at best.
-fn drops_losing_authorized_status(
+fn members_losing_authorized_status_after_lead_change(
     listing: &[PublicKey],
     lead: &PublicKey,
     my_pubkey: &PublicKey,
@@ -2748,14 +2752,13 @@ mod apply_lead_to_maintainers_tests {
     }
 
     #[test]
-    fn specifying_another_lead_collapses_the_listing() {
+    fn specifying_another_lead_keeps_only_active_self_and_lead_roles() {
         let me = Keys::generate().public_key();
         let lead = Keys::generate().public_key();
         let default_listed = Keys::generate().public_key();
 
-        // no existing announcement of mine: nothing loses authorized
-        // status, so no --force needed even though the resolved listing
-        // shrinks
+        // With no existing announcement, the role update cannot remove an
+        // established member from the active graph.
         let (maintainers, resolved) =
             apply_lead_to_maintainers(Some(lead), &me, vec![me, default_listed], None, None)
                 .unwrap();
@@ -2777,7 +2780,7 @@ mod apply_lead_to_maintainers_tests {
         // the pubkey losing authorized-maintainer status is identified
         // (and named in the cli_error printed to stderr)
         assert_eq!(
-            drops_losing_authorized_status(
+            members_losing_authorized_status_after_lead_change(
                 &[me, lead],
                 &lead,
                 &me,
@@ -2799,15 +2802,15 @@ mod apply_lead_to_maintainers_tests {
     }
 
     #[test]
-    fn drop_kept_listed_by_a_reciprocal_leads_announcement_needs_no_force() {
+    fn member_covered_by_a_reciprocal_lead_remains_authorized() {
         let me = Keys::generate().public_key();
         let lead_keys = Keys::generate();
         let lead = lead_keys.public_key();
         let dropped = Keys::generate().public_key();
         let my_ref = test_repo_ref(vec![me, dropped], None);
         // the lead keeps the dropped pubkey listed and acknowledges me, so
-        // their announcement is reciprocal (authoritative) the moment my
-        // collapsed listing is published
+        // their announcement is reciprocal (authoritative) when my lead
+        // relationship is published
         let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped, me])]);
 
         let (maintainers, resolved) = apply_lead_to_maintainers(
@@ -2835,7 +2838,7 @@ mod apply_lead_to_maintainers_tests {
         let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped])]);
 
         assert_eq!(
-            drops_losing_authorized_status(
+            members_losing_authorized_status_after_lead_change(
                 &[me, lead],
                 &lead,
                 &me,
