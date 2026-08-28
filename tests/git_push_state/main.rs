@@ -45,6 +45,8 @@
 //!   announcement, but without their own kind-30617 yet, clones the repo and
 //!   attempts to push a normal branch. Asserts the push is rejected until
 //!   explicit acceptance and publishes neither an announcement nor state.
+//! - [`maintainers_yaml`] — changing and pushing the legacy coordinate file
+//!   advances Git state without replacing the signed maintainer roster.
 //! - [`vanilla_server_noop`] — a no-op push against a vanilla (non-GRASP) git
 //!   server whose bare repo can be mutated out-of-band: a tag already pushed to
 //!   the server directly produces an empty per-server plan, and the nostr push
@@ -65,5 +67,6 @@ mod delete_branch;
 mod force_with_lease;
 mod fresh_repo;
 mod grasp_accepts_remaining_relay_down;
+mod maintainers_yaml;
 mod push_tag;
 mod vanilla_server_noop;

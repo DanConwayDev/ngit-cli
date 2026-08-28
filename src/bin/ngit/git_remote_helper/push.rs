@@ -30,8 +30,7 @@ use ngit::{
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
-    repo_ref::{self, get_repo_config_from_yaml},
-    repo_state,
+    repo_ref, repo_state,
     signer::NgitSigner,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_open_or_draft_proposals,
@@ -39,7 +38,7 @@ use ngit::{
     },
 };
 use nostr::prelude::{
-    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, RelayUrl, Tag,
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
     nip01::Nip01Tag,
     nip10::{Marker, Nip10Tag},
     nip19::{Nip19, ToBech32},
@@ -571,19 +570,6 @@ async fn create_events_and_proposals(
                         .as_str(),
                 )?;
             }
-        }
-
-        if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
-            term,
-            &repo_ref.to_nostr_git_url(&None),
-            repo_ref,
-            git_repo,
-            &signer,
-            git_server_refspecs,
-        )
-        .await
-        {
-            events.push(repo_ref_event);
         }
     }
 
@@ -1442,97 +1428,6 @@ pub(crate) fn generate_updated_state(
         }
     }
     Ok(new_state)
-}
-
-async fn get_maintainers_yaml_update(
-    term: &console::Term,
-    decoded_nostr_url: &NostrUrlDecoded,
-    repo_ref: &RepoRef,
-    git_repo: &Repo,
-    signer: &Arc<NgitSigner>,
-    refspecs_to_git_server: &Vec<String>,
-) -> Result<Option<Event>> {
-    for refspec in refspecs_to_git_server {
-        let (from, to) = refspec_to_from_to(refspec)?;
-        if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
-            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-            let tip_of_remote_branch =
-                git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
-                    &git_repo.git_repo,
-                    refspec,
-                    None,
-                    &decoded_nostr_url.original_string,
-                )?)?;
-            let diff = git_repo.git_repo.diff_tree_to_tree(
-                Some(
-                    &git_repo
-                        .git_repo
-                        .find_commit(sha1_to_oid(&tip_of_pushed_branch)?)?
-                        .tree()?,
-                ),
-                Some(
-                    &git_repo
-                        .git_repo
-                        .find_commit(sha1_to_oid(&tip_of_remote_branch)?)?
-                        .tree()?,
-                ),
-                None,
-            )?;
-            for delta in diff.deltas() {
-                // File was added or updated
-                if let Some(path) = delta.new_file().path() {
-                    if path.to_string_lossy() == "maintainers.yaml" {
-                        let config = get_repo_config_from_yaml(git_repo)?;
-                        if config.identifier == Some(repo_ref.identifier.clone())
-                            || config.identifier.is_none()
-                        {
-                            let config_maintainers = config
-                                .maintainers
-                                .iter()
-                                .filter_map(|s| PublicKey::parse(s).ok())
-                                .collect::<Vec<PublicKey>>();
-                            let config_relays = config
-                                .relays
-                                .iter()
-                                .filter_map(|s| RelayUrl::parse(s).ok())
-                                .collect::<Vec<RelayUrl>>();
-                            if repo_ref.maintainers != config_maintainers
-                                || repo_ref.relays != config_relays
-                            {
-                                let mut repo_ref = repo_ref.clone();
-                                repo_ref.maintainers = config_maintainers;
-                                repo_ref.relays = config_relays;
-                                // role history and the lead assertion are the
-                                // author's own statement: the consolidated
-                                // RepoRef carries the *selected* maintainer's,
-                                // so swap in the signer's own record (first
-                                // use of role tags when they have none). A
-                                // prior announcement predating role tags is
-                                // materialized so a member this update drops
-                                // is closed with an end boundary rather than
-                                // silently unlisted.
-                                let author = signer.get_public_key().await?;
-                                let my_prior = repo_ref
-                                    .events
-                                    .values()
-                                    .find(|e| e.pubkey == author)
-                                    .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
-                                repo_ref.role_tags = my_prior
-                                    .as_ref()
-                                    .map_or_else(Vec::new, RepoRef::role_history_for_republish);
-                                repo_ref.lead = my_prior
-                                    .and_then(|r| r.lead)
-                                    .filter(|lead| repo_ref.maintainers.contains(lead));
-                                term.write_line("maintainers.yaml update detected so publishing repo announcement update")?;
-                                return Ok(Some(repo_ref.to_event(signer).await?));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(None)
 }
 
 struct MergeStatusContext<'a> {
