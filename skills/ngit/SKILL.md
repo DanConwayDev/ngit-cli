@@ -1,9 +1,9 @@
 ---
 name: ngit
-description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
+description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.8"
+  version: "1.9"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -37,6 +37,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
 - **Multiline files are safe with normal `ngit` text options, but not with `git push -o`.** For `ngit ... --body` or `ngit ... --description`, pass the file as one quoted argument: `--body "$(cat note.md)"`. For a Git push option, real newlines are forbidden; use literal `\n` only for a short inline value. Never convert a file into `-o description=...`.
 - **Use `--signer <alias|npub|nostr-display-name>` to select a non-default stored identity for one `ngit` command.** For one Git command, use `git -c nostr.signer=<alias|npub|nostr-display-name> push ...`; this does not change the configured login. Do not export or pass an nsec merely to switch between configured accounts.
+- **Check Nostr CI explicitly after pushes and when diagnosing test coverage.** Repository CI workflows live under `.ngit/act/workflows/`; do not infer CI success from a successful push, local validation, or files under another provider's workflow directory. Query the exact commit with `ngit ci status <COMMIT-ISH> --json` and inspect `ci.conclusion` rather than the top-level command `status`. See `reference/ci.md`.
 
 ## Detecting a nostr repo
 
@@ -77,5 +78,6 @@ Detailed command references live in `reference/*.md` in this skill's directory. 
 | Repository settings and membership | `reference/repo-settings.md` |
 | Open, stack, review, merge PRs | `reference/prs.md` |
 | Create/view/comment/close issues | `reference/issues.md` |
+| Inspect CI workflows, runs, trust, failures | `reference/ci.md` |
 | Accounts, login, secrets | `reference/accounts.md` |
 | Sync, flags, git config | `reference/sync-config.md` |

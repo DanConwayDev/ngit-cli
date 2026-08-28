@@ -118,9 +118,9 @@ ngit pr checkout <ID|nevent> --json
 ## Merge (maintainer)
 
 ```bash
-ngit merge <ID|nevent> --json                    # merge into the PR's declared target; does not push
+ngit merge <ID|nevent> --require-ci-trust maintainer-directed --json # gate on green trusted CI
 ngit pr checkout <ID|nevent> --json
-ngit merge --json                                # infers PR from checked-out pr/ branch
+ngit merge --require-ci-trust maintainer-directed --json # infer PR from checked-out pr/ branch
 ngit merge --exclude-description <ID|nevent> --json
 git push origin <target-branch>           # publishes the merge and applied status
 ```
