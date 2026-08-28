@@ -3,6 +3,7 @@ pub mod checkout;
 pub mod ci_control;
 pub mod ci_status;
 pub mod comment;
+pub mod container;
 pub mod create;
 pub mod export_keys;
 pub mod forget_keys;

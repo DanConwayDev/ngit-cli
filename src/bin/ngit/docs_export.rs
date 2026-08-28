@@ -515,6 +515,19 @@ mod tests {
                 .contains("ngit nsite publish")
         );
 
+        let container = command_at_path(&export["command"], &["container"]);
+        assert!(
+            container["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == &serde_json::json!({"name": "oci", "visible": true}))
+        );
+        let publish = command_at_path(&export["command"], &["container", "publish"]);
+        assert!(publish["args"].as_array().unwrap().iter().any(|argument| {
+            argument["long"] == "blossom-server" && argument["required"] == true
+        }));
+
         let root_args = export["command"]["args"].as_array().unwrap();
         let defaults = root_args
             .iter()

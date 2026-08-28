@@ -425,6 +425,9 @@ pub enum Commands {
     Release(ReleaseSubCommandArgs),
     /// publish static websites through Nostr and Blossom
     Nsite(NsiteSubCommandArgs),
+    /// publish OCI container images through Nostr and Blossom
+    #[command(visible_alias = "oci")]
+    Container(ContainerSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -579,6 +582,50 @@ pub struct RepoSubCommandArgs {
 pub struct ReleaseSubCommandArgs {
     #[command(subcommand)]
     pub release_command: ReleaseCommands,
+}
+
+// ---------------------------------------------------------------------------
+// OCI container subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct ContainerSubCommandArgs {
+    #[command(subcommand)]
+    pub container_command: ContainerCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ContainerCommands {
+    /// upload an OCI image layout to Blossom and publish its tag map
+    Publish(ContainerPublishArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ContainerPublishArgs {
+    /// Container repository name; one lowercase OCI name component
+    #[arg(value_name = "NAME")]
+    pub repository: String,
+    /// OCI image-layout directory containing index.json and blobs/sha256
+    #[arg(long, value_name = "PATH")]
+    pub layout: PathBuf,
+    /// Blossom server which must store every reachable blob (repeatable)
+    #[arg(long = "blossom-server", value_name = "URL", required = true)]
+    pub blossom_servers: Vec<String>,
+    /// Extend publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Human-readable repository title (defaults to NAME)
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+    /// Human-readable repository description
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// Absolute HTTP(S) URL for the image source repository
+    #[arg(long, value_name = "URL")]
+    pub source: Option<String>,
+    /// Replace the complete tag map and metadata instead of merging this layout
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Subcommand)]
@@ -1611,8 +1658,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands,
-        extract_signer_cli_arguments, read_nsec_file,
+        AccountCommands, Cli, Commands, ContainerCommands, ReleaseAppCommands,
+        ReleaseAssetCommands, ReleaseCommands, extract_signer_cli_arguments, read_nsec_file,
     };
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {
@@ -2031,6 +2078,45 @@ mod tests {
         ] {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn container_publish_and_oci_alias_parse() {
+        for args in [
+            [
+                "ngit",
+                "container",
+                "publish",
+                "my-app",
+                "--layout",
+                "/tmp/layout",
+                "--blossom-server",
+                "https://blossom.example",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "oci",
+                "publish",
+                "my-app",
+                "--layout",
+                "/tmp/layout",
+                "--blossom-server",
+                "https://blossom.example",
+                "--json",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let Some(Commands::Container(container)) = cli.command else {
+                panic!("expected container command");
+            };
+            assert!(matches!(
+                container.container_command,
+                ContainerCommands::Publish(_)
+            ));
         }
     }
 
