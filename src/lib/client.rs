@@ -1714,8 +1714,18 @@ pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude
 pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
     let addr_deconstructed = Nip05Address::parse(nip05_addr)
         .context(format!("cannot parse nip05 address: {nip05_addr}"))?;
+    nip05_query_address(&addr_deconstructed).await
+}
+
+/// As [`nip05_query`], for an address a caller has already parsed.
+///
+/// # Errors
+///
+/// Returns an error when the `.well-known` document cannot be fetched, is
+/// not JSON, or names no public key for the address.
+pub async fn nip05_query_address(nip05_addr: &Nip05Address) -> Result<Nip05Profile> {
     let json_res: Value = reqwest::Client::new()
-        .get(addr_deconstructed.url().to_string())
+        .get(nip05_addr.url().to_string())
         .send()
         .await
         .context(format!(
@@ -1726,7 +1736,7 @@ pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
         .context(format!(
             "nip05 server response did not respond with json when querying address: {nip05_addr}"
         ))?;
-    Nip05Profile::from_json(&addr_deconstructed, &json_res).context(format!(
+    Nip05Profile::from_json(nip05_addr, &json_res).context(format!(
         "cannot get public key for nip05 address: {nip05_addr}"
     ))
 }
@@ -3168,6 +3178,7 @@ pub fn get_fetch_filters(
                             .map(|c| c.coordinate.to_string())
                             .collect::<Vec<String>>(),
                     ),
+                get_filter_ci_events(repo_coordinates),
             ]
         },
         if proposal_ids.is_empty() {
@@ -3335,6 +3346,25 @@ pub fn get_filter_repo_ann_events(
     } else {
         filter
     }
+}
+
+/// Every CI event the repository's announcements are named on.
+///
+/// The consumed CI kinds all carry the repository `a` tag, so one
+/// repository-wide filter brings Workflow Results, Progress markers, Job
+/// Results, Service Requests/Stops and Manual Triggers into the local cache
+/// during the fetch every PR command already performs. `ngit ci status`,
+/// and later the `pr` surfaces, then read them from the cache.
+pub fn get_filter_ci_events(repo_coordinates: &HashSet<Nip19Coordinate>) -> nostr::prelude::Filter {
+    nostr::prelude::Filter::default()
+        .kinds(crate::ci::kinds::CONSUMED_CI_KINDS.to_vec())
+        .custom_tags(
+            SingleLetterTag::LOWERCASE_A,
+            repo_coordinates
+                .iter()
+                .map(|c| c.coordinate.to_string())
+                .collect::<Vec<String>>(),
+        )
 }
 
 pub static STATE_KIND: nostr::prelude::Kind = Kind::Custom(30618);

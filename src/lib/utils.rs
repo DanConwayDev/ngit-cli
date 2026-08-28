@@ -119,8 +119,11 @@ pub fn read_line<'a>(stdin: &io::Stdin, line: &'a mut String) -> io::Result<Vec<
 ///
 /// This is the event that subsequent PR updates should reference via their `E`
 /// tag, ensuring the tag always points at the PR kind event (never a PR update)
-/// regardless of how many PR updates have occurred since the upgrade.
-fn pr_upgrade_root(commits_events: &[Event]) -> Option<Event> {
+/// regardless of how many PR updates have occurred since the upgrade. CI
+/// events anchor on the same event, so `ngit ci status` resolves a thread's
+/// `#E` anchor through this rule rather than duplicating it.
+#[must_use]
+pub fn pr_upgrade_root(commits_events: &[Event]) -> Option<Event> {
     commits_events
         .iter()
         .filter(|e| event_is_revision_root(e) && e.kind.eq(&KIND_PULL_REQUEST))

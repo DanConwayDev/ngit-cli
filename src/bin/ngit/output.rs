@@ -67,6 +67,19 @@ pub fn finish_success() {
     std::println!("{rendered}");
 }
 
+/// Emit the stored document, then exit with `code`.
+///
+/// For a command whose refusal is part of its output rather than a failure to
+/// produce it — `ngit ci status --require-ci-trust` — `main`'s error path
+/// would replace the document with `{"status":"error"}` and lose the runs that
+/// explain the refusal.
+pub fn finish_and_exit(code: i32) -> ! {
+    if is_json() {
+        finish_success();
+    }
+    std::process::exit(code)
+}
+
 pub fn finish_error(error: &anyhow::Error) {
     let mut value = serde_json::json!({
         "status": "error",

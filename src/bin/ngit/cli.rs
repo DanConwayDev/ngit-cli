@@ -417,6 +417,8 @@ pub enum Commands {
     Merge(MergeSubCommandArgs),
     /// work with issues
     Issue(IssueSubCommandArgs),
+    /// inspect CI results and the trust context behind them
+    Ci(CiSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -652,7 +654,7 @@ pub enum PrCommands {
     },
     /// merge a PR into the current branch (maintainer only)
     #[command(
-        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state"
+        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state\n\nthe PR's CI results and the trust context of every signer behind them are printed before the merge. Without --require-ci-trust a result that is failing, unfinished, or signed only by signers with no known context is a warning, not a refusal."
     )]
     Merge {
         /// Proposal event-id (hex) or nevent (bech32)
@@ -661,6 +663,10 @@ pub enum PrCommands {
         /// Use squash merge
         #[arg(long)]
         squash: bool,
+        /// Refuse to merge unless the current CI result is a success whose
+        /// weakest run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -702,6 +708,118 @@ pub enum PrCommands {
         /// Markdown body for the cover note
         #[arg(long)]
         body: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// CI subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct CiSubCommandArgs {
+    #[command(subcommand)]
+    pub ci_command: CiCommands,
+}
+
+/// The trust floor `--require-ci-trust` enforces. The values are the
+/// classification names shared with gitworkshop.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CiTrustFloor {
+    #[value(name = "maintainer-directed")]
+    MaintainerDirected,
+    #[value(name = "operationally-associated")]
+    OperationallyAssociated,
+}
+
+impl CiTrustFloor {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaintainerDirected => "maintainer-directed",
+            Self::OperationallyAssociated => "operationally-associated",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum CiCommands {
+    /// show CI results, with the trust context of every signer behind them
+    #[command(
+        long_about = "show CI results, with the trust context of every signer behind them\n\n\
+        <TARGET> is resolved in this order:\n  \
+        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
+        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
+        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
+        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
+        5. with no target, the HEAD commit\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current.\n\n\
+        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
+    )]
+    Status {
+        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
+        /// HEAD
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+        /// Exit non-zero unless the current result is a success whose weakest
+        /// run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
+        /// Skip the relay fetch and NIP-05 trust verification, reading CI
+        /// from the local cache
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to run CI for this repository
+    #[command(
+        long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci stop`. It never covers runs that started before it.\n\n\
+        <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
+        The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
+    )]
+    Request {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to stop running CI for this repository
+    #[command(
+        long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
+        Published for the same repository perspective as `ngit ci request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+    )]
+    Stop {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to run one workflow once
+    #[command(
+        long_about = "ask a coordinator to run one workflow once (kind-9840 Manual Trigger)\n\n\
+        A Manual Trigger is a one-shot authorization for exactly the workflow file identified by its content hash at the resolved commit, so it can replay a push or pull-request workflow that does not declare `manual`. It needs no standing Service Request.\n\n\
+        <COMMIT-ISH> defaults to HEAD. An annotated tag is published as both the commit it peels to (first) and the tag object id, so a single `#c` query finds the run either way; ngit refuses to publish `c` values that do not all peel to the same commit.\n\n\
+        --workflow is a path in the repository, and its SHA-256 is taken from the blob at the resolved commit — never from the working tree, whose line endings and clean/smudge filters can differ from the object the coordinator hashes."
+    )]
+    Trigger {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Commit-ish to run; defaults to HEAD
+        #[arg(value_name = "COMMIT-ISH")]
+        commit_ish: Option<String>,
+        /// Path of the workflow file, as it exists at the resolved commit
+        #[arg(long, value_name = "PATH")]
+        workflow: String,
+        /// Git ref published as the run's context, e.g. refs/heads/main
+        #[arg(long = "ref", value_name = "GIT-REF")]
+        git_ref: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

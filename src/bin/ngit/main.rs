@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 
 use clap::Parser;
 use cli::{
-    AccountCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams, customise_template,
-    extract_signer_cli_arguments,
+    AccountCommands, CiCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams,
+    customise_template, extract_signer_cli_arguments,
 };
 
 mod cli;
@@ -18,9 +18,13 @@ use ngit::{
     git_events, login, repo_ref,
 };
 
+mod ci_commit;
 mod git_remote_helper;
 #[macro_use]
 mod output;
+// Declared after `output` so the stdout-guarding `println!` macro is in
+// scope for it.
+mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;
 mod sub_commands;
@@ -263,8 +267,18 @@ async fn main() {
                 PrCommands::Merge {
                     id,
                     squash,
+                    require_ci_trust,
                     offline,
-                } => sub_commands::pr_merge::launch(id, *squash, *offline, signer_params).await,
+                } => {
+                    sub_commands::pr_merge::launch(
+                        id,
+                        *squash,
+                        *require_ci_trust,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Label {
                     id,
                     labels,
@@ -422,6 +436,53 @@ async fn main() {
                     sub_commands::set_cover_note::launch_issue_set_cover_note(
                         id,
                         body,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
+            },
+            Commands::Ci(args) => match &args.ci_command {
+                CiCommands::Status {
+                    target,
+                    require_ci_trust,
+                    offline,
+                } => {
+                    sub_commands::ci_status::launch(
+                        target.as_deref(),
+                        *offline,
+                        *require_ci_trust,
+                        cli.json,
+                        signer_params,
+                    )
+                    .await
+                }
+                CiCommands::Request {
+                    coordinator,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_request(coordinator, *offline, signer_params)
+                        .await
+                }
+                CiCommands::Stop {
+                    coordinator,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
+                        .await
+                }
+                CiCommands::Trigger {
+                    coordinator,
+                    commit_ish,
+                    workflow,
+                    git_ref,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_trigger(
+                        coordinator,
+                        commit_ish.as_deref(),
+                        workflow,
+                        git_ref.as_deref(),
                         *offline,
                         signer_params,
                     )

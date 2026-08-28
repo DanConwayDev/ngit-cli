@@ -75,6 +75,11 @@ once_cell = "1.21.3"
 rstest = "0.26"
 serial_test = "3.4.0"
 test_harness = { path = "test_harness" }
+# `test-util` is not part of tokio's `full` feature. It provides the paused
+# test clock the CI identity-resolution deadline is asserted on, which is how
+# that test measures a five-second budget without any wall-clock time passing.
+# Resolver 2 keeps a dev-dependency feature out of normal builds.
+tokio = { version = "1.52.3", features = ["test-util"] }
 
 [workspace]
 members = [

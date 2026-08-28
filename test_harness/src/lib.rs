@@ -57,6 +57,7 @@
 //!   tests demand.
 
 pub mod buzz;
+pub mod ci;
 pub mod grasp;
 pub mod harness;
 pub mod nostr;
@@ -70,6 +71,10 @@ pub mod snapshot;
 pub mod vanilla_git_server;
 
 pub use buzz::BuzzServer;
+pub use ci::{
+    CiJob, CiProgress, CiProvenance, CiRunEvents, CiRunSpec, CiTrigger, build_ci_run,
+    build_manual_trigger, build_service_control, repo_coordinate, workflow_hash,
+};
 pub use grasp::GraspServer;
 pub use harness::{Harness, HarnessBuilder};
 pub use nostr::{
