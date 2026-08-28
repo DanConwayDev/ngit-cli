@@ -560,5 +560,5 @@ pub async fn launch(
         private: args.private,
         public: args.public,
     };
-    init::launch(cli, &internal_args, signer_params).await
+    init::launch_repo_edit(cli, &internal_args, signer_params).await
 }

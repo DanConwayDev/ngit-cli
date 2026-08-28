@@ -330,8 +330,7 @@ fn read_nsec_file(path: &Path) -> Result<String> {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// publish a repository to nostr; signal you are its maintainer accepting
-    /// PRs and issues
+    /// create and publish a new repository on nostr
     Init(sub_commands::init::SubCommandArgs),
     /// manage repository metadata and maintainership
     #[command(
@@ -803,11 +802,11 @@ pub enum IssueCommands {
 
 #[derive(Subcommand)]
 pub enum RepoCommands {
-    /// publish a repository to nostr (alias for `ngit init`)
+    /// create and publish a new repository on nostr (alias for `ngit init`)
     Init(sub_commands::init::SubCommandArgs),
     /// update repository metadata on nostr
     #[command(
-        long_about = "update repository metadata on nostr\n\nlike `ngit init` but makes clear you are editing an existing repository"
+        long_about = "update an existing repository announcement on nostr\n\nrepository announcements are created with `ngit init`; use this command for every later metadata or roster change"
     )]
     Edit(sub_commands::repo::edit::SubCommandArgs),
     /// accept an invitation to co-maintain a repository

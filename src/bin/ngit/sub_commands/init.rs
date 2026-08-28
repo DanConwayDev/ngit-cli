@@ -89,6 +89,12 @@ enum InitState {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaunchMode {
+    Init,
+    RepoEdit,
+}
+
 fn may_suggest_skill(state: &InitState) -> bool {
     matches!(
         state,
@@ -643,6 +649,7 @@ impl SubCommandArgs {
 fn validate_pre_fetch(
     cli: &Cli,
     args: &SubCommandArgs,
+    mode: LaunchMode,
     repo_coordinate: Option<&Nip19Coordinate>,
     user_has_grasp_list: bool,
     cached_repo_ref: Option<&RepoRef>,
@@ -656,6 +663,13 @@ fn validate_pre_fetch(
     // If no coordinate exists, we're in State A (Fresh) - validate now
     if repo_coordinate.is_none() {
         return validate_fresh(cli, args, user_has_grasp_list);
+    }
+
+    // Repository edits retain the existing fast-path validation. Public init
+    // waits for the post-fetch state so it can give the correct create/edit/
+    // accept boundary error even when the cache is stale.
+    if mode == LaunchMode::Init {
+        return Ok(());
     }
 
     // If we have cached data and it's MyAnnouncement state, validate early
@@ -685,8 +699,62 @@ fn validate_pre_fetch(
     Ok(())
 }
 
-fn validate_post_fetch(cli: &Cli, args: &SubCommandArgs, state: &InitState) -> Result<()> {
-    // Interactive mode bypasses all validation
+fn validate_post_fetch(
+    cli: &Cli,
+    args: &SubCommandArgs,
+    mode: LaunchMode,
+    state: &InitState,
+    my_pubkey: PublicKey,
+) -> Result<()> {
+    if mode == LaunchMode::Init {
+        return match state {
+            InitState::Fresh => Ok(()),
+            InitState::CoordinateOnly { coordinate } => {
+                if cli.force {
+                    Ok(())
+                } else {
+                    let id = &coordinate.identifier;
+                    Err(cli_error(
+                        &format!(
+                            "no announcement found for coordinate '{id}'\n\n\
+                             \x20 This could be a relay or network issue. Only proceed with --force\n\
+                             \x20 if you are sure there isn't an existing announcement event."
+                        ),
+                        &[],
+                        &["ngit init --force"],
+                    ))
+                }
+            }
+            InitState::MyAnnouncement { .. } => Err(cli_error(
+                "this repository has already been initialized",
+                &[],
+                &["edit your existing announcement with `ngit repo edit`"],
+            )),
+            InitState::CoMaintainer { repo_ref, .. } => {
+                if repo_ref.confirmed_maintainers().contains(&my_pubkey) {
+                    Err(cli_error(
+                        "this repository has already been initialized",
+                        &[],
+                        &["edit your existing announcement with `ngit repo edit`"],
+                    ))
+                } else {
+                    Err(cli_error(
+                        "ngit init cannot accept an existing repository invitation",
+                        &[],
+                        &["accept the invitation with `ngit repo accept`"],
+                    ))
+                }
+            }
+            InitState::NotListed { .. } => Err(cli_error(
+                "ngit init cannot join or replace an existing repository",
+                &[],
+                &["clone or select the repository without publishing an announcement"],
+            )),
+        };
+    }
+
+    // Interactive repository editing retains its prompting behavior after the
+    // public init boundary above has rejected every existing announcement.
     if cli.interactive {
         return Ok(());
     }
@@ -1078,43 +1146,10 @@ fn resolve_fields(
         maintainers_default
     };
 
-    let maintainers = if args.replace_maintainers
-        || !interactive
-        || (base_maintainers.len() == 1
-            && Interactor::default().choice(
-                PromptChoiceParms::default()
-                    .with_prompt("add other maintainers now?")
-                    .dont_report()
-                    .with_choices(vec![
-                        "maybe later".to_string(),
-                        "add maintainers".to_string(),
-                    ])
-                    .with_default(0),
-            )? == 0)
-    {
-        base_maintainers
-    } else {
-        let selections: Vec<bool> = vec![true; base_maintainers.len()];
-        let selected = multi_select_with_custom_value(
-            "maintainers",
-            "maintainer npub",
-            base_maintainers
-                .iter()
-                .filter_map(|m| m.to_bech32().ok())
-                .collect(),
-            selections,
-            |s| {
-                extract_npub(s)
-                    .map(|_| s.to_string())
-                    .context(format!("Invalid npub: {s}"))
-            },
-        )?;
-        show_multi_input_prompt_success("maintainers", &selected);
-        selected
-            .iter()
-            .filter_map(|npub| PublicKey::parse(npub).ok())
-            .collect()
-    };
+    // `ngit init` always creates a sole-maintainer repository. Existing
+    // membership is changed only by the named actions in `ngit repo edit`,
+    // which supply an exact internal projection here.
+    let maintainers = base_maintainers;
 
     // --- Lead maintainer (NIP-34 `M` role) ---
     let lead_arg = args
@@ -1452,7 +1487,6 @@ async fn publish_and_finalize(
     cli: &Cli,
     git_repo: &Repo,
     repo_config_result: &Result<ngit::repo_ref::RepoConfigYaml>,
-    is_co_maintainer_first_acceptance: bool,
     selected_repo: Option<&ResolvedRepoCoordinate>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
@@ -1774,24 +1808,14 @@ async fn publish_and_finalize(
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
             "status": "ok",
-            "action": if is_co_maintainer_first_acceptance { "accepted" } else { "published" },
+            "action": "published",
             "entity": "repository",
             "nostr_url": nostr_url,
             "url": gitworkshop_url,
         }));
     }
-    if is_co_maintainer_first_acceptance {
-        println!("co-maintainership accepted.");
-        println!("your announcement was published to nostr. you can now push updates.");
-        println!("your repository URL: {gitworkshop_url}");
-        println!("your clone URL: {nostr_url}");
-        println!(
-            "note: run `ngit init` at any time to update your announcement (relays, git servers, etc.)"
-        );
-    } else {
-        println!("share your repository: {gitworkshop_url}");
-        println!("clone url: {nostr_url}");
-    }
+    println!("share your repository: {gitworkshop_url}");
+    println!("clone url: {nostr_url}");
 
     // Step 10: Update maintainers.yaml if needed
     let relays = fields
@@ -1834,6 +1858,23 @@ async fn publish_and_finalize(
 
 #[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
+    launch_with_mode(cli_args, args, signer, LaunchMode::Init).await
+}
+
+pub(crate) async fn launch_repo_edit(
+    cli_args: &Cli,
+    args: &SubCommandArgs,
+    signer: SignerParams<'_>,
+) -> Result<()> {
+    launch_with_mode(cli_args, args, signer, LaunchMode::RepoEdit).await
+}
+
+async fn launch_with_mode(
+    cli_args: &Cli,
+    args: &SubCommandArgs,
+    signer: SignerParams<'_>,
+    mode: LaunchMode,
+) -> Result<()> {
     // Phase 1: Local-only setup
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -1874,6 +1915,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
     validate_pre_fetch(
         cli_args,
         args,
+        mode,
         repo_coordinate.as_ref(),
         user_has_grasp_list,
         cached_repo_ref.as_ref(),
@@ -1920,41 +1962,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
         }
     };
 
-    validate_post_fetch(cli_args, args, &state)?;
+    validate_post_fetch(cli_args, args, mode, &state, user_ref.public_key)?;
 
-    // Print CoMaintainer-specific context before proceeding so the user
-    // understands they are accepting (or updating) a co-maintainership
-    // offer, NOT creating a new repository.
-    let is_co_maintainer_first_acceptance =
-        if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
-            rr.maintainers_without_annoucnement
-                .as_ref()
-                .is_some_and(|ms| ms.contains(&user_ref.public_key))
-        } else {
-            false
-        };
-
+    // This state is reachable only through the internal repository-edit
+    // publication path. Public init rejects every existing announcement, and
+    // acceptance is handled exclusively by `ngit repo accept`.
     if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
-        if is_co_maintainer_first_acceptance {
-            println!(
-                "accepting co-maintainership of '{}' (offered by {})",
-                rr.name,
-                rr.selected_maintainer
-                    .to_bech32()
-                    .unwrap_or_else(|_| rr.selected_maintainer.to_string()),
-            );
-            println!(
-                "publishing your repository announcement to nostr to confirm your co-maintainership..."
-            );
-            if cli_args.interactive {
-                println!("tip: run `ngit init -d` to accept with defaults and skip all prompts");
-            }
-        } else {
-            println!(
-                "updating your co-maintainer announcement for '{}' on nostr...",
-                rr.name
-            );
-        }
+        println!(
+            "updating your co-maintainer announcement for '{}' on nostr...",
+            rr.name
+        );
     }
 
     // Phase 5: Resolve all fields
@@ -1986,7 +2003,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
         cli_args,
         &git_repo,
         &repo_config_result,
-        is_co_maintainer_first_acceptance,
         resolved_repo_coordinate.as_ref(),
     )
     .await;
@@ -2175,8 +2191,8 @@ async fn push_initial_branch(
 /// git servers to it, fan it out to every remaining announced relay and
 /// cache it only after a git server and at least one relay accepted it.
 ///
-/// The republish exists because `ngit init` is how relays and git
-/// servers are added to an announcement: a repository whose refs are
+/// The republish exists because `ngit repo edit` can add relays and git
+/// servers to an announcement: a repository whose refs are
 /// unchanged would otherwise leave a newly announced relay without the
 /// state event (and a newly announced git server without the git data)
 /// until the next real `git push`, which a fully synced repository may
