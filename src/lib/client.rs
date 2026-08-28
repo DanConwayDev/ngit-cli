@@ -11,7 +11,7 @@
 // certain that the implementation is going to make it to stable but we don't
 // want to inadvertlty use other features of nightly that might be removed.
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     fmt::{Display, Write},
     fs::create_dir_all,
     path::{Path, PathBuf},
@@ -33,7 +33,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::prelude::{
-    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, Url,
+    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
     event::UnsignedEvent,
     message::MachineReadablePrefix,
     nip01::Coordinate,
@@ -2043,16 +2043,6 @@ pub async fn get_repo_ref_from_cache(
         .map(|e| e.pubkey)
         .collect();
     ordered_maintainers.retain(|m| !declined_maintainers.contains(m));
-    // moderator (and other role-fetched) announcements are consulted for
-    // their authors' self-entries only: privacy classification and the
-    // shared-metadata cascade keep reading the maintainer-listed
-    // announcements, as before their discovery
-    let maintainer_authored: Vec<nostr::prelude::Event> = repo_events
-        .iter()
-        .filter(|e| maintainers.contains(&e.pubkey))
-        .cloned()
-        .collect();
-    let private = repository_events_are_private(&maintainer_authored);
     let repo_ref = RepoRef::try_from((
         repo_events
             .iter()
@@ -2061,12 +2051,6 @@ pub async fn get_repo_ref_from_cache(
             .clone(),
         Some(repo_coordinate.public_key),
     ))?;
-
-    // Use name/description/web/hashtags/upstream from the latest event across
-    // all maintainers.
-    let latest_metadata = maintainer_authored
-        .last()
-        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok());
 
     let mut events: HashMap<Nip19Coordinate, nostr::prelude::Event> = HashMap::new();
     for m in &ordered_maintainers {
@@ -2085,41 +2069,11 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
-    // Use relays, git and blossom servers from all maintainer announcement events
-    // we use Vec and HashSet to remove duplicates and preserve order
-    let mut relays: Vec<RelayUrl> = repo_ref.relays.clone();
-    let mut git_server: Vec<String> = repo_ref.git_server.clone();
-    let mut blossoms: Vec<Url> = repo_ref.blossoms.clone();
-    let mut seen_relays: HashSet<RelayUrl> = HashSet::from_iter(relays.iter().cloned());
-    let mut seen_git_server: HashSet<String> = git_server
-        .iter()
-        .map(|server| server.trim_end_matches('/').to_string())
-        .collect();
-    let mut seen_blossoms: HashSet<Url> = HashSet::from_iter(blossoms.iter().cloned());
-
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
 
     for m in &ordered_maintainers {
-        if let Some(event) = repo_events.iter().find(|e| e.pubkey == *m) {
-            if let Ok(m_repo_ref) = RepoRef::try_from((event.clone(), None)) {
-                for relay in m_repo_ref.relays {
-                    if seen_relays.insert(relay.clone()) {
-                        relays.push(relay);
-                    }
-                }
-                for server in m_repo_ref.git_server {
-                    if seen_git_server.insert(server.trim_end_matches('/').to_string()) {
-                        git_server.push(server);
-                    }
-                }
-                for blossom in m_repo_ref.blossoms {
-                    if seen_blossoms.insert(blossom.clone()) {
-                        blossoms.push(blossom);
-                    }
-                }
-            }
-        } else {
+        if !repo_events.iter().any(|e| e.pubkey == *m) {
             maintainers_without_annoucnement.push(*m);
         }
     }
@@ -2143,26 +2097,14 @@ pub async fn get_repo_ref_from_cache(
         // recent event
         maintainers: ordered_maintainers,
         moderators: vec![],
-        relays,
-        git_server,
+        // Shared fields are filled only after the reciprocal graph has
+        // identified the confirmed member component below.
+        relays: vec![],
+        git_server: vec![],
+        blossoms: vec![],
         events,
         maintainers_without_annoucnement: Some(maintainers_without_annoucnement),
-        name: latest_metadata
-            .as_ref()
-            .map_or_else(|| repo_ref.name.clone(), |r| r.name.clone()),
-        description: latest_metadata
-            .as_ref()
-            .map_or_else(|| repo_ref.description.clone(), |r| r.description.clone()),
-        web: latest_metadata
-            .as_ref()
-            .map_or_else(|| repo_ref.web.clone(), |r| r.web.clone()),
-        upstream: latest_metadata
-            .as_ref()
-            .map_or_else(|| repo_ref.upstream.clone(), |r| r.upstream.clone()),
-        hashtags: latest_metadata
-            .as_ref()
-            .map_or_else(|| repo_ref.hashtags.clone(), |r| r.hashtags.clone()),
-        private,
+        private: false,
         ..repo_ref
     };
 
@@ -2203,7 +2145,71 @@ pub async fn get_repo_ref_from_cache(
         }
     }
 
+    apply_confirmed_member_repository_data(&mut repo_ref);
+
     Ok(repo_ref)
+}
+
+/// Apply shared repository fields using confirmed members only.
+///
+/// `RepoRef::events` also retains invitation announcements because the graph
+/// resolver needs them to recognize acceptance. Those events must not alter
+/// metadata, privacy or infrastructure until their author is confirmed.
+fn apply_confirmed_member_repository_data(repo_ref: &mut RepoRef) {
+    let authoritative_events: Vec<Event> = repo_ref
+        .confirmed_member_announcements()
+        .into_iter()
+        .cloned()
+        .collect();
+    let latest_metadata = authoritative_events
+        .last()
+        .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
+
+    let mut relays = Vec::new();
+    let mut git_server = Vec::new();
+    let mut blossoms = Vec::new();
+    let mut seen_relays = HashSet::new();
+    let mut seen_git_server = HashSet::new();
+    let mut seen_blossoms = HashSet::new();
+
+    for member in repo_ref.confirmed_members() {
+        let Some(event) = authoritative_events
+            .iter()
+            .find(|event| event.pubkey == member)
+        else {
+            continue;
+        };
+        let Ok(member_ref) = RepoRef::try_from((event.clone(), None)) else {
+            continue;
+        };
+        for relay in member_ref.relays {
+            if seen_relays.insert(relay.clone()) {
+                relays.push(relay);
+            }
+        }
+        for server in member_ref.git_server {
+            if seen_git_server.insert(server.trim_end_matches('/').to_string()) {
+                git_server.push(server);
+            }
+        }
+        for blossom in member_ref.blossoms {
+            if seen_blossoms.insert(blossom.clone()) {
+                blossoms.push(blossom);
+            }
+        }
+    }
+
+    if let Some(metadata) = latest_metadata {
+        repo_ref.name = metadata.name;
+        repo_ref.description = metadata.description;
+        repo_ref.web = metadata.web;
+        repo_ref.upstream = metadata.upstream;
+        repo_ref.hashtags = metadata.hashtags;
+    }
+    repo_ref.private = repository_events_are_private(&authoritative_events);
+    repo_ref.relays = relays;
+    repo_ref.git_server = git_server;
+    repo_ref.blossoms = blossoms;
 }
 
 /// Record the repository's privacy classification in `.git/config` so later
@@ -4433,29 +4439,92 @@ fn repository_privacy_from_effective_announcements(
         }
     }
 
-    let mut pending = VecDeque::from([selected_maintainer]);
-    let mut visited = HashSet::new();
-    while let Some(maintainer) = pending.pop_front() {
-        if !visited.insert(maintainer) {
+    let Some(selected_event) = effective.get(&selected_maintainer) else {
+        return true;
+    };
+    let Ok(mut repo_ref) =
+        RepoRef::try_from(((*selected_event).clone(), Some(selected_maintainer)))
+    else {
+        return true;
+    };
+
+    // Discover the same maintainer candidate closure as normal repository
+    // loading. Candidate announcements are retained for reciprocity, but only
+    // the confirmed subset contributes to the privacy decision below.
+    let mut maintainers = vec![selected_maintainer];
+    let mut seen = HashSet::from([selected_maintainer]);
+    let mut cursor = 0;
+    while cursor < maintainers.len() {
+        let author = maintainers[cursor];
+        cursor += 1;
+        let Some(event) = effective.get(&author) else {
             continue;
-        }
-        let Some(event) = effective.get(&maintainer) else {
-            if maintainer == selected_maintainer {
-                return true;
+        };
+        let Ok(author_ref) = RepoRef::try_from(((*event).clone(), None)) else {
+            return true;
+        };
+        for subject in author_ref.maintainers {
+            if seen.insert(subject) {
+                maintainers.push(subject);
             }
-            continue;
-        };
-        let Ok(repo_ref) = RepoRef::try_from(((*event).clone(), None)) else {
-            // An effective announcement that cannot be interpreted must never
-            // be allowed to broaden publication.
-            return true;
-        };
-        if repo_ref.private {
-            return true;
         }
-        pending.extend(repo_ref.maintainers);
     }
-    false
+
+    repo_ref.maintainers = maintainers;
+    repo_ref.events.clear();
+    for author in &repo_ref.maintainers {
+        if let Some(event) = effective.get(author) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: *author,
+                        identifier: identifier.to_string(),
+                    },
+                    relays: vec![],
+                },
+                (*event).clone(),
+            );
+        }
+    }
+    if !repo_ref
+        .confirmed_maintainers()
+        .contains(&selected_maintainer)
+    {
+        // The selected-non-member topology is deliberately unsupported for
+        // this release. Privacy publication must fail closed until it can be
+        // resolved safely.
+        return true;
+    }
+
+    repo_ref.moderators = repo_ref.assigned_moderators();
+    for moderator in repo_ref.moderators.clone() {
+        if let Some(event) = effective.get(&moderator) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: moderator,
+                        identifier: identifier.to_string(),
+                    },
+                    relays: vec![],
+                },
+                (*event).clone(),
+            );
+        }
+    }
+    repo_ref.moderators.retain(|moderator| {
+        effective
+            .get(moderator)
+            .is_none_or(|event| !announcement_author_declines_moderatorship(event))
+    });
+
+    repo_ref
+        .confirmed_member_announcements()
+        .iter()
+        .any(|event| {
+            RepoRef::try_from(((*event).clone(), None)).is_ok_and(|member_ref| member_ref.private)
+        })
 }
 
 #[cfg(test)]
@@ -5066,6 +5135,55 @@ mod private_repository_tests {
             "publication may broaden only after every reachable current announcement is public"
         );
     }
+
+    #[test]
+    fn invited_maintainer_cannot_change_publication_privacy() {
+        fn announcement(
+            keys: &Keys,
+            maintainers: &[PublicKey],
+            private: bool,
+            created_at: u64,
+        ) -> Event {
+            let mut tags = vec![
+                Tag::identifier("repo"),
+                Tag::parse(
+                    [
+                        vec!["maintainers".to_string()],
+                        maintainers.iter().map(ToString::to_string).collect(),
+                    ]
+                    .concat(),
+                )
+                .unwrap(),
+            ];
+            if private {
+                tags.push(Tag::parse(["private", "true"]).unwrap());
+            }
+            signed(
+                keys,
+                EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                    .tags(tags)
+                    .custom_created_at(Timestamp::from_secs(created_at)),
+            )
+        }
+
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let announcements = vec![
+            announcement(&alice, &[alice.public_key(), bob.public_key()], false, 1),
+            // Bob has a same-identifier private repository but has not
+            // reciprocated Alice's invitation.
+            announcement(&bob, &[bob.public_key()], true, 2),
+        ];
+
+        assert!(
+            !repository_privacy_from_effective_announcements(
+                alice.public_key(),
+                "repo",
+                &announcements,
+            ),
+            "an invitation must not import the invitee's privacy setting"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5269,6 +5387,194 @@ mod announcement_consolidation_tests {
             assert_eq!(consolidated[0].id, bob.id);
             assert_eq!(consolidated[2].id, tie_winner_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod confirmed_repository_data_tests {
+    use nostr::prelude::{EventBuilder, Keys, Tag, event::FinalizeEvent};
+
+    use super::*;
+
+    struct Announcement<'a> {
+        created_at: u64,
+        name: &'a str,
+        clone_url: &'a str,
+        relay: &'a str,
+        blossom: &'a str,
+        private: bool,
+        roles: Vec<Vec<String>>,
+    }
+
+    fn announcement(keys: &Keys, values: Announcement<'_>) -> Event {
+        let mut tags = vec![
+            Tag::identifier("repo"),
+            Tag::parse(["name", values.name]).unwrap(),
+            Tag::parse(["clone", values.clone_url]).unwrap(),
+            Tag::parse(["relays", values.relay]).unwrap(),
+            Tag::parse(["blossoms", values.blossom]).unwrap(),
+        ];
+        if values.private {
+            tags.push(Tag::parse(["private", "true"]).unwrap());
+        }
+        tags.extend(
+            values
+                .roles
+                .into_iter()
+                .map(|role| Tag::parse(role).unwrap()),
+        );
+        EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from_secs(values.created_at))
+            .finalize(keys)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn invited_and_departed_announcements_are_discovery_only() {
+        let owner_keys = Keys::generate();
+        let invitee_keys = Keys::generate();
+        let departed_keys = Keys::generate();
+        let moderator_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let invitee = invitee_keys.public_key();
+        let departed = departed_keys.public_key();
+        let moderator = moderator_keys.public_key();
+
+        let events = vec![
+            announcement(
+                &owner_keys,
+                Announcement {
+                    created_at: 10,
+                    name: "owner metadata",
+                    clone_url: "https://owner.example/repo.git",
+                    relay: "wss://owner.example",
+                    blossom: "https://owner.example/blossom",
+                    private: false,
+                    roles: vec![
+                        vec!["M".to_string(), owner.to_string()],
+                        vec!["m".to_string(), invitee.to_string()],
+                        vec!["m".to_string(), departed.to_string()],
+                        vec!["o".to_string(), moderator.to_string()],
+                    ],
+                },
+            ),
+            announcement(
+                &invitee_keys,
+                Announcement {
+                    created_at: 40,
+                    name: "invitee metadata",
+                    clone_url: "https://invitee.example/repo.git",
+                    relay: "wss://invitee.example",
+                    blossom: "https://invitee.example/blossom",
+                    private: true,
+                    // A self-role alone does not acknowledge an existing
+                    // confirmed member, so this remains an invitation.
+                    roles: vec![vec!["m".to_string(), invitee.to_string()]],
+                },
+            ),
+            announcement(
+                &departed_keys,
+                Announcement {
+                    created_at: 50,
+                    name: "departed metadata",
+                    clone_url: "https://departed.example/repo.git",
+                    relay: "wss://departed.example",
+                    blossom: "https://departed.example/blossom",
+                    private: true,
+                    roles: vec![vec![
+                        "m".to_string(),
+                        departed.to_string(),
+                        "1".to_string(),
+                        "2".to_string(),
+                    ]],
+                },
+            ),
+            announcement(
+                &moderator_keys,
+                Announcement {
+                    created_at: 60,
+                    name: "moderator metadata",
+                    clone_url: "https://moderator.example/repo.git",
+                    relay: "wss://moderator.example",
+                    blossom: "https://moderator.example/blossom",
+                    private: true,
+                    // The self acknowledgement does not name a confirmed
+                    // member, so the moderator is not confirmed.
+                    roles: vec![vec!["o".to_string(), moderator.to_string()]],
+                },
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        for event in events {
+            save_event_in_local_cache(dir.path(), &event).await.unwrap();
+        }
+        let repo_ref = get_repo_ref_from_cache(
+            Some(dir.path()),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: owner,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(repo_ref.confirmed_maintainers(), vec![owner]);
+        assert!(repo_ref.confirmed_moderators().is_empty());
+        assert_eq!(repo_ref.name, "owner metadata");
+        assert!(!repo_ref.private);
+        assert_eq!(repo_ref.git_server, vec!["https://owner.example/repo.git"]);
+        assert_eq!(
+            repo_ref
+                .relays
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["wss://owner.example"]
+        );
+        assert_eq!(
+            repo_ref
+                .blossoms
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["https://owner.example/blossom"]
+        );
+        assert!(
+            repo_ref
+                .events
+                .values()
+                .any(|event| event.pubkey == invitee),
+            "the invitee announcement remains available for reciprocity"
+        );
+        assert!(
+            repo_ref
+                .events
+                .values()
+                .any(|event| event.pubkey == moderator),
+            "the moderator announcement remains available for acknowledgement"
+        );
+        assert!(
+            repo_ref
+                .events
+                .values()
+                .all(|event| event.pubkey != departed),
+            "a departed author is removed after their self-role is evaluated"
+        );
+        assert_eq!(repo_ref.members_for_announcement_tags(), vec![owner]);
+        assert_eq!(
+            repo_ref
+                .coordinates()
+                .into_iter()
+                .map(|coordinate| coordinate.public_key)
+                .collect::<HashSet<_>>(),
+            HashSet::from([owner])
+        );
     }
 }
 

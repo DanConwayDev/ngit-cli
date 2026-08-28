@@ -1309,88 +1309,28 @@ impl RepoRef {
         true
     }
 
-    /// coordinates without relay hints
+    /// Confirmed member coordinates without relay hints.
+    ///
+    /// Role subjects are fetched separately while resolving the repository
+    /// graph. This set is used for repository-scoped event discovery, so an
+    /// invitation must not make the invitee's pre-existing state, issues or
+    /// proposals part of the repository before they acknowledge it.
     pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
-        res.insert(Nip19Coordinate {
-            coordinate: Coordinate {
-                kind: Kind::GitRepoAnnouncement,
-                public_key: self.selected_maintainer,
-                identifier: self.identifier.clone(),
-            },
-            relays: vec![],
-        });
-
-        for m in &self.maintainers {
-            res.insert(Nip19Coordinate {
-                coordinate: Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key: *m,
-                    identifier: self.identifier.clone(),
-                },
-                relays: vec![],
-            });
-        }
-        // moderators are members: proposals and status events tag their
-        // announcements too (NIP-34's "include all current members'
-        // repository announcements"), so cache lookups and fetch filters
-        // must cover their coordinates
-        for m in &self.moderators {
-            res.insert(self.announcement_coordinate(m));
+        for member in self.confirmed_members() {
+            res.insert(self.announcement_coordinate(&member));
         }
         res
     }
 
     /// Members in announcement-tag order.
     ///
-    /// The maintainer selected by the `nostr://` URL or explicit repo
-    /// coordinate is always first, followed by the other confirmed
-    /// maintainers and then confirmed moderators — per NIP-34, repository
-    /// tags SHOULD include all current members' announcements. Invited
-    /// (unaccepted) maintainers and assigned-but-unacknowledged moderators
-    /// come last: their announcements may not exist yet and their events are
-    /// not authoritative, but tagging them means in-flight PRs and issues
-    /// already tag the new member during transitions. This keeps PR/issue
-    /// repository `a` tags anchored to the reciprocal group while still
-    /// tagging every listed member.
+    /// Confirmed maintainers are followed by confirmed moderators. Invited
+    /// maintainers and assigned-but-unacknowledged moderators are excluded:
+    /// tagging an invitation would make the invitee's pre-existing
+    /// same-identifier events appear to belong to this repository.
     pub fn members_for_announcement_tags(&self) -> Vec<PublicKey> {
-        let confirmed_maintainers: HashSet<PublicKey> =
-            self.confirmed_maintainers().into_iter().collect();
-        let confirmed_moderators: HashSet<PublicKey> =
-            self.confirmed_moderators().into_iter().collect();
-
-        let mut ordered = Vec::new();
-        let mut seen = HashSet::new();
-
-        if seen.insert(self.selected_maintainer) {
-            ordered.push(self.selected_maintainer);
-        }
-
-        for maintainer in &self.maintainers {
-            if confirmed_maintainers.contains(maintainer) && seen.insert(*maintainer) {
-                ordered.push(*maintainer);
-            }
-        }
-
-        for moderator in &self.moderators {
-            if confirmed_moderators.contains(moderator) && seen.insert(*moderator) {
-                ordered.push(*moderator);
-            }
-        }
-
-        for maintainer in &self.maintainers {
-            if seen.insert(*maintainer) {
-                ordered.push(*maintainer);
-            }
-        }
-
-        for moderator in &self.moderators {
-            if seen.insert(*moderator) {
-                ordered.push(*moderator);
-            }
-        }
-
-        ordered
+        self.confirmed_members()
     }
 
     /// Directed maintainer relationships from the announcements we know.
@@ -1603,6 +1543,28 @@ impl RepoRef {
             }
         }
         members
+    }
+
+    /// Latest announcement from each confirmed member, ordered from oldest to
+    /// newest using the NIP-01 addressable-event tie-break.
+    ///
+    /// The event map intentionally also retains invitations for reciprocal
+    /// graph discovery. Consumers of shared repository metadata and personal
+    /// infrastructure must use this filtered view so those discovery events
+    /// do not become authoritative prematurely.
+    pub(crate) fn confirmed_member_announcements(&self) -> Vec<&nostr::prelude::Event> {
+        let members: HashSet<PublicKey> = self.confirmed_members().into_iter().collect();
+        let mut events: Vec<&nostr::prelude::Event> = self
+            .events
+            .values()
+            .filter(|event| members.contains(&event.pubkey))
+            .collect();
+        events.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        events
     }
 
     /// Whether `pubkey` may author member actions: status (kinds 1630-1633),
@@ -2961,19 +2923,14 @@ pub fn format_grasp_server_url_as_grasp06_prs_url(
     ))
 }
 
-/// Find the latest announcement event (by `created_at`) across all maintainer
-/// events and parse it into a `RepoRef` for shared metadata (name, description,
-/// web, etc.).
+/// Find the latest authoritative announcement across confirmed members and
+/// parse it into a `RepoRef` for shared metadata (name, description, web,
+/// etc.). Discovery-only invitee events are deliberately excluded.
 pub fn latest_event_repo_ref(repo_ref: &RepoRef) -> Option<RepoRef> {
     repo_ref
-        .events
-        .values()
-        .max_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| b.id.cmp(&a.id))
-        })
-        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
+        .confirmed_member_announcements()
+        .last()
+        .and_then(|e| RepoRef::try_from(((*e).clone(), None)).ok())
 }
 
 /// Derive clone-URLs and relay URLs from selected grasp servers.
@@ -3122,7 +3079,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn announcement_tags_start_with_selected_and_put_invited_last() {
+        async fn announcement_tags_include_only_confirmed_members() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let accepted = TEST_KEY_2_KEYS.public_key();
             let requested = PublicKey::from_hex(
@@ -3145,7 +3102,7 @@ mod tests {
 
             assert_eq!(
                 repo_ref.members_for_announcement_tags(),
-                vec![selected, accepted, requested]
+                vec![selected, accepted]
             );
         }
 
@@ -4411,7 +4368,7 @@ mod tests {
         }
 
         #[test]
-        fn announcement_tags_and_coordinates_cover_members_and_invitees() {
+        fn announcement_tags_and_coordinates_cover_confirmed_members_only() {
             let owner_keys = nostr::prelude::Keys::generate();
             let owner = owner_keys.public_key();
             let invited = nostr::prelude::Keys::generate().public_key();
@@ -4440,22 +4397,23 @@ mod tests {
                 ),
             );
 
-            // members first (selected maintainer, then the confirmed
-            // moderator), invitees last (unaccepted maintainer, then the
-            // unacknowledged moderator)
             assert_eq!(
                 repo_ref.members_for_announcement_tags(),
-                vec![owner, moderator, invited, unacknowledged]
+                vec![owner, moderator]
             );
 
-            // coordinate sets used for cache lookups and fetch filters
-            // cover the moderators' announcements too
-            for pk in [owner, invited, moderator, unacknowledged] {
+            for pk in [owner, moderator] {
                 assert!(
                     repo_ref
                         .coordinates()
                         .iter()
                         .any(|c| c.public_key == pk && c.identifier == "test-repo")
+                );
+            }
+            for pk in [invited, unacknowledged] {
+                assert!(
+                    repo_ref.coordinates().iter().all(|c| c.public_key != pk),
+                    "invited role subjects must not become repository event coordinates"
                 );
             }
         }
