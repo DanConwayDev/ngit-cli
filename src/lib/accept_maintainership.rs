@@ -1,14 +1,13 @@
-//! Auto-accept co-maintainership when publishing maintainer events.
+//! Explicit co-maintainer acceptance and announcement publication.
 //!
 //! When a user has been offered co-maintainership (they appear in another
 //! maintainer's `maintainers` tag but have never published their own
-//! Kind:30617 announcement), pushing would normally fail. This module
-//! provides helpers to publish the co-maintainer's announcement with sensible
-//! defaults before, or batched with, the maintainer's own event.
+//! Kind:30617 announcement), maintainer operations remain unavailable until
+//! they accept. This module builds and publishes the acceptance announcement
+//! used by `ngit repo accept`.
 //!
-//! See `docs/design/co-maintainer-announcement-rationale.md` for why the
-//! announcement is required (scam-protection) even though the fetch/read side
-//! already trusts state events from all listed maintainers.
+//! Reciprocal acceptance prevents an unsolicited invitation from making the
+//! invitee's repository state or role-scoped actions authoritative.
 use std::{
     collections::HashMap,
     sync::{
@@ -21,7 +20,7 @@ use std::{
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use nostr::prelude::{Event, PublicKey, RelayUrl};
+use nostr::prelude::{Event, PublicKey, RelayUrl, Timestamp};
 
 #[cfg(not(test))]
 use crate::client::Client;
@@ -54,19 +53,51 @@ pub struct MaintainerAcceptance {
     private_signer: Option<Arc<NgitSigner>>,
 }
 
+/// Lead relationship an acceptance may safely acknowledge.
+///
+/// A resolved lead is preferred. A pending direct `M` may be completed only
+/// by that named pubkey accepting; an ordinary invitee must not confirm an
+/// unaccepted third-party lead.
+pub fn acceptance_lead(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Option<PublicKey> {
+    repo_ref
+        .lead_maintainer()
+        .or_else(|| repo_ref.lead.filter(|lead| *lead == my_pubkey))
+}
+
 /// Maintainers to list when accepting without an explicit relationship choice.
 ///
-/// Match gitworkshop's preferred framing by reciprocating the sole confirmed
-/// maintainer or unique inferred lead. Ambiguous graphs retain the selected
-/// maintainer for backwards-compatible, non-interactive operation.
+/// Follows NIP-34's SHOULD: when `M` is used, `m` and `o` authors list only
+/// themselves and the lead — so the lead can change or remove them
+/// unilaterally — while an accepting author who is themselves the lead keeps
+/// the full listing, since the lead's announcement defines the membership.
+/// A wire-asserted lead is only reciprocated when already confirmed: listing
+/// an unconfirmed lead alone could not make the accepter's own announcement
+/// acknowledge a confirmed member. Without a usable lead, reciprocate the
+/// sole confirmed maintainer, retaining the selected maintainer for
+/// backwards-compatible, non-interactive operation on ambiguous graphs.
 pub fn default_acceptance_maintainers(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Vec<PublicKey> {
-    let confirmed = repo_ref.confirmed_maintainers();
-    let preferred = if confirmed.len() == 1 {
-        confirmed.first().copied()
-    } else {
-        repo_ref.lead_maintainer()
+    let lead = acceptance_lead(repo_ref, my_pubkey);
+    if lead == Some(my_pubkey) {
+        let mut maintainers = vec![my_pubkey];
+        for maintainer in &repo_ref.maintainers {
+            if !maintainers.contains(maintainer) {
+                maintainers.push(*maintainer);
+            }
+        }
+        return maintainers;
     }
-    .unwrap_or(repo_ref.selected_maintainer);
+
+    let confirmed = repo_ref.confirmed_maintainers();
+    let preferred = lead
+        .filter(|lead| confirmed.contains(lead))
+        .or_else(|| {
+            if confirmed.len() == 1 {
+                confirmed.first().copied()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(repo_ref.selected_maintainer);
 
     let mut maintainers = vec![my_pubkey];
     if preferred != my_pubkey {
@@ -78,8 +109,8 @@ pub fn default_acceptance_maintainers(repo_ref: &RepoRef, my_pubkey: PublicKey) 
 /// Build the co-maintainer's own Kind:30617 announcement with defaults.
 ///
 /// The caller is responsible for publishing `MaintainerAcceptance::event` to
-/// `MaintainerAcceptance::relays`, optionally batched with another event, and
-/// then calling `finalize_maintainership_acceptance`.
+/// `MaintainerAcceptance::relays` and then calling
+/// `finalize_maintainership_acceptance`.
 pub async fn build_maintainership_acceptance_with_defaults(
     repo_ref: &RepoRef,
     user_ref: &UserRef,
@@ -141,12 +172,22 @@ pub async fn build_maintainership_acceptance_with_defaults(
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| repo_ref.root_commit.clone());
 
-    // --- Step 3: reciprocate the sole maintainer or unique lead ---
+    // --- Step 3: reciprocate the lead or sole maintainer ---
 
     let maintainers = default_acceptance_maintainers(repo_ref, *my_pubkey);
+    // per NIP-34 the acceptance re-asserts the repository's wire lead as
+    // `M`; the guard is defensive — a lead reported by lead_maintainer()
+    // always ends up in the default listing
+    let lead = acceptance_lead(repo_ref, *my_pubkey).filter(|lead| maintainers.contains(lead));
 
     // --- Step 4: build RepoRef ---
 
+    let role_tags = repo_ref.role_history_for_acceptance(
+        my_pubkey,
+        &maintainers,
+        lead,
+        Timestamp::now().as_secs(),
+    );
     let my_repo_ref = RepoRef {
         identifier: identifier.clone(),
         name: name.clone(),
@@ -165,6 +206,9 @@ pub async fn build_maintainership_acceptance_with_defaults(
         events: HashMap::new(),
         nostr_git_url: None,
         extra_tags: vec![],
+        role_tags,
+        moderators: vec![],
+        lead,
     };
 
     // --- Step 5: sign the announcement ---
@@ -208,10 +252,12 @@ pub async fn finalize_maintainership_acceptance(
     // resolution on the accepter's own announcement — which always lists
     // them as a maintainer — would make it impossible to observe the
     // inviter removing them later. Keeping resolution on the inviter's
-    // coordinate means removal surfaces naturally; only `ngit repo edit` /
-    // `ngit init` may change the resolved coordinate deliberately.
+    // coordinate means removal surfaces naturally. `ngit repo follow-lead`
+    // is the explicit way to move the checkout to the resolved lead.
 
-    eprintln!("info: co-maintainership accepted. run `ngit init` to customise your announcement.");
+    eprintln!(
+        "info: co-maintainership accepted. run `ngit repo edit` to customise your announcement."
+    );
 
     Ok(())
 }
@@ -222,10 +268,10 @@ pub async fn finalize_maintainership_acceptance(
 /// repository keeps resolving from the inviter's coordinate (see
 /// `finalize_maintainership_acceptance`).
 ///
-/// This is called automatically from the push path when the pushing user is
-/// listed as a maintainer but has not yet published their own announcement.
-/// No interactive prompts are shown — all values come from the existing
-/// announcement and the user's saved grasp server / relay preferences.
+/// This is called by `ngit repo accept` after its invitation and state
+/// preflight. No interactive prompts are shown: all values come from the
+/// existing announcement and the user's saved grasp server and relay
+/// preferences.
 pub async fn accept_maintainership_with_defaults(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -252,7 +298,7 @@ pub async fn accept_maintainership_with_defaults(
         vec![acceptance.event.clone()],
         user_ref.relays.write(),
         acceptance.relays.clone(),
-        false, // no spinner — we are mid-push
+        false, // the explicit acceptance command reports its own progress
         true,  // silent
     )
     .await
@@ -642,6 +688,145 @@ mod tests {
 
     use super::*;
     use crate::git_http_auth::authorization_for_url;
+
+    mod default_acceptance_maintainers {
+        use nostr::prelude::{
+            EventBuilder, Kind, Tag, event::FinalizeEvent, nip01::Coordinate,
+            nip19::Nip19Coordinate,
+        };
+
+        use super::*;
+
+        fn announcement(keys: &Keys, tags: Vec<Vec<String>>) -> Event {
+            let mut event_tags = vec![Tag::identifier("test-repo")];
+            for tag in tags {
+                event_tags.push(Tag::parse(tag).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        fn role(letter: &str, pk: &PublicKey) -> Vec<String> {
+            vec![letter.to_string(), pk.to_string()]
+        }
+
+        /// Consolidate `events` the way `get_repo_ref_from_cache` would:
+        /// the first event is the selected maintainer's, `maintainers` is
+        /// the recursive union.
+        fn repo_ref_from(events: Vec<Event>, maintainers: Vec<PublicKey>) -> RepoRef {
+            let mut repo_ref = RepoRef::try_from((events[0].clone(), None)).unwrap();
+            for event in events {
+                repo_ref.events.insert(
+                    Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: Kind::GitRepoAnnouncement,
+                            public_key: event.pubkey,
+                            identifier: "test-repo".to_string(),
+                        },
+                        relays: vec![],
+                    },
+                    event,
+                );
+            }
+            repo_ref.maintainers = maintainers;
+            repo_ref
+        }
+
+        #[test]
+        fn acceptance_lists_only_self_and_the_confirmed_lead() {
+            let lead_keys = Keys::generate();
+            let lead = lead_keys.public_key();
+            let co_keys = Keys::generate();
+            let co = co_keys.public_key();
+            let me = Keys::generate().public_key();
+
+            let repo_ref = repo_ref_from(
+                vec![
+                    announcement(
+                        &lead_keys,
+                        vec![role("M", &lead), role("m", &co), role("m", &me)],
+                    ),
+                    announcement(&co_keys, vec![role("M", &lead), role("m", &co)]),
+                ],
+                vec![lead, co, me],
+            );
+
+            assert_eq!(
+                default_acceptance_maintainers(&repo_ref, me),
+                vec![me, lead]
+            );
+        }
+
+        #[test]
+        fn the_accepting_lead_keeps_the_full_listing() {
+            let selected_keys = Keys::generate();
+            let selected = selected_keys.public_key();
+            let lead = Keys::generate().public_key();
+            let co = Keys::generate().public_key();
+
+            // the selected maintainer designated another pubkey as lead;
+            // that pubkey's acceptance announcement defines the membership,
+            // so it lists everyone
+            let repo_ref = repo_ref_from(
+                vec![announcement(
+                    &selected_keys,
+                    vec![role("m", &selected), role("M", &lead), role("m", &co)],
+                )],
+                vec![selected, lead, co],
+            );
+
+            assert_eq!(
+                default_acceptance_maintainers(&repo_ref, lead),
+                vec![lead, selected, co]
+            );
+        }
+
+        #[test]
+        fn an_unconfirmed_lead_is_not_reciprocated_alone() {
+            let selected_keys = Keys::generate();
+            let selected = selected_keys.public_key();
+            let lead = Keys::generate().public_key();
+            let me = Keys::generate().public_key();
+
+            // the designated lead has not announced: listing only them
+            // could not acknowledge a confirmed member, so fall back to
+            // the sole confirmed maintainer
+            let repo_ref = repo_ref_from(
+                vec![announcement(
+                    &selected_keys,
+                    vec![role("m", &selected), role("M", &lead), role("m", &me)],
+                )],
+                vec![selected, lead, me],
+            );
+
+            assert_eq!(
+                default_acceptance_maintainers(&repo_ref, me),
+                vec![me, selected]
+            );
+        }
+
+        #[test]
+        fn without_role_tags_the_sole_confirmed_maintainer_is_reciprocated() {
+            let selected_keys = Keys::generate();
+            let selected = selected_keys.public_key();
+            let me = Keys::generate().public_key();
+
+            let repo_ref = repo_ref_from(
+                vec![announcement(
+                    &selected_keys,
+                    vec![vec!["maintainers".to_string(), me.to_string()]],
+                )],
+                vec![selected, me],
+            );
+
+            assert_eq!(
+                default_acceptance_maintainers(&repo_ref, me),
+                vec![me, selected]
+            );
+        }
+    }
 
     #[tokio::test]
     async fn poll_authorization_is_only_installed_with_a_private_signer() {

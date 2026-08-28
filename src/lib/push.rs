@@ -512,7 +512,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     if !repo_grasps.is_empty() {
         eprintln!(
             "pushing proposal refs to {}",
-            if repo_ref.maintainers.contains(&user_ref.public_key) {
+            if repo_ref.is_authorized_maintainer(&user_ref.public_key) {
                 "repository git servers"
             } else {
                 "repository grasp servers"

@@ -1,4 +1,4 @@
-//! Repeat `ngit init` with a cached kind-30618: the cached ref values
+//! Edit an announcement with a cached kind-30618: the cached ref values
 //! are re-signed as a fresh state event and established through the
 //! state transaction.
 //!
@@ -9,19 +9,19 @@
 //! Two properties are pinned here:
 //!
 //! 1. **Fresh event, identical refs, newly added relay covered** — a repeat
-//!    init that adds a `--relay` publishes a kind-30618 with a *new* event id
+//!    edit that adds a `--relay` publishes a kind-30618 with a *new* event id
 //!    but the *same* ref map, and the newly announced relay holds it even
 //!    though it was never in ngit's default relay set (the `extra` role is
 //!    deliberately not env-injected).
 //! 2. **Failure leaves the previous state authoritative** — when the push
-//!    cannot establish the fresh event (no git server listable), init exits
-//!    non-zero pointing at `ngit sync` as the follow-up and no new kind-30618
-//!    reaches any relay. (The cache-write half of the invariant — commit only
-//!    after acceptance — is unit-tested on the transaction driver in
-//!    `state_transaction.rs`.)
+//!    cannot establish the fresh event (no git server listable), repo edit
+//!    exits non-zero pointing at `ngit sync` as the follow-up and no new
+//!    kind-30618 reaches any relay. (The cache-write half of the invariant —
+//!    commit only after acceptance — is unit-tested on the transaction driver
+//!    in `state_transaction.rs`.)
 //!
-//! Assertions run immediately after each `ngit init` subprocess exits:
-//! init publishes its events in-process before returning, so there is
+//! Assertions run immediately after each command exits: publication happens
+//! in-process before returning, so there is
 //! nothing asynchronous left to poll for.
 
 use std::time::Duration;
@@ -92,8 +92,19 @@ async fn run_init(repo: &test_harness::Repo, args: &[&str]) -> Result<std::proce
     command.output().await.context("failed to spawn ngit init")
 }
 
+async fn run_edit(repo: &test_harness::Repo, args: &[&str]) -> Result<std::process::Output> {
+    let mut full = vec!["repo", "edit", "--name", DISPLAY_NAME];
+    full.extend_from_slice(args);
+    let mut command = repo.ngit(full);
+    command.kill_on_drop(true);
+    command
+        .output()
+        .await
+        .context("failed to spawn ngit repo edit")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repeat_init_republishes_fresh_state_to_newly_added_relay() -> Result<()> {
+async fn repository_edit_republishes_fresh_state_to_newly_added_relay() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -137,10 +148,10 @@ async fn repeat_init_republishes_fresh_state_to_newly_added_relay() -> Result<()
         "the extra relay must not hold the state before it is announced",
     );
 
-    // Repeat init announcing an additional relay. The refs are
+    // Edit the announcement to add another relay. The refs are
     // unchanged, so only the cached-state republish can bring the state
     // event to the newly announced relay.
-    let second = run_init(
+    let second = run_edit(
         &repo,
         &[
             "--clone",
@@ -154,7 +165,7 @@ async fn repeat_init_republishes_fresh_state_to_newly_added_relay() -> Result<()
     .await?;
     if !second.status.success() {
         bail!(
-            "repeat ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            "ngit repo edit exited non-zero ({:?})\nstdout: {}\nstderr: {}",
             second.status,
             String::from_utf8_lossy(&second.stdout),
             String::from_utf8_lossy(&second.stderr),
@@ -165,12 +176,12 @@ async fn repeat_init_republishes_fresh_state_to_newly_added_relay() -> Result<()
         .await?
         .context(
             "no kind-30618 on the newly announced relay after the repeat \
-             init — the cached-state republish should have fanned the fresh \
+             edit — the cached-state republish should have fanned the fresh \
              event out to every announced relay",
         )?;
     assert_ne!(
         republished.id, first_event.id,
-        "the repeat init must publish a fresh state event, not re-send the \
+        "the repository edit must publish a fresh state event, not re-send the \
          cached one",
     );
     assert_eq!(
@@ -235,16 +246,16 @@ async fn failed_republish_leaves_previous_state_authoritative() -> Result<()> {
 
     let failed = tokio::time::timeout(
         Duration::from_secs(5),
-        run_init(
+        run_edit(
             &repo,
             &["--clone", &dead_url, "--relay", &default_relay_url],
         ),
     )
     .await
-    .context("repeat init did not fail promptly for an unavailable git server")??;
+    .context("repo edit did not fail promptly for an unavailable git server")??;
     assert!(
         !failed.status.success(),
-        "repeat init with no listable git server must fail instead of \
+        "repo edit with no listable git server must fail instead of \
          broadcasting a state event no git server holds\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&failed.stdout),
         String::from_utf8_lossy(&failed.stderr),

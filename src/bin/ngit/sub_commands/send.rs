@@ -293,7 +293,7 @@ pub async fn launch(
     if existing_thread_is_pr {
         if let Some(proposal_author) = proposal_author {
             if proposal_author != user_ref.public_key
-                && !repo_ref.maintainers.contains(&user_ref.public_key)
+                && !repo_ref.is_authorized_maintainer(&user_ref.public_key)
             {
                 bail!(
                     "only the proposal author or a repository maintainer can update an existing pull request"

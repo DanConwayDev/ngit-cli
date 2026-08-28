@@ -19,12 +19,10 @@
 //! ## Shape
 //!
 //! - 1 vanilla relay (`"default"`) + 1 GRASP (`"repo"`).
-//! - Maintainer publishes a repo with **one additional co-maintainer** listed
-//!   on the kind-30617 announcement, so the per-maintainer `a` / `p` tag
-//!   assertions exercise a list of length > 1 (the regression the legacy test
-//!   caught — and the reason [`PublishRepoOpts::additional_maintainer_count`]
-//!   exists). The single-maintainer case is implicitly covered by every other
-//!   harness test.
+//! - Maintainer publishes a repo with one confirmed co-maintainer, so the
+//!   per-maintainer `a` / `p` tag assertions exercise a list of length > 1 (the
+//!   regression the legacy test caught). The single-maintainer case is
+//!   implicitly covered by every other harness test.
 //! - A fresh contributor clone is minted by [`Harness::publish_patch_series`]
 //!   and a 2-commit branch (`t3.md`, `t4.md`) is published as a patch series
 //!   **with a cover letter** via `ngit send HEAD~2 --force-patch --title ...
@@ -52,7 +50,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::{Harness, PublishPatchSeriesOpts, PublishRepoOpts};
+use test_harness::{Harness, PublishPatchSeriesOpts};
 use tokio::sync::OnceCell;
 
 const COVER_LETTER_TITLE: &str = "exampletitle";
@@ -88,9 +86,8 @@ struct Snapshot {
     /// `d` tag on the kind-30617 event and the third coordinate
     /// component of every `a` tag on a patch.
     identifier: String,
-    /// Pubkeys of every maintainer listed on the announcement, in the
-    /// order they appear there: `[publisher, extra-1]`. Both must be
-    /// p-tagged and a-coordinate-tagged on every published patch /
+    /// Pubkeys of both confirmed maintainers: `[lead, co-maintainer]`. Both
+    /// must be p-tagged and a-coordinate-tagged on every published patch /
     /// cover letter.
     maintainer_pubkeys: Vec<PublicKey>,
     /// Branch name the contributor committed on — matches the
@@ -128,24 +125,14 @@ async fn capture_snapshot() -> Result<Snapshot> {
     .build()
     .await?;
 
-    let (_publisher, published) = harness
-        .publish_repo(PublishRepoOpts {
-            display_name: Some("send-patch maintainer".into()),
-            identifier: Some("send-patch-repo".into()),
-            // One *additional* co-maintainer beyond the publisher ⇒ the
-            // announcement carries two maintainers, which is the
-            // minimum number needed to give the per-maintainer `a` /
-            // `p` tag assertions something non-trivial to assert on.
-            // Increasing this further would only re-test the same loop;
-            // legacy used two maintainers for the same reason.
-            additional_maintainer_count: 1,
-            ..Default::default()
-        })
+    let (_publisher, role_graph) = harness
+        .publish_repo_with_role_graph("send-patch-repo")
         .await?;
+    let published = &role_graph.published;
 
     let series = harness
         .publish_patch_series(
-            &published,
+            published,
             PublishPatchSeriesOpts {
                 commits: vec![
                     (FIRST_COMMIT_FILE.into(), "some content\n".into()),
@@ -180,13 +167,10 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let first_patch = find_patch_for_commit(&series.patch_events, &first_commit_oid)?;
     let second_patch = find_patch_for_commit(&series.patch_events, &second_commit_oid)?;
 
-    let mut maintainer_pubkeys = vec![published.maintainer_keys.public_key()];
-    maintainer_pubkeys.extend(
-        published
-            .additional_maintainer_keys
-            .iter()
-            .map(|k| k.public_key()),
-    );
+    let maintainer_pubkeys = vec![
+        published.maintainer_keys.public_key(),
+        role_graph.co_maintainer_keys.public_key(),
+    ];
 
     Ok(Snapshot {
         cover_letter,

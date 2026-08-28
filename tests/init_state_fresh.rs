@@ -25,6 +25,13 @@
 //!   on the captured `Snapshot`. Same discipline as `tests/send_patch.rs` and
 //!   `tests/git_push_state/fresh_repo.rs` — see those files' module-level docs
 //!   for the rationale.
+//! - **Success — self-lead** (1 standalone test —
+//!   `lead_maintainer_self_emits_uppercase_m_role_tag`): `ngit init
+//!   --lead-maintainer <own npub>` end-to-end — clap flag through
+//!   `resolve_fields` to `RepoRef::to_event` — asserting the announcement
+//!   carries the publisher as an untimed `M` role tag. The collapse and
+//!   `--force` semantics for a non-self lead are pinned by the
+//!   `apply_lead_to_maintainers` unit tests in init.rs.
 //! - **Success — non-grasp clone path** (1 standalone test —
 //!   `vanilla_clone_url_passes_through_to_announcement`): drives `ngit init
 //!   --name --clone <vanilla_url> --relay <ws>` against a harness-managed
@@ -251,11 +258,10 @@ async fn relays_only_errors_missing_required_fields() -> Result<()> {
 ///
 /// Holds the announcement event itself (rather than pre-extracted tag
 /// values) so future cases asserting on additional tags don't have to
-/// re-run setup; the maintainer pubkey + grasp URL prefix are surfaced
+/// re-run setup; the maintainer npub + grasp URL prefix are surfaced
 /// alongside because more than one case asserts on them.
 struct Snapshot {
     announcement: Event,
-    maintainer_pubkey: PublicKey,
     /// `http://127.0.0.1:<port>` — the grasp's URL the test passed to
     /// `--grasp-server`. Cloned URLs in the announcement should start
     /// with this prefix (and end with `/<npub>/<identifier>.git`).
@@ -353,7 +359,6 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     Ok(Snapshot {
         announcement,
-        maintainer_pubkey: state.keys.public_key(),
         grasp_http_url,
         grasp_relay_url,
         maintainer_npub: state.npub,
@@ -458,24 +463,29 @@ async fn relays_include_grasp_derived(#[future] snapshot: Arc<Snapshot>) -> Resu
     Ok(())
 }
 
-/// Equivalent of legacy
-/// `with_name_and_grasp_server::maintainers_is_just_me`. With no
-/// `--other-maintainers`, the announcement lists only the publishing
-/// pubkey.
+/// A fresh one-person repository uses NIP-34's implicit-author form. It does
+/// not need an indexed role or deprecated compatibility roster until another
+/// role is introduced.
 #[rstest]
 #[tokio::test]
-async fn maintainers_is_just_me(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+async fn sole_maintainer_is_implicit(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    let maintainers = tag_values(&s.announcement, "maintainers");
+    let membership_tags: Vec<Vec<String>> = s
+        .announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|tag| {
+            matches!(
+                tag.first().map(String::as_str),
+                Some("M" | "m" | "o" | "maintainers")
+            )
+        })
+        .collect();
     assert_eq!(
-        maintainers.len(),
-        1,
-        "expected single maintainer; got {maintainers:?}",
-    );
-    assert_eq!(
-        maintainers[0],
-        s.maintainer_pubkey.to_string(),
-        "expected sole maintainer to be the publisher",
+        membership_tags,
+        Vec::<Vec<String>>::new(),
+        "the announcement author should remain the implicit sole maintainer",
     );
     Ok(())
 }
@@ -893,6 +903,115 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
         "expected refs/remotes/origin/main to match the pushed main tip",
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Success — self-lead through the repository-edit API
+// ---------------------------------------------------------------------------
+
+/// `repo edit --lead-maintainer` with the publisher's own npub keeps the
+/// listing intact and asserts the publisher as lead. The replacement closes
+/// the author's implicit co-maintainer history and starts an `M` interval at
+/// the same transition time.
+#[tokio::test]
+async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (repo, state) = harness.arrange_init_state_a_fresh().await?;
+    let grasp_http_url = harness.grasp("repo").url().to_string();
+
+    let init_out = repo
+        .ngit([
+            "init",
+            "--name",
+            DISPLAY_NAME,
+            "--grasp-server",
+            &grasp_http_url,
+        ])
+        .output()
+        .await
+        .context("failed to spawn ngit init")?;
+    if !init_out.status.success() {
+        bail!(
+            "ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            init_out.status,
+            String::from_utf8_lossy(&init_out.stdout),
+            String::from_utf8_lossy(&init_out.stderr),
+        );
+    }
+    repo.nostr_push(["-u", "origin", "main"])
+        .await
+        .context("graduate sole-maintainer announcement")?;
+    let edit_out = repo
+        .ngit(["repo", "edit", "--lead-maintainer", &state.npub])
+        .output()
+        .await
+        .context("failed to spawn ngit repo edit --lead-maintainer")?;
+    if !edit_out.status.success() {
+        bail!(
+            "ngit repo edit --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            edit_out.status,
+            String::from_utf8_lossy(&edit_out.stdout),
+            String::from_utf8_lossy(&edit_out.stderr),
+        );
+    }
+
+    // same relay-selection rationale as `capture_snapshot`: the default
+    // relay always materialises the kind-30617
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(state.keys.public_key())
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let announcement = announcements
+        .into_iter()
+        .find(|e| tag_value(e, "d").as_deref() == Some(EXPECTED_IDENTIFIER))
+        .with_context(|| {
+            format!(
+                "no kind-30617 with `d` = {EXPECTED_IDENTIFIER:?} on the default \
+                 relay after `ngit repo edit --lead-maintainer`"
+            )
+        })?;
+
+    let role_tags: Vec<Vec<String>> = announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|t| t.first().is_some_and(|name| name == "M" || name == "m"))
+        .collect();
+    let author = state.keys.public_key().to_string();
+    assert_eq!(role_tags.len(), 2, "expected M and closed m history");
+    assert_eq!(&role_tags[0][..2], &["M".to_string(), author.clone()]);
+    assert_eq!(
+        &role_tags[1][..3],
+        &["m".to_string(), author, "0".to_string()]
+    );
+    assert_eq!(role_tags[0].len(), 3, "the M interval should be active");
+    assert_eq!(
+        role_tags[1].len(),
+        4,
+        "the prior m interval should be closed"
+    );
+    assert_eq!(
+        role_tags[0][2], role_tags[1][3],
+        "promotion should close m and start M at one boundary",
+    );
+    assert_eq!(
+        tag_values(&announcement, "maintainers"),
+        vec![state.keys.public_key().to_string()],
+        "deprecated `maintainers` tag should carry the same sole member",
+    );
     Ok(())
 }
 

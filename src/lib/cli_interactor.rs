@@ -16,12 +16,21 @@ use mockall::*;
 /// output to stderr, don't double-print". This is the same pattern clap uses
 /// internally.
 #[derive(Debug)]
-pub struct CliError;
+pub struct CliError {
+    message: String,
+    category: Option<&'static str>,
+}
+
+impl CliError {
+    #[must_use]
+    pub fn category(&self) -> Option<&'static str> {
+        self.category
+    }
+}
 
 impl fmt::Display for CliError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Empty display — the error message was already printed to stderr
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
@@ -38,6 +47,24 @@ impl std::error::Error for CliError {}
 /// This function does NOT call `process::exit()`. It prints to stderr and
 /// returns an error that the caller should propagate with `?` or `return Err`.
 pub fn cli_error(message: &str, details: &[(&str, &str)], suggestions: &[&str]) -> anyhow::Error {
+    render_cli_error(None, message, details, suggestions)
+}
+
+pub fn cli_error_with_category(
+    category: &'static str,
+    message: &str,
+    details: &[(&str, &str)],
+    suggestions: &[&str],
+) -> anyhow::Error {
+    render_cli_error(Some(category), message, details, suggestions)
+}
+
+fn render_cli_error(
+    category: Option<&'static str>,
+    message: &str,
+    details: &[(&str, &str)],
+    suggestions: &[&str],
+) -> anyhow::Error {
     let dim = Style::new().for_stderr().color256(247);
 
     eprint!(
@@ -74,7 +101,11 @@ pub fn cli_error(message: &str, details: &[(&str, &str)], suggestions: &[&str]) 
         }
     }
 
-    CliError.into()
+    CliError {
+        message: message.to_string(),
+        category,
+    }
+    .into()
 }
 
 #[derive(Default)]

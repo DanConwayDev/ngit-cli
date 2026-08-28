@@ -45,7 +45,7 @@ git remote -v | grep -q 'nostr://'   # primary check — no cache needed
 ngit repo --json --offline            # full metadata when needed
 ```
 
-`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes `nostr_url`, `maintainers`, `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, `maintainer_edges`, and `grasp_servers`. "Invited" means the relationship is not reciprocal; it does not mean the maintainer lacks authority.
+`ngit repo` always exits 0; `is_nostr_repo: false` can be a cold-cache false negative — if remotes show `nostr://`, run `git fetch origin` then retry. Full output includes roster fields plus `lead_source`, `lead_path`, `pending_actions`, and `health`. Follow an explicit forward with `ngit repo follow-lead`. "Invited" means the relationship is not reciprocal; an invited member's events are not authoritative until they accept. Moderators can manage issues and PRs but never publish repository state. See `reference/repositories.md` for named membership actions and the role model.
 
 ## Selecting the target repository
 

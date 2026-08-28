@@ -17,7 +17,6 @@ use git_events::{
 };
 use git2::{Oid, Repository};
 use ngit::{
-    accept_maintainership::accept_maintainership_with_defaults,
     client::{self, Client, get_event_from_cache_by_id, get_filter_state_events},
     git::{self, Repo, nostr_url::NostrUrlDecoded},
     git_events::{
@@ -31,8 +30,7 @@ use ngit::{
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
-    repo_ref::{self, get_repo_config_from_yaml},
-    repo_state,
+    repo_ref, repo_state,
     signer::NgitSigner,
     utils::{
         find_proposal_and_patches_by_branch_name, get_all_proposals, get_open_or_draft_proposals,
@@ -40,7 +38,7 @@ use ngit::{
     },
 };
 use nostr::prelude::{
-    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, RelayUrl, Tag,
+    Event, EventBuilder, EventId, FromBech32, Kind, PublicKey, Tag,
     nip01::Nip01Tag,
     nip10::{Marker, Nip10Tag},
     nip19::{Nip19, ToBech32},
@@ -158,6 +156,7 @@ pub(super) async fn run_push(
     if !(git_state_refspecs.is_empty() && proposal_refspecs.is_empty()) {
         let PushEventsPlan {
             rejected_proposal_refspecs,
+            rejected_git_server_refspecs,
             rejected,
             state,
             other_events,
@@ -178,6 +177,11 @@ pub(super) async fn run_push(
             command_signer,
         )
         .await?;
+
+        // Like the out-of-sync and stale-lease rejections above, refspecs
+        // refused by the maintainer-listing check have received their
+        // `error` responses and must not reach the state transaction.
+        git_state_refspecs.retain(|refspec| !rejected_git_server_refspecs.contains(refspec));
 
         if !rejected {
             let decoded_nostr_url = repo_ref.to_nostr_git_url(&None);
@@ -335,6 +339,12 @@ fn apply_force_with_lease(
 
 struct PushEventsPlan {
     rejected_proposal_refspecs: Vec<String>,
+    /// refs/heads and refs/tags refspecs refused by the maintainer-listing
+    /// check. Their `error` responses have already been written, so the
+    /// caller must drop them before the state transaction — otherwise their
+    /// git data would still be pushed and the same refs reported a second
+    /// time.
+    rejected_git_server_refspecs: Vec<String>,
     rejected: bool,
     /// the candidate replacement repository state (`None` under
     /// `nostr.nostate` or when no state refspecs are being pushed)
@@ -428,17 +438,32 @@ async fn create_events_and_proposals(
         "authentication required; run 'ngit account login' or 'ngit account create', then try again",
     )?;
 
-    if !repo_ref.maintainers.contains(&user_ref.public_key) {
+    let authorized_maintainer = repo_ref.is_authorized_maintainer(&user_ref.public_key);
+    if !authorized_maintainer {
+        let rejection = if repo_ref
+            .invited_maintainers()
+            .contains(&user_ref.public_key)
+        {
+            "you are invited as a maintainer but have not accepted; run `ngit repo accept` first"
+                .to_string()
+        } else {
+            format!(
+                "your nostr account {} is not a confirmed maintainer of the repo",
+                user_ref.metadata.name
+            )
+        };
         for refspec in git_server_refspecs {
             let (_, to) = refspec_to_from_to(refspec).unwrap();
-            eprintln!(
-                "error {to} your nostr account {} isn't listed as a maintainer of the repo",
-                user_ref.metadata.name
-            );
+            // `error <dst> <why>` is the remote-helper protocol response on
+            // stdout — like the out-of-sync and stale-lease rejections — so
+            // git reports the ref as rejected and exits non-zero. A stderr
+            // message would leave git believing nothing needed pushing.
+            println!("error {to} {rejection}");
         }
         if proposal_refspecs.is_empty() {
             return Ok(PushEventsPlan {
                 rejected_proposal_refspecs: vec![],
+                rejected_git_server_refspecs: git_server_refspecs.clone(),
                 rejected: true,
                 state: None,
                 other_events: vec![],
@@ -446,19 +471,6 @@ async fn create_events_and_proposals(
                 repo_relay_only: false,
             });
         }
-    } else if repo_ref
-        .maintainers_without_annoucnement
-        .clone()
-        .is_some_and(|ms| ms.contains(&user_ref.public_key))
-    {
-        // Auto-accept co-maintainership: publish the user's own announcement
-        // with defaults before proceeding with the push. The announcement is
-        // required (not just for consent, but to prevent scammers from
-        // attributing a person's state events to a fake project with the same
-        // identifier). See docs/design/co-maintainer-announcement-rationale.md.
-        accept_maintainership_with_defaults(git_repo, repo_ref, &user_ref, client, &signer)
-            .await
-            .context("failed to auto-accept co-maintainership")?;
     }
 
     let mut events = vec![];
@@ -469,7 +481,10 @@ async fn create_events_and_proposals(
     // should auto-resolve issues and when scoping proposal fork points.
     let declared_default_branch = repo_state::default_branch_from_state(&existing_state);
 
-    if !git_server_refspecs.is_empty() {
+    // A rejected pusher's branch refspecs produce no state candidate, no
+    // merge/issue status events and no maintainers.yaml update; only their
+    // proposal refspecs are processed below.
+    if authorized_maintainer && !git_server_refspecs.is_empty() {
         let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
 
         let store_state =
@@ -556,19 +571,6 @@ async fn create_events_and_proposals(
                 )?;
             }
         }
-
-        if let Ok(Some(repo_ref_event)) = get_maintainers_yaml_update(
-            term,
-            &repo_ref.to_nostr_git_url(&None),
-            repo_ref,
-            git_repo,
-            &signer,
-            git_server_refspecs,
-        )
-        .await
-        {
-            events.push(repo_ref_event);
-        }
     }
 
     let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
@@ -607,6 +609,11 @@ async fn create_events_and_proposals(
 
     Ok(PushEventsPlan {
         rejected_proposal_refspecs,
+        rejected_git_server_refspecs: if authorized_maintainer {
+            vec![]
+        } else {
+            git_server_refspecs.clone()
+        },
         rejected: false,
         state,
         other_events: events,
@@ -722,9 +729,8 @@ async fn process_proposal_refspecs(
                     .map(|base| base.commit)
                     .or(preserved_base),
             };
-            if [repo_ref.maintainers.clone(), vec![proposal.pubkey]]
-                .concat()
-                .contains(&user_ref.public_key)
+            if proposal.pubkey == user_ref.public_key
+                || repo_ref.is_authorized_maintainer(&user_ref.public_key)
             {
                 if refspec.starts_with('+') {
                     // force push
@@ -1424,76 +1430,6 @@ pub(crate) fn generate_updated_state(
     Ok(new_state)
 }
 
-async fn get_maintainers_yaml_update(
-    term: &console::Term,
-    decoded_nostr_url: &NostrUrlDecoded,
-    repo_ref: &RepoRef,
-    git_repo: &Repo,
-    signer: &Arc<NgitSigner>,
-    refspecs_to_git_server: &Vec<String>,
-) -> Result<Option<Event>> {
-    for refspec in refspecs_to_git_server {
-        let (from, to) = refspec_to_from_to(refspec)?;
-        if to.eq("refs/heads/main") || to.eq("refs/heads/master") {
-            let tip_of_pushed_branch = git_repo.get_commit_or_tip_of_reference(from)?;
-            let tip_of_remote_branch =
-                git_repo.get_commit_or_tip_of_reference(&refspec_remote_ref_name(
-                    &git_repo.git_repo,
-                    refspec,
-                    None,
-                    &decoded_nostr_url.original_string,
-                )?)?;
-            let diff = git_repo.git_repo.diff_tree_to_tree(
-                Some(
-                    &git_repo
-                        .git_repo
-                        .find_commit(sha1_to_oid(&tip_of_pushed_branch)?)?
-                        .tree()?,
-                ),
-                Some(
-                    &git_repo
-                        .git_repo
-                        .find_commit(sha1_to_oid(&tip_of_remote_branch)?)?
-                        .tree()?,
-                ),
-                None,
-            )?;
-            for delta in diff.deltas() {
-                // File was added or updated
-                if let Some(path) = delta.new_file().path() {
-                    if path.to_string_lossy() == "maintainers.yaml" {
-                        let config = get_repo_config_from_yaml(git_repo)?;
-                        if config.identifier == Some(repo_ref.identifier.clone())
-                            || config.identifier.is_none()
-                        {
-                            let config_maintainers = config
-                                .maintainers
-                                .iter()
-                                .filter_map(|s| PublicKey::parse(s).ok())
-                                .collect::<Vec<PublicKey>>();
-                            let config_relays = config
-                                .relays
-                                .iter()
-                                .filter_map(|s| RelayUrl::parse(s).ok())
-                                .collect::<Vec<RelayUrl>>();
-                            if repo_ref.maintainers != config_maintainers
-                                || repo_ref.relays != config_relays
-                            {
-                                let mut repo_ref = repo_ref.clone();
-                                repo_ref.maintainers = config_maintainers;
-                                repo_ref.relays = config_relays;
-                                term.write_line("maintainers.yaml update detected so publishing repo announcement update")?;
-                                return Ok(Some(repo_ref.to_event(signer).await?));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
 struct MergeStatusContext<'a> {
     decoded_nostr_url: &'a NostrUrlDecoded,
     repo_ref: &'a RepoRef,
@@ -1736,10 +1672,11 @@ async fn get_issue_resolution_status_events(
                         continue;
                     }
 
-                    // Match command-level permissions: only issue author or
-                    // repository maintainers can change issue status.
+                    // Match command-level permissions: only the issue author
+                    // or a confirmed repository member can change issue
+                    // status. Confirmed moderators therefore count here.
                     if issue.pubkey != signer_pubkey
-                        && !repo_ref.maintainers.contains(&signer_pubkey)
+                        && !repo_ref.is_authorized_member(&signer_pubkey)
                     {
                         term.write_line(
                             format!(

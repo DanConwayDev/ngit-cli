@@ -247,7 +247,11 @@ Key shapes:
 
 The API is small on purpose. Scenario builders
 (`harness.publish_repo`, `harness.publish_pr`, etc.) accrue in
-`test_harness/src/scenarios.rs` as tests demand them.
+`test_harness/src/scenarios.rs` as tests demand them. NIP-34
+role-tag fixtures — fabricated announcements with `M`/`m`/`o`
+assignments, acknowledgements and history boundaries that ngit's own
+emission paths cannot produce — live in `test_harness/src/roles.rs`
+(`publish_fabricated_announcement`, `publish_repo_with_role_graph`).
 
 ## Assertion model
 

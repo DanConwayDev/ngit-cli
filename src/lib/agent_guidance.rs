@@ -897,7 +897,7 @@ pub async fn warn_if_maintainer(
     let Ok(Some(account)) = get_likely_logged_in_user(root).await else {
         return Ok(());
     };
-    if !repo_ref.maintainers.contains(&account) {
+    if !repo_ref.is_authorized_maintainer(&account) {
         return Ok(());
     }
     let status = status(root)?;

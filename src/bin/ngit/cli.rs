@@ -392,8 +392,7 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// publish a repository to nostr; signal you are its maintainer accepting
-    /// PRs and issues
+    /// create and publish a new repository on nostr
     Init(sub_commands::init::SubCommandArgs),
     /// manage repository metadata and maintainership
     #[command(
@@ -865,13 +864,13 @@ pub enum IssueCommands {
 
 #[derive(Subcommand)]
 pub enum RepoCommands {
-    /// publish a repository to nostr (alias for `ngit init`)
+    /// create and publish a new repository on nostr (alias for `ngit init`)
     Init(sub_commands::init::SubCommandArgs),
     /// update repository metadata on nostr
     #[command(
-        long_about = "update repository metadata on nostr\n\nlike `ngit init` but makes clear you are editing an existing repository"
+        long_about = "update an existing repository announcement on nostr\n\nrepository announcements are created with `ngit init`; use this command for every later metadata or roster change"
     )]
-    Edit(sub_commands::init::SubCommandArgs),
+    Edit(sub_commands::repo::edit::SubCommandArgs),
     /// accept an invitation to co-maintain a repository
     #[command(long_about = "accept an invitation to co-maintain a repository\n\n\
             publishes your repository announcement to nostr, confirming your co-maintainership.\n\n\
@@ -879,6 +878,21 @@ pub enum RepoCommands {
             to a specific repository coordinate chain, preventing scammers from attributing your\n\
             commits to a fake repository. See `ngit repo info` for details on the maintainer model.")]
     Accept(sub_commands::repo::accept::SubCommandArgs),
+    /// end your own role in a repository you co-maintain or moderate
+    #[command(
+        long_about = "end your own role in a repository you co-maintain or moderate\n\n\
+            republishes your repository announcement with your self-role ended (per NIP-34 a\n\
+            member may leave by ending their self-role). Your own record takes precedence over\n\
+            maintainer assignments in other members' announcements, so this removes you from\n\
+            the repository's authorized member set even while others still list you."
+    )]
+    Leave(sub_commands::repo::leave::SubCommandArgs),
+    /// follow the repository's resolved lead maintainer
+    #[command(
+        name = "follow-lead",
+        long_about = "follow the repository's resolved lead maintainer\n\nupdates retained role history when applicable, then switches the selected repository coordinate and matching nostr remotes"
+    )]
+    FollowLead(sub_commands::repo::follow_lead::SubCommandArgs),
 }
 
 #[cfg(test)]
@@ -1287,5 +1301,90 @@ mod tests {
             let cli = Cli::try_parse_from(args).expect("command should parse");
             assert!(cli.repo_relay_only);
         }
+    }
+
+    #[test]
+    fn init_rejects_membership_edit_options() {
+        for option in ["--other-maintainers", "--lead-maintainer"] {
+            assert!(
+                Cli::try_parse_from(["ngit", "init", option, "npub1invalid"]).is_err(),
+                "ngit init unexpectedly accepted {option}",
+            );
+        }
+    }
+
+    #[test]
+    fn repo_edit_exposes_named_relationship_actions() {
+        for args in [
+            ["ngit", "repo", "edit", "--add-maintainer", "npub1invalid"].as_slice(),
+            [
+                "ngit",
+                "repo",
+                "edit",
+                "--remove-maintainer",
+                "npub1invalid",
+                "--no-lead-maintainer",
+            ]
+            .as_slice(),
+            ["ngit", "repo", "edit", "--lead-maintainer", "npub1invalid"].as_slice(),
+            [
+                "ngit",
+                "repo",
+                "edit",
+                "--acknowledge-maintainer-change",
+                "npub1invalid",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("failed to parse: {error}"));
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--add-maintainer",
+                "npub1invalid",
+                "--remove-maintainer",
+                "npub1alsoinvalid",
+            ])
+            .is_err(),
+            "one invocation must not accept two named relationship actions",
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--acknowledge-maintainer-change",
+                "npub1invalid",
+                "--name",
+                "changed too",
+            ])
+            .is_err(),
+            "the history acknowledgement must be standalone",
+        );
+    }
+
+    #[test]
+    fn repo_follow_lead_is_non_interactive() {
+        assert!(Cli::try_parse_from(["ngit", "repo", "follow-lead"]).is_ok());
+    }
+
+    #[test]
+    fn repository_membership_commands_reserve_force() {
+        assert!(Cli::try_parse_from(["ngit", "repo", "accept", "--force"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--add-maintainer",
+                "npub1invalid",
+                "--force",
+            ])
+            .is_ok()
+        );
     }
 }

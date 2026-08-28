@@ -74,13 +74,16 @@ pub async fn run_list(
     // This prevents advertising refs whose git objects haven't been pushed to
     // any server yet, which would cause `git clone` / `git fetch` to fail.
     //
-    // filter by maintainers to avoid state events from other remotes with the
-    // same identifier being selected when they have a newer created_at
+    // filter by confirmed maintainers so that state events from other remotes
+    // with the same identifier, or from invited maintainers who haven't made
+    // the relationship reciprocal, are never selected even with a newer
+    // created_at
+    let authorized_state_authors = repo_ref.confirmed_maintainers();
     let mut candidates: Vec<&nostr::prelude::Event> = fetch_report
         .state_per_relay
         .values()
         .filter_map(|maybe| maybe.as_ref())
-        .filter(|event| repo_ref.maintainers.contains(&event.pubkey))
+        .filter(|event| authorized_state_authors.contains(&event.pubkey))
         .collect();
     // Sort newest-first using NIP-01 replacement ordering: the lower event ID
     // wins when timestamps tie.
@@ -362,7 +365,7 @@ async fn get_open_and_draft_proposals_state(
                 }
                 Err(error) => {
                     if let Ok(Some(public_key)) = get_curent_user(git_repo) {
-                        if repo_ref.maintainers.contains(&public_key)
+                        if repo_ref.is_authorized_maintainer(&public_key)
                             || events_to_apply.iter().any(|e| e.pubkey.eq(&public_key))
                         {
                             term.write_line(

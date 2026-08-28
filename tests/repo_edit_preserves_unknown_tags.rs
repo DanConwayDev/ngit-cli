@@ -1,4 +1,4 @@
-//! `ngit init` round-trips unknown tags on the existing repo
+//! `ngit repo edit` round-trips unknown tags on the existing repo
 //! announcement instead of silently stripping them.
 //!
 //! Motivating problem: `RepoRef::try_from` parses only the tags ngit
@@ -7,14 +7,13 @@
 //! `RepoRef::to_event` rebuilds the tag list from the typed struct
 //! fields. Anything else on the source event is dropped on every
 //! republish. If a future ngit version or a third-party tool adds a
-//! new tag, today's `ngit init` silently erases it the next time the
-//! maintainer runs it.
+//! new tag, today's client must not erase it during a metadata edit.
 //!
 //! The contract these tests pin:
 //!
-//! - **Preserve by default.** `ngit init --force` against a State C
-//!   announcement carrying unknown tags republishes them verbatim, including
-//!   repeated tags of the same unknown name (`multi-example- style-2` shape).
+//! - **Preserve by default.** `ngit repo edit` against a State C announcement
+//!   carrying unknown tags republishes them verbatim, including repeated tags
+//!   of the same unknown name (`multi-example- style-2` shape).
 //! - **Multi-value tags survive intact.** A single unknown tag with multiple
 //!   value slots (`["multi-example", "v1", "v2"]`) round- trips as one tag with
 //!   both values, not as two tags or one truncated tag.
@@ -23,7 +22,7 @@
 //!   event carries exactly one — ngit's typed field is the single source of
 //!   truth for known names. The extras are not smuggled back in via the
 //!   unknown-tag pass-through.
-//! - **`--clean` drops them.** `ngit init --force --clean` against the same
+//! - **`--clean` drops them.** `ngit repo edit --clean` against the same
 //!   arrange republishes with the unknown tags removed.
 //!
 //! ## Coverage
@@ -31,22 +30,21 @@
 //! Two captured snapshots, each shared across multiple `#[rstest]`
 //! cases via `tokio::sync::OnceCell`:
 //!
-//! - `PreserveSnapshot` — `ngit init --force`
+//! - `PreserveSnapshot` — `ngit repo edit`
 //!   - `preserve_keeps_single_example`
 //!   - `preserve_keeps_multi_value`
 //!   - `preserve_keeps_repeated_style_2`
 //!   - `preserve_dedupes_name_tag`
-//! - `CleanSnapshot` — `ngit init --force --clean`
+//! - `CleanSnapshot` — `ngit repo edit --clean`
 //!   - `clean_drops_example`
 //!   - `clean_drops_multi_example`
 //!   - `clean_drops_multi_example_style_2`
 //!
 //! ## Why two snapshots
 //!
-//! `--force` and `--force --clean` exercise the same MyAnnouncement
+//! the ordinary and `--clean` edits exercise the same MyAnnouncement
 //! republish path with the same arrange but different ngit CLI flags;
-//! one snapshot can't observe both behaviours. Two `OnceCell` fixtures
-//! match the `init_state_my_announcement.rs` precedent.
+//! one snapshot can't observe both behaviours.
 //!
 //! ## Why State C
 //!
@@ -96,10 +94,10 @@ fn fixture_extra_tags() -> Vec<Tag> {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot — `ngit init --force` (preserve fixture)
+// Snapshot — `ngit repo edit` (preserve fixture)
 // ---------------------------------------------------------------------------
 
-/// Captured side-effects of one `ngit init --force` invocation against
+/// Captured side-effects of one `ngit repo edit` invocation against
 /// a State C repo whose existing announcement carries
 /// [`fixture_extra_tags`]. Read-only; shared across `#[rstest]` cases
 /// via `OnceCell`.
@@ -120,7 +118,7 @@ async fn preserve_snapshot() -> Arc<PreserveSnapshot> {
             Arc::new(
                 capture_preserve()
                     .await
-                    .expect("init_preserves_unknown_tags: capture_preserve failed"),
+                    .expect("repo_edit_preserves_unknown_tags: capture_preserve failed"),
             )
         })
         .await
@@ -140,19 +138,19 @@ async fn capture_preserve() -> Result<PreserveSnapshot> {
         .arrange_init_state_c_my_announcement_with_extra_tags(fixture_extra_tags())
         .await?;
 
-    let init_out = repo
-        .ngit(["init", "--force"])
+    let edit_out = repo
+        .ngit(["repo", "edit", "--description", &state.existing_description])
         .output()
         .await
-        .context("failed to spawn ngit init --force")?;
+        .context("failed to spawn ngit repo edit")?;
     // The arrange's announcement lists only an unreachable clone URL, so
-    // the post-republish push cannot succeed. Since init migrated onto
+    // the post-republish push cannot succeed. Since repository publication
     // the state transaction (push unification phase 3), that failure is
-    // a real error instead of the old warn-and-continue: init exits
+    // a real error instead of the old warn-and-continue: the edit exits
     // non-zero *after* republishing the announcement and reports what
     // succeeded plus the follow-up command. The tag round-trip on the
     // republished announcement remains the property under test.
-    expect_announcement_published_but_push_failed("ngit init --force", &init_out)?;
+    expect_announcement_published_but_push_failed("ngit repo edit", &edit_out)?;
 
     let republished = fetch_republished_announcement(
         &harness,
@@ -277,10 +275,10 @@ async fn preserve_dedupes_name_tag(
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot — `ngit init --force --clean` (clean fixture)
+// Snapshot — `ngit repo edit --clean` (clean fixture)
 // ---------------------------------------------------------------------------
 
-/// Captured side-effects of one `ngit init --force --clean` invocation
+/// Captured side-effects of one `ngit repo edit --clean` invocation
 /// against the same State C arrange as [`PreserveSnapshot`].
 struct CleanSnapshot {
     republished: Event,
@@ -295,7 +293,7 @@ async fn clean_snapshot() -> Arc<CleanSnapshot> {
             Arc::new(
                 capture_clean()
                     .await
-                    .expect("init_preserves_unknown_tags: capture_clean failed"),
+                    .expect("repo_edit_preserves_unknown_tags: capture_clean failed"),
             )
         })
         .await
@@ -315,15 +313,21 @@ async fn capture_clean() -> Result<CleanSnapshot> {
         .arrange_init_state_c_my_announcement_with_extra_tags(fixture_extra_tags())
         .await?;
 
-    let init_out = repo
-        .ngit(["init", "--force", "--clean"])
+    let edit_out = repo
+        .ngit([
+            "repo",
+            "edit",
+            "--description",
+            &state.existing_description,
+            "--clean",
+        ])
         .output()
         .await
-        .context("failed to spawn ngit init --force --clean")?;
+        .context("failed to spawn ngit repo edit --clean")?;
     // See capture_preserve: the unreachable clone URL makes the
     // post-republish push fail, which is now a real error after the
     // announcement was republished.
-    expect_announcement_published_but_push_failed("ngit init --force --clean", &init_out)?;
+    expect_announcement_published_but_push_failed("ngit repo edit --clean", &edit_out)?;
 
     let republished = fetch_republished_announcement(
         &harness,
@@ -382,7 +386,7 @@ async fn clean_drops_multi_example_style_2(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Assert the expected outcome of `ngit init` when the announcement can
+/// Assert the expected outcome of `ngit repo edit` when the announcement can
 /// be (re)published but the announced git servers are unreachable: a
 /// non-zero exit whose error reports that the announcement succeeded
 /// and the push did not. Substring-matching a stable error prefix is
@@ -418,8 +422,7 @@ fn expect_announcement_published_but_push_failed(
 /// the *republished* event, not the back-dated existing one the
 /// arrange already put on the relay.
 ///
-/// Same shape as the helper in `tests/init_state_my_announcement.rs`;
-/// duplicated here rather than shared because tests/* binaries can't
+/// Kept local because tests/* binaries cannot
 /// share helper modules without a `mod common` shim and the duplication
 /// is a few lines.
 async fn fetch_republished_announcement(
@@ -441,7 +444,7 @@ async fn fetch_republished_announcement(
             format!(
                 "no republished kind-30617 with `d` = {identifier:?} and \
                  created_at > {not_after} on the default relay after \
-                 `ngit init` — did the republish fail silently?"
+                 `ngit repo edit` — did the republish fail silently?"
             )
         })
 }

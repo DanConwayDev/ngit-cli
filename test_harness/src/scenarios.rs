@@ -75,20 +75,16 @@ pub struct PublishRepoOpts {
     /// before `ngit init` so HEAD has an oid for libgit2 to read.
     pub initial_file: Option<(String, String)>,
     /// Number of *additional* co-maintainers (beyond the publisher) to
-    /// list in the kind-30617 announcement. The harness mints that many
-    /// fresh [`Keys`] and passes their npubs to `ngit init` via
-    /// `--other-maintainers`. The resulting maintainer list on the
-    /// announcement is `[publisher, extra-1, extra-2, ...]`, matching
-    /// the order `init.rs` assembles it (see
-    /// `src/bin/ngit/sub_commands/init.rs:880-892`).
+    /// invite through one `ngit repo edit --add-maintainer` invocation per
+    /// fresh [`Keys`] value. The resulting maintainer list on the announcement
+    /// is `[publisher, extra-1, extra-2, ...]`.
     ///
     /// Defaults to `0` (single-maintainer announcement — the publisher).
     /// The minted keys are surfaced on
     /// [`PublishedRepo::additional_maintainer_keys`] so tests can assert
     /// on per-co-maintainer `p` / `a` tags downstream. The co-maintainers
-    /// themselves do **not** need to sign anything: an npub in the
-    /// `maintainers` tag is enough to make ngit treat that pubkey as a
-    /// maintainer for tag-generation purposes.
+    /// themselves do **not** sign anything, so they remain invited until a
+    /// scenario explicitly runs `ngit repo accept` as one of them.
     pub additional_maintainer_count: usize,
     /// Extra `--relay <url>` arguments to pass to `ngit init`, on top of
     /// the grasp's relay URL that `apply_grasp_infrastructure`
@@ -132,6 +128,14 @@ pub struct PublishRepoOpts {
     /// Requires one `with_grasp_server(role)` call per entry on the harness
     /// builder; panics at lookup time if any role has not been registered.
     pub additional_grasp_roles: Vec<String>,
+    /// Run `ngit repo edit --lead-maintainer <own npub>` after initial
+    /// publication so the announcement asserts the publisher as the NIP-34
+    /// lead. This composes with
+    /// [`PublishRepoOpts::additional_maintainer_count`].
+    ///
+    /// Defaults to `false`. The first additional invitation still establishes
+    /// the publisher as lead through the normal edit workflow.
+    pub assert_self_as_lead: bool,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -290,15 +294,8 @@ impl Harness {
         // form into defaults — there are no interactive prompts to drive
         // in the new harness.
         //
-        // `--other-maintainers <npub>...` injects the freshly-minted
-        // co-maintainer pubkeys into the announcement's `maintainers` tag.
-        // The init code path that consumes this lives at
-        // `src/bin/ngit/sub_commands/init.rs:880-892` — when the flag is
-        // present (or running non-interactively, as here), `base_maintainers`
-        // is taken straight from it without any prompt. The co-maintainer
-        // keypairs need not sign anything; an npub in the maintainers tag
-        // is enough for ngit to emit per-maintainer `p` / `a` tags on
-        // subsequent patches.
+        // Relationship changes happen only after the sole-maintainer
+        // repository has been published and graduated below.
         let additional_maintainer_keys: Vec<Keys> = (0..opts.additional_maintainer_count)
             .map(|_| Keys::generate())
             .collect();
@@ -322,12 +319,6 @@ impl Harness {
             grasp_url,
             "-d".into(),
         ];
-        if !additional_maintainer_npubs.is_empty() {
-            init_args.push("--other-maintainers".into());
-            for npub in &additional_maintainer_npubs {
-                init_args.push(npub.clone());
-            }
-        }
         // Additional grasp servers are appended in order so the kind-30617
         // `clone` tag ends up as [repo, ...additional_grasp_roles]. The
         // iteration order in push_refs_and_generate_pr_or_pr_update_event
@@ -386,6 +377,41 @@ impl Harness {
             .nostr_push(["-u", "origin", "main"])
             .await
             .context("git push -u origin main (publish_repo graduation)")?;
+
+        if opts.assert_self_as_lead {
+            let edit = publisher
+                .ngit(["repo", "edit", "--lead-maintainer", &npub])
+                .output()
+                .await
+                .context("failed to spawn ngit repo edit --lead-maintainer")?;
+            if !edit.status.success() {
+                bail!(
+                    "ngit repo edit --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                    edit.status,
+                    String::from_utf8_lossy(&edit.stdout),
+                    String::from_utf8_lossy(&edit.stderr),
+                );
+            }
+        }
+
+        // Membership changes use the same one-person-at-a-time public API as
+        // real callers. The first add automatically makes the publisher lead;
+        // subsequent adds retain that explicit lead.
+        for npub in &additional_maintainer_npubs {
+            let edit = publisher
+                .ngit(["repo", "edit", "--add-maintainer", npub])
+                .output()
+                .await
+                .context("failed to spawn ngit repo edit --add-maintainer")?;
+            if !edit.status.success() {
+                bail!(
+                    "ngit repo edit --add-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                    edit.status,
+                    String::from_utf8_lossy(&edit.stdout),
+                    String::from_utf8_lossy(&edit.stderr),
+                );
+            }
+        }
 
         Ok((
             publisher,
@@ -716,10 +742,10 @@ impl Harness {
     /// Pass [`PublishedRepo::identifier`] straight through.
     ///
     /// **Signing.** Defaults to [`PublishedRepo::maintainer_keys`] because
-    /// `list.rs:64-69` filters candidate state events by
-    /// `repo_ref.maintainers.contains(&event.pubkey)` — events signed by a
-    /// non-maintainer are silently ignored and the test wouldn't fail in
-    /// any way that points at the cause. The
+    /// `list.rs` filters candidate state events by
+    /// `repo_ref.confirmed_maintainers()` — events signed by anyone who is
+    /// not a confirmed maintainer are silently ignored and the test wouldn't
+    /// fail in any way that points at the cause. The
     /// [`PublishStateEventOpts::signer_keys`] knob is there only for tests
     /// that specifically want a non-maintainer event present (so they can
     /// assert it's discarded).
@@ -1297,10 +1323,9 @@ pub struct PublishStateEventOpts {
     /// today).
     pub identifier: Option<String>,
     /// Sign with these keys instead of [`PublishedRepo::maintainer_keys`].
-    /// `list.rs:67-69` filters candidates by
-    /// `repo_ref.maintainers.contains(&event.pubkey)`, so a non-maintainer
-    /// signer is only useful for tests asserting "this event is
-    /// discarded".
+    /// `list.rs` filters candidates by `repo_ref.confirmed_maintainers()`,
+    /// so a signer who is not a confirmed maintainer is only useful for
+    /// tests asserting "this event is discarded".
     pub signer_keys: Option<Keys>,
     /// Subtract this many seconds from `Timestamp::now()` for the
     /// event's `created_at`. Used to deterministically order two state
@@ -1502,9 +1527,9 @@ pub struct ArrangedInitStateB {
     /// HEAD oid after seed commits.
     pub head_oid: String,
     /// `identifier` value that the State B arrange wrote into
-    /// `nostr.repo`'s coordinate. The post-init kind-30617 announcement
-    /// must carry this same value as its `d` tag — the State B
-    /// "inherits identifier from coordinate" contract.
+    /// `nostr.repo`'s coordinate. A forced creation carries this same value
+    /// as its `d` tag — the State B "inherits identifier from coordinate"
+    /// contract.
     pub coordinate_identifier: String,
     /// Bech32 form of the `nostr.repo` coordinate ngit will read on
     /// the next subcommand. Captured so tests that want to assert the
@@ -1516,13 +1541,8 @@ pub struct ArrangedInitStateB {
 /// Captured side-state for a State C "MyAnnouncement" arrange.
 ///
 /// `ngit init` running against this repo finds an existing kind-30617
-/// signed by the publisher (`coordinate.pubkey == user.pubkey`) and
-/// trips the `MyAnnouncement` arm in `validate_post_fetch`
-/// (init.rs:531-549) — bare `ngit init` is rejected with
-/// "no arguments specified" unless `--force` (or a substantive flag
-/// such as `--name`) is set, and `--identifier <new>` is rejected with
-/// "changing identifier creates a new repository" unless `--force` is
-/// also passed.
+/// signed by the publisher (`coordinate.pubkey == user.pubkey`) and refuses
+/// to edit it. Existing announcements are changed through `ngit repo edit`.
 ///
 /// The arrange publishes the existing announcement to the harness's
 /// `"default"` relay — the same relay [`ArrangedInitStateB`] lists in
@@ -1541,24 +1561,16 @@ pub struct ArrangedInitStateC {
     /// HEAD oid after seed commits.
     pub head_oid: String,
     /// `d` tag on the existing announcement — also the identifier in
-    /// the `nostr.repo` coordinate. The re-published announcement
-    /// keeps this value unless `--identifier <new> --force` is passed
-    /// (legacy `identifier_unchanged`).
+    /// the `nostr.repo` coordinate.
     pub coordinate_identifier: String,
     /// Bech32 form of the `nostr.repo` coordinate ngit reads on the
     /// next subcommand.
     pub coordinate_bech32: String,
-    /// The kind-30617 event the arrange published before `ngit init`
-    /// runs. Tests can inspect tags on this directly without re-querying
-    /// the relay.
+    /// The kind-30617 event already present before the command runs.
     pub existing_announcement: Event,
-    /// `name` tag value carried by [`existing_announcement`]. The
-    /// re-published announcement should preserve this on `--force`
-    /// (legacy `name_preserved`) or replace it when `--name <new>` is
-    /// passed (legacy `name_overridden`).
+    /// `name` tag value carried by [`existing_announcement`].
     pub existing_name: String,
     /// `description` tag value carried by [`existing_announcement`].
-    /// Preserved on `--force` (legacy `description_preserved`).
     pub existing_description: String,
     /// URLs in [`existing_announcement`]'s `relays` tag. Includes the
     /// harness `"default"` relay (so ngit's lookup finds the event)
@@ -1583,17 +1595,9 @@ pub struct ArrangedInitStateC {
 
 /// Captured side-state for a State D "CoMaintainer" arrange.
 ///
-/// `ngit init` running against this repo finds an existing kind-30617
-/// signed by a *different* maintainer (`coordinate.pubkey !=
-/// user_pubkey`) whose `maintainers` tag includes the publisher's
-/// pubkey — the `CoMaintainer` arm in `validate_post_fetch`
-/// (init.rs:551-562). No `--force` is required: bare
-/// `ngit init --grasp-server <url>` is enough to publish a new
-/// announcement signed by the publisher that inherits the existing
-/// announcement's `name` / `description` / `web` while replacing
-/// `clone` / `relays` with the publisher's own grasp infrastructure
-/// and listing both publisher + selected maintainer in the
-/// `maintainers` tag.
+/// `ngit init` running against this repo finds an existing kind-30617 signed
+/// by a different maintainer whose active roster includes the publisher. It
+/// refuses the implicit join and directs the publisher to `ngit repo accept`.
 ///
 /// The arrange publishes the existing announcement to the harness's
 /// `"default"` relay — the same relay listed in `nostr.repo`'s
@@ -1613,11 +1617,7 @@ pub struct ArrangedInitStateD {
     /// HEAD oid after seed commits.
     pub head_oid: String,
     /// `d` tag on the existing announcement — also the identifier in
-    /// the `nostr.repo` coordinate. The post-init announcement keeps
-    /// this value as its own `d` tag (legacy state-D doesn't change
-    /// identifier). The publisher signs the new announcement, so the
-    /// `(pubkey, kind, d)` tuple differs from the existing one's and
-    /// both events coexist on the relay.
+    /// the `nostr.repo` coordinate.
     pub coordinate_identifier: String,
     /// Bech32 form of the `nostr.repo` coordinate ngit reads on the
     /// next subcommand. Coordinate's `public_key` comes from
@@ -1631,8 +1631,6 @@ pub struct ArrangedInitStateD {
     /// `maintainers` tag — that is the State-D discriminator.
     pub existing_announcement: Event,
     /// `name` tag on [`existing_announcement`](Self::existing_announcement).
-    /// The post-init announcement should inherit this value (legacy
-    /// `name_inherited_from_other_maintainer`).
     pub existing_name: String,
     /// `description` tag on
     /// [`existing_announcement`](Self::existing_announcement).
@@ -1654,22 +1652,16 @@ pub struct ArrangedInitStateD {
     /// in init.rs:718 unchanged.
     pub existing_clone_url: String,
     /// Selected maintainer's keypair — signs
-    /// [`existing_announcement`](Self::existing_announcement) and
-    /// appears alongside the publisher in the post-init
-    /// announcement's `maintainers` tag (legacy
-    /// `maintainers_is_me_and_selected`).
+    /// [`existing_announcement`](Self::existing_announcement) and appears
+    /// alongside the publisher in its `maintainers` tag.
     pub selected_maintainer_keys: Keys,
 }
 
 /// Captured side-state for a State E "NotListed" arrange.
 ///
-/// Same shape as [`ArrangedInitStateD`] except the existing
-/// announcement's `maintainers` tag does **not** include the publisher
-/// — the `NotListed` arm in `validate_post_fetch` (init.rs:564-574).
-/// Bare `ngit init` (and `ngit init --defaults`) errors with
-/// `"you are not listed as a maintainer"`; only `ngit init --force`
-/// proceeds, after which the publisher is added to the new
-/// announcement's `maintainers` tag alongside the selected maintainer.
+/// Same shape as [`ArrangedInitStateD`] except the existing announcement does
+/// not invite the publisher. `ngit init` refuses to join or replace the
+/// repository even when `--force` is supplied.
 #[derive(Clone, Debug)]
 pub struct ArrangedInitStateE {
     /// Publisher's keypair (the "me" identity that runs `ngit init`).
@@ -1825,50 +1817,33 @@ impl Harness {
     /// **already-published** kind-30617 signed by the publisher that
     /// matches `nostr.repo`'s coordinate.
     ///
-    /// Running `ngit init` against the returned [`Repo`] hits the
-    /// `MyAnnouncement` arm of `validate_pre_fetch` / `validate_post_fetch`
-    /// (init.rs:478-499, 531-549) because `coord.coordinate.public_key ==
-    /// my_pubkey`:
-    ///
-    /// - Bare `ngit init` errors with `"no arguments specified, use --force to
-    ///   publish with new timestamp"` (legacy
-    ///   `state_c_my_announcement::errors::bare_no_flags_requires_force`).
-    /// - `ngit init --identifier <new>` (without `--force`) errors with
-    ///   `"changing identifier creates a new repository"` (legacy
-    ///   `state_c_my_announcement::errors::identifier_change_requires_force`).
-    /// - `ngit init --force` republishes, preserving the existing
-    ///   announcement's `name` / `description` / `relays` / `maintainers`
-    ///   (legacy `state_c_my_announcement::success::force_refresh::*`).
-    /// - `ngit init --name <new>` overrides the name but leaves the identifier
-    ///   (legacy `state_c_my_announcement::success::name_override::*`).
+    /// Running `ngit init` against the returned [`Repo`] reaches the
+    /// `MyAnnouncement` classification and is refused. Tests that need to
+    /// republish the announcement use `ngit repo edit`.
     ///
     /// **Discovery.** The existing announcement is published to the
     /// harness's `"default"` relay — the same relay
     /// [`Self::arrange_init_state_b_coordinate_only`] writes into
     /// `nostr.repo`'s coordinate — so `fetching_with_report` finds it on
     /// the first round-trip. No grasp servers are required (the existing
-    /// announcement's `clone` tag carries a deliberately unreachable URL;
-    /// under `NGITTEST=TRUE`, init.rs:1195 short- circuits the post-init
-    /// `git push` so the unreachability is invisible).
+    /// announcement's `clone` tag carries a deliberately unreachable URL).
     ///
     /// **Marker relay.** `relays` on the existing announcement is
     /// `[default_relay_url, marker_relay_url]`. The marker is a
-    /// non-routable `ws://ngit-test-marker.invalid:65535` — ngit's
-    /// publish to it will fail silently (one-of-many relays), but the
-    /// URL string survives into the re-published announcement's `relays`
-    /// tag via init.rs:739-746. Asserting on the marker (rather than
-    /// `default_relay_url`, which ngit might add for unrelated reasons)
-    /// keeps the `relays_from_my_event` regression non-tautological.
+    /// non-routable `ws://ngit-test-marker.invalid:65535` — publication to
+    /// it will fail silently (one-of-many relays), but the URL string survives
+    /// into a re-published announcement's `relays` tag. Asserting on the marker
+    /// (rather than `default_relay_url`, which ngit might add for unrelated
+    /// reasons) keeps the `relays_from_my_event` regression
+    /// non-tautological.
     ///
-    /// **Timestamp.** The fabricated announcement is back-dated 30s so
-    /// ngit's re-publish has an unambiguously newer timestamp.
+    /// **Timestamp.** The fabricated announcement is back-dated 30s so a
+    /// subsequent edit has an unambiguously newer timestamp.
     ///
     /// **Co-maintainer.** A single fresh [`Keys`] is minted and listed
-    /// after the publisher in `maintainers`. The keypair need not
-    /// sign anything; an npub in the tag is enough for ngit to keep
-    /// it on republish. The full [`Keys`] is surfaced (not just the
-    /// pubkey) so tests that want to drive ngit *as* the co-maintainer
-    /// in a follow-up can do so without re-deriving.
+    /// after the publisher in `maintainers`. The full [`Keys`] is surfaced (not
+    /// just the pubkey) so tests that want to drive ngit *as* the
+    /// co-maintainer in a follow-up can do so without re-deriving.
     pub async fn arrange_init_state_c_my_announcement(&self) -> Result<(Repo, ArrangedInitStateC)> {
         self.arrange_init_state_c_my_announcement_with_extra_tags(vec![])
             .await
@@ -1920,10 +1895,8 @@ impl Harness {
             Tag::custom("description", vec![existing_description.clone()]),
             // `clone` carries a deliberately unreachable URL — same
             // shape as the legacy fixture's `git:://123.gitexample.com/test`
-            // — because the State C arrange doesn't drive any git
-            // operation, and the `NGITTEST=TRUE` short-circuit in
-            // init.rs:1195 suppresses the post-republish push that
-            // would have hit it.
+            // — because the State C arrange itself doesn't drive any git
+            // operation.
             Tag::custom(
                 "clone",
                 vec!["https://ngit-test-clone.invalid/repo.git".to_string()],
@@ -2004,39 +1977,21 @@ impl Harness {
     /// an already-published kind-30617 (signed by that other maintainer)
     /// whose `maintainers` tag includes the publisher.
     ///
-    /// Running `ngit init` against the returned [`Repo`] hits the
-    /// `CoMaintainer` arm of `validate_post_fetch` (init.rs:551-562)
-    /// because `coord.coordinate.public_key != my_pubkey` *and* the
-    /// existing announcement's `maintainers` tag contains `my_pubkey`:
-    ///
-    /// - Bare `ngit init --grasp-server <url>` succeeds (no `--force` needed —
-    ///   that is the State-D vs State-E discriminator) and publishes a new
-    ///   announcement signed by the publisher whose `d` tag equals the
-    ///   coordinate identifier, whose `name` / `description` / `web` are
-    ///   inherited from the existing announcement, whose `clone` / `relays`
-    ///   come from the publisher's own grasp infrastructure (the selected
-    ///   maintainer's git-server URL is **not** carried over), and whose
-    ///   `maintainers` tag carries `[publisher, selected_maintainer]` — the
-    ///   maintainers-default fallback in init.rs:869-878 when `my_ref.is_none()
-    ///   && selected != my_pubkey`.
-    /// - `ngit init` does **not** error on a missing `--name` /
-    ///   `--description`: `validate_post_fetch`'s CoMaintainer arm doesn't gate
-    ///   on either — `validate_fresh`'s required-fields check (init.rs:354-371)
-    ///   only runs in State A.
+    /// Running `ngit init` against the returned [`Repo`] reaches the
+    /// `CoMaintainer` classification because the selected announcement
+    /// invites the publisher, then refuses the implicit acceptance and points
+    /// to `ngit repo accept`.
     ///
     /// **Discovery.** The existing announcement is published to the
     /// harness's `"default"` relay — the same relay [`nostr.repo`'s
     /// coordinate carries — so `fetching_with_report` finds it on the
     /// first round-trip. No grasp servers are required for the arrange
-    /// itself; the test driving `ngit init` adds `--grasp-server <url>`
-    /// to provide the publisher's clone-URL infrastructure.
+    /// itself.
     ///
     /// **EUC.** The existing announcement carries the publisher's
     /// `root_oid` as its `r euc` value, mirroring the realistic case
     /// where two maintainers work on the same repo. ngit's EUC
-    /// resolution in init.rs:979-990 falls through to
-    /// `repo_ref.root_commit` when `my_ref` is `None`, so the post-init
-    /// announcement carries the same EUC.
+    /// resolution can therefore compare a coherent repository identity.
     ///
     /// **Timestamp.** The fabricated announcement is back-dated 30s so
     /// the publisher's new event has an unambiguously newer timestamp.
@@ -2101,22 +2056,9 @@ impl Harness {
     /// announcement's `maintainers` tag carries **only** the selected
     /// maintainer — the publisher's pubkey is absent.
     ///
-    /// Running `ngit init` against the returned [`Repo`] hits the
-    /// `NotListed` arm of `validate_post_fetch` (init.rs:564-574):
-    ///
-    /// - Bare `ngit init` errors with `"you are not listed as a maintainer"`
-    ///   (legacy `state_e_not_listed::errors::bare_no_flags`).
-    /// - `ngit init --defaults` errors with the same message — `--defaults`
-    ///   does **not** bypass the NotListed check, only `--force` does (legacy
-    ///   `state_e_not_listed::errors::defaults_still_requires_force`,
-    ///   regression for the `-d` shortcut accidentally short-circuiting
-    ///   maintainer-list validation).
-    /// - `ngit init --force --grasp-server <url>` succeeds and publishes a new
-    ///   announcement signed by the publisher whose `name` / `description` /
-    ///   `web` are inherited from the existing announcement and whose
-    ///   `maintainers` tag carries `[publisher, selected_maintainer]` — the
-    ///   same maintainers-default fallback the CoMaintainer arm uses when
-    ///   `my_ref` is None.
+    /// Running `ngit init` against the returned repository must fail before
+    /// publication. `--force` does not turn repository creation into a join or
+    /// replacement operation.
     pub async fn arrange_init_state_e_not_listed(&self) -> Result<(Repo, ArrangedInitStateE)> {
         let (repo, state_a) = self.arrange_init_state_a_fresh().await?;
         let selected = Keys::generate();
@@ -2222,18 +2164,12 @@ impl Harness {
             "https://gitworkshop.dev/123".to_string(),
         ];
         // Deliberately non-grasp-format so it survives the
-        // `is_my_grasp_clone_url` filter in init.rs:718 unchanged when
-        // (and if) it ever reaches `git_servers_default`. Under State D
-        // `my_ref` is None, so the filter is bypassed entirely and
-        // `git_servers_default = vec![]` — but capturing the URL on the
-        // arrange lets the test assert "the selected maintainer's git
-        // server URL did NOT leak into the new announcement" without
-        // re-deriving the value (legacy
-        // `clone_url_from_my_grasp_server_not_theirs`).
+        // `is_my_grasp_clone_url` filtering if a test uses this fixture for a
+        // repository edit. Capturing the URL also lets tests distinguish the
+        // selected maintainer's infrastructure without re-deriving it.
         //
         // RFC-2606 `.invalid` TLD so this never resolves; `clone` tags
-        // are opaque to `ngit init`'s republish logic, which only
-        // round-trips them through the filter.
+        // are opaque to announcement parsing.
         let existing_clone_url = "https://ngit-test-selected.invalid/repo.git".to_string();
 
         let mut tags: Vec<Tag> = vec![
@@ -2255,12 +2191,8 @@ impl Harness {
         // test log.
         let _ = &mut tags; // silence "unused mut" if future edits drop the .push()
 
-        // Back-date by 30s — same reasoning as State C: the publisher's
-        // post-init announcement should carry a strictly greater
-        // `created_at` (different `(pubkey, kind, d)` tuple, but
-        // chronological ordering matters for the test's relay-query
-        // sort). 30s is generous enough that even a slow CI box's
-        // clock-skew can't flip the order.
+        // Back-date by 30s so later fixture-driven publication is ordered
+        // unambiguously after this announcement.
         let created_at = Timestamp::now() - 30u64;
         let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
             .tags(tags)

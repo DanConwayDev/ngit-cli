@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
-    accept_maintainership::{
-        build_maintainership_acceptance_with_defaults, finalize_maintainership_acceptance,
-    },
     client::{Params, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
 };
@@ -81,10 +78,11 @@ async fn publish_set_subject_event(
 
     let user_pubkey = signer.get_public_key().await?;
 
-    // Permission check: only the author or a maintainer may set the subject.
-    if target.pubkey != user_pubkey && !repo_ref.maintainers.contains(&user_pubkey) {
+    // Permission check: only the author or a confirmed member (maintainer or
+    // moderator) may set the subject.
+    if target.pubkey != user_pubkey && !repo_ref.is_authorized_member(&user_pubkey) {
         bail!(
-            "only the {target_kind} author or a repository maintainer can set the subject of a {target_kind}"
+            "only the {target_kind} author or a repository member (maintainer or moderator) can set the subject of a {target_kind}"
         );
     }
 
@@ -119,20 +117,6 @@ async fn publish_set_subject_event(
         );
         return Ok(());
     }
-
-    let maintainer_acceptance = if repo_ref
-        .maintainers_without_annoucnement
-        .as_ref()
-        .is_some_and(|ms| ms.contains(&user_pubkey))
-    {
-        Some(
-            build_maintainership_acceptance_with_defaults(&repo_ref, &user_ref, &client, &signer)
-                .await
-                .context("failed to auto-accept co-maintainership")?,
-        )
-    } else {
-        None
-    };
 
     // Build the kind-1985 subject label event.
     //
@@ -175,36 +159,16 @@ async fn publish_set_subject_event(
     let mut client = client;
     client.set_signer(signer).await;
 
-    let mut events = maintainer_acceptance
-        .as_ref()
-        .map(|acceptance| acceptance.event.clone())
-        .into_iter()
-        .collect::<Vec<_>>();
-    events.push(subject_event);
-
-    let mut relay_targets = repo_ref.relays.clone();
-    if let Some(acceptance) = &maintainer_acceptance {
-        for relay in &acceptance.relays {
-            if !relay_targets.contains(relay) {
-                relay_targets.push(relay.clone());
-            }
-        }
-    }
-
     send_events(
         &client,
         Some(git_repo_path),
-        events,
+        vec![subject_event],
         user_ref.relays.write(),
-        relay_targets,
+        repo_ref.relays.clone(),
         true,
         false,
     )
     .await?;
-
-    if let Some(acceptance) = &maintainer_acceptance {
-        finalize_maintainership_acceptance(&git_repo, acceptance).await?;
-    }
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({

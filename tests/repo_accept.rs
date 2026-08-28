@@ -1,13 +1,15 @@
 //! `ngit repo accept` — accepting co-maintainership publishes the accepter's
-//! own kind-30617 announcement, and nothing else locally.
+//! own kind-30617 announcement, and nothing else locally. The accept-then-
+//! leave flow of `ngit repo leave` is also driven here, reusing the invited
+//! clone arrangement.
 //!
 //! The coordinate the repo resolves from is the root of trust. If accepting
 //! re-rooted resolution on the accepter's own announcement — which always
 //! lists them as a maintainer — the accepter could never observe the inviter
 //! removing them later. Both accept paths (defaults and explicit
 //! `--grasp-server`) must therefore leave `remote.origin.url` byte-for-byte
-//! unchanged and `nostr.repo` unwritten; only `ngit repo edit` / `ngit init`
-//! may change the resolved coordinate deliberately.
+//! unchanged and `nostr.repo` unwritten. `ngit repo follow-lead` is the
+//! explicit command for moving the checkout to its resolved lead coordinate.
 //!
 //! ## Why the announcement is asserted on the vanilla relay + grasp disk
 //!
@@ -23,7 +25,20 @@ use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use test_harness::{
     CloneLogin, Harness, PublishRepoOpts, PublishedRepo, Repo, tag_value, tag_values,
+    tag_values_multiple,
 };
+
+fn role_entries(event: &Event, letter: &str, subject: PublicKey) -> Vec<Vec<String>> {
+    let subject = subject.to_string();
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| {
+            tag.first().map(String::as_str) == Some(letter) && tag.get(1) == Some(&subject)
+        })
+        .collect()
+}
 
 /// Publish a repo with one invited (announcement-less) co-maintainer, clone
 /// it, and log the clone in as that co-maintainer.
@@ -97,6 +112,18 @@ async fn arrange_invited_clone(
     Ok((harness, published, clone, co_maintainer_pubkey))
 }
 
+async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {
+    let client = Client::default();
+    client.add_relay(relay_url).await?;
+    client.connect().await;
+    for event in events {
+        let output = client.send_event(event).to([relay_url]).await?;
+        anyhow::ensure!(output.failed.is_empty(), "relay rejected event: {output:?}");
+    }
+    client.disconnect().await;
+    Ok(())
+}
+
 /// Assert the accepter's kind-30617 landed on their fallback write relay with
 /// both maintainers listed, and that the grasp accepted it (bare repo on
 /// disk under the accepter's npub).
@@ -126,6 +153,17 @@ async fn assert_announcement_published(
     assert!(
         maintainers.contains(&published.maintainer_keys.public_key().to_string()),
         "announcement should retain the inviting maintainer; got {maintainers:?}",
+    );
+    // NIP-34 graceful degradation: active lead and co-maintainer roles carry
+    // exactly the same current members as the deprecated compatibility tag.
+    let roles = [
+        tag_values_multiple(announcement, "m"),
+        tag_values_multiple(announcement, "M"),
+    ]
+    .concat();
+    assert_eq!(
+        roles, maintainers,
+        "active `M`/`m` roles should match the deprecated `maintainers` tag",
     );
 
     let bare_repo = harness
@@ -206,6 +244,39 @@ async fn accept_and_assert_resolution_untouched(clone: &Repo, extra_args: &[&str
     assert_eq!(json["maintainer_edges"].as_array().map(Vec::len), Some(2));
     assert!(json["selected_maintainer"].is_string());
     assert!(json.get("lead_maintainer").is_some());
+    assert_eq!(json["lead_source"], "explicit");
+    assert_eq!(json["lead_path"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["pending_actions"], serde_json::json!([]));
+    assert_eq!(json["health"]["status"], "ok");
+    assert_eq!(json["moderators"], serde_json::json!([]));
+    assert_eq!(json["confirmed_moderators"], serde_json::json!([]));
+    let members = json["members"]
+        .as_array()
+        .context("members missing from ngit repo --json")?;
+    assert_eq!(members.len(), 2, "one member entry per maintainer: {json}");
+    let lead = json["lead_maintainer"]
+        .as_str()
+        .context("first invitation should establish the inviter as lead")?;
+    for member in members {
+        assert!(member["pubkey"].is_string());
+        assert_eq!(
+            member["role"],
+            if member["pubkey"] == lead {
+                "lead"
+            } else {
+                "co-maintainer"
+            },
+            "the first inviter should be the sole lead: {json}",
+        );
+        assert_eq!(
+            member["status"], "confirmed",
+            "reciprocal acceptance should confirm both members: {json}",
+        );
+        assert_eq!(
+            member["source"], "role_tag",
+            "both announcements were published with indexed role tags: {json}",
+        );
+    }
 
     Ok(())
 }
@@ -218,6 +289,309 @@ async fn accept_with_defaults_publishes_announcement_without_rerooting_resolutio
     accept_and_assert_resolution_untouched(&clone, &[]).await?;
     assert_announcement_published(&harness, &published, co_maintainer_pubkey).await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_acceptance_refuses_without_republishing() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-repeat-accept").await?;
+    accept_and_assert_resolution_untouched(&clone, &[]).await?;
+
+    let before = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier.clone()),
+        )
+        .await?
+        .into_iter()
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("first acceptance announcement was not published")?;
+
+    let output = clone.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        !output.status.success(),
+        "an already confirmed maintainer must not accept again",
+    );
+
+    let after = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier),
+        )
+        .await?
+        .into_iter()
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("acceptance announcement vanished")?;
+    assert_eq!(
+        after.id, before.id,
+        "repeat acceptance must publish nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accept_refuses_an_existing_announcement_without_republishing() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-accept-state-collision").await?;
+    let co_keys = published.additional_maintainer_keys[0].clone();
+    let now = Timestamp::now();
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse([
+                "m",
+                &co_maintainer_pubkey.to_string(),
+                &now.as_secs().to_string(),
+            ])?,
+            Tag::parse([
+                "o",
+                &co_maintainer_pubkey.to_string(),
+                &now.as_secs().to_string(),
+            ])?,
+            Tag::parse(["maintainers", &co_maintainer_pubkey.to_string()])?,
+            Tag::parse(["r", &published.initial_oid, "euc"])?,
+            Tag::parse([
+                "u",
+                &format!("30617:{}:experimental-upstream", co_maintainer_pubkey),
+            ])?,
+            Tag::parse(["x-preserve", "signed-by-another-client"])?,
+        ])
+        .finalize(&co_keys)?;
+    publish_to_relay(harness.relay("default").url(), &[&announcement]).await?;
+
+    let output = clone.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        !output.status.success(),
+        "an existing same-identifier announcement must block acceptance"
+    );
+
+    let surviving = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier),
+        )
+        .await?;
+    assert_eq!(
+        surviving.iter().map(|event| event.id).collect::<Vec<_>>(),
+        vec![announcement.id],
+        "a refused acceptance must not replace the existing announcement",
+    );
+    Ok(())
+}
+
+/// After accepting, `ngit repo leave` republishes the leaver's announcement
+/// with the self-role ended per NIP-34's role-history grammar: the `m` entry
+/// gains an end boundary instead of vanishing from the event, and the
+/// deprecated `maintainers` degradation tag drops the leaver. A second leave
+/// has no active self-role left to end and must fail cleanly.
+#[tokio::test]
+async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-leave-after-accept").await?;
+
+    accept_and_assert_resolution_untouched(&clone, &[]).await?;
+    assert_announcement_published(&harness, &published, co_maintainer_pubkey).await?;
+
+    let out = clone
+        .ngit(["repo", "leave"])
+        .output()
+        .await
+        .context("failed to spawn ngit repo leave")?;
+    assert!(
+        out.status.success(),
+        "ngit repo leave exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    // the NIP-01 winner in case the relay retained the pre-leave version
+    let announcement = announcements
+        .iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("no co-maintainer announcement found after repo leave")?;
+
+    let maintainers = tag_values(announcement, "maintainers");
+    assert!(
+        !maintainers.contains(&co_maintainer_pubkey.to_string()),
+        "the deprecated maintainers tag must drop the leaver; got {maintainers:?}",
+    );
+    let self_entries: Vec<Vec<String>> = announcement
+        .tags
+        .iter()
+        .map(|t| t.as_slice().to_vec())
+        .filter(|s| {
+            matches!(s.first().map(String::as_str), Some("M" | "m"))
+                && s.get(1) == Some(&co_maintainer_pubkey.to_string())
+        })
+        .collect();
+    assert_eq!(
+        self_entries.len(),
+        1,
+        "leaving must keep exactly one closed self role entry; got {self_entries:?}",
+    );
+    let entry = &self_entries[0];
+    assert!(
+        entry.len() >= 4 && entry.len().is_multiple_of(2),
+        "the self role entry must be ended (even element count of at least four): {entry:?}",
+    );
+
+    let again = clone
+        .ngit(["repo", "leave"])
+        .output()
+        .await
+        .context("failed to spawn second ngit repo leave")?;
+    assert!(
+        !again.status.success(),
+        "a second leave must fail: the announcement already records the role as ended",
+    );
+    // the refused leave must not have published anything: the NIP-01
+    // winner on the relay is still the first leave's announcement
+    let announcements_after = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let winner_after = announcements_after
+        .iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("co-maintainer announcement vanished after refused second leave")?;
+    assert_eq!(
+        winner_after.id, announcement.id,
+        "a refused leave must not publish a new announcement",
+    );
+
+    Ok(())
+}
+
+/// Under a wire-asserted lead, a non-lead accepter follows NIP-34's
+/// SHOULD: their acceptance announcement actively lists only themselves
+/// (`m`) and the lead (re-asserted as `M`). Other roster history is retained
+/// with `defer`, so the lead can change or remove co-maintainers
+/// unilaterally.
+#[tokio::test]
+async fn accept_under_lead_activates_self_and_lead_and_defers_others() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+
+    let (_maintainer_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("repo-accept-under-lead".into()),
+            identifier: Some("repo-accept-under-lead".into()),
+            additional_maintainer_count: 2,
+            assert_self_as_lead: true,
+            ..Default::default()
+        })
+        .await?;
+    let lead_pubkey = published.maintainer_keys.public_key();
+    let other_co_pubkey = published.additional_maintainer_keys[0].public_key();
+    let invited_keys = published.additional_maintainer_keys[1].clone();
+    let invited_pubkey = invited_keys.public_key();
+
+    // Write relay for the accept fan-out, same as arrange_invited_clone.
+    harness.publish_user_relay_list(&invited_keys).await?;
+    let clone = harness
+        .clone_published_repo_as(&published, &invited_keys)
+        .await?;
+
+    let out = clone
+        .ngit(["repo", "accept"])
+        .output()
+        .await
+        .context("failed to spawn ngit repo accept")?;
+    assert!(
+        out.status.success(),
+        "ngit repo accept exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let announcements = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(invited_pubkey)
+                .kind(Kind::GitRepoAnnouncement),
+        )
+        .await?;
+    let announcement = announcements
+        .iter()
+        .find(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .context("no acceptance announcement was published on repo accept")?;
+
+    let lead_entries = role_entries(announcement, "M", lead_pubkey);
+    assert_eq!(lead_entries.len(), 1);
+    assert_eq!(lead_entries[0].len(), 3, "the lead role must be active");
+    assert!(lead_entries[0][2].parse::<u64>().is_ok());
+
+    let self_entries = role_entries(announcement, "m", invited_pubkey);
+    assert_eq!(self_entries.len(), 1);
+    assert_eq!(self_entries[0].len(), 3, "the self role must be active");
+    assert!(self_entries[0][2].parse::<u64>().is_ok());
+
+    let other_entries = role_entries(announcement, "m", other_co_pubkey);
+    assert_eq!(other_entries.len(), 1);
+    assert_eq!(other_entries[0].last().map(String::as_str), Some("defer"));
+    let maintainers = tag_values(announcement, "maintainers");
+    assert_eq!(
+        {
+            let mut sorted = maintainers.clone();
+            sorted.sort();
+            sorted
+        },
+        {
+            let mut expected = vec![invited_pubkey.to_string(), lead_pubkey.to_string()];
+            expected.sort();
+            expected
+        },
+        "the degradation tag carries exactly [me, lead]",
+    );
     Ok(())
 }
 

@@ -279,27 +279,25 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         "maintainer skill install did not create its dedicated commit"
     );
 
-    let second_init = repo
+    let edit = repo
         .ngit([
-            "init",
+            "repo",
+            "edit",
             "--name",
             display_name,
-            "--identifier",
-            identifier,
             "--grasp-server",
             &grasp_url,
-            "-d",
         ])
         .output()
         .await?;
     assert!(
-        second_init.status.success(),
-        "repeat init failed: {}",
-        String::from_utf8_lossy(&second_init.stderr)
+        edit.status.success(),
+        "repository edit failed: {}",
+        String::from_utf8_lossy(&edit.stderr)
     );
     assert!(
-        !String::from_utf8_lossy(&second_init.stderr).contains("ngit skill"),
-        "repeat init suggested an already installed repository skill"
+        !String::from_utf8_lossy(&edit.stderr).contains("ngit skill"),
+        "repository edit suggested an already installed repository skill"
     );
 
     Ok(())

@@ -89,6 +89,12 @@ enum InitState {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaunchMode {
+    Init,
+    RepoEdit,
+}
+
 fn may_suggest_skill(state: &InitState) -> bool {
     matches!(
         state,
@@ -154,6 +160,115 @@ struct ResolvedFields {
     /// third-party tool aren't silently dropped. Cleared when
     /// `--clean` is passed. See [`SubCommandArgs::clean`].
     extra_tags: Vec<nostr::prelude::Tag>,
+    /// NIP-34 indexed role tags from **my own** existing announcement,
+    /// supplying the start/end history boundaries and moderator (`o`)
+    /// entries that `RepoRef::generate_role_tags` builds the emitted
+    /// role tags from. Sourced from my announcement only — like
+    /// `maintainers`, each maintainer's role record is their own
+    /// statement. Deliberately unaffected by `--clean`: role tags are
+    /// ngit-known tags, and dropping them would silently discard
+    /// moderators and restart every member's role history.
+    role_tags: Vec<nostr::prelude::Tag>,
+    /// The lead maintainer to assert with the NIP-34 `M` role:
+    /// `--lead-maintainer`, or my own announcement's existing assertion
+    /// while the lead remains in `maintainers`. `None` emits only `m` tags.
+    lead: Option<PublicKey>,
+    preserve_selected_coordinate: bool,
+}
+
+/// Apply the resolved lead (`M` role) to the maintainer listing.
+///
+/// Without `--lead-maintainer` the author's own announcement's lead
+/// assertion is carried forward while that pubkey remains in the listing.
+/// Specifying yourself keeps the full listing and emits you as `M`.
+/// Specifying someone else follows NIP-34's SHOULD — the announcement then
+/// keeps only the author and lead active. When that change would remove a
+/// pubkey from the active graph because the lead does not cover them, refuse
+/// the unnamed removal.
+fn apply_lead_to_maintainers(
+    lead_arg: Option<PublicKey>,
+    my_pubkey: &PublicKey,
+    maintainers: Vec<PublicKey>,
+    my_ref: Option<&RepoRef>,
+    consolidated: Option<&RepoRef>,
+) -> Result<(Vec<PublicKey>, Option<PublicKey>)> {
+    let Some(lead) = lead_arg else {
+        let inherited = my_ref
+            .and_then(|mr| mr.lead)
+            .filter(|lead| maintainers.contains(lead));
+        return Ok((maintainers, inherited));
+    };
+    if lead == *my_pubkey {
+        return Ok((maintainers, Some(lead)));
+    }
+    let listing = vec![*my_pubkey, lead];
+    let dropped: Vec<String> = members_losing_authorized_status_after_lead_change(
+        &listing,
+        &lead,
+        my_pubkey,
+        my_ref,
+        consolidated,
+    )
+    .iter()
+    .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
+    .collect();
+    if !dropped.is_empty() {
+        let lead_npub = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
+        let mut suggestions = vec![format!(
+            "ask {lead_npub} to add these maintainers first: {}",
+            dropped.join(", ")
+        )];
+        suggestions.extend(
+            dropped
+                .iter()
+                .map(|npub| format!("ngit repo edit --remove-maintainer {npub}")),
+        );
+        let suggestion_refs: Vec<&str> = suggestions.iter().map(String::as_str).collect();
+        return Err(cli_error(
+            &format!(
+                "setting {lead_npub} as lead would remove specific maintainers from your active graph: {}",
+                dropped.join(", ")
+            ),
+            &[],
+            &suggestion_refs,
+        ));
+    }
+    Ok((listing, Some(lead)))
+}
+
+/// Pubkeys that would lose authorized status when the author's active roles
+/// change to `[me, lead]`, excluding those the lead's own announcement keeps
+/// listed *with authority*. Per NIP-34, the lead's listing counts as cover
+/// only when the lead is already confirmed or their announcement acknowledges
+/// the author, making the relationship reciprocal when this update is
+/// published. An unconfirmed, non-reciprocal lead's announcement covers
+/// nobody.
+///
+/// Conservative over-approximation: a drop kept listed by another remaining
+/// member's announcement still gates even though that listing may keep the
+/// pubkey confirmed. Under a lead, non-lead members SHOULD list only
+/// themselves and the lead, so such cover is transitional at best.
+fn members_losing_authorized_status_after_lead_change(
+    listing: &[PublicKey],
+    lead: &PublicKey,
+    my_pubkey: &PublicKey,
+    my_ref: Option<&RepoRef>,
+    consolidated: Option<&RepoRef>,
+) -> Vec<PublicKey> {
+    let lead_lists: Vec<PublicKey> = consolidated
+        .and_then(|rr| {
+            let event = rr.events.values().find(|e| e.pubkey == *lead)?;
+            let lead_ref = RepoRef::try_from((event.clone(), None)).ok()?;
+            (rr.is_authorized_maintainer(lead) || lead_ref.maintainers.contains(my_pubkey))
+                .then_some(lead_ref.maintainers)
+        })
+        .unwrap_or_default();
+    my_ref
+        .map(|mr| mr.maintainers.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pk| !listing.contains(pk) && !lead_lists.contains(pk))
+        .collect()
 }
 
 /// Extract my own announcement's `RepoRef` from the events map.
@@ -440,52 +555,70 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
 }
 
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
     #[clap(long, alias = "title")]
     /// name of repository (preferred over --identifier); --title is an alias
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[clap(long)]
     /// shortname with no spaces or special characters
-    identifier: Option<String>,
+    pub(crate) identifier: Option<String>,
     #[clap(long)]
     /// optional description
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
     /// where your git+nostr data is hosted
-    grasp_server: Vec<String>,
+    pub(crate) grasp_server: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
-    relay: Vec<String>,
+    pub(crate) relay: Vec<String>,
     #[clap(long)]
     /// additional git server URLs beyond grasp servers
-    clone: Vec<String>,
+    pub(crate) clone: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// homepage
-    web: Vec<String>,
+    pub(crate) web: Vec<String>,
     #[clap(short = 'u', long = "u", alias = "upstream", value_parser, num_args = 1..)]
     /// informational NIP-34 subordinate-fork `u` tag fields
-    upstream: Vec<String>,
-    #[clap(long, value_parser, num_args = 1..)]
-    /// npubs of other maintainers
-    other_maintainers: Vec<String>,
+    pub(crate) upstream: Vec<String>,
+    /// Internal named-action projection used by `ngit repo edit`. It is not
+    /// part of the `ngit init` command surface.
+    #[clap(skip)]
+    pub(crate) other_maintainers: Vec<String>,
+    /// Internal governance choice used by `ngit repo edit`.
+    #[clap(skip)]
+    pub(crate) lead_maintainer: Option<String>,
+    /// Whether `other_maintainers` is an exact named-action result, including
+    /// the empty result of removing the final co-maintainer.
+    #[clap(skip)]
+    pub(crate) replace_maintainers: bool,
+    /// Explicitly clear this announcement's active lead declaration.
+    #[clap(skip)]
+    pub(crate) clear_lead: bool,
+    /// Exact role history prepared by a named lifecycle action.
+    #[clap(skip)]
+    pub(crate) role_tags: Option<Vec<nostr::prelude::Tag>>,
+    /// Keep the checkout rooted at its selected maintainer after publication.
+    #[clap(skip)]
+    pub(crate) preserve_selected_coordinate: bool,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
-    hashtag: Vec<String>,
+    pub(crate) hashtag: Vec<String>,
     #[clap(long)]
     /// usually root commit but will be more recent commit for forks
-    earliest_unique_commit: Option<String>,
+    pub(crate) earliest_unique_commit: Option<String>,
     #[clap(long)]
     /// drop unknown tags from the existing announcement when republishing
     /// (default is to preserve them so tags added by future ngit versions
     /// or third-party tools aren't silently lost)
-    clean: bool,
+    pub(crate) clean: bool,
     #[clap(long, conflicts_with = "public")]
     /// mark the repository private and restrict discovery to its repository
     /// relays
-    private: bool,
+    pub(crate) private: bool,
     #[clap(long, conflicts_with = "private")]
     /// remove the private marker from this maintainer's announcement
-    public: bool,
+    pub(crate) public: bool,
 }
 
 impl SubCommandArgs {
@@ -498,7 +631,8 @@ impl SubCommandArgs {
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
             || !self.upstream.is_empty()
-            || !self.other_maintainers.is_empty()
+            || self.replace_maintainers
+            || self.lead_maintainer.is_some()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
             || repo_relay_only
@@ -515,6 +649,7 @@ impl SubCommandArgs {
 fn validate_pre_fetch(
     cli: &Cli,
     args: &SubCommandArgs,
+    mode: LaunchMode,
     repo_coordinate: Option<&Nip19Coordinate>,
     user_has_grasp_list: bool,
     cached_repo_ref: Option<&RepoRef>,
@@ -528,6 +663,13 @@ fn validate_pre_fetch(
     // If no coordinate exists, we're in State A (Fresh) - validate now
     if repo_coordinate.is_none() {
         return validate_fresh(cli, args, user_has_grasp_list);
+    }
+
+    // Repository edits retain the existing fast-path validation. Public init
+    // waits for the post-fetch state so it can give the correct create/edit/
+    // accept boundary error even when the cache is stale.
+    if mode == LaunchMode::Init {
+        return Ok(());
     }
 
     // If we have cached data and it's MyAnnouncement state, validate early
@@ -557,8 +699,63 @@ fn validate_pre_fetch(
     Ok(())
 }
 
-fn validate_post_fetch(cli: &Cli, args: &SubCommandArgs, state: &InitState) -> Result<()> {
-    // Interactive mode bypasses all validation
+#[allow(clippy::too_many_lines)]
+fn validate_post_fetch(
+    cli: &Cli,
+    args: &SubCommandArgs,
+    mode: LaunchMode,
+    state: &InitState,
+    my_pubkey: PublicKey,
+) -> Result<()> {
+    if mode == LaunchMode::Init {
+        return match state {
+            InitState::Fresh => Ok(()),
+            InitState::CoordinateOnly { coordinate } => {
+                if cli.force {
+                    Ok(())
+                } else {
+                    let id = &coordinate.identifier;
+                    Err(cli_error(
+                        &format!(
+                            "no announcement found for coordinate '{id}'\n\n\
+                             \x20 This could be a relay or network issue. Only proceed with --force\n\
+                             \x20 if you are sure there isn't an existing announcement event."
+                        ),
+                        &[],
+                        &["ngit init --force"],
+                    ))
+                }
+            }
+            InitState::MyAnnouncement { .. } => Err(cli_error(
+                "this repository has already been initialized",
+                &[],
+                &["edit your existing announcement with `ngit repo edit`"],
+            )),
+            InitState::CoMaintainer { repo_ref, .. } => {
+                if repo_ref.confirmed_maintainers().contains(&my_pubkey) {
+                    Err(cli_error(
+                        "this repository has already been initialized",
+                        &[],
+                        &["edit your existing announcement with `ngit repo edit`"],
+                    ))
+                } else {
+                    Err(cli_error(
+                        "ngit init cannot accept an existing repository invitation",
+                        &[],
+                        &["accept the invitation with `ngit repo accept`"],
+                    ))
+                }
+            }
+            InitState::NotListed { .. } => Err(cli_error(
+                "ngit init cannot join or replace an existing repository",
+                &[],
+                &["clone or select the repository without publishing an announcement"],
+            )),
+        };
+    }
+
+    // Interactive repository editing retains its prompting behavior after the
+    // public init boundary above has rejected every existing announcement.
     if cli.interactive {
         return Ok(());
     }
@@ -936,9 +1133,7 @@ fn resolve_fields(
         vec![*my_pubkey]
     };
 
-    let base_maintainers = if args.other_maintainers.is_empty() {
-        maintainers_default
-    } else {
+    let base_maintainers = if args.replace_maintainers {
         let mut m = vec![user_ref.public_key];
         for npub in &args.other_maintainers {
             if let Ok(pk) = PublicKey::from_bech32(npub) {
@@ -948,44 +1143,35 @@ fn resolve_fields(
             }
         }
         m
+    } else {
+        maintainers_default
     };
 
-    let maintainers = if !args.other_maintainers.is_empty()
-        || !interactive
-        || (base_maintainers.len() == 1
-            && Interactor::default().choice(
-                PromptChoiceParms::default()
-                    .with_prompt("add other maintainers now?")
-                    .dont_report()
-                    .with_choices(vec![
-                        "maybe later".to_string(),
-                        "add maintainers".to_string(),
-                    ])
-                    .with_default(0),
-            )? == 0)
-    {
-        base_maintainers
+    // `ngit init` always creates a sole-maintainer repository. Existing
+    // membership is changed only by the named actions in `ngit repo edit`,
+    // which supply an exact internal projection here.
+    let maintainers = base_maintainers;
+
+    // --- Lead maintainer (NIP-34 `M` role) ---
+    let lead_arg = args
+        .lead_maintainer
+        .as_deref()
+        .map(|input| {
+            PublicKey::parse(input).with_context(|| {
+                format!("--lead-maintainer '{input}' is not a valid npub or hex public key")
+            })
+        })
+        .transpose()?;
+    let (maintainers, lead) = if args.clear_lead {
+        (maintainers, None)
     } else {
-        let selections: Vec<bool> = vec![true; base_maintainers.len()];
-        let selected = multi_select_with_custom_value(
-            "maintainers",
-            "maintainer npub",
-            base_maintainers
-                .iter()
-                .filter_map(|m| m.to_bech32().ok())
-                .collect(),
-            selections,
-            |s| {
-                extract_npub(s)
-                    .map(|_| s.to_string())
-                    .context(format!("Invalid npub: {s}"))
-            },
-        )?;
-        show_multi_input_prompt_success("maintainers", &selected);
-        selected
-            .iter()
-            .filter_map(|npub| PublicKey::parse(npub).ok())
-            .collect()
+        apply_lead_to_maintainers(
+            lead_arg,
+            my_pubkey,
+            maintainers,
+            my_ref.as_ref(),
+            state.repo_ref(),
+        )?
     };
 
     // --- Interactive: github/codeberg warning ---
@@ -1144,6 +1330,19 @@ fn resolve_fields(
         vec![]
     };
 
+    // --- Role tags (my own announcement only, like `maintainers`) ---
+    // Prior role tags supply the history boundaries and moderator entries
+    // for the generated role tags; `--clean` leaves them alone (see
+    // [`ResolvedFields::role_tags`]). When my announcement predates role
+    // tags, untimed entries are materialized from its maintainer listing so
+    // a member this republish drops is closed with an end boundary rather
+    // than silently unlisted.
+    let role_tags = args.role_tags.clone().unwrap_or_else(|| {
+        my_ref
+            .as_ref()
+            .map_or_else(Vec::new, RepoRef::role_history_for_republish)
+    });
+
     let private = if args.private {
         true
     } else if args.public {
@@ -1171,6 +1370,9 @@ fn resolve_fields(
             .map(|repo_ref| repo_ref.events.clone())
             .unwrap_or_default(),
         extra_tags,
+        role_tags,
+        lead,
+        preserve_selected_coordinate: args.preserve_selected_coordinate,
     })
 }
 
@@ -1286,10 +1488,10 @@ async fn publish_and_finalize(
     cli: &Cli,
     git_repo: &Repo,
     repo_config_result: &Result<ngit::repo_ref::RepoConfigYaml>,
-    is_co_maintainer_first_acceptance: bool,
     selected_repo: Option<&ResolvedRepoCoordinate>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
+    let preserve_selected_coordinate = fields.preserve_selected_coordinate;
 
     // Step 1: Build RepoRef
     //
@@ -1335,6 +1537,9 @@ async fn publish_and_finalize(
         events: fields.announcement_events,
         nostr_git_url: None,
         extra_tags: fields.extra_tags,
+        role_tags: fields.role_tags,
+        moderators: vec![],
+        lead: fields.lead,
     };
     clear_private_git_auth();
     if repo_ref.private {
@@ -1477,34 +1682,36 @@ async fn publish_and_finalize(
     )
     .await?;
 
-    // Step 6: Set git config
-    git_repo.save_git_config_item(
-        "nostr.repo",
-        &Nip19Coordinate {
-            coordinate: Coordinate {
-                kind: Kind::GitRepoAnnouncement,
-                public_key: user_ref.public_key,
-                identifier: fields.identifier.clone(),
-            },
-            relays: vec![],
-        }
-        .to_bech32()?,
-        false,
-    )?;
-
-    // Step 7: Set origin remote
     let nostr_url = nostr_url_decoded.to_string();
-    if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
-        let previous_url = remote.url().ok().map(std::string::ToString::to_string);
-        drop(remote);
-        if let Some(previous_url) = previous_url {
-            preserve_replaced_origin_remote(git_repo, &previous_url);
+    if !preserve_selected_coordinate {
+        // Step 6: Set git config
+        git_repo.save_git_config_item(
+            "nostr.repo",
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: user_ref.public_key,
+                    identifier: fields.identifier.clone(),
+                },
+                relays: vec![],
+            }
+            .to_bech32()?,
+            false,
+        )?;
+
+        // Step 7: Set origin remote
+        if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
+            let previous_url = remote.url().ok().map(std::string::ToString::to_string);
+            drop(remote);
+            if let Some(previous_url) = previous_url {
+                preserve_replaced_origin_remote(git_repo, &previous_url);
+            }
+            git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
+        } else {
+            git_repo.git_repo.remote("origin", &nostr_url)?;
         }
-        git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
-    } else {
-        git_repo.git_repo.remote("origin", &nostr_url)?;
+        println!("set remote origin to nostr url");
     }
-    println!("set remote origin to nostr url");
 
     // Step 8: Push/sync
     match state_action {
@@ -1602,24 +1809,14 @@ async fn publish_and_finalize(
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
             "status": "ok",
-            "action": if is_co_maintainer_first_acceptance { "accepted" } else { "published" },
+            "action": "published",
             "entity": "repository",
             "nostr_url": nostr_url,
             "url": gitworkshop_url,
         }));
     }
-    if is_co_maintainer_first_acceptance {
-        println!("co-maintainership accepted.");
-        println!("your announcement was published to nostr. you can now push updates.");
-        println!("your repository URL: {gitworkshop_url}");
-        println!("your clone URL: {nostr_url}");
-        println!(
-            "note: run `ngit init` at any time to update your announcement (relays, git servers, etc.)"
-        );
-    } else {
-        println!("share your repository: {gitworkshop_url}");
-        println!("clone url: {nostr_url}");
-    }
+    println!("share your repository: {gitworkshop_url}");
+    println!("clone url: {nostr_url}");
 
     // Step 10: Update maintainers.yaml if needed
     let relays = fields
@@ -1660,8 +1857,25 @@ async fn publish_and_finalize(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
+    launch_with_mode(cli_args, args, signer, LaunchMode::Init).await
+}
+
+pub(crate) async fn launch_repo_edit(
+    cli_args: &Cli,
+    args: &SubCommandArgs,
+    signer: SignerParams<'_>,
+) -> Result<()> {
+    launch_with_mode(cli_args, args, signer, LaunchMode::RepoEdit).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn launch_with_mode(
+    cli_args: &Cli,
+    args: &SubCommandArgs,
+    signer: SignerParams<'_>,
+    mode: LaunchMode,
+) -> Result<()> {
     // Phase 1: Local-only setup
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
@@ -1702,6 +1916,7 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
     validate_pre_fetch(
         cli_args,
         args,
+        mode,
         repo_coordinate.as_ref(),
         user_has_grasp_list,
         cached_repo_ref.as_ref(),
@@ -1748,41 +1963,16 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
         }
     };
 
-    validate_post_fetch(cli_args, args, &state)?;
+    validate_post_fetch(cli_args, args, mode, &state, user_ref.public_key)?;
 
-    // Print CoMaintainer-specific context before proceeding so the user
-    // understands they are accepting (or updating) a co-maintainership
-    // offer, NOT creating a new repository.
-    let is_co_maintainer_first_acceptance =
-        if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
-            rr.maintainers_without_annoucnement
-                .as_ref()
-                .is_some_and(|ms| ms.contains(&user_ref.public_key))
-        } else {
-            false
-        };
-
+    // This state is reachable only through the internal repository-edit
+    // publication path. Public init rejects every existing announcement, and
+    // acceptance is handled exclusively by `ngit repo accept`.
     if let InitState::CoMaintainer { repo_ref: rr, .. } = &state {
-        if is_co_maintainer_first_acceptance {
-            println!(
-                "accepting co-maintainership of '{}' (offered by {})",
-                rr.name,
-                rr.selected_maintainer
-                    .to_bech32()
-                    .unwrap_or_else(|_| rr.selected_maintainer.to_string()),
-            );
-            println!(
-                "publishing your repository announcement to nostr to confirm your co-maintainership..."
-            );
-            if cli_args.interactive {
-                println!("tip: run `ngit init -d` to accept with defaults and skip all prompts");
-            }
-        } else {
-            println!(
-                "updating your co-maintainer announcement for '{}' on nostr...",
-                rr.name
-            );
-        }
+        println!(
+            "updating your co-maintainer announcement for '{}' on nostr...",
+            rr.name
+        );
     }
 
     // Phase 5: Resolve all fields
@@ -1814,7 +2004,6 @@ pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<
         cli_args,
         &git_repo,
         &repo_config_result,
-        is_co_maintainer_first_acceptance,
         resolved_repo_coordinate.as_ref(),
     )
     .await;
@@ -2003,8 +2192,8 @@ async fn push_initial_branch(
 /// git servers to it, fan it out to every remaining announced relay and
 /// cache it only after a git server and at least one relay accepted it.
 ///
-/// The republish exists because `ngit init` is how relays and git
-/// servers are added to an announcement: a repository whose refs are
+/// The republish exists because `ngit repo edit` can add relays and git
+/// servers to an announcement: a repository whose refs are
 /// unchanged would otherwise leave a newly announced relay without the
 /// state event (and a newly announced git server without the git data)
 /// until the next real `git push`, which a fully synced repository may
@@ -2473,6 +2662,253 @@ fn object_exists_locally(git_repo: &Repo, oid: &str) -> bool {
         return true;
     };
     git_repo.git_repo.find_object(parsed, None).is_ok()
+}
+
+#[cfg(test)]
+mod apply_lead_to_maintainers_tests {
+    use nostr::prelude::{Keys, Tag, event::FinalizeEvent};
+
+    use super::*;
+
+    fn test_repo_ref(maintainers: Vec<PublicKey>, lead: Option<PublicKey>) -> RepoRef {
+        RepoRef {
+            name: "test".to_string(),
+            description: String::new(),
+            identifier: "test-repo".to_string(),
+            root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
+            git_server: vec![],
+            web: vec![],
+            upstream: vec![],
+            relays: vec![],
+            blossoms: vec![],
+            hashtags: vec![],
+            private: false,
+            selected_maintainer: maintainers[0],
+            maintainers,
+            maintainers_without_annoucnement: None,
+            events: HashMap::new(),
+            nostr_git_url: None,
+            extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead,
+        }
+    }
+
+    /// A consolidated `RepoRef` anchored on `selected`, carrying one
+    /// announcement per `(announcer, listed)` pair — each listing `listed`
+    /// via the deprecated `maintainers` tag — with `maintainers` set to the
+    /// recursive union, the way `get_repo_ref_from_cache` consolidates.
+    fn consolidated_with_announcements(
+        selected: PublicKey,
+        announcements: &[(&Keys, &[PublicKey])],
+    ) -> RepoRef {
+        let mut maintainers = vec![selected];
+        for (announcer, listed) in announcements {
+            for pk in std::iter::once(announcer.public_key()).chain(listed.iter().copied()) {
+                if !maintainers.contains(&pk) {
+                    maintainers.push(pk);
+                }
+            }
+        }
+        let mut repo_ref = test_repo_ref(maintainers, None);
+        repo_ref.selected_maintainer = selected;
+        for (announcer, listed) in announcements {
+            let mut maintainers_tag = vec!["maintainers".to_string()];
+            maintainers_tag.extend(listed.iter().map(ToString::to_string));
+            let event = nostr::prelude::EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(vec![
+                    Tag::identifier("test-repo"),
+                    Tag::parse(maintainers_tag).unwrap(),
+                ])
+                .finalize(*announcer)
+                .unwrap();
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                event,
+            );
+        }
+        repo_ref
+    }
+
+    #[test]
+    fn without_the_flag_my_own_assertion_is_carried_while_the_lead_stays_listed() {
+        let me = Keys::generate().public_key();
+        let lead = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, lead], Some(lead));
+
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(None, &me, vec![me, lead], Some(&my_ref), None).unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+
+        // the lead was removed from the resolved listing: the assertion is
+        // not carried forward
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(None, &me, vec![me], Some(&my_ref), None).unwrap();
+        assert_eq!(maintainers, vec![me]);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn specifying_yourself_keeps_the_full_listing() {
+        let me = Keys::generate().public_key();
+        let other = Keys::generate().public_key();
+
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(Some(me), &me, vec![me, other], None, None).unwrap();
+        assert_eq!(maintainers, vec![me, other]);
+        assert_eq!(resolved, Some(me));
+    }
+
+    #[test]
+    fn specifying_another_lead_keeps_only_active_self_and_lead_roles() {
+        let me = Keys::generate().public_key();
+        let lead = Keys::generate().public_key();
+        let default_listed = Keys::generate().public_key();
+
+        // With no existing announcement, the role update cannot remove an
+        // established member from the active graph.
+        let (maintainers, resolved) =
+            apply_lead_to_maintainers(Some(lead), &me, vec![me, default_listed], None, None)
+                .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
+
+    #[test]
+    fn uncovered_drop_of_a_currently_listed_maintainer_is_refused() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        // the lead acknowledges me (their listing counts as cover) but does
+        // not keep the dropped pubkey listed
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[me])]);
+
+        // the pubkey losing authorized-maintainer status is identified
+        // (and named in the cli_error printed to stderr)
+        assert_eq!(
+            members_losing_authorized_status_after_lead_change(
+                &[me, lead],
+                &lead,
+                &me,
+                Some(&my_ref),
+                Some(&consolidated)
+            ),
+            vec![dropped]
+        );
+        assert!(
+            apply_lead_to_maintainers(
+                Some(lead),
+                &me,
+                vec![me, dropped],
+                Some(&my_ref),
+                Some(&consolidated),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn member_covered_by_a_reciprocal_lead_remains_authorized() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        // the lead keeps the dropped pubkey listed and acknowledges me, so
+        // their announcement is reciprocal (authoritative) when my lead
+        // relationship is published
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped, me])]);
+
+        let (maintainers, resolved) = apply_lead_to_maintainers(
+            Some(lead),
+            &me,
+            vec![me, dropped],
+            Some(&my_ref),
+            Some(&consolidated),
+        )
+        .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
+
+    #[test]
+    fn an_unauthoritative_leads_listing_covers_no_drops() {
+        let me = Keys::generate().public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, dropped], None);
+        // the lead keeps the dropped pubkey listed but is neither confirmed
+        // nor acknowledging me: per NIP-34 their announcement is not
+        // authoritative, so the dropped pubkey still loses authorized status
+        let consolidated = consolidated_with_announcements(me, &[(&lead_keys, &[dropped])]);
+
+        assert_eq!(
+            members_losing_authorized_status_after_lead_change(
+                &[me, lead],
+                &lead,
+                &me,
+                Some(&my_ref),
+                Some(&consolidated)
+            ),
+            vec![dropped]
+        );
+        assert!(
+            apply_lead_to_maintainers(
+                Some(lead),
+                &me,
+                vec![me, dropped],
+                Some(&my_ref),
+                Some(&consolidated),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_confirmed_leads_listing_covers_drops_without_acknowledging_me() {
+        let me_keys = Keys::generate();
+        let me = me_keys.public_key();
+        let third_keys = Keys::generate();
+        let third = third_keys.public_key();
+        let lead_keys = Keys::generate();
+        let lead = lead_keys.public_key();
+        let dropped = Keys::generate().public_key();
+        let my_ref = test_repo_ref(vec![me, third, lead, dropped], None);
+        // the lead is confirmed through `third` (listed by me, acknowledging
+        // a confirmed member) without listing me directly; their listing is
+        // authoritative and keeps the dropped pubkey covered
+        let consolidated = consolidated_with_announcements(
+            me,
+            &[
+                (&me_keys, &[third, lead, dropped]),
+                (&third_keys, &[me]),
+                (&lead_keys, &[third, dropped]),
+            ],
+        );
+
+        let (maintainers, resolved) = apply_lead_to_maintainers(
+            Some(lead),
+            &me,
+            vec![me, third, lead, dropped],
+            Some(&my_ref),
+            Some(&consolidated),
+        )
+        .unwrap();
+        assert_eq!(maintainers, vec![me, lead]);
+        assert_eq!(resolved, Some(lead));
+    }
 }
 
 #[cfg(test)]

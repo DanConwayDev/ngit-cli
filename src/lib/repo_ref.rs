@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use console::Style;
 use nostr::prelude::{
-    FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url, nip01::Coordinate,
+    Event, FromBech32, Kind, PublicKey, RelayUrl, Tag, Timestamp, ToBech32, Url, nip01::Coordinate,
     nip19::Nip19Coordinate,
 };
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,32 @@ pub struct RepoRef {
     /// not silently dropped. See [`is_known_tag_name`] for the allowlist of
     /// names this field excludes.
     pub extra_tags: Vec<Tag>,
+    /// NIP-34 indexed role tags (`M` lead, `m` co-maintainer, `o` moderator)
+    /// carried verbatim from the source announcement. Their currently-active
+    /// entries populate `maintainers` and `moderators`; when any role tag is
+    /// present the deprecated `maintainers` tag is ignored. On republish
+    /// `M`/`m` entries are not re-emitted verbatim: the typed `maintainers`
+    /// field is the source of truth for current membership (mirroring the
+    /// deprecated tag) and [`RepoRef::generate_role_tags`] emits an active
+    /// role tag per member (`M` for `lead`, `m` otherwise) plus closed
+    /// per-letter records for removals and role transitions, using these
+    /// tags only as the record of start/end history boundaries. `o` tags
+    /// are preserved verbatim.
+    pub role_tags: Vec<Tag>,
+    /// Currently-active moderators from NIP-34 `o` role tags. Moderators are
+    /// deliberately excluded from `maintainers`: per NIP-34 they can never
+    /// publish authoritative repository state (kind 30618), so they must not
+    /// reach the state-event authority checks built on the maintainer set.
+    /// An `o` self-entry also stops an announcement author from implicitly
+    /// asserting maintainership.
+    pub moderators: Vec<PublicKey>,
+    /// The lead this announcement asserts: the pubkey of its active `M`
+    /// role entry, if any. Drives emission — [`RepoRef::generate_role_tags`]
+    /// gives this pubkey the `M` letter when it is a current maintainer and
+    /// every other maintainer stays `m`; `None` emits only `m` tags. The
+    /// repository-wide lead across members' announcements is read from
+    /// `events` by [`RepoRef::lead_maintainer`], not from this field.
+    pub lead: Option<PublicKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -75,23 +101,83 @@ pub struct MaintainerEdge {
     pub to: PublicKey,
 }
 
-fn graph_reaches(from: PublicKey, target: PublicKey, edges: &[MaintainerEdge]) -> bool {
-    let mut pending = vec![from];
-    let mut seen = HashSet::new();
-    while let Some(current) = pending.pop() {
-        if !seen.insert(current) {
-            continue;
+/// How a member's listing is recorded across the announcements ngit
+/// consulted. Informational provenance for UIs (`ngit repo`): authorization
+/// stays with the confirmed sets regardless of which mechanism listed a
+/// member. See [`RepoRef::member_role_source`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleSource {
+    /// Named in a currently-active NIP-34 indexed role tag (`M`/`m`/`o`).
+    RoleTag,
+    /// Listed via the deprecated `maintainers` tag on an announcement
+    /// without indexed role tags (the fallback NIP-34 keeps for graceful
+    /// degradation; a `maintainers` tag on a role-tag-bearing announcement
+    /// is dead and never counts).
+    MaintainersTag,
+    /// Named in no tag at all: membership is implied by authoring an
+    /// announcement — per NIP-34 an author absent from every role tag is
+    /// implicitly a maintainer, and an announcement without role tags
+    /// implies its author regardless of the deprecated tag.
+    Implicit,
+}
+
+/// How lead resolution concluded for the selected repository coordinate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeadSource {
+    ImplicitSole,
+    Explicit,
+    LegacyInferred,
+    ExplicitNone,
+    None,
+    Pending,
+    Conflict,
+}
+
+impl LeadSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ImplicitSole => "implicit_sole",
+            Self::Explicit => "explicit",
+            Self::LegacyInferred => "legacy_inferred",
+            Self::ExplicitNone => "explicit_none",
+            Self::None => "none",
+            Self::Pending => "pending",
+            Self::Conflict => "conflict",
         }
-        if current == target {
-            return true;
-        }
-        pending.extend(
-            edges
-                .iter()
-                .filter_map(|edge| (edge.from == current).then_some(edge.to)),
-        );
     }
-    false
+}
+
+/// Lead resolution rooted at [`RepoRef::selected_maintainer`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeadResolution {
+    /// Terminal lead for a completed implicit, explicit, or legacy-inferred
+    /// resolution. Pending, absent, and conflicting paths have no lead.
+    pub lead: Option<PublicKey>,
+    pub source: LeadSource,
+    /// Selected maintainer followed by each explicit pointer target. Legacy
+    /// inference appends its winner when that differs from the selected
+    /// maintainer.
+    pub path: Vec<PublicKey>,
+}
+
+/// One boundary in an indexed `M`, `m`, or `o` role history.
+///
+/// Numeric boundaries alternate between starts and ends. `Defer` is valid
+/// only as the final value in an end position; it retains a historical
+/// interval without asserting a current assignment or a numeric end time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleBoundary {
+    Timestamp(u64),
+    Defer,
+}
+
+/// Signed membership transition copied into another maintainer's retained
+/// history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaintainerAcknowledgement {
+    Accepted { at: u64, changed: bool },
+    Departed { at: u64, changed: bool },
 }
 
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
@@ -117,7 +203,176 @@ pub fn is_known_tag_name(name: &str) -> bool {
             | "maintainers"
             | "private"
             | "alt"
+            | "M"
+            | "m"
+            | "o"
     )
+}
+
+/// Parse the history boundaries of a NIP-34 indexed role tag.
+///
+/// `defer` is accepted only as the final value in an end position. Any other
+/// non-numeric boundary makes the record invalid and therefore unable to
+/// grant authority.
+fn role_boundaries(slice: &[String]) -> Option<Vec<RoleBoundary>> {
+    if slice.len() < 2 {
+        return None;
+    }
+    let raw = &slice[2..];
+    let mut boundaries = Vec::with_capacity(raw.len());
+    for (index, value) in raw.iter().enumerate() {
+        if value == "defer" {
+            let is_final_end = index % 2 == 1 && index + 1 == raw.len();
+            if !is_final_end {
+                return None;
+            }
+            boundaries.push(RoleBoundary::Defer);
+        } else {
+            boundaries.push(RoleBoundary::Timestamp(value.parse().ok()?));
+        }
+    }
+    Some(boundaries)
+}
+
+/// Whether a NIP-34 indexed role tag entry is currently active. A role tag
+/// lists a pubkey followed by optional alternating start/end history
+/// boundaries. An empty history is untimed and active; a numeric history is
+/// active when its final boundary is a start. A valid record ending in
+/// `defer` is inactive.
+fn role_entry_is_active(slice: &[String]) -> bool {
+    role_boundaries(slice)
+        .is_some_and(|boundaries| boundaries.is_empty() || boundaries.len() % 2 == 1)
+}
+
+/// Whether the name is a NIP-34 indexed role tag consumed by the role-tag
+/// pass in [`RepoRef::try_from`].
+fn is_role_tag_name(name: &str) -> bool {
+    matches!(name, "M" | "m" | "o")
+}
+
+/// Close an active role entry: append `now` as an end boundary, inserting a
+/// `0` start when the entry recorded no history (active from the beginning).
+fn close_role_entry(entry: &mut Vec<String>, now: u64) {
+    if entry.len().is_multiple_of(2) {
+        entry.push("0".to_string());
+    }
+    entry.push(now.to_string());
+}
+
+/// Start a new interval on an inactive role record.
+///
+/// A numeric-ended record simply gains a new start. A deferred interval has
+/// no numeric end, so the new assignment supplies `now` as both the previous
+/// interval's end and the new interval's start instead of leaving `defer` in
+/// a non-final position.
+fn restart_role_entry(entry: &mut Vec<String>, now: u64) {
+    if entry.last().is_some_and(|value| value == "defer") {
+        *entry.last_mut().unwrap() = now.to_string();
+    }
+    entry.push(now.to_string());
+}
+
+/// Pubkeys named by currently-active role entries on `event`, paired with
+/// their role tag letter (`M`, `m` or `o`), in tag order.
+fn active_role_entries(event: &nostr::prelude::Event) -> Vec<(String, PublicKey)> {
+    let mut entries = Vec::new();
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(name) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        if !role_entry_is_active(slice) {
+            continue;
+        }
+        if let Some(pk) = slice
+            .get(1)
+            .and_then(|value| PublicKey::from_str(value).ok())
+        {
+            entries.push((name.clone(), pk));
+        }
+    }
+    entries
+}
+
+/// Active maintainer subjects represented by indexed `M` and `m` tags, in
+/// tag order with duplicates removed. This is also the exact compatibility
+/// projection emitted in the deprecated `maintainers` tag.
+fn active_maintainer_projection(tags: &[Tag]) -> Vec<PublicKey> {
+    let mut maintainers = Vec::new();
+    for tag in tags {
+        let slice = tag.as_slice();
+        if !matches!(slice.first().map(String::as_str), Some("M" | "m"))
+            || !role_entry_is_active(slice)
+        {
+            continue;
+        }
+        if let Some(pubkey) = slice
+            .get(1)
+            .and_then(|value| PublicKey::from_str(value).ok())
+        {
+            if !maintainers.contains(&pubkey) {
+                maintainers.push(pubkey);
+            }
+        }
+    }
+    maintainers
+}
+
+/// Whether `event`'s author does not assert maintainership: at least one
+/// role tag names the author but none of them is an active maintainer
+/// (`M`/`m`) entry — the author left by ending their self-role, or their
+/// announcement
+/// acknowledges only moderatorship (`o`). Per NIP-34 the self-role takes
+/// precedence over assignments in other announcements, so such an author
+/// must not be consolidated as a maintainer — in particular a moderator's
+/// acknowledgement announcement must not turn another member's maintainer
+/// assignment into authoritative state. An author absent from all role tags
+/// has *not* declined — they are implicitly a maintainer for the
+/// repository's entire history.
+pub fn announcement_author_declines_maintainership(event: &nostr::prelude::Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut author_has_entry = false;
+    let mut author_has_active_maintainer_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(name) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        if slice.get(1) != Some(&author) {
+            continue;
+        }
+        author_has_entry = true;
+        if name != "o" && role_entry_is_active(slice) {
+            author_has_active_maintainer_entry = true;
+        }
+    }
+    author_has_entry && !author_has_active_maintainer_entry
+}
+
+/// Whether `event`'s author does not hold moderatorship by their own
+/// account: at least one `o` tag names the author but none of those entries
+/// is active — they left by ending their self-role. Per NIP-34 the
+/// self-declaration takes precedence over an active `o` assignment in
+/// another member's announcement, so such an author must not appear in the
+/// consolidated moderator set. An author with no `o` self-entry makes no
+/// statement about moderatorship and never declines it here (an
+/// unacknowledged assignment is an invitation, which the moderator union
+/// currently surfaces).
+pub fn announcement_author_declines_moderatorship(event: &nostr::prelude::Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut author_has_o_entry = false;
+    let mut author_has_active_o_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if slice.first().map(String::as_str) != Some("o") || slice.get(1) != Some(&author) {
+            continue;
+        }
+        author_has_o_entry = true;
+        if role_entry_is_active(slice) {
+            author_has_active_o_entry = true;
+        }
+    }
+    author_has_o_entry && !author_has_active_o_entry
 }
 
 impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
@@ -154,7 +409,71 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: Vec::new(),
+            role_tags: Vec::new(),
+            moderators: Vec::new(),
+            lead: None,
         };
+
+        // NIP-34 indexed role tags: ["M"|"m"|"o", "<pubkey>", <alternating
+        // start/end unix timestamps>...]. The lead/co-maintainer distinction
+        // carries no meaning for ngit's authorization, so both collapse into
+        // one maintainer set; moderators (`o`) are kept separate because they
+        // can never publish authoritative repository state. Entries whose
+        // history shows the role has ended are ignored entirely: role history
+        // only ever concludes that a pubkey no longer holds the role, never
+        // grants retroactive authority over historic events. Duplicate tags
+        // for the same pubkey are consolidated: the pubkey holds a role while
+        // any of its entries is active.
+        let mut role_tags_present = false;
+        let mut author_has_role_entry = false;
+        let mut active_role_maintainers: Vec<PublicKey> = Vec::new();
+        for tag in event.tags.iter() {
+            let slice = tag.as_slice();
+            let Some(name) = slice.first() else { continue };
+            if !is_role_tag_name(name) {
+                continue;
+            }
+            role_tags_present = true;
+            r.role_tags.push(tag.clone());
+            let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let pk = PublicKey::from_str(pk)
+                .context(format!("failed to convert entry from `{name}` role tag {pk} into a valid nostr public key. it should be in hex format"))
+                .context("invalid repository event")?;
+            if pk == event.pubkey {
+                author_has_role_entry = true;
+            }
+            if role_entry_is_active(slice) {
+                if name == "o" {
+                    if !r.moderators.contains(&pk) {
+                        r.moderators.push(pk);
+                    }
+                } else {
+                    if name == "M" && r.lead.is_none() {
+                        r.lead = Some(pk);
+                    }
+                    if !active_role_maintainers.contains(&pk) {
+                        active_role_maintainers.push(pk);
+                    }
+                }
+            }
+        }
+        if role_tags_present {
+            // per NIP-34 an author who appears in no role tag is implicitly a
+            // maintainer for the repository's entire history. An author with
+            // a role entry is exactly what it records: a maintainer, a
+            // moderator (never a maintainer via the implicit rule), or — when
+            // every entry has ended — a member who left.
+            if !author_has_role_entry {
+                r.maintainers.push(event.pubkey);
+            }
+            for pk in active_role_maintainers {
+                if !r.maintainers.contains(&pk) {
+                    r.maintainers.push(pk);
+                }
+            }
+        }
 
         for tag in event.tags.iter() {
             match tag.as_slice() {
@@ -219,16 +538,25 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
                         }
                     }
                 }
+                [t, ..] if is_role_tag_name(t) => {
+                    // consumed by the role-tag pass above; re-emission is
+                    // generated from the typed fields with `role_tags` as
+                    // the history record (see `generate_role_tags`)
+                }
                 [t, maintainers @ ..] if t == "maintainers" => {
-                    if !maintainers.contains(&event.pubkey.to_string()) {
-                        r.maintainers.push(event.pubkey);
-                    }
-                    for pk in maintainers {
-                        r.maintainers.push(
-                            PublicKey::from_str(pk)
-                                .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
-                                .context("invalid repository event")?,
-                        );
+                    // deprecated per NIP-34: ignored entirely when indexed
+                    // role tags are present
+                    if !role_tags_present {
+                        if !maintainers.contains(&event.pubkey.to_string()) {
+                            r.maintainers.push(event.pubkey);
+                        }
+                        for pk in maintainers {
+                            r.maintainers.push(
+                                PublicKey::from_str(pk)
+                                    .context(format!("failed to convert entry from maintainers tag {pk} into a valid nostr public key. it should be in hex format"))
+                                    .context("invalid repository event")?,
+                            );
+                        }
                     }
                 }
                 _ => {
@@ -250,8 +578,11 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             }
         }
 
-        // If no maintainers were added, add the event's public key
-        if r.maintainers.is_empty() {
+        // If no maintainers were added, add the event's public key. With role
+        // tags present an empty set is deliberate: the author's own entries
+        // have all ended (they left) or record only moderatorship, and no
+        // other maintainer entry is active.
+        if r.maintainers.is_empty() && !role_tags_present {
             r.maintainers.push(event.pubkey);
         }
         r.events = HashMap::new();
@@ -272,6 +603,33 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
 
 impl RepoRef {
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
+        let public_key = signer.get_public_key().await?;
+        let implicit_sole = self.role_tags.is_empty()
+            && self.moderators.is_empty()
+            && self.lead.is_none()
+            && self.maintainers.as_slice() == [public_key];
+        let generated_role_tags = if implicit_sole {
+            Vec::new()
+        } else {
+            self.generate_role_tags(&public_key, Timestamp::now().as_secs())
+        };
+        let compatibility_maintainers = active_maintainer_projection(&generated_role_tags);
+        let compatibility_tag = (!implicit_sole)
+            .then(|| {
+                Tag::parse(
+                    [
+                        vec!["maintainers".to_string()],
+                        compatibility_maintainers
+                            .iter()
+                            .map(PublicKey::to_string)
+                            .collect::<Vec<_>>(),
+                    ]
+                    .concat(),
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
         let builder =
             nostr::prelude::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
@@ -311,19 +669,9 @@ impl RepoRef {
                             .concat(),
                         )
                         .unwrap(),
-                        Tag::parse(
-                            [
-                                vec!["maintainers".to_string()],
-                                self.maintainers
-                                    .iter()
-                                    .map(|pk| pk.to_string())
-                                    .collect::<Vec<_>>(),
-                            ]
-                            .concat(),
-                        )
-                        .unwrap(),
                         Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
                     ],
+                    compatibility_tag,
                     self.hashtags
                         .iter()
                         .map(|h| Tag::parse(["t", h]).unwrap())
@@ -356,6 +704,15 @@ impl RepoRef {
                             .unwrap(),
                         ]
                     },
+                    // NIP-34 indexed role tags: one tag per active
+                    // maintainer, generated from the typed fields (`M` for
+                    // the lead, `m` for everyone else). They are the primary
+                    // maintainer listing; the `maintainers` tag emitted
+                    // above degrades to the same current members for older
+                    // clients. History boundaries come from the source
+                    // announcement's role tags and moderator (`o`) tags are
+                    // preserved verbatim. See [`RepoRef::generate_role_tags`].
+                    generated_role_tags,
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
                     // [`is_known_tag_name`]: ngit-known names never end up
@@ -367,7 +724,6 @@ impl RepoRef {
                 ]
                 .concat(),
             );
-        let public_key = signer.get_public_key().await?;
         crate::client::sign_draft_event(
             crate::event_ordering::finalize_ordered_unsigned(
                 builder,
@@ -380,60 +736,639 @@ impl RepoRef {
         .await
         .context("failed to create repository reference event")
     }
-    /// coordinates without relay hints
+
+    /// Generate the NIP-34 indexed role tags for this announcement.
+    ///
+    /// The typed `maintainers` field is the source of truth for *current*
+    /// membership, mirroring the deprecated `maintainers` tag: every active
+    /// maintainer gets an active role tag — the letter `M` for the pubkey
+    /// in `self.lead`, `m` for everyone else. Without a lead no active `M`
+    /// tag is emitted. `self.role_tags` (the source announcement's role
+    /// tags) supplies each pubkey's per-letter start/end history — per
+    /// NIP-34 a pubkey MAY appear in one `M`, one `m`, and one `o` tag to
+    /// record transitions between roles:
+    ///
+    /// - first use of role tags (none on the source announcement): plain
+    ///   untimed entries with no start time;
+    /// - a pubkey with an active prior entry under the letter being emitted
+    ///   keeps that entry's history verbatim;
+    /// - a promotion or demotion between `M` and `m` records a per-letter
+    ///   transition boundary: the old letter's active entry is closed with
+    ///   `now` and the new letter's entry opens at `now`, restarting the
+    ///   pubkey's ended record under that letter when one exists;
+    /// - a pubkey whose prior entries all ended is started again by appending
+    ///   `now` as a fresh start boundary to their record under the letter being
+    ///   emitted; when their only ended record is under the other letter it is
+    ///   kept verbatim and a new record opens at `now`;
+    /// - a pubkey newly added while role tags are already in use starts at
+    ///   `now`; the author is exempt because an author absent from prior role
+    ///   tags was implicitly a member for the repository's entire history;
+    /// - a removed pubkey's active entry is closed under its own letter by
+    ///   appending `now` as an end boundary (inserting a `0` start when the
+    ///   entry recorded no history), and already-ended records are kept so a
+    ///   later re-add restarts them rather than forgetting they ever held the
+    ///   role;
+    /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
+    ///   or end moderators.
+    pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
+        // Prior maintainer-role entries per pubkey, split per letter
+        // (`[0]` = `M`, `[1]` = `m`) since a pubkey may appear in one tag of
+        // each. Entries without a pubkey slot carry no information and are
+        // dropped; moderator tags pass through untouched. Among duplicate
+        // same-letter entries an active one wins, otherwise the first.
+        fn upsert(slot: &mut Option<Vec<String>>, entry: Vec<String>) {
+            match slot {
+                Some(existing)
+                    if role_entry_is_active(existing) || !role_entry_is_active(&entry) => {}
+                _ => *slot = Some(entry),
+            }
+        }
+        let mut prior: Vec<(String, [Option<Vec<String>>; 2])> = Vec::new();
+        let mut moderator_tags: Vec<Tag> = Vec::new();
+        for tag in &self.role_tags {
+            let slice = tag.as_slice();
+            let Some(name) = slice.first() else { continue };
+            if name == "o" {
+                moderator_tags.push(tag.clone());
+                continue;
+            }
+            if role_boundaries(slice).is_none() {
+                continue;
+            }
+            let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let index = usize::from(name != "M");
+            if let Some((_, records)) = prior.iter_mut().find(|(p, _)| p == pk) {
+                upsert(&mut records[index], slice.to_vec());
+            } else {
+                let mut records = [None, None];
+                upsert(&mut records[index], slice.to_vec());
+                prior.push((pk.clone(), records));
+            }
+        }
+
+        let first_use_of_role_tags = self.role_tags.is_empty();
+        let author_hex = author.to_string();
+        let lead_hex = self.lead.map(|pk| pk.to_string());
+        let mut tags: Vec<Tag> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for pk in &self.maintainers {
+            let pk_hex = pk.to_string();
+            if !seen.insert(pk_hex.clone()) {
+                continue;
+            }
+            let is_lead = lead_hex.as_deref() == Some(pk_hex.as_str());
+            let letter = if is_lead { "M" } else { "m" };
+            let (current_index, other_index) = if is_lead { (0, 1) } else { (1, 0) };
+            let records = prior.iter().find(|(p, _)| *p == pk_hex).map(|(_, r)| r);
+            let current_record = records.and_then(|r| r[current_index].clone());
+            let other_record = records.and_then(|r| r[other_index].clone());
+
+            let mut parts = vec![letter.to_string(), pk_hex.clone()];
+            if let Some(entry) = &current_record {
+                parts.extend(entry[2..].iter().cloned());
+                if !role_entry_is_active(entry) {
+                    // stopped record under this letter: start again now (a
+                    // re-add, or a transition back to this letter)
+                    restart_role_entry(&mut parts, now);
+                }
+            } else if other_record.is_some() || (!first_use_of_role_tags && pk_hex != author_hex) {
+                // the record under this letter opens now: a per-letter
+                // transition from the other letter, a re-add under a new
+                // letter, or a pubkey newly added while role tags are in use
+                parts.push(now.to_string());
+            }
+            tags.push(Tag::parse(parts).unwrap());
+
+            // the other letter's record: a transition closes its active
+            // entry; an already-ended one is kept so the transition history
+            // survives
+            if let Some(mut entry) = other_record {
+                if role_entry_is_active(&entry) {
+                    close_role_entry(&mut entry, now);
+                }
+                tags.push(Tag::parse(entry).unwrap());
+            }
+        }
+
+        // removed maintainers: prior records whose pubkey is no longer in
+        // the typed field are closed under their own letter; already-ended
+        // records are kept
+        for (pk_hex, records) in &prior {
+            if !seen.insert(pk_hex.clone()) {
+                continue;
+            }
+            for entry in records.iter().flatten() {
+                let mut entry = entry.clone();
+                if role_entry_is_active(&entry) {
+                    close_role_entry(&mut entry, now);
+                }
+                tags.push(Tag::parse(entry).unwrap());
+            }
+        }
+
+        tags.extend(moderator_tags);
+        tags
+    }
+
+    /// Role-history records for a republish of this announcement (the
+    /// author's own prior announcement), feeding
+    /// [`RepoRef::generate_role_tags`].
+    ///
+    /// Returns the announcement's role tags verbatim. When the announcement
+    /// predates maintainer role tags — its members are listed only via the
+    /// deprecated `maintainers` tag or the author's implicit membership —
+    /// untimed entries are materialized from its maintainer listing so that
+    /// a member dropped by the republish is closed with an end boundary
+    /// rather than silently unlisted. Continuing members still emit the same
+    /// untimed entries a first use of role tags would produce; only a member
+    /// added in the same republish gains a start boundary, which is accurate
+    /// since the prior listing proves they were not a member before.
+    pub fn role_history_for_republish(&self) -> Vec<Tag> {
+        let mut tags = self.role_tags.clone();
+        let has_maintainer_entries = tags
+            .iter()
+            .any(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("M" | "m")));
+        if !has_maintainer_entries {
+            for pk in &self.maintainers {
+                let letter = if self.lead == Some(*pk) { "M" } else { "m" };
+                tags.push(Tag::parse([letter, &pk.to_string()]).unwrap());
+            }
+        }
+        tags
+    }
+
+    /// Build the accepting maintainer's first indexed role view.
+    ///
+    /// The relationships the accepter confirms start at `now`. Other role
+    /// records from the resolved lead (or selected maintainer when there is
+    /// no lead) are retained as history, but a currently-active record ends
+    /// in `defer` so this announcement does not assign that third party.
+    pub fn role_history_for_acceptance(
+        &self,
+        author: &PublicKey,
+        maintainers: &[PublicKey],
+        lead: Option<PublicKey>,
+        now: u64,
+    ) -> Vec<Tag> {
+        let history_author = lead.unwrap_or(self.selected_maintainer);
+        let source = self
+            .events
+            .values()
+            .find(|event| event.pubkey == history_author)
+            .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
+        let source_history = source
+            .as_ref()
+            .map_or_else(Vec::new, RepoRef::role_history_for_republish);
+
+        let active_subjects: HashSet<String> =
+            maintainers.iter().map(PublicKey::to_string).collect();
+        debug_assert!(maintainers.contains(author));
+        let mut history = Vec::new();
+        for tag in source_history {
+            let slice = tag.as_slice();
+            let Some(name @ ("M" | "m" | "o")) = slice.first().map(String::as_str) else {
+                continue;
+            };
+            let Some(subject) = slice.get(1) else {
+                continue;
+            };
+            if active_subjects.contains(subject) && name != "o" {
+                continue;
+            }
+            let mut parts = slice.to_vec();
+            if role_entry_is_active(&parts) {
+                if parts.len().is_multiple_of(2) {
+                    parts.push("0".to_string());
+                }
+                parts.push("defer".to_string());
+            }
+            history.push(Tag::parse(parts).unwrap());
+        }
+
+        for maintainer in maintainers {
+            let letter = if lead == Some(*maintainer) { "M" } else { "m" };
+            history.push(
+                Tag::parse(vec![
+                    letter.to_string(),
+                    maintainer.to_string(),
+                    now.to_string(),
+                ])
+                .unwrap(),
+            );
+        }
+        history
+    }
+
+    /// Build the role-history source for a confirmed co-maintainer preparing
+    /// to receive the lead.
+    ///
+    /// The current lead's moderator records are canonical for the active
+    /// roster, including pending moderator invitations. They replace the
+    /// candidate's deferred copies of the same records. Candidate-only ended
+    /// moderator history is retained so preparation does not erase a signed
+    /// historical view.
+    pub fn role_history_for_prepared_lead(&self, current_lead: &RepoRef) -> Vec<Tag> {
+        let lead_history = current_lead.role_history_for_republish();
+        let lead_moderator_subjects: HashSet<String> = lead_history
+            .iter()
+            .filter_map(|tag| {
+                let slice = tag.as_slice();
+                (slice.first().map(String::as_str) == Some("o"))
+                    .then(|| slice.get(1).cloned())
+                    .flatten()
+            })
+            .collect();
+        let mut history: Vec<Tag> = self
+            .role_history_for_republish()
+            .into_iter()
+            .filter(|tag| {
+                let slice = tag.as_slice();
+                slice.first().map(String::as_str) != Some("o")
+                    || slice
+                        .get(1)
+                        .is_none_or(|subject| !lead_moderator_subjects.contains(subject))
+            })
+            .collect();
+        history.extend(
+            lead_history
+                .into_iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("o")),
+        );
+        history
+    }
+
+    /// Retain all known role history while delegating current third-party
+    /// assignments to a lead.
+    ///
+    /// Active maintainer records naming `author` or `lead` remain available
+    /// for the normal role-transition generator. Every other active role is
+    /// changed to a `defer`-ended copy so it carries history without making
+    /// an assignment from this announcement.
+    pub fn defer_third_party_roles(&mut self, author: PublicKey, lead: PublicKey) {
+        self.role_tags = self.role_history_for_republish();
+        let active_subjects = [author.to_string(), lead.to_string()];
+        for tag in &mut self.role_tags {
+            let slice = tag.as_slice();
+            let is_active_relationship =
+                matches!(slice.first().map(String::as_str), Some("M" | "m" | "o"))
+                    && role_entry_is_active(slice);
+            let keep_active = matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                && slice
+                    .get(1)
+                    .is_some_and(|subject| active_subjects.contains(subject));
+            if !is_active_relationship || keep_active {
+                continue;
+            }
+            let mut parts = slice.to_vec();
+            if parts.len().is_multiple_of(2) {
+                parts.push("0".to_string());
+            }
+            parts.push("defer".to_string());
+            *tag = Tag::parse(parts).unwrap();
+        }
+    }
+
+    /// Merge the resolved lead's retained history into this maintainer's
+    /// view before following a new lead.
+    ///
+    /// The author's own role and their previous direct `M` relationship stay
+    /// active long enough for [`RepoRef::generate_role_tags`] to perform the
+    /// numeric transition. Other current assignments become `defer` copies.
+    /// For a maintainer removed by the lead, the lead's numeric self-role end
+    /// replaces the stale active self record.
+    pub fn role_history_for_follow_lead(
+        &self,
+        canonical_lead: &RepoRef,
+        author: PublicKey,
+        old_lead: PublicKey,
+        new_lead: PublicKey,
+        author_is_active: bool,
+    ) -> Result<Vec<Tag>> {
+        fn key(parts: &[String]) -> Option<(String, String)> {
+            let name = parts.first()?;
+            let subject = parts.get(1)?;
+            is_role_tag_name(name).then(|| (name.clone(), subject.clone()))
+        }
+
+        let author_hex = author.to_string();
+        let old_lead_hex = old_lead.to_string();
+        let new_lead_hex = new_lead.to_string();
+        let author_declined = self.events.values().any(|event| {
+            event.pubkey == author && announcement_author_declines_maintainership(event)
+        }) || (!self.maintainers.contains(&author)
+            && self.role_tags.iter().any(|tag| {
+                let slice = tag.as_slice();
+                slice.get(1) == Some(&author_hex)
+                    && matches!(slice.first().map(String::as_str), Some("M" | "m"))
+            }));
+
+        let mut records: Vec<(Vec<String>, bool)> = self
+            .role_history_for_republish()
+            .into_iter()
+            .map(|tag| (tag.as_slice().to_vec(), true))
+            .collect();
+        for tag in canonical_lead.role_history_for_republish() {
+            let parts = tag.as_slice().to_vec();
+            let Some(record_key) = key(&parts) else {
+                continue;
+            };
+            let subject = &record_key.1;
+            let relationship_subject = [
+                author_hex.as_str(),
+                old_lead_hex.as_str(),
+                new_lead_hex.as_str(),
+            ]
+            .contains(&subject.as_str());
+            let replace_author = subject == &author_hex && !author_is_active && !author_declined;
+            if let Some(index) = records
+                .iter()
+                .position(|(existing, _)| key(existing).as_ref() == Some(&record_key))
+            {
+                if replace_author || !relationship_subject {
+                    records[index] = (parts, false);
+                }
+            } else {
+                records.push((parts, false));
+            }
+        }
+
+        for (parts, from_author) in &mut records {
+            if !role_entry_is_active(parts) {
+                continue;
+            }
+            let name = parts.first().map(String::as_str);
+            let subject = parts.get(1).map(String::as_str);
+            let keep_active = *from_author
+                && matches!(name, Some("M" | "m"))
+                && ((author_is_active && subject == Some(&author_hex))
+                    || (name == Some("M")
+                        && matches!(subject, Some(value) if value == old_lead_hex || value == new_lead_hex)));
+            if keep_active {
+                continue;
+            }
+            if parts.len().is_multiple_of(2) {
+                parts.push("0".to_string());
+            }
+            parts.push("defer".to_string());
+        }
+
+        if !author_is_active {
+            let has_numeric_self_end = records.iter().any(|(parts, _)| {
+                parts.get(1) == Some(&author_hex)
+                    && matches!(parts.first().map(String::as_str), Some("M" | "m"))
+                    && role_boundaries(parts).is_some_and(|boundaries| {
+                        boundaries.len().is_multiple_of(2)
+                            && matches!(boundaries.last(), Some(RoleBoundary::Timestamp(_)))
+                    })
+            });
+            if !has_numeric_self_end {
+                bail!("the lead view has no numeric end for your maintainer role");
+            }
+        }
+
+        Ok(records
+            .into_iter()
+            .map(|(parts, _)| Tag::parse(parts).unwrap())
+            .collect())
+    }
+
+    /// Record the target author's signed acceptance or departure boundary in
+    /// this announcement's existing relationship to them.
+    ///
+    /// Active local assignments remain active when an acceptance start is
+    /// adopted. A local `defer` copy remains inactive. A signed departure
+    /// closes either form and removes only that target from the typed active
+    /// roster.
+    pub fn acknowledge_maintainer_event(
+        &mut self,
+        target_event: &nostr::prelude::Event,
+    ) -> Result<MaintainerAcknowledgement> {
+        let target = target_event.pubkey;
+        let target_hex = target.to_string();
+        let target_self_records: Vec<Vec<String>> = target_event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .filter(|slice| {
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&target_hex)
+                    && role_boundaries(slice).is_some()
+            })
+            .map(<[String]>::to_vec)
+            .collect();
+        let active_self_records: Vec<&Vec<String>> = target_self_records
+            .iter()
+            .filter(|record| role_entry_is_active(record))
+            .collect();
+        if active_self_records.len() > 1 {
+            bail!("the target announcement has conflicting active self roles");
+        }
+
+        let observation = if let Some(record) = active_self_records.first() {
+            let at = role_boundaries(record)
+                .and_then(|boundaries| boundaries.last().copied())
+                .and_then(|boundary| match boundary {
+                    RoleBoundary::Timestamp(timestamp) => Some(timestamp),
+                    RoleBoundary::Defer => None,
+                })
+                .unwrap_or_else(|| target_event.created_at.as_secs());
+            (true, at)
+        } else if announcement_author_declines_maintainership(target_event) {
+            let at = target_self_records
+                .iter()
+                .filter_map(|record| role_boundaries(record))
+                .filter_map(|boundaries| match boundaries.last() {
+                    Some(RoleBoundary::Timestamp(timestamp)) if boundaries.len() % 2 == 0 => {
+                        Some(*timestamp)
+                    }
+                    _ => None,
+                })
+                .max()
+                .context("the target departure has no signed numeric end boundary")?;
+            (false, at)
+        } else if target_self_records.is_empty() {
+            (true, target_event.created_at.as_secs())
+        } else {
+            bail!("the target announcement records no active maintainer self role");
+        };
+
+        self.role_tags = self.role_history_for_republish();
+        let mut candidates: Vec<usize> = self
+            .role_tags
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tag)| {
+                let slice = tag.as_slice();
+                (matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&target_hex)
+                    && role_boundaries(slice).is_some())
+                .then_some(index)
+            })
+            .collect();
+        candidates.sort_by_key(|index| {
+            let slice = self.role_tags[*index].as_slice();
+            if role_entry_is_active(slice) {
+                0
+            } else if slice.last().is_some_and(|value| value == "defer") {
+                1
+            } else {
+                2
+            }
+        });
+        let index = candidates
+            .first()
+            .copied()
+            .context("your announcement has no relationship to that maintainer")?;
+        let mut parts = self.role_tags[index].as_slice().to_vec();
+        let boundaries = role_boundaries(&parts).unwrap();
+        let (accepted, at) = observation;
+        let changed = if accepted {
+            if !role_entry_is_active(&parts) && parts.last().is_none_or(|value| value != "defer") {
+                bail!("your relationship to that maintainer has already ended");
+            }
+            let prior_start = boundaries
+                .iter()
+                .rev()
+                .find_map(|boundary| match boundary {
+                    RoleBoundary::Timestamp(timestamp) => Some(*timestamp),
+                    RoleBoundary::Defer => None,
+                })
+                .unwrap_or(0);
+            if at < prior_start {
+                bail!("the signed acceptance predates your invitation boundary");
+            }
+            let start_index = if parts.last().is_some_and(|value| value == "defer") {
+                parts.len() - 2
+            } else if boundaries.is_empty() {
+                parts.push(at.to_string());
+                parts.len() - 1
+            } else {
+                parts.len() - 1
+            };
+            let changed = parts[start_index] != at.to_string();
+            parts[start_index] = at.to_string();
+            changed
+        } else {
+            let start_boundary = if boundaries.len().is_multiple_of(2) {
+                boundaries
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| boundaries.get(index))
+            } else {
+                boundaries.last()
+            };
+            let start = match start_boundary {
+                Some(RoleBoundary::Timestamp(timestamp)) => *timestamp,
+                Some(RoleBoundary::Defer) | None => 0,
+            };
+            if at < start {
+                bail!("the signed departure predates your relationship start");
+            }
+            if role_entry_is_active(&parts) {
+                if boundaries.is_empty() {
+                    parts.push("0".to_string());
+                }
+                parts.push(at.to_string());
+                true
+            } else {
+                let end = at.to_string();
+                let changed = parts.last() != Some(&end);
+                *parts.last_mut().unwrap() = end;
+                changed
+            }
+        };
+        self.role_tags[index] = Tag::parse(parts).unwrap();
+
+        if accepted {
+            Ok(MaintainerAcknowledgement::Accepted { at, changed })
+        } else {
+            self.maintainers.retain(|maintainer| *maintainer != target);
+            if self.lead == Some(target) {
+                self.lead = None;
+            }
+            Ok(MaintainerAcknowledgement::Departed { at, changed })
+        }
+    }
+
+    /// End the author's own self-role in this announcement, per NIP-34's "a
+    /// member MAY leave by ending their self-role": every active role entry
+    /// naming `author` — `M`, `m` and `o` alike — is closed with `now` as an
+    /// end boundary, and the author is removed from the typed membership
+    /// fields so a republish emits the closed records instead of an active
+    /// listing. The self-declaration takes precedence over maintainer
+    /// assignments in other members' announcements.
+    ///
+    /// History is first materialized via
+    /// [`RepoRef::role_history_for_republish`], and an author who was only
+    /// implicitly a member next to existing role tags gains an untimed `m`
+    /// entry to close — without a closed self-entry the republished event
+    /// would carry no record of the author and NIP-34 would make them an
+    /// implicit maintainer again.
+    ///
+    /// Returns whether an active role was ended; `false` means the author
+    /// held no active role in this announcement (nothing to leave), and the
+    /// announcement is left unchanged apart from the history
+    /// materialization.
+    pub fn end_self_role(&mut self, author: &PublicKey, now: u64) -> bool {
+        self.role_tags = self.role_history_for_republish();
+        let author_hex = author.to_string();
+        if self.maintainers.contains(author)
+            && !self.role_tags.iter().any(|tag| {
+                let slice = tag.as_slice();
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&author_hex)
+            })
+        {
+            // implicitly a member while role tags are already in use:
+            // materialize the untimed self-entry the closure below ends
+            self.role_tags.push(Tag::parse(["m", &author_hex]).unwrap());
+        }
+        let mut ended = false;
+        for tag in &mut self.role_tags {
+            let slice = tag.as_slice();
+            if slice.get(1) == Some(&author_hex) && role_entry_is_active(slice) {
+                let mut parts = slice.to_vec();
+                close_role_entry(&mut parts, now);
+                *tag = Tag::parse(parts).unwrap();
+                ended = true;
+            }
+        }
+        if !ended {
+            return false;
+        }
+        self.maintainers.retain(|pk| pk != author);
+        self.moderators.retain(|pk| pk != author);
+        if self.lead == Some(*author) {
+            self.lead = None;
+        }
+        true
+    }
+
+    /// Confirmed member coordinates without relay hints.
+    ///
+    /// Role subjects are fetched separately while resolving the repository
+    /// graph. This set is used for repository-scoped event discovery, so an
+    /// invitation must not make the invitee's pre-existing state, issues or
+    /// proposals part of the repository before they acknowledge it.
     pub fn coordinates(&self) -> HashSet<Nip19Coordinate> {
         let mut res = HashSet::new();
-        res.insert(Nip19Coordinate {
-            coordinate: Coordinate {
-                kind: Kind::GitRepoAnnouncement,
-                public_key: self.selected_maintainer,
-                identifier: self.identifier.clone(),
-            },
-            relays: vec![],
-        });
-
-        for m in &self.maintainers {
-            res.insert(Nip19Coordinate {
-                coordinate: Coordinate {
-                    kind: Kind::GitRepoAnnouncement,
-                    public_key: *m,
-                    identifier: self.identifier.clone(),
-                },
-                relays: vec![],
-            });
+        for member in self.confirmed_members() {
+            res.insert(self.announcement_coordinate(&member));
         }
         res
     }
 
-    /// Maintainers in announcement-tag order.
+    /// Members in announcement-tag order.
     ///
-    /// The maintainer selected by the `nostr://` URL or explicit repo
-    /// coordinate is always first. Confirmed maintainers come before invited
-    /// maintainers. This keeps PR/issue repository `a` tags anchored to the
-    /// reciprocal group while still tagging every authorized maintainer.
-    pub fn maintainers_for_announcement_tags(&self) -> Vec<PublicKey> {
-        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
-
-        let mut ordered = Vec::new();
-        let mut seen = HashSet::new();
-
-        if seen.insert(self.selected_maintainer) {
-            ordered.push(self.selected_maintainer);
-        }
-
-        for maintainer in &self.maintainers {
-            if confirmed.contains(maintainer) && seen.insert(*maintainer) {
-                ordered.push(*maintainer);
-            }
-        }
-
-        for maintainer in &self.maintainers {
-            if !confirmed.contains(maintainer) && seen.insert(*maintainer) {
-                ordered.push(*maintainer);
-            }
-        }
-
-        ordered
+    /// Confirmed maintainers are followed by confirmed moderators. Invited
+    /// maintainers and assigned-but-unacknowledged moderators are excluded:
+    /// tagging an invitation would make the invitee's pre-existing
+    /// same-identifier events appear to belong to this repository.
+    pub fn members_for_announcement_tags(&self) -> Vec<PublicKey> {
+        self.confirmed_members()
     }
 
     /// Directed maintainer relationships from the announcements we know.
@@ -457,24 +1392,133 @@ impl RepoRef {
         edges
     }
 
-    /// Maintainers in the selected maintainer's reciprocally connected group.
+    /// Maintainers in the selected coordinate's reciprocally connected group.
     ///
-    /// Every maintainer reachable from the selected announcement is authorized.
-    /// Reciprocal connectivity is only the accepted-membership framing used in
-    /// user-facing output; it does not restrict event authority.
+    /// Per NIP-34 a listed pubkey is only invited until their own announcement
+    /// makes the relationship reciprocal, and an invited pubkey's events MUST
+    /// NOT be treated as authoritative. Confirmed maintainers are therefore
+    /// the authoritative set: see [`RepoRef::is_authorized_maintainer`].
+    ///
+    /// An explicit `M` path is rooted at its terminal self-`M` lead; a
+    /// leadless or legacy graph is rooted at the selected maintainer. A
+    /// candidate is confirmed only when an already-confirmed member's
+    /// announcement lists them *and* their own announcement lists an
+    /// already-confirmed member. Mere reachability is not enough: in a cycle
+    /// of unconfirmed invitees (A lists B, B lists C, C lists A) every
+    /// invitee can reach the selected maintainer without any of them ever
+    /// having acknowledged a confirmed member, so none is confirmed.
     pub fn confirmed_maintainers(&self) -> Vec<PublicKey> {
         let edges = self.maintainer_edges();
-        self.maintainers
+        // A member's own announcement takes precedence over assignments in
+        // other announcements: no active `M`/`m` self-entry (they left, or
+        // acknowledge only moderatorship) removes them from the candidate
+        // set even when another member still lists them as a maintainer.
+        let declined: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_maintainership(event))
+            .map(|event| event.pubkey)
+            .collect();
+        self.resolve_confirmed_maintainers(&self.maintainers, &edges, &declined)
+    }
+
+    fn resolve_confirmed_maintainers(
+        &self,
+        candidates: &[PublicKey],
+        edges: &[MaintainerEdge],
+        declined: &HashSet<PublicKey>,
+    ) -> Vec<PublicKey> {
+        let mut confirmed: HashSet<PublicKey> = HashSet::new();
+        if let Some(seed) = self.confirmation_seed(declined) {
+            confirmed.insert(seed);
+        }
+        loop {
+            let mut changed = false;
+            for candidate in candidates {
+                if confirmed.contains(candidate) || declined.contains(candidate) {
+                    continue;
+                }
+                let listed_by_member = edges
+                    .iter()
+                    .any(|edge| edge.to == *candidate && confirmed.contains(&edge.from));
+                let acknowledges_member = edges
+                    .iter()
+                    .any(|edge| edge.from == *candidate && confirmed.contains(&edge.to));
+                if listed_by_member && acknowledges_member {
+                    confirmed.insert(*candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        candidates
             .iter()
             .copied()
-            .filter(|maintainer| {
-                *maintainer == self.selected_maintainer
-                    || graph_reaches(*maintainer, self.selected_maintainer, &edges)
-            })
+            .filter(|maintainer| confirmed.contains(maintainer))
             .collect()
     }
 
-    /// Authorized maintainers not reciprocally connected to the selected group.
+    /// Choose the authority seed without granting authority merely because a
+    /// coordinate was selected. An indexed `M` path must terminate at one
+    /// active self-`M`; missing, conflicting, and cyclic paths seed nobody.
+    /// Announcements without an active `M` retain the legacy/leadless selected
+    /// coordinate seed.
+    fn confirmation_seed(&self, declined: &HashSet<PublicKey>) -> Option<PublicKey> {
+        let mut current = self.selected_maintainer;
+        let mut followed_explicit_lead = false;
+        let mut visited = HashSet::new();
+
+        loop {
+            if !visited.insert(current) {
+                return None;
+            }
+            let Some(event) = self.events.values().find(|event| event.pubkey == current) else {
+                return (!followed_explicit_lead && !declined.contains(&current))
+                    .then_some(current);
+            };
+            let mut leads = Vec::new();
+            for (letter, target) in active_role_entries(event) {
+                if letter == "M" && !leads.contains(&target) {
+                    leads.push(target);
+                }
+            }
+            if leads.is_empty() {
+                return (!followed_explicit_lead && !declined.contains(&current))
+                    .then_some(current);
+            }
+            if leads.len() != 1 {
+                return None;
+            }
+            let target = leads[0];
+            followed_explicit_lead = true;
+            if target == current {
+                return (!declined.contains(&target)).then_some(target);
+            }
+            current = target;
+        }
+    }
+
+    /// Whether `pubkey` holds maintainer authority.
+    ///
+    /// True only for confirmed maintainers: authoritative repository state
+    /// (kind 30618) and maintainer-only actions such as merging are gated
+    /// here. Invited maintainers do not qualify until they publish an
+    /// announcement that makes the relationship reciprocal, and moderators
+    /// (`o` role tags, [`RepoRef::moderators`]) never do: per NIP-34 they
+    /// cannot publish authoritative repository state, so a moderator-only
+    /// pubkey is excluded from the maintainer set this check is built on.
+    /// Member actions — status (kinds 1630-1633), label, subject and
+    /// cover-note events — are gated by [`RepoRef::is_authorized_member`]
+    /// instead, which also counts confirmed moderators.
+    pub fn is_authorized_maintainer(&self, pubkey: &PublicKey) -> bool {
+        self.confirmed_maintainers().contains(pubkey)
+    }
+
+    /// Listed maintainers not reciprocally connected to the selected group.
+    /// Their events are not authoritative until they accept; see
+    /// [`RepoRef::is_authorized_maintainer`].
     pub fn invited_maintainers(&self) -> Vec<PublicKey> {
         let confirmed: HashSet<_> = self.confirmed_maintainers().into_iter().collect();
         self.maintainers
@@ -484,30 +1528,499 @@ impl RepoRef {
             .collect()
     }
 
-    /// The unique confirmed maintainer with the highest positive in-degree.
-    /// Ties and graphs with no maintainer-to-maintainer edges have no lead.
-    pub fn lead_maintainer(&self) -> Option<PublicKey> {
-        let confirmed = self.confirmed_maintainers();
-        let confirmed_set: HashSet<_> = confirmed.iter().copied().collect();
-        let mut counts: HashMap<PublicKey, usize> = confirmed
-            .iter()
-            .copied()
-            .map(|maintainer| (maintainer, 0))
-            .collect();
-        for edge in self.maintainer_edges() {
-            if confirmed_set.contains(&edge.from) && confirmed_set.contains(&edge.to) {
-                *counts.entry(edge.to).or_default() += 1;
+    /// This announcement's coordinate for `public_key`, without relay hints.
+    fn announcement_coordinate(&self, public_key: &PublicKey) -> Nip19Coordinate {
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: *public_key,
+                identifier: self.identifier.clone(),
+            },
+            relays: vec![],
+        }
+    }
+
+    /// Moderators assigned by the confirmed maintainer group: pubkeys with an
+    /// active `o` entry in a confirmed maintainer's announcement, in listing
+    /// order.
+    ///
+    /// Per NIP-34 "An `o` role can only be assigned by an `M` or `m` member;
+    /// the moderator's matching self-tag acknowledges rather than assigns
+    /// it", so `o` entries in a moderator-only, invited-maintainer or
+    /// outsider announcement assign nothing here.
+    ///
+    /// Assignment alone is an invitation, mirroring
+    /// [`RepoRef::invited_maintainers`]: see
+    /// [`RepoRef::confirmed_moderators`] for the acknowledged subset whose
+    /// member actions are authorized. Self-leave precedence (an announcement
+    /// recording only ended `o` self-entries) is applied by the consolidation
+    /// in `get_repo_ref_from_cache`, which consults fetched announcements
+    /// beyond this event map.
+    pub fn assigned_moderators(&self) -> Vec<PublicKey> {
+        let mut assigned = Vec::new();
+        for maintainer in self.confirmed_maintainers() {
+            let Some(event) = self.events.get(&self.announcement_coordinate(&maintainer)) else {
+                continue;
+            };
+            for (letter, pk) in active_role_entries(event) {
+                if letter == "o" && !assigned.contains(&pk) {
+                    assigned.push(pk);
+                }
             }
         }
-        let highest = counts.values().copied().max().unwrap_or_default();
-        if highest == 0 {
-            return None;
+        assigned
+    }
+
+    /// Moderators in the selected maintainer's reciprocally connected group:
+    /// assigned an active `o` role by a confirmed maintainer *and*
+    /// acknowledged by their own announcement.
+    ///
+    /// Per NIP-34 a pubkey is invited until their own announcement
+    /// acknowledges the role and assigns a role to an existing member, so
+    /// confirmation requires the moderator's announcement to carry an active
+    /// `o` self-entry and an active role entry naming an already-confirmed
+    /// member. That entry is read only as their acknowledgement of the
+    /// group — a moderator's assignments assign nothing to others.
+    /// Membership grows as a fixpoint so an acknowledgement toward another
+    /// confirmed moderator also confirms.
+    pub fn confirmed_moderators(&self) -> Vec<PublicKey> {
+        let assigned = self.assigned_moderators();
+        let confirmed_maintainers = self.confirmed_maintainers();
+        let declined: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_moderatorship(event))
+            .map(|event| event.pubkey)
+            .collect();
+        self.resolve_confirmed_moderators(&confirmed_maintainers, &assigned, &declined)
+    }
+
+    fn resolve_confirmed_moderators(
+        &self,
+        confirmed_maintainers: &[PublicKey],
+        assigned: &[PublicKey],
+        declined: &HashSet<PublicKey>,
+    ) -> Vec<PublicKey> {
+        let mut members: HashSet<PublicKey> = confirmed_maintainers.iter().copied().collect();
+        let mut confirmed: Vec<PublicKey> = Vec::new();
+        loop {
+            let mut changed = false;
+            for candidate in assigned {
+                if confirmed.contains(candidate) || declined.contains(candidate) {
+                    continue;
+                }
+                let Some(event) = self.events.get(&self.announcement_coordinate(candidate)) else {
+                    continue;
+                };
+                let entries = active_role_entries(event);
+                let acknowledges_role = entries
+                    .iter()
+                    .any(|(letter, pk)| letter == "o" && pk == candidate);
+                let acknowledges_member = entries
+                    .iter()
+                    .any(|(_, pk)| pk != candidate && members.contains(pk));
+                if acknowledges_role && acknowledges_member {
+                    confirmed.push(*candidate);
+                    members.insert(*candidate);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
-        let mut leaders = counts
-            .into_iter()
-            .filter_map(|(maintainer, count)| (count == highest).then_some(maintainer));
-        let lead = leaders.next()?;
-        leaders.next().is_none().then_some(lead)
+        confirmed
+    }
+
+    /// Resolve the membership that would result from replacing one author's
+    /// active maintainer projection, without signing or publishing an event.
+    ///
+    /// `author_keeps_maintainership` is false for `repo leave`; an ordinary
+    /// roster edit passes true. `author_keeps_moderatorship` is `None` when the
+    /// edit preserves the author's current moderator self-role and
+    /// `Some(false)` when leaving ends it. The author's third-party moderator
+    /// assignments are unchanged, but cease to assign roles if the author is
+    /// no longer a confirmed maintainer.
+    pub fn membership_after_author_change(
+        &self,
+        author: PublicKey,
+        replacement_maintainers: &[PublicKey],
+        author_keeps_maintainership: bool,
+        author_keeps_moderatorship: Option<bool>,
+    ) -> (Vec<PublicKey>, Vec<PublicKey>) {
+        let mut candidates = self.maintainers.clone();
+        for candidate in replacement_maintainers {
+            if !candidates.contains(candidate) {
+                candidates.push(*candidate);
+            }
+        }
+
+        let mut edges = self.maintainer_edges();
+        edges.retain(|edge| edge.from != author);
+        for target in replacement_maintainers {
+            if *target != author
+                && !edges
+                    .iter()
+                    .any(|edge| edge.from == author && edge.to == *target)
+            {
+                edges.push(MaintainerEdge {
+                    from: author,
+                    to: *target,
+                });
+            }
+        }
+
+        let mut declined_maintainers: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_maintainership(event))
+            .map(|event| event.pubkey)
+            .collect();
+        if author_keeps_maintainership {
+            declined_maintainers.remove(&author);
+        } else {
+            declined_maintainers.insert(author);
+        }
+        let maintainers =
+            self.resolve_confirmed_maintainers(&candidates, &edges, &declined_maintainers);
+
+        let mut assigned_moderators = Vec::new();
+        for maintainer in &maintainers {
+            let Some(event) = self.events.get(&self.announcement_coordinate(maintainer)) else {
+                continue;
+            };
+            for (letter, pubkey) in active_role_entries(event) {
+                if letter == "o" && !assigned_moderators.contains(&pubkey) {
+                    assigned_moderators.push(pubkey);
+                }
+            }
+        }
+        let mut declined_moderators: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_moderatorship(event))
+            .map(|event| event.pubkey)
+            .collect();
+        if let Some(keeps_role) = author_keeps_moderatorship {
+            if keeps_role {
+                declined_moderators.remove(&author);
+            } else {
+                declined_moderators.insert(author);
+            }
+        }
+        let moderators = self.resolve_confirmed_moderators(
+            &maintainers,
+            &assigned_moderators,
+            &declined_moderators,
+        );
+
+        (maintainers, moderators)
+    }
+
+    /// All current members: confirmed maintainers followed by confirmed
+    /// moderators.
+    ///
+    /// Per NIP-34 all members can perform "other maintainer actions" —
+    /// status (kinds 1630-1633), label, subject and cover-note events — but
+    /// only maintainers may publish authoritative repository state, so
+    /// state authority keeps using [`RepoRef::confirmed_maintainers`].
+    pub fn confirmed_members(&self) -> Vec<PublicKey> {
+        let mut members = self.confirmed_maintainers();
+        for moderator in self.confirmed_moderators() {
+            if !members.contains(&moderator) {
+                members.push(moderator);
+            }
+        }
+        members
+    }
+
+    /// Latest announcement from each confirmed member, ordered from oldest to
+    /// newest using the NIP-01 addressable-event tie-break.
+    ///
+    /// The event map intentionally also retains invitations for reciprocal
+    /// graph discovery. Consumers of shared repository metadata and personal
+    /// infrastructure must use this filtered view so those discovery events
+    /// do not become authoritative prematurely.
+    pub(crate) fn confirmed_member_announcements(&self) -> Vec<&nostr::prelude::Event> {
+        let members: HashSet<PublicKey> = self.confirmed_members().into_iter().collect();
+        let mut events: Vec<&nostr::prelude::Event> = self
+            .events
+            .values()
+            .filter(|event| members.contains(&event.pubkey))
+            .collect();
+        events.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        events
+    }
+
+    /// Whether `pubkey` may author member actions: status (kinds 1630-1633),
+    /// label, subject and cover-note events. True for confirmed maintainers
+    /// and confirmed moderators alike. Authoritative repository state (kind
+    /// 30618) and maintainer-only actions such as merging remain gated by
+    /// [`RepoRef::is_authorized_maintainer`].
+    pub fn is_authorized_member(&self, pubkey: &PublicKey) -> bool {
+        self.confirmed_members().contains(pubkey)
+    }
+
+    /// Resolve the lead by walking active `M` pointers from the selected
+    /// coordinate, with legacy vote inference only when that rooted view has
+    /// not adopted indexed roles.
+    pub fn lead_resolution(&self) -> LeadResolution {
+        fn event_for<'a>(repo_ref: &'a RepoRef, pubkey: &PublicKey) -> Option<&'a Event> {
+            repo_ref
+                .events
+                .values()
+                .find(|event| event.pubkey == *pubkey)
+        }
+
+        fn active_leads(event: &Event) -> Vec<PublicKey> {
+            let mut leads = Vec::new();
+            for tag in event.tags.iter() {
+                let slice = tag.as_slice();
+                if slice.first().map(String::as_str) != Some("M") || !role_entry_is_active(slice) {
+                    continue;
+                }
+                if let Some(pubkey) = slice
+                    .get(1)
+                    .and_then(|value| PublicKey::from_str(value).ok())
+                {
+                    if !leads.contains(&pubkey) {
+                        leads.push(pubkey);
+                    }
+                }
+            }
+            leads
+        }
+
+        fn has_indexed_roles(event: &Event) -> bool {
+            event.tags.iter().any(|tag| {
+                tag.as_slice()
+                    .first()
+                    .is_some_and(|name| is_role_tag_name(name))
+            })
+        }
+
+        fn has_indexed_maintainer_role(event: &Event) -> bool {
+            event
+                .tags
+                .iter()
+                .any(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("M" | "m")))
+        }
+
+        fn has_legacy_listing(event: &Event) -> bool {
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers"))
+        }
+
+        fn legacy_resolution(repo_ref: &RepoRef, confirmed: &HashSet<PublicKey>) -> LeadResolution {
+            let selected = repo_ref.selected_maintainer;
+            let mut votes: HashMap<PublicKey, usize> = HashMap::new();
+            for event in repo_ref.events.values() {
+                if !confirmed.contains(&event.pubkey) {
+                    continue;
+                }
+                if has_indexed_roles(event) {
+                    for target in active_leads(event) {
+                        if target != event.pubkey && confirmed.contains(&target) {
+                            *votes.entry(target).or_default() += 1;
+                        }
+                    }
+                    continue;
+                }
+                for tag in event.tags.iter() {
+                    let slice = tag.as_slice();
+                    if slice.first().map(String::as_str) != Some("maintainers") {
+                        continue;
+                    }
+                    for target in slice
+                        .iter()
+                        .skip(1)
+                        .filter_map(|value| PublicKey::from_str(value).ok())
+                    {
+                        if target != event.pubkey && confirmed.contains(&target) {
+                            *votes.entry(target).or_default() += 1;
+                        }
+                    }
+                }
+            }
+
+            let Some(highest) = votes.values().copied().max() else {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            };
+            let winners: Vec<PublicKey> = votes
+                .into_iter()
+                .filter_map(|(pubkey, count)| (count == highest).then_some(pubkey))
+                .collect();
+            if winners.len() != 1 {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            }
+            let lead = winners[0];
+            let mut path = vec![selected];
+            if lead != selected {
+                path.push(lead);
+            }
+            LeadResolution {
+                lead: Some(lead),
+                source: LeadSource::LegacyInferred,
+                path,
+            }
+        }
+
+        let selected = self.selected_maintainer;
+        let confirmed: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
+        let Some(selected_event) = event_for(self, &selected) else {
+            return LeadResolution {
+                lead: None,
+                source: LeadSource::Pending,
+                path: vec![selected],
+            };
+        };
+
+        let selected_leads = active_leads(selected_event);
+        if selected_leads.is_empty() {
+            if has_indexed_maintainer_role(selected_event) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::ExplicitNone,
+                    path: vec![selected],
+                };
+            }
+            if has_indexed_roles(selected_event) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                };
+            }
+            if !has_legacy_listing(selected_event)
+                && confirmed.len() == 1
+                && confirmed.contains(&selected)
+            {
+                return LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::ImplicitSole,
+                    path: vec![selected],
+                };
+            }
+            return legacy_resolution(self, &confirmed);
+        }
+
+        let mut path = vec![selected];
+        let mut visited: HashSet<PublicKey> = HashSet::from([selected]);
+        let mut current = selected;
+        loop {
+            let Some(event) = event_for(self, &current) else {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::Pending,
+                    path,
+                };
+            };
+            let leads = active_leads(event);
+            if leads.len() != 1 {
+                return LeadResolution {
+                    lead: None,
+                    source: if leads.is_empty() {
+                        LeadSource::Pending
+                    } else {
+                        LeadSource::Conflict
+                    },
+                    path,
+                };
+            }
+            let target = leads[0];
+            if target == current {
+                return if confirmed.contains(&target) {
+                    LeadResolution {
+                        lead: Some(target),
+                        source: LeadSource::Explicit,
+                        path,
+                    }
+                } else {
+                    LeadResolution {
+                        lead: None,
+                        source: LeadSource::Pending,
+                        path,
+                    }
+                };
+            }
+            path.push(target);
+            if !visited.insert(target) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path,
+                };
+            }
+            if event_for(self, &target).is_some_and(announcement_author_declines_maintainership) {
+                return LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path,
+                };
+            }
+            current = target;
+        }
+    }
+
+    /// Terminal lead for callers which do not need source or path details.
+    pub fn lead_maintainer(&self) -> Option<PublicKey> {
+        self.lead_resolution().lead
+    }
+
+    /// How `pubkey`'s membership is recorded across the announcements in
+    /// `events`. An active indexed role tag naming the pubkey takes
+    /// precedence; failing that, a `maintainers` listing on a role-tag-free
+    /// announcement counts as the deprecated fallback (per NIP-34 the
+    /// deprecated tag is ignored when role tags are present, so such a
+    /// listing never sources membership); otherwise the membership is
+    /// implicit — the pubkey authored an announcement that names them in no
+    /// tag. Provenance is informational and grants nothing: authorization
+    /// stays with [`RepoRef::confirmed_maintainers`] and
+    /// [`RepoRef::confirmed_members`].
+    pub fn member_role_source(&self, pubkey: &PublicKey) -> RoleSource {
+        let hex = pubkey.to_string();
+        let mut listed_in_deprecated_tag = false;
+        for event in self.events.values() {
+            let mut event_has_role_tags = false;
+            let mut in_maintainers_tag = false;
+            for tag in event.tags.iter() {
+                let slice = tag.as_slice();
+                match slice.first().map(String::as_str) {
+                    Some(name) if is_role_tag_name(name) => {
+                        event_has_role_tags = true;
+                        if slice.get(1) == Some(&hex) && role_entry_is_active(slice) {
+                            return RoleSource::RoleTag;
+                        }
+                    }
+                    Some("maintainers") if slice.iter().skip(1).any(|value| value == &hex) => {
+                        in_maintainers_tag = true;
+                    }
+                    _ => {}
+                }
+            }
+            if in_maintainers_tag && !event_has_role_tags {
+                listed_in_deprecated_tag = true;
+            }
+        }
+        if listed_in_deprecated_tag {
+            RoleSource::MaintainersTag
+        } else {
+            RoleSource::Implicit
+        }
     }
 
     /// coordinates without relay hints
@@ -1597,19 +3110,14 @@ pub fn format_grasp_server_url_as_grasp06_prs_url(
     ))
 }
 
-/// Find the latest announcement event (by `created_at`) across all maintainer
-/// events and parse it into a `RepoRef` for shared metadata (name, description,
-/// web, etc.).
+/// Find the latest authoritative announcement across confirmed members and
+/// parse it into a `RepoRef` for shared metadata (name, description, web,
+/// etc.). Discovery-only invitee events are deliberately excluded.
 pub fn latest_event_repo_ref(repo_ref: &RepoRef) -> Option<RepoRef> {
     repo_ref
-        .events
-        .values()
-        .max_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| b.id.cmp(&a.id))
-        })
-        .and_then(|e| RepoRef::try_from((e.clone(), None)).ok())
+        .confirmed_member_announcements()
+        .last()
+        .and_then(|e| RepoRef::try_from(((*e).clone(), None)).ok())
 }
 
 /// Derive clone-URLs and relay URLs from selected grasp servers.
@@ -1715,6 +3223,9 @@ mod tests {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead: None,
         }
         .to_event(&TEST_KEY_1_SIGNER)
         .await
@@ -1743,14 +3254,19 @@ mod tests {
             events: HashMap::new(),
             nostr_git_url: None,
             extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead: None,
         }
     }
 
     mod maintainer_order {
+        use nostr::prelude::{EventBuilder, event::FinalizeEvent};
+
         use super::*;
 
         #[tokio::test]
-        async fn announcement_tags_start_with_selected_and_put_invited_last() {
+        async fn announcement_tags_include_only_confirmed_members() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let accepted = TEST_KEY_2_KEYS.public_key();
             let requested = PublicKey::from_hex(
@@ -1772,8 +3288,8 @@ mod tests {
             );
 
             assert_eq!(
-                repo_ref.maintainers_for_announcement_tags(),
-                vec![selected, accepted, requested]
+                repo_ref.members_for_announcement_tags(),
+                vec![selected, accepted]
             );
         }
 
@@ -1821,6 +3337,91 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn cycle_of_unreciprocated_invitees_confirms_no_one() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let invitee_b_keys = &*TEST_KEY_2_KEYS;
+            let invitee_b = invitee_b_keys.public_key();
+            let invitee_c_keys = nostr::prelude::Keys::generate();
+            let invitee_c = invitee_c_keys.public_key();
+
+            // A lists B, B lists C, C lists A: both invitees can *reach* the
+            // selected maintainer through the cycle, but B never acknowledged
+            // an already-confirmed member and C was never listed by one, so
+            // neither is confirmed.
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, invitee_b, invitee_c], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, invitee_b]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(invitee_b_keys, vec![invitee_b, invitee_c]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&invitee_c_keys, vec![invitee_c, selected]).await,
+            );
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected]);
+            assert_eq!(repo_ref.invited_maintainers(), vec![invitee_b, invitee_c]);
+            assert!(!repo_ref.is_authorized_maintainer(&invitee_b));
+            assert!(!repo_ref.is_authorized_maintainer(&invitee_c));
+        }
+
+        #[tokio::test]
+        async fn acceptance_toward_any_confirmed_member_confirms_recursively() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let co_keys = &*TEST_KEY_2_KEYS;
+            let co = co_keys.public_key();
+            let third_keys = nostr::prelude::Keys::generate();
+            let third = third_keys.public_key();
+
+            // A and B are reciprocal; B lists C and C acknowledges B: C is
+            // listed by a confirmed member and acknowledges one, so
+            // confirmation grows through B without C ever listing A.
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, co, third], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, co]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(co_keys, vec![co, selected, third]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&third_keys, vec![third, co]).await,
+            );
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![selected, co, third]);
+        }
+
+        #[tokio::test]
+        async fn only_confirmed_maintainers_are_authorized() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let invited = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, invited], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, invited]).await,
+            );
+
+            assert!(repo_ref.is_authorized_maintainer(&selected));
+            assert!(!repo_ref.is_authorized_maintainer(&invited));
+
+            // acceptance makes the relationship reciprocal and authorizes the
+            // previously invited maintainer
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![invited, selected]).await,
+            );
+            assert!(repo_ref.is_authorized_maintainer(&invited));
+        }
+
+        #[tokio::test]
         async fn reciprocal_relationship_confirms_both_maintainers() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let other = TEST_KEY_2_KEYS.public_key();
@@ -1839,27 +3440,371 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn lead_requires_unique_highest_confirmed_listing_count() {
+        async fn simulated_removal_resolves_reciprocal_consequences() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let bridge_keys = &*TEST_KEY_2_KEYS;
+            let bridge = bridge_keys.public_key();
+            let dependent_keys = nostr::prelude::Keys::generate();
+            let dependent = dependent_keys.public_key();
+
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, bridge, dependent], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, bridge]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(bridge_keys, vec![bridge, selected, dependent]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&dependent_keys, vec![dependent, bridge]).await,
+            );
+            assert_eq!(
+                repo_ref.confirmed_maintainers(),
+                vec![selected, bridge, dependent]
+            );
+
+            let (after, _) =
+                repo_ref.membership_after_author_change(selected, &[selected], true, None);
+            assert_eq!(after, vec![selected]);
+        }
+
+        #[tokio::test]
+        async fn simulated_removal_detects_a_retaining_co_maintainer_edge() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let co_keys = &*TEST_KEY_2_KEYS;
+            let co = co_keys.public_key();
+            let target_keys = nostr::prelude::Keys::generate();
+            let target = target_keys.public_key();
+
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, co, target], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, co, target]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(co_keys, vec![co, selected, target]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&target_keys, vec![target, selected]).await,
+            );
+
+            let (after, _) =
+                repo_ref.membership_after_author_change(selected, &[selected, co], true, None);
+            assert_eq!(after, vec![selected, co, target]);
+        }
+
+        async fn announcement_with_lead(
+            keys: &nostr::prelude::Keys,
+            listed: Vec<PublicKey>,
+            lead: Option<PublicKey>,
+        ) -> nostr::prelude::Event {
+            let signer = Arc::new(crate::NgitSigner::Keys(keys.clone()));
+            let mut repo_ref = create_repo_ref_for_maintainer_order(listed, vec![]);
+            repo_ref.selected_maintainer = keys.public_key();
+            repo_ref.lead = lead;
+            repo_ref.to_event(&signer).await.unwrap()
+        }
+
+        fn raw_announcement(
+            keys: &nostr::prelude::Keys,
+            tags: Vec<Vec<String>>,
+        ) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("123412341")];
+            event_tags.extend(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()));
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        fn legacy_announcement(
+            keys: &nostr::prelude::Keys,
+            listed: &[PublicKey],
+        ) -> nostr::prelude::Event {
+            raw_announcement(
+                keys,
+                vec![
+                    [
+                        vec!["maintainers".to_string()],
+                        listed.iter().map(ToString::to_string).collect(),
+                    ]
+                    .concat(),
+                ],
+            )
+        }
+
+        #[tokio::test]
+        async fn explicit_lead_is_pending_until_the_target_accepts() {
             let selected = TEST_KEY_1_KEYS.public_key();
             let lead = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, lead], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, vec![selected, lead], Some(lead)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Pending,
+                    path: vec![selected, lead],
+                }
+            );
+
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_2_KEYS, vec![lead, selected], Some(lead)).await,
+            );
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(lead),
+                    source: LeadSource::Explicit,
+                    path: vec![selected, lead],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn explicit_pointer_walk_resolves_from_the_selected_coordinate() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let intermediate_keys = &*TEST_KEY_2_KEYS;
+            let intermediate = intermediate_keys.public_key();
+            let lead_keys = nostr::prelude::Keys::generate();
+            let lead = lead_keys.public_key();
+            let roster = vec![selected, intermediate, lead];
+            let mut repo_ref = create_repo_ref_for_maintainer_order(roster.clone(), vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, roster.clone(), Some(intermediate)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(intermediate_keys, roster.clone(), Some(lead)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&lead_keys, roster, Some(lead)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(lead),
+                    source: LeadSource::Explicit,
+                    path: vec![selected, intermediate, lead],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn legacy_listings_retain_the_unique_vote_winner() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let winner_keys = &*TEST_KEY_2_KEYS;
+            let winner = winner_keys.public_key();
             let third_keys = nostr::prelude::Keys::generate();
             let third = third_keys.public_key();
             let mut repo_ref =
-                create_repo_ref_for_maintainer_order(vec![selected, lead, third], vec![]);
+                create_repo_ref_for_maintainer_order(vec![selected, winner, third], vec![]);
             insert_event(
                 &mut repo_ref,
-                announcement(&TEST_KEY_1_KEYS, vec![selected, lead, third]).await,
+                legacy_announcement(&TEST_KEY_1_KEYS, &[winner, third]),
+            );
+            insert_event(&mut repo_ref, legacy_announcement(winner_keys, &[selected]));
+            insert_event(&mut repo_ref, legacy_announcement(&third_keys, &[winner]));
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(winner),
+                    source: LeadSource::LegacyInferred,
+                    path: vec![selected, winner],
+                }
+            );
+        }
+
+        #[test]
+        fn tied_legacy_votes_remain_leadless() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
+            insert_event(
+                &mut repo_ref,
+                legacy_announcement(&TEST_KEY_1_KEYS, &[other]),
             );
             insert_event(
                 &mut repo_ref,
-                announcement(&TEST_KEY_2_KEYS, vec![lead, selected]).await,
-            );
-            insert_event(
-                &mut repo_ref,
-                announcement(&third_keys, vec![third, lead]).await,
+                legacy_announcement(&TEST_KEY_2_KEYS, &[selected]),
             );
 
-            assert_eq!(repo_ref.lead_maintainer(), Some(lead));
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::None,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[test]
+        fn bare_sole_maintainer_is_the_implicit_lead() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected], vec![]);
+            insert_event(&mut repo_ref, raw_announcement(&TEST_KEY_1_KEYS, vec![]));
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::ImplicitSole,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn indexed_m_without_an_active_m_uppercase_is_explicitly_leadless() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, other]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_2_KEYS, vec![other, selected]).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::ExplicitNone,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn off_path_lead_views_do_not_override_the_selected_path() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, other], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, vec![selected, other], Some(selected))
+                    .await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_2_KEYS, vec![other, selected], Some(other)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: Some(selected),
+                    source: LeadSource::Explicit,
+                    path: vec![selected],
+                }
+            );
+        }
+
+        #[test]
+        fn multiple_active_leads_in_one_announcement_conflict() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let third = nostr::prelude::Keys::generate().public_key();
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, other, third], vec![]);
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_1_KEYS,
+                    vec![
+                        vec!["M".to_string(), other.to_string()],
+                        vec!["M".to_string(), third.to_string()],
+                        vec!["m".to_string(), selected.to_string()],
+                    ],
+                ),
+            );
+
+            assert_eq!(repo_ref.lead_resolution().source, LeadSource::Conflict);
+        }
+
+        #[tokio::test]
+        async fn explicit_pointer_cycle_conflicts() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let other = TEST_KEY_2_KEYS.public_key();
+            let roster = vec![selected, other];
+            let mut repo_ref = create_repo_ref_for_maintainer_order(roster.clone(), vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_1_KEYS, roster.clone(), Some(other)).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement_with_lead(&TEST_KEY_2_KEYS, roster, Some(selected)).await,
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path: vec![selected, other, selected],
+                }
+            );
+        }
+
+        #[test]
+        fn pointer_to_a_maintainer_who_explicitly_left_conflicts() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let former = TEST_KEY_2_KEYS.public_key();
+            let mut repo_ref = create_repo_ref_for_maintainer_order(vec![selected, former], vec![]);
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_1_KEYS,
+                    vec![
+                        vec!["M".to_string(), former.to_string()],
+                        vec!["m".to_string(), selected.to_string()],
+                    ],
+                ),
+            );
+            insert_event(
+                &mut repo_ref,
+                raw_announcement(
+                    &TEST_KEY_2_KEYS,
+                    vec![
+                        vec!["M".to_string(), selected.to_string()],
+                        vec![
+                            "m".to_string(),
+                            former.to_string(),
+                            "1".to_string(),
+                            "2".to_string(),
+                        ],
+                    ],
+                ),
+            );
+
+            assert_eq!(
+                repo_ref.lead_resolution(),
+                LeadResolution {
+                    lead: None,
+                    source: LeadSource::Conflict,
+                    path: vec![selected, former],
+                }
+            );
         }
     }
 
@@ -2063,6 +4008,1959 @@ mod tests {
         }
     }
 
+    /// NIP-34 indexed role tags (`M`/`m`): activeness by element count,
+    /// precedence over the deprecated `maintainers` tag, implicit author
+    /// membership, leaving via an ended self-entry, and re-emission generated
+    /// from the typed maintainer set (see [`RepoRef::generate_role_tags`]).
+    mod role_tags {
+        use nostr::prelude::{EventBuilder, event::FinalizeEvent};
+
+        use super::*;
+
+        fn tag(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(ToString::to_string).collect()
+        }
+
+        fn role_event(
+            keys: &nostr::prelude::Keys,
+            tags: Vec<Vec<String>>,
+        ) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("test-repo")];
+            for t in tags {
+                event_tags.push(Tag::parse(t).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        #[test]
+        fn entry_activeness_parses_numeric_history_and_defer() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let other = nostr::prelude::Keys::generate().public_key();
+            let other_hex = other.to_string();
+
+            // History values after the pubkey and their expected current
+            // activeness. `defer` is a valid final end but never an active
+            // assignment. Malformed boundary sequences also fail closed.
+            let cases: Vec<(Vec<&str>, bool)> = vec![
+                (vec![], true),
+                (vec!["100"], true),
+                (vec!["100", "200"], false),
+                (vec!["100", "200", "300"], true),
+                (vec!["100", "200", "300", "400"], false),
+                (vec!["100", "defer"], false),
+                (vec!["defer"], false),
+                (vec!["100", "defer", "300"], false),
+                (vec!["100", "not-a-timestamp"], false),
+            ];
+
+            for (history, expected_active) in cases {
+                let mut m_tag = vec!["m".to_string(), other_hex.clone()];
+                m_tag.extend(history.iter().map(ToString::to_string));
+                let event =
+                    role_event(&keys, vec![tag(&["M", &author.to_string()]), m_tag.clone()]);
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                assert_eq!(
+                    parsed.maintainers.contains(&other),
+                    expected_active,
+                    "history {history:?} expected active={expected_active}"
+                );
+            }
+        }
+
+        #[test]
+        fn deferred_self_or_lead_records_do_not_accept_an_invitation() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let deferred_self = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string(), "100"]),
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                ],
+            );
+            assert!(announcement_author_declines_maintainership(&deferred_self));
+
+            let deferred_lead = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string(), "100", "defer"]),
+                    tag(&["m", &author.to_string(), "100"]),
+                ],
+            );
+            assert_eq!(RepoRef::try_from((deferred_lead, None)).unwrap().lead, None);
+        }
+
+        #[test]
+        fn lead_and_co_maintainer_collapse_into_one_maintainer_set() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let listed_as_lead = nostr::prelude::Keys::generate().public_key();
+            let listed_as_co = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["M", &listed_as_lead.to_string()]),
+                    tag(&["m", &listed_as_co.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(
+                parsed.maintainers,
+                vec![author, listed_as_lead, listed_as_co]
+            );
+        }
+
+        #[test]
+        fn deprecated_maintainers_tag_is_ignored_when_role_tags_present() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let legacy_listed = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["maintainers", &legacy_listed.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author]);
+        }
+
+        #[test]
+        fn author_without_role_entry_is_implicitly_a_maintainer() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let other = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(&keys, vec![tag(&["m", &other.to_string()])]);
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author, other]);
+            assert!(!announcement_author_declines_maintainership(&event));
+        }
+
+        #[test]
+        fn author_with_only_ended_entries_has_left() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "1700000000"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![lead]);
+            assert!(announcement_author_declines_maintainership(&event));
+
+            // an active self-entry means the author has not left
+            let active = role_event(&keys, vec![tag(&["M", &author.to_string()])]);
+            assert!(!announcement_author_declines_maintainership(&active));
+
+            // the deprecated format never records leaving
+            let legacy = role_event(&keys, vec![tag(&["maintainers", &lead.to_string()])]);
+            assert!(!announcement_author_declines_maintainership(&legacy));
+        }
+
+        #[test]
+        fn role_transition_is_active_while_either_entry_is_active() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let demoted = nostr::prelude::Keys::generate().public_key();
+            let gone = nostr::prelude::Keys::generate().public_key();
+
+            // one `M` and one `m` tag for the same pubkey record a transition
+            // between the roles: the pubkey is a maintainer while either
+            // entry is active, and no longer one when both have ended
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["M", &demoted.to_string(), "0", "100"]),
+                    tag(&["m", &demoted.to_string(), "100"]),
+                    tag(&["M", &gone.to_string(), "0", "100"]),
+                    tag(&["m", &gone.to_string(), "100", "200"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.maintainers.contains(&demoted));
+            assert!(!parsed.maintainers.contains(&gone));
+        }
+
+        #[test]
+        fn duplicate_same_letter_entries_are_consolidated() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let returning = nostr::prelude::Keys::generate().public_key();
+            let ended_twice = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["m", &returning.to_string(), "0", "100"]),
+                    tag(&["m", &returning.to_string(), "200"]),
+                    tag(&["m", &ended_twice.to_string(), "0", "100"]),
+                    tag(&["m", &ended_twice.to_string(), "200", "300"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.maintainers.contains(&returning));
+            assert!(!parsed.maintainers.contains(&ended_twice));
+        }
+
+        #[test]
+        fn lead_field_follows_the_active_m_uppercase_entry() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string()]),
+                ],
+            );
+            assert_eq!(RepoRef::try_from((event, None)).unwrap().lead, Some(lead));
+
+            // an ended `M` entry asserts no lead
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string(), "0", "100"]),
+                    tag(&["m", &author.to_string()]),
+                ],
+            );
+            assert_eq!(RepoRef::try_from((event, None)).unwrap().lead, None);
+
+            // `m`-only announcements assert no lead
+            let event = role_event(&keys, vec![tag(&["m", &author.to_string()])]);
+            assert_eq!(RepoRef::try_from((event, None)).unwrap().lead, None);
+        }
+
+        #[test]
+        fn moderators_are_parsed_and_supersede_the_maintainers_tag() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
+            let legacy_listed = nostr::prelude::Keys::generate().public_key();
+
+            // an `o` tag alone counts as role-tag usage: the deprecated
+            // `maintainers` tag is ignored and the author is implicitly the
+            // sole maintainer
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["maintainers", &legacy_listed.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author]);
+            assert_eq!(parsed.moderators, vec![moderator]);
+        }
+
+        #[test]
+        fn ended_moderator_entries_are_ignored() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let former = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["o", &former.to_string(), "0", "100"]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(parsed.moderators.is_empty());
+            assert!(!parsed.maintainers.contains(&former));
+        }
+
+        #[test]
+        fn moderator_self_entry_does_not_assert_maintainership() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            // a moderator's acknowledgement announcement: without `o` support
+            // the author would appear in no known role tag and wrongly become
+            // an implicit maintainer, making their state events authoritative
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string()]),
+                ],
+            );
+            let parsed = RepoRef::try_from((event.clone(), None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![lead]);
+            assert_eq!(parsed.moderators, vec![author]);
+            // an `o` self-entry acknowledges only moderatorship, which takes
+            // precedence over maintainer assignments in other announcements
+            assert!(announcement_author_declines_maintainership(&event));
+        }
+
+        #[test]
+        fn author_with_only_ended_o_entries_declines_moderatorship() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            // an ended `o` self-entry records leaving moderatorship, which
+            // takes precedence over another member's active assignment
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(announcement_author_declines_moderatorship(&event));
+
+            // an active `o` self-entry acknowledges the role
+            let active = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["o", &author.to_string()]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(&active));
+
+            // no `o` self-entry makes no statement about moderatorship,
+            // even when the announcement ends the author's maintainer role
+            let maintainer_only = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(
+                &maintainer_only
+            ));
+
+            // an `o` entry naming someone else is an assignment, not a
+            // statement about the author's own moderatorship
+            let other = nostr::prelude::Keys::generate().public_key();
+            let assigns_other = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["o", &other.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(!announcement_author_declines_moderatorship(&assigns_other));
+        }
+
+        #[test]
+        fn leave_produced_announcement_declines_both_roles() {
+            // `end_self_role` closes every active self-entry, so the
+            // republished announcement of a maintainer-and-moderator who
+            // left declines maintainership and moderatorship alike
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let lead = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &lead.to_string()]),
+                    tag(&["m", &author.to_string(), "0", "100"]),
+                    tag(&["o", &author.to_string(), "0", "100"]),
+                ],
+            );
+            assert!(announcement_author_declines_maintainership(&event));
+            assert!(announcement_author_declines_moderatorship(&event));
+        }
+
+        #[test]
+        fn moderator_acknowledgement_does_not_confirm_maintainership() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            // the owner assigns `m` to the moderator's pubkey, but the
+            // moderator's own announcement acknowledges only moderatorship:
+            // the self-role takes precedence, so the acknowledgement edge
+            // back to the owner must not confirm them as a maintainer with
+            // authoritative state
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &moderator.to_string()]),
+                ],
+            );
+            let moderator_event = role_event(
+                &moderator_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: moderator,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                moderator_event,
+            );
+            // as consolidated by get_repo_ref_from_cache before its
+            // declines-maintainership retain
+            repo_ref.maintainers = vec![owner, moderator];
+
+            assert_eq!(repo_ref.confirmed_maintainers(), vec![owner]);
+            assert!(repo_ref.is_authorized_maintainer(&owner));
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
+        }
+
+        #[test]
+        fn moderator_is_not_authorized_for_state_events() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
+
+            let event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let repo_ref = RepoRef::try_from((event, None)).unwrap();
+            assert!(repo_ref.is_authorized_maintainer(&owner));
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
+        }
+
+        fn insert_announcement(repo_ref: &mut RepoRef, event: nostr::prelude::Event) {
+            repo_ref.events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: Kind::GitRepoAnnouncement,
+                        public_key: event.pubkey,
+                        identifier: "test-repo".to_string(),
+                    },
+                    relays: vec![],
+                },
+                event,
+            );
+        }
+
+        #[test]
+        fn simulated_graph_change_reports_dependent_moderator_loss() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let bridge_keys = nostr::prelude::Keys::generate();
+            let bridge = bridge_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &bridge.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &bridge_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["m", &bridge.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &bridge.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            repo_ref.maintainers = vec![owner, bridge];
+            repo_ref.moderators = vec![moderator];
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+
+            let (maintainers, moderators) =
+                repo_ref.membership_after_author_change(owner, &[owner], true, None);
+            assert_eq!(maintainers, vec![owner]);
+            assert!(moderators.is_empty());
+        }
+
+        #[test]
+        fn o_assignment_by_a_moderator_or_invited_maintainer_assigns_nothing() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let invited_keys = nostr::prelude::Keys::generate();
+            let invited = invited_keys.public_key();
+            let assigned_by_moderator = nostr::prelude::Keys::generate().public_key();
+            let assigned_by_invited = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            // the moderator acknowledges their role but also tries to assign
+            // `o` to a third pubkey: only `M`/`m` members can assign `o`
+            let moderator_event = role_event(
+                &moderator_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["o", &assigned_by_moderator.to_string()]),
+                ],
+            );
+            // the invited maintainer never acknowledged a member, so their
+            // announcement is not authoritative and assigns nothing either
+            let invited_event = role_event(
+                &invited_keys,
+                vec![
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &assigned_by_invited.to_string()]),
+                ],
+            );
+
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(&mut repo_ref, moderator_event);
+            insert_announcement(&mut repo_ref, invited_event);
+            repo_ref.maintainers = vec![owner, invited];
+
+            assert_eq!(repo_ref.assigned_moderators(), vec![moderator]);
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+        }
+
+        #[test]
+        fn moderator_confirmation_requires_acknowledgement_toward_a_member() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let silent = nostr::prelude::Keys::generate().public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &silent.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+
+            // `silent` has no announcement and `moderator`'s self-`o` names
+            // no member: both are assigned (invited) but unconfirmed
+            insert_announcement(
+                &mut repo_ref,
+                role_event(&moderator_keys, vec![tag(&["o", &moderator.to_string()])]),
+            );
+            assert_eq!(repo_ref.assigned_moderators(), vec![silent, moderator]);
+            assert!(repo_ref.confirmed_moderators().is_empty());
+
+            // acknowledging the role and an existing member confirms
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+
+            // an ended self-`o` records leaving, never an acknowledgement
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string(), "0", "100"]),
+                    ],
+                ),
+            );
+            assert!(repo_ref.confirmed_moderators().is_empty());
+        }
+
+        #[test]
+        fn moderator_confirmation_grows_through_acknowledged_moderators() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let first_keys = nostr::prelude::Keys::generate();
+            let first = first_keys.public_key();
+            let second_keys = nostr::prelude::Keys::generate();
+            let second = second_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &first.to_string()]),
+                    tag(&["o", &second.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &first_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &first.to_string()]),
+                    ],
+                ),
+            );
+            // the second moderator acknowledges toward the first — an
+            // existing member once the fixpoint confirms the first
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &second_keys,
+                    vec![
+                        tag(&["o", &second.to_string()]),
+                        tag(&["o", &first.to_string()]),
+                    ],
+                ),
+            );
+
+            assert_eq!(repo_ref.confirmed_moderators(), vec![first, second]);
+        }
+
+        #[test]
+        fn announcement_tags_and_coordinates_cover_confirmed_members_only() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let invited = nostr::prelude::Keys::generate().public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let unacknowledged = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &invited.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                    tag(&["o", &unacknowledged.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+
+            assert_eq!(
+                repo_ref.members_for_announcement_tags(),
+                vec![owner, moderator]
+            );
+
+            for pk in [owner, moderator] {
+                assert!(
+                    repo_ref
+                        .coordinates()
+                        .iter()
+                        .any(|c| c.public_key == pk && c.identifier == "test-repo")
+                );
+            }
+            for pk in [invited, unacknowledged] {
+                assert!(
+                    repo_ref.coordinates().iter().all(|c| c.public_key != pk),
+                    "invited role subjects must not become repository event coordinates"
+                );
+            }
+        }
+
+        #[test]
+        fn confirmed_moderators_are_authorized_members_but_not_maintainers() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+            let outsider = nostr::prelude::Keys::generate().public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+
+            // assigned but unacknowledged: an invited moderator has no
+            // member authority
+            assert!(!repo_ref.is_authorized_member(&moderator));
+
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            assert_eq!(repo_ref.confirmed_members(), vec![owner, moderator]);
+            assert!(repo_ref.is_authorized_member(&owner));
+            assert!(repo_ref.is_authorized_member(&moderator));
+            assert!(!repo_ref.is_authorized_member(&outsider));
+            // members are not maintainers: repository state stays barred
+            assert!(!repo_ref.is_authorized_maintainer(&moderator));
+        }
+
+        #[tokio::test]
+        async fn round_trip_emits_m_tags_for_active_maintainers_and_degrades() {
+            let author = TEST_KEY_1_KEYS.public_key();
+            let active = nostr::prelude::Keys::generate().public_key();
+            let ended = nostr::prelude::Keys::generate().public_key();
+            let moderator = nostr::prelude::Keys::generate().public_key();
+
+            let source_tags = vec![
+                tag(&["M", &author.to_string()]),
+                tag(&["m", &active.to_string(), "100"]),
+                tag(&["m", &ended.to_string(), "0", "100"]),
+                tag(&["o", &moderator.to_string()]),
+            ];
+            let event = role_event(&TEST_KEY_1_KEYS, source_tags);
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert_eq!(parsed.maintainers, vec![author, active]);
+            let re_emitted = parsed.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+
+            // one role tag per active maintainer with its history carried
+            // over (the author's lead entry is re-asserted as `M`), the
+            // removed maintainer's ended record preserved, and the `o` tag
+            // kept
+            let emitted_role_tags: Vec<Vec<String>> = re_emitted
+                .tags
+                .iter()
+                .map(|t| t.as_slice().to_vec())
+                .filter(|s| {
+                    s.first()
+                        .is_some_and(|name| name == "M" || name == "m" || name == "o")
+                })
+                .collect();
+            assert_eq!(
+                emitted_role_tags,
+                vec![
+                    tag(&["M", &author.to_string()]),
+                    tag(&["m", &active.to_string(), "100"]),
+                    tag(&["m", &ended.to_string(), "0", "100"]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            );
+
+            // the deprecated tag degrades to exactly the same current
+            // members as the active `m` entries and never includes
+            // moderators or ended records
+            let maintainers_tag = re_emitted
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0].eq("maintainers"))
+                .unwrap();
+            assert_eq!(
+                maintainers_tag.as_slice()[1..].to_vec(),
+                vec![author.to_string(), active.to_string()],
+            );
+        }
+
+        /// The history rules of [`RepoRef::generate_role_tags`], pinned with
+        /// a deterministic `now`.
+        mod generation {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn generate(
+                role_tags: Vec<Vec<String>>,
+                maintainers: Vec<PublicKey>,
+                author: &PublicKey,
+            ) -> Vec<Vec<String>> {
+                generate_with_lead(role_tags, maintainers, None, author)
+            }
+
+            fn generate_with_lead(
+                role_tags: Vec<Vec<String>>,
+                maintainers: Vec<PublicKey>,
+                lead: Option<PublicKey>,
+                author: &PublicKey,
+            ) -> Vec<Vec<String>> {
+                let mut repo_ref = create_repo_ref_for_maintainer_order(maintainers, vec![]);
+                repo_ref.lead = lead;
+                repo_ref.role_tags = role_tags
+                    .into_iter()
+                    .map(|t| Tag::parse(t).unwrap())
+                    .collect();
+                repo_ref
+                    .generate_role_tags(author, NOW)
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            fn now() -> String {
+                NOW.to_string()
+            }
+
+            #[test]
+            fn first_use_of_role_tags_emits_untimed_entries() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(vec![], vec![author, other], &author),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn newly_added_maintainer_starts_now_once_role_tags_are_in_use() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let added = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["m", &author.to_string()])],
+                        vec![author, added],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &added.to_string(), &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn author_without_prior_entry_was_implicit_and_stays_untimed() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let listed = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["m", &listed.to_string()])],
+                        vec![author, listed],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &listed.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn stopped_maintainer_is_started_again_now() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &returning.to_string(), "0", "100"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "0", "100", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn removed_maintainer_is_ended_now_with_zero_start_fallback() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let untimed = nostr::prelude::Keys::generate().public_key();
+                let timed = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &untimed.to_string()]),
+                            tag(&["m", &timed.to_string(), "50"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &untimed.to_string(), "0", &now()]),
+                        tag(&["m", &timed.to_string(), "50", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn already_ended_records_are_preserved() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &former.to_string(), "0", "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &former.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn deferred_records_are_preserved_while_inactive() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let historical = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &historical.to_string(), "100", "defer"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &historical.to_string(), "100", "defer"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn restarting_a_deferred_record_closes_and_reopens_it_now() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["m", &returning.to_string(), "100", "defer"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "100", &now(), &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_tags_are_preserved_verbatim() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["o", &moderator.to_string()]),
+                            tag(&["o", &former.to_string(), "0", "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                        tag(&["o", &former.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn the_lead_gets_the_uppercase_m_tag() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate_with_lead(vec![], vec![author, other], Some(author), &author),
+                    vec![
+                        tag(&["M", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn newly_designated_lead_starts_now_once_role_tags_are_in_use() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate_with_lead(
+                        vec![tag(&["m", &author.to_string()])],
+                        vec![author, lead],
+                        Some(lead),
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["M", &lead.to_string(), &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn promotion_and_demotion_record_per_letter_boundaries() {
+                // the lead moves from the author to the other maintainer:
+                // each old letter's active entry is closed and the new
+                // letter's entry opens now, so a pubkey's record of each
+                // role survives the transition (a pubkey MAY appear in one
+                // `M` and one `m` tag)
+                let author = nostr::prelude::Keys::generate().public_key();
+                let promoted = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate_with_lead(
+                        vec![
+                            tag(&["M", &author.to_string()]),
+                            tag(&["m", &promoted.to_string(), "100"]),
+                        ],
+                        vec![author, promoted],
+                        Some(promoted),
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string(), &now()]),
+                        tag(&["M", &author.to_string(), "0", &now()]),
+                        tag(&["M", &promoted.to_string(), &now()]),
+                        tag(&["m", &promoted.to_string(), "100", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn restart_of_a_returning_lead_continues_the_m_uppercase_record() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate_with_lead(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["M", &returning.to_string(), "0", "100"]),
+                            tag(&["m", &returning.to_string(), "100", "200"]),
+                        ],
+                        vec![author, returning],
+                        Some(returning),
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["M", &returning.to_string(), "0", "100", &now()]),
+                        tag(&["m", &returning.to_string(), "100", "200"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn demotion_closes_the_lead_record_and_opens_a_co_maintainer_one() {
+                // no lead asserted any more: the author's active `M` entry
+                // is closed with its recorded start preserved and their `m`
+                // record opens now
+                let author = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![tag(&["M", &author.to_string(), "100"])],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string(), &now()]),
+                        tag(&["M", &author.to_string(), "100", &now()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn restart_continues_the_co_maintainer_record_over_a_former_lead() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let returning = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["M", &returning.to_string(), "0", "100"]),
+                            tag(&["m", &returning.to_string(), "100", "200"]),
+                        ],
+                        vec![author, returning],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &returning.to_string(), "100", "200", &now()]),
+                        tag(&["M", &returning.to_string(), "0", "100"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn removed_maintainers_are_closed_under_their_own_letter() {
+                // a removed lead's record closes as `M`, not `m`, and a
+                // removed pubkey with records under both letters keeps both
+                let author = nostr::prelude::Keys::generate().public_key();
+                let former_lead = nostr::prelude::Keys::generate().public_key();
+                let former_both = nostr::prelude::Keys::generate().public_key();
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            tag(&["M", &former_lead.to_string()]),
+                            tag(&["M", &former_both.to_string(), "0", "100"]),
+                            tag(&["m", &former_both.to_string(), "100"]),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["M", &former_lead.to_string(), "0", &now()]),
+                        tag(&["M", &former_both.to_string(), "0", "100"]),
+                        tag(&["m", &former_both.to_string(), "100", &now()]),
+                    ],
+                );
+            }
+        }
+
+        /// [`RepoRef::role_history_for_republish`]: verbatim pass-through
+        /// once maintainer role tags exist, and materialization of untimed
+        /// entries from a deprecated-listing announcement so a member
+        /// dropped on republish closes with an end boundary instead of
+        /// silently vanishing.
+        mod republish_history {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn history_of(repo_ref: &RepoRef) -> Vec<Vec<String>> {
+                repo_ref
+                    .role_history_for_republish()
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn existing_maintainer_role_tags_pass_through_verbatim() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let source = vec![
+                    tag(&["m", &author.to_string(), "100"]),
+                    tag(&["m", &former.to_string(), "0", "100"]),
+                    tag(&["o", &moderator.to_string()]),
+                ];
+                let parsed = RepoRef::try_from((role_event(&keys, source.clone()), None)).unwrap();
+                assert_eq!(history_of(&parsed), source);
+            }
+
+            #[test]
+            fn deprecated_listing_materializes_untimed_entries() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &other.to_string(),
+                    ])],
+                );
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                assert_eq!(
+                    history_of(&parsed),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_only_role_tags_still_materialize_the_implicit_author() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(&keys, vec![tag(&["o", &moderator.to_string()])]);
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+                // an `o`-only announcement never asserted the author as a
+                // maintainer via role tags, but they are one implicitly
+                assert_eq!(
+                    history_of(&parsed),
+                    vec![
+                        tag(&["o", &moderator.to_string()]),
+                        tag(&["m", &author.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn dropping_a_deprecated_maintainer_closes_their_materialized_entry() {
+                // the init republish pipeline: source history from the prior
+                // deprecated-listing announcement, drop a member from the
+                // typed field, and the generated role tags record the
+                // removal instead of unlisting them
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let dropped = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &dropped.to_string(),
+                    ])],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                parsed.role_tags = parsed.role_history_for_republish();
+                parsed.maintainers = vec![author];
+                assert_eq!(
+                    parsed
+                        .generate_role_tags(&author, NOW)
+                        .iter()
+                        .map(|t| t.as_slice().to_vec())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        tag(&["m", &dropped.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+        }
+
+        mod acceptance_history {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            #[test]
+            fn confirms_self_and_lead_while_deferring_other_current_roles() {
+                let lead_keys = nostr::prelude::Keys::generate();
+                let lead = lead_keys.public_key();
+                let accepter = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &lead_keys,
+                    vec![
+                        tag(&["M", &lead.to_string(), "100"]),
+                        tag(&["m", &accepter.to_string(), "110"]),
+                        tag(&["m", &other.to_string(), "120"]),
+                        tag(&["m", &former.to_string(), "0", "90"]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                );
+                let parsed = RepoRef::try_from((event, None)).unwrap();
+
+                let history = parsed
+                    .role_history_for_acceptance(&accepter, &[accepter, lead], Some(lead), NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    history,
+                    vec![
+                        tag(&["m", &other.to_string(), "120", "defer"]),
+                        tag(&["m", &former.to_string(), "0", "90"]),
+                        tag(&["o", &moderator.to_string(), "0", "defer"]),
+                        tag(&["m", &accepter.to_string(), &NOW.to_string()]),
+                        tag(&["M", &lead.to_string(), &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn prepared_lead_activates_canonical_moderators_and_keeps_ended_history() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let former = nostr::prelude::Keys::generate().public_key();
+                let lead = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let candidate = RepoRef::try_from((
+                    role_event(
+                        &bob_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "110"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120", "defer"]),
+                            tag(&["o", &former.to_string(), "10", "20"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = candidate
+                    .role_history_for_prepared_lead(&lead)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "120"])));
+                assert!(history.contains(&tag(&["o", &former.to_string(), "10", "20"])));
+                assert!(!history.contains(&tag(&["o", &moderator.to_string(), "120", "defer",])));
+            }
+
+            #[test]
+            fn handover_view_defers_every_active_third_party_role() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob = nostr::prelude::Keys::generate().public_key();
+                let carol = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &alice_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "100"]),
+                        tag(&["m", &bob.to_string(), "110"]),
+                        tag(&["m", &carol.to_string(), "120"]),
+                        tag(&["o", &moderator.to_string(), "130"]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+
+                parsed.defer_third_party_roles(alice, bob);
+                let history = parsed
+                    .role_tags
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(history.contains(&tag(&["M", &alice.to_string(), "100"])));
+                assert!(history.contains(&tag(&["m", &bob.to_string(), "110"])));
+                assert!(history.contains(&tag(&["m", &carol.to_string(), "120", "defer"])));
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "130", "defer"])));
+            }
+
+            #[test]
+            fn follower_keeps_self_and_old_lead_for_numeric_transition() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let dave = nostr::prelude::Keys::generate().public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "150", "defer"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &dave.to_string(), "250"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, true)
+                    .unwrap();
+                carol_ref.maintainers = vec![carol, bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200"])));
+                assert!(generated.contains(&tag(&[
+                    "M",
+                    &alice.to_string(),
+                    "200",
+                    &NOW.to_string()
+                ])));
+                assert!(generated.iter().any(|role| {
+                    role.first().map(String::as_str) == Some("M")
+                        && role.get(1) == Some(&bob.to_string())
+                        && role.len() % 2 == 1
+                }));
+                assert!(generated.contains(&tag(&["m", &dave.to_string(), "250", "defer"])));
+            }
+
+            #[test]
+            fn removed_follower_adopts_the_leads_numeric_self_end() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200", "400"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, false)
+                    .unwrap();
+                carol_ref.maintainers = vec![bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200", "400"])));
+                assert!(!generated.iter().any(|role| {
+                    role.get(1) == Some(&carol.to_string()) && role.len() % 2 == 1
+                }));
+            }
+        }
+
+        mod acknowledge_maintainer_event {
+            use super::*;
+
+            fn history(repo_ref: &RepoRef) -> Vec<Vec<String>> {
+                repo_ref
+                    .role_tags
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn replaces_an_active_invitation_start_with_the_acceptance_start() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200"]),
+                    ],
+                );
+
+                assert_eq!(
+                    alice_ref.acknowledge_maintainer_event(&bob_event).unwrap(),
+                    MaintainerAcknowledgement::Accepted {
+                        at: 200,
+                        changed: true,
+                    },
+                );
+                assert!(history(&alice_ref).contains(&tag(&["m", &bob.to_string(), "200"])));
+                assert!(alice_ref.maintainers.contains(&bob));
+            }
+
+            #[test]
+            fn a_deferred_copy_stays_deferred_when_acceptance_is_recorded() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["m", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200"]),
+                    ],
+                );
+
+                alice_ref.acknowledge_maintainer_event(&bob_event).unwrap();
+                assert!(history(&alice_ref).contains(&tag(&[
+                    "m",
+                    &bob.to_string(),
+                    "200",
+                    "defer"
+                ])));
+                assert!(!alice_ref.maintainers.contains(&bob));
+            }
+
+            #[test]
+            fn adopts_a_signed_departure_end_without_changing_other_roles() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol = nostr::prelude::Keys::generate().public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "200"]),
+                            tag(&["m", &carol.to_string(), "210"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200", "300"]),
+                    ],
+                );
+
+                assert_eq!(
+                    alice_ref.acknowledge_maintainer_event(&bob_event).unwrap(),
+                    MaintainerAcknowledgement::Departed {
+                        at: 300,
+                        changed: true,
+                    },
+                );
+                let history = history(&alice_ref);
+                assert!(history.contains(&tag(&["m", &bob.to_string(), "200", "300"])));
+                assert!(history.contains(&tag(&["m", &carol.to_string(), "210"])));
+                assert!(!alice_ref.maintainers.contains(&bob));
+                assert!(alice_ref.maintainers.contains(&carol));
+            }
+
+            #[test]
+            fn refuses_an_acceptance_that_predates_the_invitation() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "200"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "150"]),
+                        tag(&["m", &bob.to_string(), "150"]),
+                    ],
+                );
+
+                assert!(alice_ref.acknowledge_maintainer_event(&bob_event).is_err());
+            }
+        }
+
+        /// [`RepoRef::end_self_role`]: leaving closes every active self
+        /// entry with an end boundary, removes the author from the typed
+        /// membership, and the republished role tags carry the closed
+        /// record instead of an active listing.
+        mod end_self_role {
+            use super::*;
+
+            const NOW: u64 = 1_700_000_000;
+
+            fn generated(repo_ref: &RepoRef, author: &PublicKey) -> Vec<Vec<String>> {
+                repo_ref
+                    .generate_role_tags(author, NOW)
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn implicit_author_from_deprecated_listing_gains_a_closed_entry() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &author.to_string(),
+                        &other.to_string(),
+                    ])],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
+                // without the closed self-entry the author would fall back
+                // to being an implicit maintainer on the republished event
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["m", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn active_self_entry_is_closed_with_history_preserved() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["m", &author.to_string(), "100"]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["m", &author.to_string(), "100", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn leaving_lead_closes_the_m_uppercase_entry_and_clears_the_lead() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["M", &author.to_string()]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.lead, None);
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["m", &other.to_string()]),
+                        tag(&["M", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn moderator_self_entry_is_closed_and_moderatorship_removed() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["M", &lead.to_string()]),
+                        tag(&["o", &author.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(parsed.end_self_role(&author, NOW));
+                assert!(parsed.moderators.is_empty());
+                assert_eq!(
+                    generated(&parsed, &author),
+                    vec![
+                        tag(&["M", &lead.to_string()]),
+                        tag(&["o", &author.to_string(), "0", &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn returns_false_when_the_author_holds_no_active_role() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &keys,
+                    vec![
+                        tag(&["m", &author.to_string(), "0", "100"]),
+                        tag(&["m", &other.to_string()]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+                assert!(!parsed.end_self_role(&author, NOW));
+                assert_eq!(parsed.maintainers, vec![other]);
+            }
+        }
+    }
+
+    mod member_role_source {
+        use nostr::prelude::{EventBuilder, Keys, event::FinalizeEvent};
+
+        use super::*;
+
+        fn tag(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(ToString::to_string).collect()
+        }
+
+        fn announcement(keys: &Keys, tags: Vec<Vec<String>>) -> nostr::prelude::Event {
+            let mut event_tags = vec![Tag::identifier("test-repo")];
+            for t in tags {
+                event_tags.push(Tag::parse(t).unwrap());
+            }
+            EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags(event_tags)
+                .finalize(keys)
+                .unwrap()
+        }
+
+        /// Consolidate `events` into one `RepoRef` view rooted on the first
+        /// event's author, mirroring the events map the cache consolidation
+        /// builds.
+        fn view_of(events: Vec<nostr::prelude::Event>) -> RepoRef {
+            let mut iter = events.into_iter();
+            let mut repo_ref = RepoRef::try_from((iter.next().unwrap(), None)).unwrap();
+            for event in iter {
+                let author = event.pubkey;
+                repo_ref
+                    .events
+                    .insert(repo_ref.announcement_coordinate(&author), event);
+            }
+            repo_ref
+        }
+
+        #[test]
+        fn active_role_entry_names_the_member() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let co = Keys::generate().public_key();
+            let moderator = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &co.to_string()]),
+                    tag(&["o", &moderator.to_string()]),
+                ],
+            )]);
+
+            assert_eq!(repo_ref.member_role_source(&owner), RoleSource::RoleTag);
+            assert_eq!(repo_ref.member_role_source(&co), RoleSource::RoleTag);
+            assert_eq!(repo_ref.member_role_source(&moderator), RoleSource::RoleTag);
+        }
+
+        #[test]
+        fn deprecated_listing_sources_membership_only_without_role_tags() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let listed = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![tag(&[
+                    "maintainers",
+                    &owner.to_string(),
+                    &listed.to_string(),
+                ])],
+            )]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&owner),
+                RoleSource::MaintainersTag
+            );
+            assert_eq!(
+                repo_ref.member_role_source(&listed),
+                RoleSource::MaintainersTag
+            );
+        }
+
+        #[test]
+        fn author_named_in_no_tag_is_implicit() {
+            let keys = Keys::generate();
+            let author = keys.public_key();
+            let other = Keys::generate().public_key();
+
+            // role-tag announcement that names only someone else
+            let with_role_tags = view_of(vec![announcement(
+                &keys,
+                vec![tag(&["m", &other.to_string()])],
+            )]);
+            assert_eq!(
+                with_role_tags.member_role_source(&author),
+                RoleSource::Implicit
+            );
+
+            // announcement without any membership tag at all
+            let bare = view_of(vec![announcement(&keys, vec![])]);
+            assert_eq!(bare.member_role_source(&author), RoleSource::Implicit);
+        }
+
+        #[test]
+        fn role_tag_in_any_announcement_takes_precedence() {
+            let legacy_keys = Keys::generate();
+            let indexed_keys = Keys::generate();
+            let member = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![
+                announcement(
+                    &legacy_keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &legacy_keys.public_key().to_string(),
+                        &member.to_string(),
+                    ])],
+                ),
+                announcement(
+                    &indexed_keys,
+                    vec![
+                        tag(&["m", &indexed_keys.public_key().to_string()]),
+                        tag(&["m", &member.to_string()]),
+                    ],
+                ),
+            ]);
+
+            assert_eq!(repo_ref.member_role_source(&member), RoleSource::RoleTag);
+        }
+
+        #[test]
+        fn ended_role_entry_does_not_count_as_a_role_tag_listing() {
+            let indexed_keys = Keys::generate();
+            let legacy_keys = Keys::generate();
+            let member = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![
+                announcement(
+                    &indexed_keys,
+                    vec![
+                        tag(&["m", &indexed_keys.public_key().to_string()]),
+                        tag(&["m", &member.to_string(), "0", "1700000000"]),
+                    ],
+                ),
+                announcement(
+                    &legacy_keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &legacy_keys.public_key().to_string(),
+                        &member.to_string(),
+                    ])],
+                ),
+            ]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&member),
+                RoleSource::MaintainersTag
+            );
+        }
+
+        #[test]
+        fn dead_maintainers_tag_on_a_role_tag_announcement_sources_nothing() {
+            let keys = Keys::generate();
+            let owner = keys.public_key();
+            let listed = Keys::generate().public_key();
+
+            let repo_ref = view_of(vec![announcement(
+                &keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["maintainers", &listed.to_string()]),
+                ],
+            )]);
+
+            assert_eq!(
+                repo_ref.member_role_source(&listed),
+                RoleSource::Implicit,
+                "a maintainers tag next to role tags is dead per NIP-34 and \
+                 must not be reported as the listing's source"
+            );
+        }
+    }
+
     mod to_event {
         use super::*;
         mod tags {
@@ -2201,6 +6099,72 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn implicit_sole_maintainer_emits_no_membership_tags() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let repo_ref = create_repo_ref_for_maintainer_order(vec![author], vec![]);
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+
+                assert!(!event.tags.iter().any(|tag| {
+                    matches!(
+                        tag.as_slice().first().map(String::as_str),
+                        Some("M" | "m" | "o" | "maintainers")
+                    )
+                }));
+            }
+
+            #[tokio::test]
+            async fn maintainers_tag_is_the_active_role_projection() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let historical = TEST_KEY_2_KEYS.public_key();
+                let mut repo_ref = create_repo_ref_for_maintainer_order(vec![author], vec![]);
+                repo_ref.lead = Some(author);
+                repo_ref.role_tags = vec![
+                    Tag::parse(["M", &author.to_string(), "100"]).unwrap(),
+                    Tag::parse(["m", &historical.to_string(), "100", "defer"]).unwrap(),
+                ];
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let maintainers = event
+                    .tags
+                    .iter()
+                    .find(|tag| {
+                        tag.as_slice()
+                            .first()
+                            .is_some_and(|name| name == "maintainers")
+                    })
+                    .unwrap()
+                    .as_slice();
+
+                assert_eq!(
+                    maintainers,
+                    &["maintainers".to_string(), author.to_string()]
+                );
+            }
+
+            #[tokio::test]
+            async fn role_aware_departure_emits_an_empty_compatibility_roster() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let mut repo_ref = create_repo_ref_for_maintainer_order(Vec::new(), vec![]);
+                repo_ref.role_tags =
+                    vec![Tag::parse(["m", &author.to_string(), "100", "200"]).unwrap()];
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let maintainers = event
+                    .tags
+                    .iter()
+                    .find(|tag| {
+                        tag.as_slice()
+                            .first()
+                            .is_some_and(|name| name == "maintainers")
+                    })
+                    .unwrap()
+                    .as_slice();
+
+                assert_eq!(maintainers, &["maintainers".to_string()]);
+            }
+
+            #[tokio::test]
             async fn private_is_emitted_only_when_enabled() {
                 let mut repo_ref = RepoRef::try_from((create().await, None)).unwrap();
                 assert!(
@@ -2228,8 +6192,52 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn maintainer_role_tags() {
+                let event = create().await;
+                let m_tags: Vec<&[String]> = event
+                    .tags
+                    .iter()
+                    .map(Tag::as_slice)
+                    .filter(|tag| tag.first().is_some_and(|name| name == "m"))
+                    .collect();
+                // first use of role tags on this announcement: one untimed
+                // `m` tag per maintainer, same members as the deprecated
+                // `maintainers` tag
+                assert_eq!(
+                    m_tags,
+                    vec![
+                        &["m".to_string(), TEST_KEY_1_KEYS.public_key().to_string()][..],
+                        &["m".to_string(), TEST_KEY_2_KEYS.public_key().to_string()][..],
+                    ],
+                );
+            }
+
+            #[tokio::test]
+            async fn lead_maintainer_gets_the_uppercase_m_role_tag() {
+                let mut repo_ref = create_repo_ref_for_maintainer_order(
+                    vec![TEST_KEY_1_KEYS.public_key(), TEST_KEY_2_KEYS.public_key()],
+                    vec![],
+                );
+                repo_ref.lead = Some(TEST_KEY_2_KEYS.public_key());
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let role_tags: Vec<&[String]> = event
+                    .tags
+                    .iter()
+                    .map(Tag::as_slice)
+                    .filter(|tag| tag.first().is_some_and(|name| name == "M" || name == "m"))
+                    .collect();
+                assert_eq!(
+                    role_tags,
+                    vec![
+                        &["m".to_string(), TEST_KEY_1_KEYS.public_key().to_string()][..],
+                        &["M".to_string(), TEST_KEY_2_KEYS.public_key().to_string()][..],
+                    ],
+                );
+            }
+
+            #[tokio::test]
             async fn no_other_tags() {
-                assert_eq!(create().await.tags.len(), 9)
+                assert_eq!(create().await.tags.len(), 11)
             }
         }
     }
