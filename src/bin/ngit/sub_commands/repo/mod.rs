@@ -2,6 +2,7 @@ pub mod accept;
 pub mod edit;
 pub mod follow_lead;
 pub mod leave;
+mod preflight;
 
 use std::{collections::HashSet, path::Path};
 

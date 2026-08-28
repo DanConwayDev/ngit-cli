@@ -38,6 +38,19 @@ async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+async fn publish_to_default(harness: &Harness, events: &[&Event]) -> Result<()> {
+    let relay_url = harness.relay("default").url();
+    let client = Client::default();
+    client.add_relay(relay_url).await?;
+    client.connect().await;
+    for event in events {
+        let output = client.send_event(event).to([relay_url]).await?;
+        anyhow::ensure!(output.failed.is_empty(), "relay rejected event: {output:?}");
+    }
+    client.disconnect().await;
+    Ok(())
+}
+
 fn active_role_start(event: &Event, letter: &str, subject: PublicKey) -> Option<u64> {
     let subject = subject.to_string();
     event
@@ -128,6 +141,118 @@ async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
     assert!(
         bob_history[0][2].parse::<u64>().is_ok() && bob_history[0][3].parse::<u64>().is_ok(),
         "Bob's invitation history should retain numeric start/end boundaries",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reciprocal_add_refuses_divergent_state_without_publishing() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("reciprocal state collision".into()),
+            identifier: Some("reciprocal-state-collision".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = Keys::generate();
+    let bob = bob_keys.public_key();
+    let started = Timestamp::now().as_secs().to_string();
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse(["M", &alice.to_string(), &started])?,
+            Tag::parse(["m", &bob.to_string(), &started])?,
+            Tag::parse(["maintainers", &alice.to_string(), &bob.to_string()])?,
+        ])
+        .finalize(&bob_keys)?;
+    let state = EventBuilder::new(Kind::Custom(30618), "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse([
+                "refs/heads/experiment",
+                "2222222222222222222222222222222222222222",
+            ])?,
+        ])
+        .finalize(&bob_keys)?;
+    publish_to_default(&harness, &[&announcement, &state]).await?;
+
+    let before = latest_announcement(&harness, alice, &published.identifier).await?;
+    let output = publisher
+        .ngit(["repo", "edit", "--add-maintainer", &bob.to_bech32()?])
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "an auto-confirming divergent state must block the invitation",
+    );
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        before.id,
+        "a refused reciprocal add must not publish an announcement",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reciprocal_add_refuses_joining_another_maintainer_component() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("reciprocal-component-collision".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = Keys::generate();
+    let bob = bob_keys.public_key();
+    let tom = Keys::generate().public_key();
+    let started = Timestamp::now().as_secs().to_string();
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse(["M", &alice.to_string(), &started])?,
+            Tag::parse(["m", &bob.to_string(), &started])?,
+            Tag::parse(["m", &tom.to_string(), &started])?,
+            Tag::parse([
+                "maintainers",
+                &alice.to_string(),
+                &bob.to_string(),
+                &tom.to_string(),
+            ])?,
+        ])
+        .finalize(&bob_keys)?;
+    publish_to_default(&harness, &[&announcement]).await?;
+
+    let before = latest_announcement(&harness, alice, &published.identifier).await?;
+    let output = publisher
+        .ngit(["repo", "edit", "--add-maintainer", &bob.to_bech32()?])
+        .output()
+        .await?;
+    assert!(!output.status.success(), "component joins must fail closed");
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        before.id,
+        "a refused component join must not publish an announcement",
     );
     Ok(())
 }

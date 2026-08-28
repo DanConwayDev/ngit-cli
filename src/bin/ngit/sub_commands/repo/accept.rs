@@ -30,6 +30,60 @@ pub struct SubCommandArgs {
     /// where your git+nostr data is hosted (optional; uses your saved grasp
     /// server list or the selected maintainer's servers if not specified)
     grasp_server: Vec<String>,
+    #[arg(long)]
+    /// reserved for future state-only replacement; collisions still fail
+    force: bool,
+}
+
+async fn preflight_existing_announcement(
+    git_repo_path: &std::path::Path,
+    repo_ref: &RepoRef,
+    client: &Client,
+    selected: nostr::prelude::PublicKey,
+    my_pubkey: nostr::prelude::PublicKey,
+    force_requested: bool,
+) -> Result<()> {
+    let discovered =
+        super::preflight::discover_candidate_events(client, repo_ref, my_pubkey).await?;
+    let Some(existing) = super::preflight::latest_announcement(
+        git_repo_path,
+        &repo_ref.identifier,
+        my_pubkey,
+        &discovered,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let existing = RepoRef::try_from((existing, None))
+        .context("failed to parse your existing same-identifier announcement")?;
+    let selected_roster = repo_ref
+        .events
+        .values()
+        .find(|event| event.pubkey == selected)
+        .cloned()
+        .map(|event| RepoRef::try_from((event, None)))
+        .transpose()
+        .context("failed to parse the selected maintainer's announcement")?
+        .map_or_else(
+            || repo_ref.maintainers.clone(),
+            |selected| selected.maintainers,
+        );
+    super::preflight::require_no_joined_component(
+        &existing,
+        &selected_roster,
+        selected,
+        my_pubkey,
+    )?;
+    super::preflight::require_equivalent_activating_state(
+        git_repo_path,
+        repo_ref,
+        my_pubkey,
+        true,
+        force_requested,
+        &discovered,
+    )
+    .await
 }
 
 pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
@@ -93,19 +147,6 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         ));
     }
 
-    let has_announcement = repo_ref
-        .events
-        .keys()
-        .any(|c| c.coordinate.public_key == my_pubkey);
-
-    if has_announcement {
-        return Err(cli_error(
-            "you have already published a co-maintainer announcement for this repository",
-            &[],
-            &["use `ngit repo edit` to update your announcement"],
-        ));
-    }
-
     if !repo_ref.maintainers.contains(&my_pubkey) {
         let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
         return Err(cli_error(
@@ -114,6 +155,16 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
             &["the selected maintainer must add your npub to their announcement first"],
         ));
     }
+
+    preflight_existing_announcement(
+        git_repo_path,
+        &repo_ref,
+        &client,
+        selected,
+        my_pubkey,
+        args.force,
+    )
+    .await?;
 
     // Happy path: CoMaintainer state without an existing announcement
     let repo_name = &repo_ref.name;

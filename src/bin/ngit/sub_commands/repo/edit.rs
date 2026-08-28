@@ -109,6 +109,9 @@ pub struct SubCommandArgs {
     #[arg(long, conflicts_with = "private")]
     /// remove the private marker
     pub(crate) public: bool,
+    #[arg(long)]
+    /// reserved for future state-only replacement; collisions still fail
+    pub(crate) force: bool,
 }
 
 impl SubCommandArgs {
@@ -450,6 +453,36 @@ pub async fn launch(
                 &[],
                 &[],
             ));
+        }
+        let discovered =
+            super::preflight::discover_candidate_events(&client, &repo_ref, target).await?;
+        if let Some(event) = super::preflight::latest_announcement(
+            git_repo_path,
+            &repo_ref.identifier,
+            target,
+            &discovered,
+        )
+        .await
+        {
+            let candidate = RepoRef::try_from((event, None))
+                .context("failed to parse the invitee's same-identifier announcement")?;
+            if candidate.maintainers.contains(&my_pubkey) {
+                super::preflight::require_no_joined_component(
+                    &candidate,
+                    &my_ref.maintainers,
+                    my_pubkey,
+                    target,
+                )?;
+                super::preflight::require_equivalent_activating_state(
+                    git_repo_path,
+                    &repo_ref,
+                    target,
+                    false,
+                    args.force,
+                    &discovered,
+                )
+                .await?;
+            }
         }
         maintainers.push(target);
     }

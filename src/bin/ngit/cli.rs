@@ -1235,4 +1235,20 @@ mod tests {
     fn repo_follow_lead_is_non_interactive() {
         assert!(Cli::try_parse_from(["ngit", "repo", "follow-lead"]).is_ok());
     }
+
+    #[test]
+    fn repository_membership_commands_reserve_force() {
+        assert!(Cli::try_parse_from(["ngit", "repo", "accept", "--force"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--add-maintainer",
+                "npub1invalid",
+                "--force",
+            ])
+            .is_ok()
+        );
+    }
 }

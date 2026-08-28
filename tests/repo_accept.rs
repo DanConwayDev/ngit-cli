@@ -112,6 +112,18 @@ async fn arrange_invited_clone(
     Ok((harness, published, clone, co_maintainer_pubkey))
 }
 
+async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {
+    let client = Client::default();
+    client.add_relay(relay_url).await?;
+    client.connect().await;
+    for event in events {
+        let output = client.send_event(event).to([relay_url]).await?;
+        anyhow::ensure!(output.failed.is_empty(), "relay rejected event: {output:?}");
+    }
+    client.disconnect().await;
+    Ok(())
+}
+
 /// Assert the accepter's kind-30617 landed on their fallback write relay with
 /// both maintainers listed, and that the grasp accepted it (bare repo on
 /// disk under the accepter's npub).
@@ -273,6 +285,63 @@ async fn accept_with_defaults_publishes_announcement_without_rerooting_resolutio
     accept_and_assert_resolution_untouched(&clone, &[]).await?;
     assert_announcement_published(&harness, &published, co_maintainer_pubkey).await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn accept_refuses_preexisting_divergent_state_without_republishing() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-accept-state-collision").await?;
+    let co_keys = published.additional_maintainer_keys[0].clone();
+    let lead = published.maintainer_keys.public_key();
+    let now = Timestamp::now();
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse(["M", &lead.to_string(), &now.as_secs().to_string()])?,
+            Tag::parse([
+                "m",
+                &co_maintainer_pubkey.to_string(),
+                &now.as_secs().to_string(),
+            ])?,
+            Tag::parse([
+                "maintainers",
+                &lead.to_string(),
+                &co_maintainer_pubkey.to_string(),
+            ])?,
+        ])
+        .finalize(&co_keys)?;
+    let state = EventBuilder::new(Kind::Custom(30618), "")
+        .tags([
+            Tag::identifier(published.identifier.clone()),
+            Tag::parse([
+                "refs/heads/experiment",
+                "1111111111111111111111111111111111111111",
+            ])?,
+        ])
+        .finalize(&co_keys)?;
+    publish_to_relay(harness.relay("default").url(), &[&announcement, &state]).await?;
+
+    let output = clone.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        !output.status.success(),
+        "divergent state must block acceptance"
+    );
+
+    let surviving = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier),
+        )
+        .await?;
+    assert_eq!(
+        surviving.iter().map(|event| event.id).collect::<Vec<_>>(),
+        vec![announcement.id],
+        "a refused acceptance must not replace the existing announcement",
+    );
     Ok(())
 }
 
