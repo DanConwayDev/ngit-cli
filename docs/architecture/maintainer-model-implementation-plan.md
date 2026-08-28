@@ -42,6 +42,12 @@ reordering its existing commits, or recreating already completed tests.
 
 ## Remaining implementation sequence
 
+Implementation status at the branch head: Waves 1–5 are complete. Wave 6 has
+stabilized the documented CLI, structured lead and health output, categorized
+membership errors, bundled skill guidance, and fail-closed collision checks.
+The items under “Deliberately deferred” remain intentionally outside this
+major-release boundary.
+
 Each wave ends green and includes focused tests for its changed contract.
 Tests may be written red-first locally, but commits contain the implementation
 and its passing tests together.
