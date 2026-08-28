@@ -244,6 +244,10 @@ async fn accept_and_assert_resolution_untouched(clone: &Repo, extra_args: &[&str
     assert_eq!(json["maintainer_edges"].as_array().map(Vec::len), Some(2));
     assert!(json["selected_maintainer"].is_string());
     assert!(json.get("lead_maintainer").is_some());
+    assert_eq!(json["lead_source"], "explicit");
+    assert_eq!(json["lead_path"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["pending_actions"], serde_json::json!([]));
+    assert_eq!(json["health"]["status"], "ok");
     assert_eq!(json["moderators"], serde_json::json!([]));
     assert_eq!(json["confirmed_moderators"], serde_json::json!([]));
     let members = json["members"]

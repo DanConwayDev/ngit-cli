@@ -72,6 +72,12 @@ struct RepoInfoJson {
     confirmed_maintainers: Option<Vec<String>>,
     invited_maintainers: Option<Vec<String>>,
     lead_maintainer: Option<String>,
+    lead_source: Option<String>,
+    lead_path: Option<Vec<String>>,
+    recommended_coordinate: Option<String>,
+    follow_lead_command: Option<String>,
+    pending_actions: Option<Vec<PendingActionJson>>,
+    health: Option<RepoHealthJson>,
     maintainer_edges: Option<Vec<MaintainerEdgeJson>>,
     moderators: Option<Vec<String>>,
     confirmed_moderators: Option<Vec<String>>,
@@ -84,6 +90,24 @@ struct RepoInfoJson {
     relays: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hashtags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct PendingActionJson {
+    code: &'static str,
+    command: &'static str,
+}
+
+#[derive(Serialize)]
+struct RepoHealthJson {
+    status: &'static str,
+    problems: Vec<HealthProblemJson>,
+}
+
+#[derive(Serialize)]
+struct HealthProblemJson {
+    code: &'static str,
+    message: &'static str,
 }
 
 #[derive(Serialize)]
@@ -304,6 +328,12 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 confirmed_maintainers: None,
                 invited_maintainers: None,
                 lead_maintainer: None,
+                lead_source: None,
+                lead_path: None,
+                recommended_coordinate: None,
+                follow_lead_command: None,
+                pending_actions: None,
+                health: None,
                 maintainer_edges: None,
                 moderators: None,
                 confirmed_moderators: None,
@@ -366,6 +396,12 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
                 confirmed_maintainers: None,
                 invited_maintainers: None,
                 lead_maintainer: None,
+                lead_source: None,
+                lead_path: None,
+                recommended_coordinate: None,
+                follow_lead_command: None,
+                pending_actions: None,
+                health: None,
                 maintainer_edges: None,
                 moderators: None,
                 confirmed_moderators: None,
@@ -413,6 +449,7 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_repo_info_json(
     repo_ref: &RepoRef,
     coordinate: &Nip19Coordinate,
@@ -467,6 +504,49 @@ fn print_repo_info_json(
     let (confirmed_maintainers, invited_maintainers, lead_maintainer, maintainer_edges) =
         maintainer_json_fields(repo_ref);
     let (moderators, confirmed_moderators, members) = membership_json_fields(repo_ref);
+    let resolution = repo_ref.lead_resolution();
+    let lead_path = resolution.path.iter().map(&encode).collect();
+    let forward_available = resolution.source == ngit::repo_ref::LeadSource::Explicit
+        && resolution
+            .lead
+            .is_some_and(|lead| lead != repo_ref.selected_maintainer);
+    let recommended_coordinate = resolution.lead.and_then(|lead| {
+        repo_ref
+            .events
+            .values()
+            .find(|event| event.pubkey == lead)
+            .cloned()
+            .and_then(|event| RepoRef::try_from((event, None)).ok())
+            .and_then(|lead_ref| lead_ref.coordinate_with_hint().to_bech32().ok())
+    });
+    let mut problems = Vec::new();
+    match resolution.source {
+        ngit::repo_ref::LeadSource::Pending => problems.push(HealthProblemJson {
+            code: "lead_pending",
+            message: "the selected lead path is incomplete",
+        }),
+        ngit::repo_ref::LeadSource::Conflict => problems.push(HealthProblemJson {
+            code: "lead_conflict",
+            message: "the selected lead path is conflicting",
+        }),
+        _ => {}
+    }
+    if forward_available {
+        problems.push(HealthProblemJson {
+            code: "follow_lead_available",
+            message: "the selected coordinate forwards to another lead",
+        });
+    }
+    let health_status = if problems
+        .iter()
+        .any(|problem| matches!(problem.code, "lead_pending" | "lead_conflict"))
+    {
+        "error"
+    } else if problems.is_empty() {
+        "ok"
+    } else {
+        "warning"
+    };
 
     let info = RepoInfoJson {
         is_nostr_repo: true,
@@ -494,6 +574,22 @@ fn print_repo_info_json(
         confirmed_maintainers: Some(confirmed_maintainers),
         invited_maintainers: Some(invited_maintainers),
         lead_maintainer,
+        lead_source: Some(resolution.source.label().to_string()),
+        lead_path: Some(lead_path),
+        recommended_coordinate,
+        follow_lead_command: forward_available.then(|| "ngit repo follow-lead".to_string()),
+        pending_actions: Some(if forward_available {
+            vec![PendingActionJson {
+                code: "follow_lead",
+                command: "ngit repo follow-lead",
+            }]
+        } else {
+            Vec::new()
+        }),
+        health: Some(RepoHealthJson {
+            status: health_status,
+            problems,
+        }),
         maintainer_edges: Some(maintainer_edges),
         moderators: Some(moderators),
         confirmed_moderators: Some(confirmed_moderators),
@@ -850,6 +946,15 @@ async fn print_repo_info(
                  Invited maintainers gain authority by accepting; a unique lead coordinates but has no extra rights."
             )
         );
+    }
+    let resolution = repo_ref.lead_resolution();
+    if resolution.source == ngit::repo_ref::LeadSource::Explicit
+        && resolution
+            .lead
+            .is_some_and(|lead| lead != repo_ref.selected_maintainer)
+    {
+        eprintln!("warning: this checkout's selected coordinate forwards to the resolved lead");
+        eprintln!("switch to the lead with: ngit repo follow-lead");
     }
 }
 

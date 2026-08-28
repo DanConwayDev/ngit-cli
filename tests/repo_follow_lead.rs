@@ -109,6 +109,20 @@ async fn confirmed_co_maintainer_converges_history_and_local_selection() -> Resu
         &["repo", "edit", "--lead-maintainer", &bob_npub],
     )
     .await?;
+    let info = carol_repo
+        .ngit(["repo", "--json", "--offline"])
+        .output()
+        .await?;
+    assert!(info.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout)?;
+    assert_eq!(info["lead_source"], "explicit");
+    assert!(
+        info["lead_path"]
+            .as_array()
+            .is_some_and(|path| !path.is_empty())
+    );
+    assert!(info["pending_actions"].is_array());
+    assert!(info["health"]["status"].is_string());
     command_ok(&carol_repo, &["repo", "follow-lead"]).await?;
 
     assert_selected_lead(&carol_repo, bob).await?;
