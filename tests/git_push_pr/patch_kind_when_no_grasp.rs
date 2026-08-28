@@ -20,11 +20,11 @@
 //!
 //! 1. Harness: one vanilla relay (`"default"`) + one vanilla git server
 //!    (`"git"`) — **no GRASP server**.
-//! 2. Publisher manually runs `ngit init --relay <relay_url> --clone <git_url>
-//!    -d --identifier ... --name ...` to publish a kind-30617 announcement
-//!    whose `clone` tag contains only the vanilla git server URL (no GRASP
-//!    URL). Pushes via the nostr:// remote to graduate the announcement and
-//!    seed the bare git repo.
+//! 2. Publisher manually runs `ngit init --additional-relay <relay_url>
+//!    --additional-clone <git_url> -d --identifier ... --name ...` to publish a
+//!    kind-30617 announcement whose `clone` tag contains only the vanilla git
+//!    server URL (no GRASP URL). Pushes via the nostr:// remote to graduate the
+//!    announcement and seed the bare git repo.
 //! 3. Contributor clones from the nostr:// URL and creates a fresh account.
 //! 4. Contributor checks out `pr/feature`, makes two commits (`t1.md`,
 //!    `t2.md`).
@@ -153,7 +153,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 2. Publisher: manual setup (publish_repo requires a GRASP) --------
     //
-    // We use ngit init --relay + --clone (without --grasp-server) so the
+    // We use ngit init --additional-relay + --additional-clone (without
+    // --grasp-server) so the
     // kind-30617 announcement carries only the vanilla git server URL in its
     // `clone` tag. That makes `repo_ref.grasp_servers()` return an empty list
     // and `repo_has_grasp_server = false` in push.rs:648.
@@ -191,15 +192,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
         )
         .await?;
 
-    // Run ngit init with --relay and --clone but NO --grasp-server.
+    // Run ngit init with additional relay and clone but NO --grasp-server.
     // `has_both_relays_and_clone_url` (init.rs:265) suppresses the
     // "missing grasp server" prompt so this runs non-interactively via -d.
     let init_out = publisher
         .ngit([
             "init",
-            "--relay",
+            "--additional-relay",
             &relay_url,
-            "--clone",
+            "--additional-clone",
             &git_server_url,
             "-d",
             "--identifier",

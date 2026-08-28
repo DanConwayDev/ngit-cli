@@ -86,8 +86,8 @@ pub struct PublishRepoOpts {
     /// themselves do **not** sign anything, so they remain invited until a
     /// scenario explicitly runs `ngit repo accept` as one of them.
     pub additional_maintainer_count: usize,
-    /// Extra `--relay <url>` arguments to pass to `ngit init`, on top of
-    /// the grasp's relay URL that `apply_grasp_infrastructure`
+    /// Extra `--additional-relay <url>` arguments to pass to `ngit init`, on
+    /// top of the grasp's relay URL that `apply_grasp_infrastructure`
     /// (`src/lib/repo_ref.rs:836`) prepends automatically.
     ///
     /// Each URL ends up as a relay tag on the kind-30617 announcement, so
@@ -331,13 +331,13 @@ impl Harness {
             init_args.push(url);
         }
         // Extra repo relays are appended *after* the grasp server is
-        // already in `init_args`. `init.rs:758-770` treats `--relay` as
+        // already in `init_args`. `init.rs` treats `--additional-relay` as
         // the entire announcement relay set when present, then
         // `apply_grasp_infrastructure` prepends the grasp's relay URL
         // back in — so the final announcement carries
         // `[grasp_relay, ...extras]` regardless of CLI arg order.
         for relay_url in &opts.extra_repo_relays {
-            init_args.push("--relay".into());
+            init_args.push("--additional-relay".into());
             init_args.push(relay_url.clone());
         }
         let init = publisher

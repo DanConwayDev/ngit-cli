@@ -38,6 +38,130 @@ async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn targeted_setting_actions_preserve_derived_and_untouched_values() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("extra")
+    .with_grasp_server("repo")
+    .with_grasp_server("backup")
+    .with_vanilla_git_server("mirror")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("targeted repository settings".into()),
+            identifier: Some("targeted-repository-settings".into()),
+            ..Default::default()
+        })
+        .await?;
+    let author = published.maintainer_keys.public_key();
+    let primary_grasp = harness.grasp("repo").url().to_string();
+    let backup_grasp = harness.grasp("backup").url().to_string();
+    let extra_relay = harness.relay("extra").url().to_string();
+    let mirror = harness.vanilla_git_server("mirror").url().to_string();
+
+    edit_ok(
+        &publisher,
+        &[
+            "--add-grasp-server",
+            &backup_grasp,
+            "--add-additional-relay",
+            &extra_relay,
+            "--add-additional-clone",
+            &mirror,
+            "--add-hashtag",
+            "#Rust",
+        ],
+    )
+    .await?;
+    let added = latest_announcement(&harness, author, &published.identifier).await?;
+    let clones = tag_values(&added, "clone");
+    assert_eq!(clones.len(), 3);
+    assert!(clones.contains(&mirror));
+    assert!(
+        clones.iter().any(|clone| clone.starts_with(&primary_grasp)),
+        "the existing grasp-derived clone must be preserved",
+    );
+    assert!(
+        clones.iter().any(|clone| clone.starts_with(&backup_grasp)),
+        "the added grasp server must contribute its derived clone",
+    );
+    let relays = tag_values(&added, "relays");
+    assert_eq!(relays.len(), 3);
+    assert!(relays.contains(&extra_relay));
+    assert_eq!(tag_values_multiple(&added, "t"), vec!["rust"]);
+
+    edit_ok(
+        &publisher,
+        &[
+            "--remove-grasp-server",
+            &backup_grasp,
+            "--remove-additional-relay",
+            &extra_relay,
+            "--remove-additional-clone",
+            &mirror,
+            "--remove-hashtag",
+            "rust",
+        ],
+    )
+    .await?;
+    let removed = latest_announcement(&harness, author, &published.identifier).await?;
+    let clones = tag_values(&removed, "clone");
+    assert_eq!(clones.len(), 1);
+    assert!(clones[0].starts_with(&primary_grasp));
+    assert_eq!(tag_values(&removed, "relays").len(), 1);
+    assert!(tag_values_multiple(&removed, "t").is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn grasp_derived_entries_cannot_be_removed_as_additional_settings() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let author = published.maintainer_keys.public_key();
+    let before = latest_announcement(&harness, author, &published.identifier).await?;
+    let grasp_relay = tag_values(&before, "relays")
+        .into_iter()
+        .next()
+        .context("grasp-derived relay is missing")?;
+    let grasp_clone = tag_values(&before, "clone")
+        .into_iter()
+        .next()
+        .context("grasp-derived clone is missing")?;
+
+    for (flag, value) in [
+        ("--remove-additional-relay", grasp_relay),
+        ("--remove-additional-clone", grasp_clone),
+    ] {
+        let refused = publisher
+            .ngit(["repo", "edit", flag, &value])
+            .output()
+            .await?;
+        assert!(!refused.status.success(), "{flag} must reject {value}");
+    }
+    assert_eq!(
+        latest_announcement(&harness, author, &published.identifier)
+            .await?
+            .id,
+        before.id,
+        "a refused derived-setting edit must not publish an announcement",
+    );
+
+    Ok(())
+}
+
 async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {
     let client = Client::default();
     client.add_relay(relay_url).await?;

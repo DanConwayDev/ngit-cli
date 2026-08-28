@@ -35,7 +35,6 @@ async fn repo_edit_recovers_deleted_state_refs_and_leaves_repo_usable() -> Resul
     let default_relay_url = harness.relay("default").url().to_string();
     let grasp = harness.grasp("repo");
     let grasp_relay_url = grasp.relay_url();
-    let grasp_url = grasp.url().to_string();
     let (publisher, published) = harness
         .publish_repo(PublishRepoOpts {
             display_name: Some(DISPLAY_NAME.to_string()),
@@ -110,17 +109,7 @@ async fn repo_edit_recovers_deleted_state_refs_and_leaves_repo_usable() -> Resul
     // original report. The repository edit recovers both refs from their raw
     // OIDs and does not recreate the local branch names.
     let edit = publisher
-        .ngit([
-            "repo",
-            "edit",
-            "--name",
-            DISPLAY_NAME,
-            "--grasp-server",
-            &grasp_url,
-            "--relay",
-            &default_relay_url,
-            "--defaults",
-        ])
+        .ngit(["repo", "edit", "--name", DISPLAY_NAME, "--defaults"])
         .output()
         .await
         .context("spawn ngit repo edit")?;

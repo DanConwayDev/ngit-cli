@@ -9,9 +9,9 @@
 //! Two properties are pinned here:
 //!
 //! 1. **Fresh event, identical refs, newly added relay covered** — a repeat
-//!    edit that adds a `--relay` publishes a kind-30618 with a *new* event id
-//!    but the *same* ref map, and the newly announced relay holds it even
-//!    though it was never in ngit's default relay set (the `extra` role is
+//!    edit that adds an additional relay publishes a kind-30618 with a *new*
+//!    event id but the *same* ref map, and the newly announced relay holds it
+//!    even though it was never in ngit's default relay set (the `extra` role is
 //!    deliberately not env-injected).
 //! 2. **Failure leaves the previous state authoritative** — when the push
 //!    cannot establish the fresh event (no git server listable), repo edit
@@ -127,7 +127,12 @@ async fn repository_edit_republishes_fresh_state_to_newly_added_relay() -> Resul
     // server and publishes the first kind-30618 to the announced relay.
     let first = run_init(
         &repo,
-        &["--clone", &vanilla_url, "--relay", &default_relay_url],
+        &[
+            "--additional-clone",
+            &vanilla_url,
+            "--additional-relay",
+            &default_relay_url,
+        ],
     )
     .await?;
     if !first.status.success() {
@@ -151,18 +156,7 @@ async fn repository_edit_republishes_fresh_state_to_newly_added_relay() -> Resul
     // Edit the announcement to add another relay. The refs are
     // unchanged, so only the cached-state republish can bring the state
     // event to the newly announced relay.
-    let second = run_edit(
-        &repo,
-        &[
-            "--clone",
-            &vanilla_url,
-            "--relay",
-            &default_relay_url,
-            "--relay",
-            &extra_relay_url,
-        ],
-    )
-    .await?;
+    let second = run_edit(&repo, &["--add-additional-relay", &extra_relay_url]).await?;
     if !second.status.success() {
         bail!(
             "ngit repo edit exited non-zero ({:?})\nstdout: {}\nstderr: {}",
@@ -223,7 +217,12 @@ async fn failed_republish_leaves_previous_state_authoritative() -> Result<()> {
 
     let first = run_init(
         &repo,
-        &["--clone", &vanilla_url, "--relay", &default_relay_url],
+        &[
+            "--additional-clone",
+            &vanilla_url,
+            "--additional-relay",
+            &default_relay_url,
+        ],
     )
     .await?;
     if !first.status.success() {
@@ -248,7 +247,12 @@ async fn failed_republish_leaves_previous_state_authoritative() -> Result<()> {
         Duration::from_secs(5),
         run_edit(
             &repo,
-            &["--clone", &dead_url, "--relay", &default_relay_url],
+            &[
+                "--remove-additional-clone",
+                &vanilla_url,
+                "--add-additional-clone",
+                &dead_url,
+            ],
         ),
     )
     .await

@@ -281,7 +281,7 @@ fn my_event_repo_ref(repo_ref: &RepoRef, my_pubkey: &PublicKey) -> Option<RepoRe
 }
 
 /// Check if a grasp-format clone URL belongs to the given public key.
-fn is_my_grasp_clone_url(url: &str, my_pubkey: &PublicKey) -> bool {
+pub(super) fn is_my_grasp_clone_url(url: &str, my_pubkey: &PublicKey) -> bool {
     if !is_grasp_server_clone_url(url) {
         return false;
     }
@@ -294,12 +294,22 @@ fn is_my_grasp_clone_url(url: &str, my_pubkey: &PublicKey) -> bool {
 }
 
 /// Check if a relay URL corresponds to one of the given grasp servers.
-fn is_grasp_derived_relay(relay: &str, grasp_servers: &[String]) -> bool {
+pub(super) fn is_grasp_derived_relay(relay: &str, grasp_servers: &[String]) -> bool {
     let Ok(relay_normalized) = normalize_grasp_server_url(relay) else {
         return false;
     };
     grasp_servers.iter().any(|gs| {
         normalize_grasp_server_url(gs).is_ok_and(|gs_normalized| gs_normalized == relay_normalized)
+    })
+}
+
+pub(super) fn is_grasp_derived_clone(clone: &str, grasp_servers: &[String]) -> bool {
+    let Ok(clone_server) = normalize_grasp_server_url(clone) else {
+        return false;
+    };
+    grasp_servers.iter().any(|grasp_server| {
+        normalize_grasp_server_url(grasp_server)
+            .is_ok_and(|grasp_server| grasp_server == clone_server)
     })
 }
 
@@ -371,7 +381,7 @@ fn resolve_web(
 
 /// Normalize and validate a hashtag: lowercase, strip leading `#`, allow only
 /// `a-z`, `0-9`, and `-` (no leading/trailing/consecutive hyphens).
-fn validate_hashtag(s: &str) -> Result<String> {
+pub(super) fn validate_hashtag(s: &str) -> Result<String> {
     let trimmed = s.trim().trim_start_matches('#').to_lowercase();
     if trimmed.is_empty() {
         bail!("hashtag cannot be empty");
@@ -392,8 +402,12 @@ fn validate_hashtag(s: &str) -> Result<String> {
 }
 
 /// Resolve the `hashtags` field from args or existing announcement.
-fn resolve_hashtags(args_hashtag: &[String], state: &InitState) -> Result<Vec<String>> {
-    if !args_hashtag.is_empty() {
+fn resolve_hashtags(
+    args_hashtag: &[String],
+    replace_hashtags: bool,
+    state: &InitState,
+) -> Result<Vec<String>> {
+    if replace_hashtags || !args_hashtag.is_empty() {
         return args_hashtag.iter().map(|h| validate_hashtag(h)).collect();
     }
     if let Some(rr) = state.repo_ref() {
@@ -414,11 +428,12 @@ fn resolve_grasp_servers(
     identifier: &str,
     interactive: bool,
 ) -> Result<Vec<String>> {
-    if !args.grasp_server.is_empty() {
+    if args.replace_grasp_servers || !args.grasp_server.is_empty() {
         return Ok(args.grasp_server.clone());
     }
 
-    let has_both_relays_and_clone_url = !args.relay.is_empty() && !args.clone.is_empty();
+    let has_both_relays_and_clone_url =
+        !args.additional_relay.is_empty() && !args.additional_clone.is_empty();
     if has_both_relays_and_clone_url {
         return Ok(vec![]);
     }
@@ -427,11 +442,11 @@ fn resolve_grasp_servers(
     // Infrastructure is personal — each maintainer has their own servers.
     let my_ref = state.my_repo_ref(&user_ref.public_key);
 
-    if !args.clone.is_empty() {
+    if !args.additional_clone.is_empty() {
         return Ok(detect_existing_grasp_servers(
             my_ref.as_ref(),
-            &args.relay,
-            &args.clone,
+            &args.additional_relay,
+            &args.additional_clone,
             identifier,
         ));
     }
@@ -439,7 +454,8 @@ fn resolve_grasp_servers(
     if !interactive || cli.defaults || state.has_coordinate() || cli.force {
         // Prefer grasp servers from my existing announcement, then user's grasp
         // list (or selected maintainer's servers as fallback), then system defaults
-        let existing = detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &[], identifier);
+        let existing =
+            detect_existing_grasp_servers(my_ref.as_ref(), &args.additional_relay, &[], identifier);
         if !existing.is_empty() {
             return Ok(existing);
         }
@@ -458,8 +474,12 @@ fn resolve_grasp_servers(
     }
 
     // Interactive prompt
-    let mut options: Vec<String> =
-        detect_existing_grasp_servers(my_ref.as_ref(), &args.relay, &args.clone, identifier);
+    let mut options: Vec<String> = detect_existing_grasp_servers(
+        my_ref.as_ref(),
+        &args.additional_relay,
+        &args.additional_clone,
+        identifier,
+    );
     let mut selections: Vec<bool> = vec![true; options.len()];
     let empty = options.is_empty();
     for user_grasp_option in &user_ref.grasp_list.urls {
@@ -515,7 +535,8 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
     }
 
     let has_grasp_servers = !args.grasp_server.is_empty();
-    let has_both_relays_and_clone_url = !args.relay.is_empty() && !args.clone.is_empty();
+    let has_both_relays_and_clone_url =
+        !args.additional_relay.is_empty() && !args.additional_clone.is_empty();
     let missing_servers =
         !has_grasp_servers && !user_has_grasp_list && !has_both_relays_and_clone_url;
     if missing_servers {
@@ -569,12 +590,12 @@ pub struct SubCommandArgs {
     #[clap(short, long, value_parser, num_args = 1..)]
     /// where your git+nostr data is hosted
     pub(crate) grasp_server: Vec<String>,
-    #[clap(long, value_parser, num_args = 1..)]
+    #[clap(long = "additional-relay", value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
-    pub(crate) relay: Vec<String>,
-    #[clap(long)]
+    pub(crate) additional_relay: Vec<String>,
+    #[clap(long = "additional-clone")]
     /// additional git server URLs beyond grasp servers
-    pub(crate) clone: Vec<String>,
+    pub(crate) additional_clone: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// homepage
     pub(crate) web: Vec<String>,
@@ -601,6 +622,19 @@ pub struct SubCommandArgs {
     /// Keep the checkout rooted at its selected maintainer after publication.
     #[clap(skip)]
     pub(crate) preserve_selected_coordinate: bool,
+    /// Treat `grasp_server` as an exact internal replacement, including an
+    /// empty list. Used by targeted `ngit repo edit` actions.
+    #[clap(skip)]
+    pub(crate) replace_grasp_servers: bool,
+    /// Treat `additional_relay` as an exact internal replacement.
+    #[clap(skip)]
+    pub(crate) replace_additional_relays: bool,
+    /// Treat `additional_clone` as an exact internal replacement.
+    #[clap(skip)]
+    pub(crate) replace_additional_clones: bool,
+    /// Treat `hashtag` as an exact internal replacement.
+    #[clap(skip)]
+    pub(crate) replace_hashtags: bool,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
     pub(crate) hashtag: Vec<String>,
@@ -626,9 +660,13 @@ impl SubCommandArgs {
         self.name.is_some()
             || self.identifier.is_some()
             || self.description.is_some()
-            || !self.clone.is_empty()
-            || !self.relay.is_empty()
+            || !self.additional_clone.is_empty()
+            || !self.additional_relay.is_empty()
             || !self.grasp_server.is_empty()
+            || self.replace_grasp_servers
+            || self.replace_additional_relays
+            || self.replace_additional_clones
+            || self.replace_hashtags
             || !self.web.is_empty()
             || !self.upstream.is_empty()
             || self.replace_maintainers
@@ -902,7 +940,9 @@ fn resolve_fields(
     };
 
     // --- Simple mode (interactive only) ---
-    let simple_mode = if !interactive || (!args.clone.is_empty() && !args.relay.is_empty()) {
+    let simple_mode = if !interactive
+        || (!args.additional_clone.is_empty() && !args.additional_relay.is_empty())
+    {
         false // not used in non-interactive, but avoids Option
     } else {
         Interactor::default().choice(
@@ -968,7 +1008,10 @@ fn resolve_fields(
         // filter out my own grasp-derived clone URLs (re-derived from grasp servers)
         mr.git_server
             .iter()
-            .filter(|url| !is_my_grasp_clone_url(url, my_pubkey))
+            .filter(|url| {
+                !is_my_grasp_clone_url(url, my_pubkey)
+                    || !is_grasp_derived_clone(url, &my_existing_grasp_servers)
+            })
             .cloned()
             .collect()
     } else if no_state {
@@ -1003,15 +1046,15 @@ fn resolve_fields(
         vec![]
     };
 
-    let mut git_servers = if args.clone.is_empty() {
+    let mut git_servers = if !args.replace_additional_clones && args.additional_clone.is_empty() {
         git_servers_default
     } else {
-        args.clone.clone()
+        args.additional_clone.clone()
     };
-    let mut relay_strings = if args.relay.is_empty() {
+    let mut relay_strings = if !args.replace_additional_relays && args.additional_relay.is_empty() {
         relays_default
     } else {
-        args.relay.clone()
+        args.additional_relay.clone()
     };
 
     apply_grasp_infrastructure(
@@ -1043,75 +1086,77 @@ fn resolve_fields(
     }
 
     // --- Git servers (interactive prompting) ---
-    let git_servers = if !args.clone.is_empty() || !interactive {
-        git_servers
-    } else {
-        prompt_git_servers(git_servers, &selected_grasp_servers, simple_mode)?
-    };
+    let git_servers =
+        if args.replace_additional_clones || !args.additional_clone.is_empty() || !interactive {
+            git_servers
+        } else {
+            prompt_git_servers(git_servers, &selected_grasp_servers, simple_mode)?
+        };
     for git_server in &git_servers {
         validate_git_server_url(git_server)?;
     }
 
     // --- Relays ---
-    let relays: Vec<RelayUrl> = if !args.relay.is_empty() || !interactive {
-        relay_strings
-            .iter()
-            .filter_map(|r| parse_relay_url(r).ok())
-            .collect()
-    } else if simple_mode {
-        let grasp_relay_urls: Vec<String> = selected_grasp_servers
-            .iter()
-            .filter_map(|r| format_grasp_server_url_as_relay_url(r).ok())
-            .collect();
-        let options: Vec<String> = relay_strings
-            .iter()
-            .filter(|s| !grasp_relay_urls.iter().any(|r| s.as_str() == r))
-            .cloned()
-            .collect();
-        let selections: Vec<bool> = vec![true; options.len()];
-        let selected = multi_select_with_custom_value(
-            "extra nostr relays (grasp servers are sufficient; public relays optional)",
-            "nostr relay",
-            options,
-            selections,
-            |s| {
-                parse_relay_url(s)
-                    .map(|_| s.to_string())
-                    .context(format!("Invalid relay URL format: {s}"))
-            },
-        )?;
-        show_multi_input_prompt_success("additional nostr relays", &selected);
-        [
-            grasp_relay_urls
+    let relays: Vec<RelayUrl> =
+        if args.replace_additional_relays || !args.additional_relay.is_empty() || !interactive {
+            relay_strings
                 .iter()
                 .filter_map(|r| parse_relay_url(r).ok())
-                .collect::<Vec<RelayUrl>>(),
+                .collect()
+        } else if simple_mode {
+            let grasp_relay_urls: Vec<String> = selected_grasp_servers
+                .iter()
+                .filter_map(|r| format_grasp_server_url_as_relay_url(r).ok())
+                .collect();
+            let options: Vec<String> = relay_strings
+                .iter()
+                .filter(|s| !grasp_relay_urls.iter().any(|r| s.as_str() == r))
+                .cloned()
+                .collect();
+            let selections: Vec<bool> = vec![true; options.len()];
+            let selected = multi_select_with_custom_value(
+                "extra nostr relays (grasp servers are sufficient; public relays optional)",
+                "nostr relay",
+                options,
+                selections,
+                |s| {
+                    parse_relay_url(s)
+                        .map(|_| s.to_string())
+                        .context(format!("Invalid relay URL format: {s}"))
+                },
+            )?;
+            show_multi_input_prompt_success("additional nostr relays", &selected);
+            [
+                grasp_relay_urls
+                    .iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect::<Vec<RelayUrl>>(),
+                selected
+                    .iter()
+                    .filter_map(|r| parse_relay_url(r).ok())
+                    .collect::<Vec<RelayUrl>>(),
+            ]
+            .concat()
+        } else {
+            // advanced interactive
+            let selections: Vec<bool> = vec![true; relay_strings.len()];
+            let selected = multi_select_with_custom_value(
+                "nostr relays",
+                "nostr relay",
+                relay_strings,
+                selections,
+                |s| {
+                    parse_relay_url(s)
+                        .map(|_| s.to_string())
+                        .context(format!("Invalid relay URL format: {s}"))
+                },
+            )?;
+            show_multi_input_prompt_success("nostr relays", &selected);
             selected
                 .iter()
                 .filter_map(|r| parse_relay_url(r).ok())
-                .collect::<Vec<RelayUrl>>(),
-        ]
-        .concat()
-    } else {
-        // advanced interactive
-        let selections: Vec<bool> = vec![true; relay_strings.len()];
-        let selected = multi_select_with_custom_value(
-            "nostr relays",
-            "nostr relay",
-            relay_strings,
-            selections,
-            |s| {
-                parse_relay_url(s)
-                    .map(|_| s.to_string())
-                    .context(format!("Invalid relay URL format: {s}"))
-            },
-        )?;
-        show_multi_input_prompt_success("nostr relays", &selected);
-        selected
-            .iter()
-            .filter_map(|r| parse_relay_url(r).ok())
-            .collect()
-    };
+                .collect()
+        };
 
     // --- Maintainers ---
     let maintainers_default = if let Some(ref mr) = my_ref {
@@ -1296,23 +1341,24 @@ fn resolve_fields(
 
     // --- Hashtags (shared metadata — from latest event, like name/description/web)
     // ---
-    let hashtags_default = resolve_hashtags(&args.hashtag, state)?;
+    let hashtags_default = resolve_hashtags(&args.hashtag, args.replace_hashtags, state)?;
 
-    let hashtags = if !args.hashtag.is_empty() || !interactive || simple_mode {
-        hashtags_default
-    } else {
-        // advanced interactive
-        let selections: Vec<bool> = vec![true; hashtags_default.len()];
-        let selected = multi_select_with_custom_value(
-            "hashtags for repository discovery",
-            "hashtag",
-            hashtags_default,
-            selections,
-            validate_hashtag,
-        )?;
-        show_multi_input_prompt_success("hashtags", &selected);
-        selected
-    };
+    let hashtags =
+        if args.replace_hashtags || !args.hashtag.is_empty() || !interactive || simple_mode {
+            hashtags_default
+        } else {
+            // advanced interactive
+            let selections: Vec<bool> = vec![true; hashtags_default.len()];
+            let selected = multi_select_with_custom_value(
+                "hashtags for repository discovery",
+                "hashtag",
+                hashtags_default,
+                selections,
+                validate_hashtag,
+            )?;
+            show_multi_input_prompt_success("hashtags", &selected);
+            selected
+        };
 
     // --- Extra (unknown) tags ---
     // Cascade: --clean wipes them, otherwise inherit from the latest
@@ -1442,7 +1488,7 @@ fn prompt_git_servers(
     }
 }
 
-fn validate_git_server_url(url: &str) -> Result<String> {
+pub(super) fn validate_git_server_url(url: &str) -> Result<String> {
     validate_git_server_clone_url(url)?;
     if is_git_remote_helper_url(url) {
         Ok(url.to_string())

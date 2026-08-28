@@ -9,7 +9,9 @@ use ngit::{
     },
     event_ordering::latest_event,
     repo_ref::{
-        LeadSource, MaintainerAcknowledgement, RepoRef, announcement_author_declines_maintainership,
+        LeadSource, MaintainerAcknowledgement, RepoRef,
+        announcement_author_declines_maintainership, detect_existing_grasp_servers,
+        latest_event_repo_ref, normalize_grasp_server_url,
     },
 };
 use nostr::prelude::{
@@ -37,34 +39,47 @@ use crate::{
         .multiple(false)
 ))]
 pub struct SubCommandArgs {
-    #[arg(long, alias = "title")]
-    /// name of repository (preferred over --identifier); --title is an alias
+    #[arg(long, alias = "title", help_heading = "Metadata")]
+    /// name of repository; --title is an alias
     pub(crate) name: Option<String>,
-    #[arg(long)]
-    /// shortname with no spaces or special characters
-    pub(crate) identifier: Option<String>,
-    #[arg(long)]
+    #[arg(long, help_heading = "Metadata")]
     /// optional description
     pub(crate) description: Option<String>,
-    #[arg(short, long, value_parser, num_args = 1..)]
-    /// where your git+nostr data is hosted
-    pub(crate) grasp_server: Vec<String>,
-    #[arg(long, value_parser, num_args = 1..)]
-    /// additional relays beyond grasp servers
-    pub(crate) relay: Vec<String>,
-    #[arg(long)]
-    /// additional git server URLs beyond grasp servers
-    pub(crate) clone: Vec<String>,
-    #[arg(long, value_parser, num_args = 1..)]
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// add a grasp server (repeatable)
+    pub(crate) add_grasp_server: Vec<String>,
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// remove a grasp server (repeatable)
+    pub(crate) remove_grasp_server: Vec<String>,
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// add a relay beyond those provided by grasp servers (repeatable)
+    pub(crate) add_additional_relay: Vec<String>,
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// remove an additional relay (repeatable)
+    pub(crate) remove_additional_relay: Vec<String>,
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// add a git clone URL beyond those provided by grasp servers (repeatable)
+    pub(crate) add_additional_clone: Vec<String>,
+    #[arg(long, value_name = "URL", help_heading = "Hosting")]
+    /// remove an additional git clone URL (repeatable)
+    pub(crate) remove_additional_clone: Vec<String>,
+    #[arg(long, value_parser, num_args = 1.., help_heading = "Metadata")]
     /// homepage
     pub(crate) web: Vec<String>,
-    #[arg(short = 'u', long = "u", alias = "upstream", value_parser, num_args = 1..)]
+    #[arg(
+        short = 'u',
+        long = "u",
+        alias = "upstream",
+        value_parser,
+        num_args = 1..,
+        help_heading = "Metadata"
+    )]
     /// informational NIP-34 subordinate-fork `u` tag fields
     pub(crate) upstream: Vec<String>,
-    #[arg(long, value_name = "NPUB")]
+    #[arg(long, value_name = "NPUB", help_heading = "Membership")]
     /// invite one maintainer
     pub(crate) add_maintainer: Option<String>,
-    #[arg(long, value_name = "NPUB")]
+    #[arg(long, value_name = "NPUB", help_heading = "Membership")]
     /// remove one maintainer relationship
     pub(crate) remove_maintainer: Option<String>,
     #[arg(
@@ -74,44 +89,56 @@ pub struct SubCommandArgs {
             "lead_maintainer",
             "no_lead_maintainer",
             "name",
-            "identifier",
             "description",
-            "grasp_server",
-            "relay",
-            "clone",
+            "add_grasp_server",
+            "remove_grasp_server",
+            "add_additional_relay",
+            "remove_additional_relay",
+            "add_additional_clone",
+            "remove_additional_clone",
             "web",
             "upstream",
-            "hashtag",
+            "add_hashtag",
+            "remove_hashtag",
             "earliest_unique_commit",
             "clean",
             "private",
             "public",
-        ]
+        ],
+        help_heading = "Membership"
     )]
     /// record one maintainer's signed acceptance or departure boundary
     pub(crate) acknowledge_maintainer_change: Option<String>,
-    #[arg(long, value_name = "NPUB", conflicts_with = "no_lead_maintainer")]
+    #[arg(
+        long,
+        value_name = "NPUB",
+        conflicts_with = "no_lead_maintainer",
+        help_heading = "Membership"
+    )]
     /// assign the lead maintainer
     pub(crate) lead_maintainer: Option<String>,
-    #[arg(long, conflicts_with = "lead_maintainer")]
+    #[arg(long, conflicts_with = "lead_maintainer", help_heading = "Membership")]
     /// affirm deliberately leadless governance for this add or remove
     pub(crate) no_lead_maintainer: bool,
-    #[arg(long, value_parser, num_args = 1..)]
-    /// hashtags for repository discovery
-    pub(crate) hashtag: Vec<String>,
-    #[arg(long)]
+    #[arg(long, value_name = "TAG", help_heading = "Discovery")]
+    /// add a repository hashtag (repeatable)
+    pub(crate) add_hashtag: Vec<String>,
+    #[arg(long, value_name = "TAG", help_heading = "Discovery")]
+    /// remove a repository hashtag (repeatable)
+    pub(crate) remove_hashtag: Vec<String>,
+    #[arg(long, help_heading = "Metadata")]
     /// usually root commit but will be more recent commit for forks
     pub(crate) earliest_unique_commit: Option<String>,
-    #[arg(long)]
+    #[arg(long, help_heading = "Recovery")]
     /// drop unknown tags from the existing announcement when republishing
     pub(crate) clean: bool,
-    #[arg(long, conflicts_with = "public")]
+    #[arg(long, conflicts_with = "public", help_heading = "Visibility")]
     /// mark the repository private
     pub(crate) private: bool,
-    #[arg(long, conflicts_with = "private")]
+    #[arg(long, conflicts_with = "private", help_heading = "Visibility")]
     /// remove the private marker
     pub(crate) public: bool,
-    #[arg(long)]
+    #[arg(long, help_heading = "Recovery")]
     /// reserved for future state-only replacement; collisions still fail
     pub(crate) force: bool,
 }
@@ -120,6 +147,117 @@ impl SubCommandArgs {
     fn has_relationship_mutation(&self) -> bool {
         self.add_maintainer.is_some() || self.remove_maintainer.is_some()
     }
+}
+
+fn normalize_unique_values<F>(flag: &str, values: &[String], normalize: &F) -> Result<Vec<String>>
+where
+    F: Fn(&str) -> Result<String>,
+{
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = normalize(value).with_context(|| format!("invalid value for {flag}"))?;
+        if normalized.contains(&value) {
+            return Err(cli_error(
+                &format!("{flag} repeats '{value}'"),
+                &[],
+                &["provide each value only once"],
+            ));
+        }
+        normalized.push(value);
+    }
+    Ok(normalized)
+}
+
+/// Apply targeted additions and removals to one announcement collection.
+///
+/// `None` means the caller omitted both actions and the field must retain its
+/// normal inheritance semantics. `Some(vec![])` is an intentional empty
+/// result and must be forwarded as an exact replacement.
+fn apply_list_actions<F>(
+    label: &str,
+    add_flag: &str,
+    remove_flag: &str,
+    current: &[String],
+    additions: &[String],
+    removals: &[String],
+    normalize: F,
+) -> Result<Option<Vec<String>>>
+where
+    F: Fn(&str) -> Result<String>,
+{
+    if additions.is_empty() && removals.is_empty() {
+        return Ok(None);
+    }
+
+    let mut result = Vec::with_capacity(current.len());
+    for value in current {
+        let value = normalize(value).context("invalid value in existing announcement")?;
+        if !result.contains(&value) {
+            result.push(value);
+        }
+    }
+    let additions = normalize_unique_values(add_flag, additions, &normalize)?;
+    let removals = normalize_unique_values(remove_flag, removals, &normalize)?;
+
+    if let Some(value) = additions.iter().find(|value| removals.contains(value)) {
+        return Err(cli_error(
+            &format!("'{value}' cannot be both added to and removed from {label}"),
+            &[],
+            &[],
+        ));
+    }
+
+    for value in removals {
+        let Some(position) = result.iter().position(|existing| existing == &value) else {
+            return Err(cli_error_with_category(
+                "repository_setting_not_listed",
+                &format!("{label} '{value}' is not listed"),
+                &[],
+                &["inspect the current values with `ngit repo --json --offline`"],
+            ));
+        };
+        result.remove(position);
+    }
+
+    for value in additions {
+        if result.contains(&value) {
+            return Err(cli_error_with_category(
+                "repository_setting_already_listed",
+                &format!("{label} '{value}' is already listed"),
+                &[],
+                &[],
+            ));
+        }
+        result.push(value);
+    }
+
+    Ok(Some(result))
+}
+
+fn normalize_relay(value: &str) -> Result<String> {
+    nostr::prelude::RelayUrl::parse(value)
+        .map(|relay| relay.to_string())
+        .with_context(|| format!("'{value}' is not a valid relay URL"))
+}
+
+fn normalize_clone(value: &str) -> Result<String> {
+    init::validate_git_server_url(value).map(|url| url.trim_end_matches('/').to_string())
+}
+
+fn grasp_setting_error(action: &str, kind: &str, value: &str) -> anyhow::Error {
+    let grasp_server = normalize_grasp_server_url(value).unwrap_or_else(|_| value.to_string());
+    let suggestion = if action == "remove" {
+        format!("use `ngit repo edit --remove-grasp-server {grasp_server}`")
+    } else {
+        format!(
+            "do not add it separately; grasp server {grasp_server} already provides this {kind}"
+        )
+    };
+    cli_error(
+        &format!("{kind} '{value}' is provided by grasp server {grasp_server}"),
+        &[],
+        &[&suggestion],
+    )
 }
 
 fn parse_pubkey(flag: &str, value: &str) -> Result<PublicKey> {
@@ -553,6 +691,121 @@ pub async fn launch(
     let my_pubkey = user_ref.public_key;
     let mut my_ref = own_announcement(&repo_ref, my_pubkey)?;
 
+    // Hosting is personal to each maintainer announcement. Separate the
+    // caller's grasp-derived entries from explicitly additional entries before
+    // applying targeted actions so a derived relay or clone can only be
+    // changed through its grasp server.
+    let current_grasp_servers =
+        detect_existing_grasp_servers(Some(&my_ref), &[], &[], &repo_ref.identifier);
+    let grasp_servers = apply_list_actions(
+        "grasp server",
+        "--add-grasp-server",
+        "--remove-grasp-server",
+        &current_grasp_servers,
+        &args.add_grasp_server,
+        &args.remove_grasp_server,
+        normalize_grasp_server_url,
+    )?;
+    let resulting_grasp_servers = grasp_servers
+        .as_deref()
+        .unwrap_or(current_grasp_servers.as_slice());
+
+    for relay in &args.remove_additional_relay {
+        if init::is_grasp_derived_relay(relay, &current_grasp_servers) {
+            return Err(grasp_setting_error("remove", "relay", relay));
+        }
+    }
+    for relay in &args.add_additional_relay {
+        if init::is_grasp_derived_relay(relay, resulting_grasp_servers) {
+            return Err(grasp_setting_error("add", "relay", relay));
+        }
+    }
+    let current_additional_relays: Vec<String> = my_ref
+        .relays
+        .iter()
+        .map(ToString::to_string)
+        .filter(|relay| !init::is_grasp_derived_relay(relay, &current_grasp_servers))
+        .collect();
+    let additional_relays = apply_list_actions(
+        "additional relay",
+        "--add-additional-relay",
+        "--remove-additional-relay",
+        &current_additional_relays,
+        &args.add_additional_relay,
+        &args.remove_additional_relay,
+        normalize_relay,
+    )?;
+
+    for clone in &args.remove_additional_clone {
+        if init::is_my_grasp_clone_url(clone, &my_pubkey)
+            && init::is_grasp_derived_clone(clone, &current_grasp_servers)
+        {
+            return Err(grasp_setting_error("remove", "clone URL", clone));
+        }
+    }
+    for clone in &args.add_additional_clone {
+        if init::is_my_grasp_clone_url(clone, &my_pubkey)
+            && init::is_grasp_derived_clone(clone, resulting_grasp_servers)
+        {
+            return Err(grasp_setting_error("add", "clone URL", clone));
+        }
+    }
+    let current_additional_clones: Vec<String> = my_ref
+        .git_server
+        .iter()
+        .filter(|clone| {
+            !init::is_my_grasp_clone_url(clone, &my_pubkey)
+                || !init::is_grasp_derived_clone(clone, &current_grasp_servers)
+        })
+        .cloned()
+        .collect();
+    let additional_clones = apply_list_actions(
+        "additional clone URL",
+        "--add-additional-clone",
+        "--remove-additional-clone",
+        &current_additional_clones,
+        &args.add_additional_clone,
+        &args.remove_additional_clone,
+        normalize_clone,
+    )?;
+
+    let current_hashtags = latest_event_repo_ref(&repo_ref)
+        .map_or_else(|| repo_ref.hashtags.clone(), |latest| latest.hashtags);
+    let hashtags = apply_list_actions(
+        "hashtag",
+        "--add-hashtag",
+        "--remove-hashtag",
+        &current_hashtags,
+        &args.add_hashtag,
+        &args.remove_hashtag,
+        init::validate_hashtag,
+    )?;
+
+    let hosting_mutation =
+        grasp_servers.is_some() || additional_relays.is_some() || additional_clones.is_some();
+    if hosting_mutation {
+        let final_additional_relays = additional_relays
+            .as_deref()
+            .unwrap_or(current_additional_relays.as_slice());
+        let final_additional_clones = additional_clones
+            .as_deref()
+            .unwrap_or(current_additional_clones.as_slice());
+        if resulting_grasp_servers.is_empty() && final_additional_relays.is_empty() {
+            return Err(cli_error(
+                "this edit would leave the repository without an announcement relay",
+                &[],
+                &["add a grasp server or an additional relay in the same command"],
+            ));
+        }
+        if resulting_grasp_servers.is_empty() && final_additional_clones.is_empty() {
+            return Err(cli_error(
+                "this edit would leave the repository without a git server",
+                &[],
+                &["add a grasp server or an additional clone in the same command"],
+            ));
+        }
+    }
+
     let acknowledgement = if let Some(value) = &args.acknowledge_maintainer_change {
         let target = parse_pubkey("--acknowledge-maintainer-change", value)?;
         if target == my_pubkey {
@@ -761,13 +1014,17 @@ pub async fn launch(
         }
     }
 
+    let replace_grasp_servers = grasp_servers.is_some();
+    let replace_additional_relays = additional_relays.is_some();
+    let replace_additional_clones = additional_clones.is_some();
+    let replace_hashtags = hashtags.is_some();
     let internal_args = init::SubCommandArgs {
         name: args.name.clone(),
-        identifier: args.identifier.clone(),
+        identifier: None,
         description: args.description.clone(),
-        grasp_server: args.grasp_server.clone(),
-        relay: args.relay.clone(),
-        clone: args.clone.clone(),
+        grasp_server: grasp_servers.unwrap_or_default(),
+        additional_relay: additional_relays.unwrap_or_default(),
+        additional_clone: additional_clones.unwrap_or_default(),
         web: args.web.clone(),
         upstream: args.upstream.clone(),
         other_maintainers: maintainers
@@ -780,7 +1037,11 @@ pub async fn launch(
         clear_lead: args.no_lead_maintainer,
         role_tags,
         preserve_selected_coordinate: true,
-        hashtag: args.hashtag.clone(),
+        replace_grasp_servers,
+        replace_additional_relays,
+        replace_additional_clones,
+        replace_hashtags,
+        hashtag: hashtags.unwrap_or_default(),
         earliest_unique_commit: args.earliest_unique_commit.clone(),
         clean: args.clean,
         private: args.private,
@@ -820,6 +1081,76 @@ mod tests {
 
     fn tag(letter: &str, pubkey: PublicKey) -> Vec<String> {
         vec![letter.to_string(), pubkey.to_string()]
+    }
+
+    #[test]
+    fn list_actions_are_targeted_repeatable_and_can_clear_a_collection() {
+        let current = vec!["one".to_string(), "two".to_string()];
+        let additions = vec!["three".to_string(), "four".to_string()];
+        let removals = vec!["one".to_string(), "two".to_string()];
+
+        assert_eq!(
+            apply_list_actions(
+                "setting",
+                "--add-setting",
+                "--remove-setting",
+                &current,
+                &additions,
+                &removals,
+                |value| Ok(value.to_string()),
+            )
+            .unwrap(),
+            Some(vec!["three".to_string(), "four".to_string()]),
+        );
+        assert_eq!(
+            apply_list_actions(
+                "setting",
+                "--add-setting",
+                "--remove-setting",
+                &current,
+                &[],
+                &current,
+                |value| Ok(value.to_string()),
+            )
+            .unwrap(),
+            Some(vec![]),
+        );
+    }
+
+    #[test]
+    fn list_actions_reject_duplicates_missing_values_and_conflicting_actions() {
+        let current = vec!["one".to_string()];
+        for result in [
+            apply_list_actions(
+                "setting",
+                "--add-setting",
+                "--remove-setting",
+                &current,
+                &["one".to_string()],
+                &[],
+                |value| Ok(value.to_string()),
+            ),
+            apply_list_actions(
+                "setting",
+                "--add-setting",
+                "--remove-setting",
+                &current,
+                &[],
+                &["two".to_string()],
+                |value| Ok(value.to_string()),
+            ),
+            apply_list_actions(
+                "setting",
+                "--add-setting",
+                "--remove-setting",
+                &current,
+                &["two".to_string()],
+                &["two".to_string()],
+                |value| Ok(value.to_string()),
+            ),
+        ] {
+            assert!(result.is_err());
+        }
     }
 
     #[test]

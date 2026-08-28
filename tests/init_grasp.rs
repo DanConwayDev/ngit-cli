@@ -280,14 +280,7 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
     );
 
     let edit = repo
-        .ngit([
-            "repo",
-            "edit",
-            "--name",
-            display_name,
-            "--grasp-server",
-            &grasp_url,
-        ])
+        .ngit(["repo", "edit", "--name", display_name])
         .output()
         .await?;
     assert!(

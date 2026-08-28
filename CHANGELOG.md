@@ -49,7 +49,7 @@ branches, and a skill installer/upgrader.
 - Add a multi-stage `Containerfile` for building a minimal Alpine-based ngit image, plus a CI smoke test that builds the image and runs `ngit --version`.
 - Add an opt-in `native-tls-roots` build feature that trusts certificate authorities installed on the host alongside WebPKI roots, enabling WSS connections to relays and GRASP servers using private, corporate, or development CAs.
 - `ngit repo --json` now exposes `selected_maintainer`, `confirmed_maintainers`, `invited_maintainers`, `lead_maintainer`, and the directional `maintainer_edges` alongside the backward-compatible full `maintainers` set.
-- Add `ngit skill install`, `upgrade`, and `status` commands plus local and global reminder opt-outs for repository-managed coding-agent guidance. Installs add a slim versioned `SKILL.md` and five on-demand `reference/*.md` guides to both Codex and Claude discovery paths, and append a compact pointer only to existing `AGENTS.md` or `CLAUDE.md` files that do not already mention ngit. Installs and upgrades preserve supported symlinks, protect modified or newer copies unless forced, and create distinct guidance-only commits; non-maintainers are advised to push the commit as a pull request, while `ngit init` leaves installation as an explicit suggested follow-up.
+- Add `ngit skill install`, `upgrade`, and `status` commands plus local and global reminder opt-outs for repository-managed coding-agent guidance. Installs add a slim versioned `SKILL.md` and six on-demand `reference/*.md` guides to both Codex and Claude discovery paths, and append a compact pointer only to existing `AGENTS.md` or `CLAUDE.md` files that do not already mention ngit. Installs and upgrades preserve supported symlinks, protect modified or newer copies unless forced, and create distinct guidance-only commits; non-maintainers are advised to push the commit as a pull request, while `ngit init` leaves installation as an explicit suggested follow-up.
 - Expand `--repo-relay-only` to all ngit commands that publish nostr events.
 - Git server clone URLs can use installed `git-remote-<scheme>` helpers for listing, fetching, and pushing. Installing a helper is treated as consent for signed repository announcements to invoke it, subject to Git's protocol policy; recursive `nostr`, internal `fd`, and GRASP-reserved `ws`/`wss` schemes are not delegated.
 - Global `--repo <REMOTE|NADDR|NOSTR-URL>` argument selects the target repository for repo-scoped operations (`send`, `issue`, `pr`, `repo`, `sync`, and every other command that resolves a repository coordinate). Available at any command position (`ngit --repo upstream issue create`, `ngit issue --repo upstream create`, `ngit issue create --repo upstream`). Value is first matched against configured remote names, then parsed as an naddr, then as a `nostr://` URL.
@@ -58,6 +58,12 @@ branches, and a skill installer/upgrader.
 
 ### Changed
 
+- Repository hosting flags now distinguish grasp-derived infrastructure from
+  deliberate additions. `ngit init` uses `--additional-relay` and
+  `--additional-clone`; `ngit repo edit` replaces whole-list
+  `--grasp-server`, `--relay`, `--clone`, and `--hashtag` flags with repeatable
+  `--add-*` and `--remove-*` actions. Repository identifiers can no longer be
+  changed through `repo edit` because doing so creates a new coordinate.
 - GRASP service URLs may include a non-root base path. Repository announcements, `nostr://` relay hints, Git push/fetch, and explicit GRASP-06 PR endpoints preserve the configured path.
 - `ngit account whoami` now inventories every usable stored account from local, global, and system Git config, `credentials.json`, and the OS credential store; groups aliases under each full npub; marks configured and active scopes; and prints shared guidance for one-shot ngit or Git use, local/global activation, alias creation, and removing a local override. `ngit account list` is a visible alias, while `ngit account login <account>` adds a concise activation form alongside the existing `--signer` spelling. A non-secret account index makes newly stored OS-keyring identities discoverable without relying on platform-specific keyring enumeration.
 - Logged-in accounts answer NIP-42 authentication challenges from repository

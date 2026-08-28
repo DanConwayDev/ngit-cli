@@ -24,8 +24,9 @@
 //!    (`"git"`) — no GRASP, so `pr/` pushes take the patch-kind path and
 //!    proposal event creation succeeds without needing a live git server (a
 //!    GRASP repo would fail earlier, while creating the PR event).
-//! 2. Publisher runs `ngit init --relay <relay> --clone <git_url>` and pushes
-//!    `main` so the announcement, state event and tracking refs exist.
+//! 2. Publisher runs `ngit init --additional-relay <relay> --additional-clone
+//!    <git_url>` and pushes `main` so the announcement, state event and
+//!    tracking refs exist.
 //! 3. Publisher advances `main` and creates a `pr/feature` branch with one
 //!    commit.
 //! 4. The only git server is taken offline (drop kills the listener).
@@ -193,9 +194,9 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let init_out = publisher
         .ngit([
             "init",
-            "--relay",
+            "--additional-relay",
             &relay_url,
-            "--clone",
+            "--additional-clone",
             &git_server_url,
             "-d",
             "--identifier",

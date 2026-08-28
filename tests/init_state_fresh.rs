@@ -34,12 +34,13 @@
 //!   `apply_lead_to_maintainers` unit tests in init.rs.
 //! - **Success — non-grasp clone path** (1 standalone test —
 //!   `vanilla_clone_url_passes_through_to_announcement`): drives `ngit init
-//!   --name --clone <vanilla_url> --relay <ws>` against a harness-managed
-//!   [`VanillaGitServer`](test_harness::VanillaGitServer), exercising the
-//!   `is_grasp_server_clone_url == false` arm of init.rs + repo_ref.rs. Single
-//!   test rather than an OnceCell snapshot because the non-grasp shape has only
-//!   one tag assertion worth pinning here (the verbatim clone-URL pass-through)
-//!   plus a server-liveness probe — sharing buys nothing.
+//!   --name --additional-clone <vanilla_url> --additional-relay <ws>` against a
+//!   harness-managed [`VanillaGitServer`](test_harness::VanillaGitServer),
+//!   exercising the `is_grasp_server_clone_url == false` arm of init.rs +
+//!   repo_ref.rs. Single test rather than an OnceCell snapshot because the
+//!   non-grasp shape has only one tag assertion worth pinning here (the
+//!   verbatim clone-URL pass-through) plus a server-liveness probe — sharing
+//!   buys nothing.
 //! - **Success — pre-existing `origin` on a reachable vanilla git server** (1
 //!   standalone test —
 //!   `pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_tag`):
@@ -207,7 +208,8 @@ async fn name_only_errors_missing_grasp_server() -> Result<()> {
 
 /// Equivalent of legacy
 /// `state_a_fresh::errors::relays_only_missing_name_and_servers`. With
-/// only `--relay` provided (and no `--clone` / `--grasp-server`),
+/// only `--additional-relay` provided (and no `--additional-clone` /
+/// `--grasp-server`),
 /// `validate_fresh` lists *both* missing flags and falls back to the
 /// umbrella message.
 #[tokio::test]
@@ -222,20 +224,20 @@ async fn relays_only_errors_missing_required_fields() -> Result<()> {
 
     let (repo, _state) = harness.arrange_init_state_a_fresh().await?;
     // Use the harness's default relay URL rather than a hard-coded
-    // localhost port: any reachable ws URL satisfies the `--relay`
+    // localhost port: any reachable ws URL satisfies `--additional-relay`
     // *parser*, and we want the test's success path to depend only on
     // hitting the validate_fresh "two missing" branch — not on whether
     // a particular hardcoded relay happens to be alive.
     let relay_url = harness.relay("default").url().to_string();
     let out = repo
-        .ngit(["init", "--relay", &relay_url])
+        .ngit(["init", "--additional-relay", &relay_url])
         .output()
         .await
-        .context("failed to spawn ngit init --relay")?;
+        .context("failed to spawn ngit init --additional-relay")?;
 
     assert!(
         !out.status.success(),
-        "expected `ngit init --relay <url>` to fail in State A; exited successfully",
+        "expected `ngit init --additional-relay <url>` to fail in State A; exited successfully",
     );
     let combined = format!(
         "{}{}",
@@ -413,7 +415,7 @@ async fn description_empty(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
 /// Three sub-properties of the same `clone` tag:
 ///
 /// - exactly one URL emitted (`--grasp-server` was passed once, and no
-///   `--clone` was added),
+///   `--additional-clone` was added),
 /// - URL starts with the grasp's HTTP base,
 /// - URL ends with `/<identifier>.git`,
 /// - URL contains the maintainer's npub (the `<git_data_path>/<npub>/...`
@@ -448,17 +450,18 @@ async fn clone_url_derived_from_grasp_server(#[future] snapshot: Arc<Snapshot>) 
 
 /// Equivalent of legacy
 /// `with_name_and_grasp_server::relays_include_grasp_derived`. The
-/// announcement's `relays` tag includes the grasp's ws URL (added by
-/// `apply_grasp_infrastructure` in `src/lib/repo_ref.rs:836`).
+/// announcement's `relays` tag contains only the grasp's ws URL (added by
+/// `apply_grasp_infrastructure`); account/default relays are not copied in as
+/// additional repository relays.
 #[rstest]
 #[tokio::test]
 async fn relays_include_grasp_derived(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
     let relays = tag_values(&s.announcement, "relays");
-    assert!(
-        relays.iter().any(|r| r == &s.grasp_relay_url),
-        "relays should include grasp-derived ws url ({}); got {relays:?}",
-        s.grasp_relay_url,
+    assert_eq!(
+        relays,
+        vec![s.grasp_relay_url.clone()],
+        "a grasp-backed repository should not gain default additional relays",
     );
     Ok(())
 }
@@ -519,12 +522,12 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 }
 
 // ---------------------------------------------------------------------------
-// Success — `--clone <vanilla_url> --relay <ws_url>` (non-grasp clone path)
+// Success — additional clone + relay (non-grasp clone path)
 // ---------------------------------------------------------------------------
 
-/// `--name X --clone <vanilla> --relay <ws>` exercises the non-grasp
-/// clone-URL arm — the `is_grasp_server_clone_url == false` branches
-/// throughout `init.rs` (e.g. line 274) and `repo_ref.rs`. The
+/// `--name X --additional-clone <vanilla> --additional-relay <ws>` exercises
+/// the non-grasp clone-URL arm — the `is_grasp_server_clone_url == false`
+/// branches throughout `init.rs` (e.g. line 274) and `repo_ref.rs`. The
 /// harness-managed [`VanillaGitServer`](test_harness::VanillaGitServer)
 /// stands in for "any plain git host"; under `NGITTEST=TRUE` the
 /// post-init `git push` (init.rs:1195) is suppressed, so the server's
@@ -543,11 +546,12 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 ///    the in-process Smart-HTTP server is actually serving requests during the
 ///    test, not just that `VanillaGitServer::start_empty` produced a URL
 ///    string.
-/// 3. ngit takes `--clone + --relay` together as satisfying `validate_fresh`'s
-///    server-infra requirement (no `--grasp-server` needed; init.rs:362-370),
-///    accepts the vanilla URL, and emits it **verbatim** in the announcement's
-///    `clone` tag — without the `<npub>/<identifier>.git` suffix synthesis that
-///    the grasp path applies (cf. `clone_url_derived_from_grasp_server` above).
+/// 3. ngit takes `--additional-clone + --additional-relay` together as
+///    satisfying `validate_fresh`'s server-infra requirement (no
+///    `--grasp-server` needed; init.rs:362-370), accepts the vanilla URL, and
+///    emits it **verbatim** in the announcement's `clone` tag — without the
+///    `<npub>/<identifier>.git` suffix synthesis that the grasp path applies
+///    (cf. `clone_url_derived_from_grasp_server` above).
 ///
 /// Uses a fresh `#[tokio::test(flavor = "multi_thread")]` rather than
 /// joining the shared snapshot above because the snapshot is keyed on
@@ -591,7 +595,7 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         String::from_utf8_lossy(&ls.stdout),
     );
 
-    // `--clone + --relay` together satisfy validate_fresh's server-infra
+    // The additional clone + relay together satisfy validate_fresh's server-infra
     // requirement (init.rs:362-370 `has_both_relays_and_clone_url`).
     // No `--grasp-server`, so this exercises the non-grasp clone-URL
     // arm exclusively.
@@ -600,14 +604,14 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
             "init",
             "--name",
             DISPLAY_NAME,
-            "--clone",
+            "--additional-clone",
             &vanilla_url,
-            "--relay",
+            "--additional-relay",
             &default_relay_url,
         ])
         .output()
         .await
-        .context("failed to spawn ngit init --name --clone --relay")?;
+        .context("failed to spawn ngit init with additional clone and relay")?;
     if !init_out.status.success() {
         bail!(
             "ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
@@ -631,7 +635,7 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         .with_context(|| {
             format!(
                 "no kind-30617 with `d` = {EXPECTED_IDENTIFIER:?} on the default \
-                 relay after `ngit init --name --clone --relay`"
+                 relay after `ngit init` with additional clone and relay"
             )
         })?;
 
@@ -791,7 +795,7 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
          ls-remote --tags reported: {tag_listing}",
     );
 
-    // Step 2: run `ngit init`. `--clone` + `--relay` together satisfy
+    // Step 2: run `ngit init`. The additional clone + relay together satisfy
     // `validate_fresh`'s server-infra requirement (init.rs:362-370); the
     // origin remote is already pointing at this URL so the origin-state
     // branch (init.rs:1213-1257) is the one we want to fire.
@@ -800,9 +804,9 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
             "init",
             "--name",
             DISPLAY_NAME,
-            "--clone",
+            "--additional-clone",
             &vanilla_url,
-            "--relay",
+            "--additional-relay",
             &default_relay_url,
         ])
         .output()

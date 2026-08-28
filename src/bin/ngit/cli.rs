@@ -868,7 +868,8 @@ pub enum RepoCommands {
     Init(sub_commands::init::SubCommandArgs),
     /// update repository metadata on nostr
     #[command(
-        long_about = "update an existing repository announcement on nostr\n\nrepository announcements are created with `ngit init`; use this command for every later metadata or roster change"
+        long_about = "update an existing repository announcement on nostr\n\nrepository announcements are created with `ngit init`; use this command for every later metadata or roster change. Omitted settings are preserved; collection settings use targeted --add-* and --remove-* actions",
+        after_long_help = "Examples:\n  ngit repo edit --description \"New description\"\n  ngit repo edit --add-grasp-server grasp.example.com\n  ngit repo edit --remove-additional-relay wss://old.example.com --add-additional-relay wss://new.example.com"
     )]
     Edit(sub_commands::repo::edit::SubCommandArgs),
     /// accept an invitation to co-maintain a repository
@@ -1309,6 +1310,64 @@ mod tests {
             assert!(
                 Cli::try_parse_from(["ngit", "init", option, "npub1invalid"]).is_err(),
                 "ngit init unexpectedly accepted {option}",
+            );
+        }
+    }
+
+    #[test]
+    fn repository_settings_use_explicit_initial_and_edit_flags() {
+        for args in [
+            [
+                "ngit",
+                "init",
+                "--additional-relay",
+                "wss://relay.example.com",
+                "--additional-clone",
+                "https://git.example.com/repo.git",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "repo",
+                "edit",
+                "--add-grasp-server",
+                "grasp.example.com",
+                "--remove-grasp-server",
+                "old-grasp.example.com",
+                "--add-additional-relay",
+                "wss://relay.example.com",
+                "--remove-additional-relay",
+                "wss://old-relay.example.com",
+                "--add-additional-clone",
+                "https://git.example.com/repo.git",
+                "--remove-additional-clone",
+                "https://old-git.example.com/repo.git",
+                "--add-hashtag",
+                "rust",
+                "--remove-hashtag",
+                "nostr",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("failed to parse: {error}"));
+        }
+
+        for removed_flag in [
+            "--identifier",
+            "--grasp-server",
+            "--relay",
+            "--clone",
+            "--hashtag",
+        ] {
+            assert!(
+                Cli::try_parse_from(["ngit", "repo", "edit", removed_flag, "value"]).is_err(),
+                "repo edit unexpectedly accepted removed flag {removed_flag}",
+            );
+        }
+        for removed_flag in ["--relay", "--clone"] {
+            assert!(
+                Cli::try_parse_from(["ngit", "init", removed_flag, "value"]).is_err(),
+                "ngit init unexpectedly accepted removed flag {removed_flag}",
             );
         }
     }
