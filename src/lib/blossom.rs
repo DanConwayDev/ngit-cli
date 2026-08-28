@@ -621,7 +621,7 @@ async fn upload_authorization(snapshot: &FileSnapshot, signer: &NgitSigner) -> R
         Tag::expiration(expires),
     ]);
     signer
-        .sign_event_builder(builder)
+        .sign_event_builder_with_description(builder, "Blossom upload authorization")
         .await
         .context("failed to sign the Blossom upload authorization")
 }

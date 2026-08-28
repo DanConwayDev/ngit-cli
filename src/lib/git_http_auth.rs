@@ -104,10 +104,13 @@ async fn build_private_git_authorization(
     // method actually used. This is an intentional GRASP-08/Buzz contract,
     // not a NIP-98 spec mismatch — do not "fix" it to match the HTTP verb.
     let event = signer
-        .sign_event_builder(EventBuilder::new(NIP98_KIND, "").tags([
-            Tag::parse(["u", canonical.as_str()])?,
-            Tag::parse(["method", "GET"])?,
-        ]))
+        .sign_event_builder_with_description(
+            EventBuilder::new(NIP98_KIND, "").tags([
+                Tag::parse(["u", canonical.as_str()])?,
+                Tag::parse(["method", "GET"])?,
+            ]),
+            "private repository HTTP authorization",
+        )
         .await
         .context("failed to sign private repository HTTP authorization")?;
     Ok(Some((

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nostr::{
@@ -44,6 +44,24 @@ impl NgitSigner {
     }
 
     pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event> {
+        self.sign_event_with_description(unsigned, "event").await
+    }
+
+    /// Sign an event while identifying remote-signer work on stderr.
+    ///
+    /// Keeping the progress message at this boundary ensures every event
+    /// signing path remains visible, including protocol authorizations which
+    /// do not go through the higher-level client helpers.
+    pub async fn sign_event_with_description(
+        &self,
+        unsigned: UnsignedEvent,
+        description: &str,
+    ) -> Result<Event> {
+        self.with_remote_signing_progress(description, self.sign_event_inner(unsigned))
+            .await
+    }
+
+    async fn sign_event_inner(&self, unsigned: UnsignedEvent) -> Result<Event> {
         match self {
             Self::Keys(k) => k.sign_event(unsigned).map_err(|e| anyhow!(e)),
             Self::Connect(c) => {
@@ -56,9 +74,41 @@ impl NgitSigner {
     }
 
     pub async fn sign_event_builder(&self, builder: EventBuilder) -> Result<Event> {
-        let public_key = self.get_public_key().await?;
-        let unsigned = builder.finalize_unsigned(public_key);
-        self.sign_event(unsigned).await
+        self.sign_event_builder_with_description(builder, "event")
+            .await
+    }
+
+    /// Finalize and sign an event while identifying remote-signer work on
+    /// stderr.
+    pub async fn sign_event_builder_with_description(
+        &self,
+        builder: EventBuilder,
+        description: &str,
+    ) -> Result<Event> {
+        self.with_remote_signing_progress(description, async move {
+            let public_key = self.get_public_key().await?;
+            let unsigned = builder.finalize_unsigned(public_key);
+            self.sign_event_inner(unsigned).await
+        })
+        .await
+    }
+
+    async fn with_remote_signing_progress<T>(
+        &self,
+        description: &str,
+        operation: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        if !self.is_remote() {
+            return operation.await;
+        }
+
+        let term = console::Term::stderr();
+        term.write_line(&remote_signing_message(description))?;
+        let result = operation.await;
+        if result.is_ok() {
+            term.clear_last_lines(1)?;
+        }
+        result
     }
 
     pub async fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String> {
@@ -90,6 +140,10 @@ impl NgitSigner {
     pub fn is_remote(&self) -> bool {
         matches!(self, Self::Connect(_))
     }
+}
+
+fn remote_signing_message(description: &str) -> String {
+    format!("signing event ({description}) with remote signer...")
 }
 
 impl std::fmt::Debug for NgitSigner {
@@ -129,6 +183,14 @@ mod tests {
 
     fn unsigned_event(keys: &Keys, content: &str) -> UnsignedEvent {
         EventBuilder::new(Kind::TextNote, content).finalize_unsigned(keys.public_key())
+    }
+
+    #[test]
+    fn remote_signing_progress_identifies_the_operation() {
+        assert_eq!(
+            remote_signing_message("Blossom upload authorization"),
+            "signing event (Blossom upload authorization) with remote signer..."
+        );
     }
 
     #[test]

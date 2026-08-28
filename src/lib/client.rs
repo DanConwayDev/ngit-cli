@@ -1650,23 +1650,10 @@ pub async fn sign_event(
     signer: &Arc<NgitSigner>,
     description: String,
 ) -> Result<nostr::prelude::Event> {
-    if signer.is_remote() {
-        let term = console::Term::stderr();
-        term.write_line(&format!(
-            "signing event ({description}) with remote signer..."
-        ))?;
-        let event = signer
-            .sign_event_builder(event_builder)
-            .await
-            .context("failed to sign event")?;
-        term.clear_last_lines(1)?;
-        Ok(event)
-    } else {
-        signer
-            .sign_event_builder(event_builder)
-            .await
-            .context("failed to sign event")
-    }
+    signer
+        .sign_event_builder_with_description(event_builder, &description)
+        .await
+        .context("failed to sign event")
 }
 
 pub async fn sign_draft_event(
@@ -1674,23 +1661,10 @@ pub async fn sign_draft_event(
     signer: &Arc<NgitSigner>,
     description: String,
 ) -> Result<nostr::prelude::Event> {
-    if signer.is_remote() {
-        let term = console::Term::stderr();
-        term.write_line(&format!(
-            "signing event ({description}) with remote signer..."
-        ))?;
-        let event = signer
-            .sign_event(draft_event)
-            .await
-            .context("failed to sign event")?;
-        term.clear_last_lines(1)?;
-        Ok(event)
-    } else {
-        signer
-            .sign_event(draft_event)
-            .await
-            .context("failed to sign event")
-    }
+    signer
+        .sign_event_with_description(draft_event, &description)
+        .await
+        .context("failed to sign event")
 }
 
 pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude::PublicKey> {

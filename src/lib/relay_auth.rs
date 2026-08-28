@@ -183,8 +183,9 @@ impl Authenticator for PolicyAuthenticator {
 
             let builder =
                 ClientAuthentication::new(challenge, relay_url.clone()).into_event_builder();
+            let description = format!("relay authentication for {relay_url}");
             signer
-                .sign_event_builder(builder)
+                .sign_event_builder_with_description(builder, &description)
                 .await
                 .map_err(|error| NostrSdkError::policy(format!("{error:#}")))
         })
