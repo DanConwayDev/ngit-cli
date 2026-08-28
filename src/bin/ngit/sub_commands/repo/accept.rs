@@ -55,6 +55,7 @@ async fn preflight_existing_announcement(
     else {
         return Ok(());
     };
+    let existing_event_id = existing.id.to_hex();
     let existing = RepoRef::try_from((existing, None))
         .context("failed to parse your existing same-identifier announcement")?;
     let selected_roster = repo_ref
@@ -75,15 +76,51 @@ async fn preflight_existing_announcement(
         selected,
         my_pubkey,
     )?;
-    super::preflight::require_equivalent_activating_state(
-        git_repo_path,
-        repo_ref,
-        my_pubkey,
-        true,
-        force_requested,
-        &discovered,
-    )
-    .await
+    let force_guidance = if force_requested {
+        "--force cannot replace an existing repository announcement"
+    } else {
+        "--force cannot override repository identity, relationships, or announcement history"
+    };
+    Err(cli_error_with_category(
+        "maintainer_acceptance_existing_announcement",
+        "accepting would replace your existing same-identifier repository announcement",
+        &[("existing event", existing_event_id.as_str())],
+        &[
+            "preserve that repository under another identifier or reconcile it with this repository first",
+            force_guidance,
+        ],
+    ))
+}
+
+fn require_pending_invitation(
+    repo_ref: &RepoRef,
+    selected: nostr::prelude::PublicKey,
+    my_pubkey: nostr::prelude::PublicKey,
+) -> Result<()> {
+    if selected == my_pubkey {
+        return Err(cli_error(
+            "you are already the selected maintainer of this repository",
+            &[],
+            &["use `ngit repo edit` to update your announcement"],
+        ));
+    }
+    if repo_ref.confirmed_maintainers().contains(&my_pubkey) {
+        return Err(cli_error(
+            "you are already a confirmed maintainer of this repository",
+            &[],
+            &["use `ngit repo edit` to update your announcement"],
+        ));
+    }
+    if repo_ref.invited_maintainers().contains(&my_pubkey) {
+        return Ok(());
+    }
+    let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
+    Err(cli_error_with_category(
+        "maintainer_invitation_missing",
+        "you have not been invited as a maintainer of this repository",
+        &[("selected maintainer", selected_npub.as_str())],
+        &["the selected maintainer must add your npub to their announcement first"],
+    ))
 }
 
 pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
@@ -139,23 +176,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     // Validate state
     let selected = repo_ref.selected_maintainer;
 
-    if selected == my_pubkey {
-        return Err(cli_error(
-            "you are already the selected maintainer of this repository",
-            &[],
-            &["use `ngit repo edit` to update your announcement"],
-        ));
-    }
-
-    if !repo_ref.maintainers.contains(&my_pubkey) {
-        let selected_npub = selected.to_bech32().unwrap_or_else(|_| selected.to_hex());
-        return Err(cli_error_with_category(
-            "maintainer_invitation_missing",
-            "you have not been invited as a maintainer of this repository",
-            &[("selected maintainer", selected_npub.as_str())],
-            &["the selected maintainer must add your npub to their announcement first"],
-        ));
-    }
+    require_pending_invitation(&repo_ref, selected, my_pubkey)?;
 
     preflight_existing_announcement(
         git_repo_path,

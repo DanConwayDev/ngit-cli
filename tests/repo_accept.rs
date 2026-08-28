@@ -293,43 +293,91 @@ async fn accept_with_defaults_publishes_announcement_without_rerooting_resolutio
 }
 
 #[tokio::test]
-async fn accept_refuses_preexisting_divergent_state_without_republishing() -> Result<()> {
+async fn repeated_acceptance_refuses_without_republishing() -> Result<()> {
+    let (harness, published, clone, co_maintainer_pubkey) =
+        arrange_invited_clone("repo-repeat-accept").await?;
+    accept_and_assert_resolution_untouched(&clone, &[]).await?;
+
+    let before = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier.clone()),
+        )
+        .await?
+        .into_iter()
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("first acceptance announcement was not published")?;
+
+    let output = clone.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        !output.status.success(),
+        "an already confirmed maintainer must not accept again",
+    );
+
+    let after = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .author(co_maintainer_pubkey)
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(published.identifier),
+        )
+        .await?
+        .into_iter()
+        .max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+        .context("acceptance announcement vanished")?;
+    assert_eq!(
+        after.id, before.id,
+        "repeat acceptance must publish nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accept_refuses_an_existing_announcement_without_republishing() -> Result<()> {
     let (harness, published, clone, co_maintainer_pubkey) =
         arrange_invited_clone("repo-accept-state-collision").await?;
     let co_keys = published.additional_maintainer_keys[0].clone();
-    let lead = published.maintainer_keys.public_key();
     let now = Timestamp::now();
     let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
         .tags([
             Tag::identifier(published.identifier.clone()),
-            Tag::parse(["M", &lead.to_string(), &now.as_secs().to_string()])?,
             Tag::parse([
                 "m",
                 &co_maintainer_pubkey.to_string(),
                 &now.as_secs().to_string(),
             ])?,
             Tag::parse([
-                "maintainers",
-                &lead.to_string(),
+                "o",
                 &co_maintainer_pubkey.to_string(),
+                &now.as_secs().to_string(),
             ])?,
-        ])
-        .finalize(&co_keys)?;
-    let state = EventBuilder::new(Kind::Custom(30618), "")
-        .tags([
-            Tag::identifier(published.identifier.clone()),
+            Tag::parse(["maintainers", &co_maintainer_pubkey.to_string()])?,
+            Tag::parse(["r", &published.initial_oid, "euc"])?,
             Tag::parse([
-                "refs/heads/experiment",
-                "1111111111111111111111111111111111111111",
+                "u",
+                &format!("30617:{}:experimental-upstream", co_maintainer_pubkey),
             ])?,
+            Tag::parse(["x-preserve", "signed-by-another-client"])?,
         ])
         .finalize(&co_keys)?;
-    publish_to_relay(harness.relay("default").url(), &[&announcement, &state]).await?;
+    publish_to_relay(harness.relay("default").url(), &[&announcement]).await?;
 
     let output = clone.ngit(["repo", "accept"]).output().await?;
     assert!(
         !output.status.success(),
-        "divergent state must block acceptance"
+        "an existing same-identifier announcement must block acceptance"
     );
 
     let surviving = harness
