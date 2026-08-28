@@ -2068,6 +2068,31 @@ pub async fn get_repo_ref_from_cache(
             );
         }
     }
+    if !events
+        .values()
+        .any(|event| event.pubkey == repo_coordinate.public_key)
+    {
+        // Keep a departed selected author's event for self-role and forwarding
+        // analysis, but never as authoritative repository data. Without this
+        // discovery-only copy confirmed_maintainers() would not see the ended
+        // self-role and would incorrectly seed the selected author again.
+        if let Some(e) = repo_events
+            .iter()
+            .find(|event| event.pubkey == repo_coordinate.public_key)
+        {
+            events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: e.kind,
+                        identifier: e.tags.identifier().unwrap().to_string(),
+                        public_key: e.pubkey,
+                    },
+                    relays: vec![],
+                },
+                e.clone(),
+            );
+        }
+    }
 
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
@@ -2107,6 +2132,15 @@ pub async fn get_repo_ref_from_cache(
         private: false,
         ..repo_ref
     };
+
+    if !repo_ref
+        .confirmed_maintainers()
+        .contains(&repo_coordinate.public_key)
+    {
+        bail!(
+            "the selected repository coordinate author is no longer a confirmed maintainer; forwarding through a selected non-member is not supported in this release"
+        );
+    }
 
     // `o` role assignments only carry authority from `M`/`m` members
     // (RepoRef::assigned_moderators), which needs the consolidated events
@@ -5574,6 +5608,83 @@ mod confirmed_repository_data_tests {
                 .map(|coordinate| coordinate.public_key)
                 .collect::<HashSet<_>>(),
             HashSet::from([owner])
+        );
+    }
+
+    #[tokio::test]
+    async fn departed_selected_coordinate_seeds_no_member_authority() {
+        let selected_keys = Keys::generate();
+        let lead_keys = Keys::generate();
+        let selected = selected_keys.public_key();
+        let lead = lead_keys.public_key();
+        let events = [
+            announcement(
+                &selected_keys,
+                Announcement {
+                    created_at: 10,
+                    name: "departed selected coordinate",
+                    clone_url: "https://selected.example/repo.git",
+                    relay: "wss://selected.example",
+                    blossom: "https://selected.example/blossom",
+                    private: false,
+                    roles: vec![
+                        vec!["M".to_string(), lead.to_string(), "5".to_string()],
+                        vec![
+                            "m".to_string(),
+                            selected.to_string(),
+                            "1".to_string(),
+                            "9".to_string(),
+                        ],
+                    ],
+                },
+            ),
+            announcement(
+                &lead_keys,
+                Announcement {
+                    created_at: 11,
+                    name: "new lead",
+                    clone_url: "https://lead.example/repo.git",
+                    relay: "wss://lead.example",
+                    blossom: "https://lead.example/blossom",
+                    private: false,
+                    roles: vec![
+                        vec!["M".to_string(), lead.to_string(), "5".to_string()],
+                        vec![
+                            "m".to_string(),
+                            selected.to_string(),
+                            "1".to_string(),
+                            "9".to_string(),
+                        ],
+                    ],
+                },
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        for event in events {
+            save_event_in_local_cache(dir.path(), &event).await.unwrap();
+        }
+
+        let error = match get_repo_ref_from_cache(
+            Some(dir.path()),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: selected,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a departed selected coordinate must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "selected repository coordinate author is no longer a confirmed maintainer"
+            ),
         );
     }
 }

@@ -74,6 +74,10 @@ safe, but must not silently guess at membership, history, or repository state.
 
 ## Repository-component workflows
 
+- Resolve an explicit lead from a selected forwarding coordinate whose author
+  has ended their own role, without treating that selected non-member as an
+  authority seed. Until this topology is supported, repository data and member
+  actions reached only through it remain fail-closed.
 - Support deliberate add or acceptance when it would join another
   same-identifier maintainer component.
 - Define explicit repository adoption and multi-component merge workflows,
