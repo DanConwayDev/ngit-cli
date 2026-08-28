@@ -166,7 +166,6 @@ async fn acknowledgement_adopts_the_confirmed_acceptance_start() -> Result<()> {
             String::from_utf8_lossy(&accepted.stderr),
         );
     }
-
     let bob_announcement = latest_announcement(&harness, bob, &published.identifier).await?;
     let accepted_at = active_role_start(&bob_announcement, "m", bob)
         .context("Bob's acceptance has no numeric active self-role start")?;
@@ -218,6 +217,11 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
             String::from_utf8_lossy(&accepted.stderr),
         );
     }
+    let bob_origin = bob_repo
+        .config("remote.origin.url")
+        .await?
+        .context("Bob's origin is missing before repository edit")?;
+    assert!(bob_repo.config("nostr.repo").await?.is_none());
 
     let before = latest_announcement(&harness, alice, &published.identifier).await?;
     let premature = alice_repo
@@ -237,6 +241,16 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
     );
 
     edit_ok(&bob_repo, &["--lead-maintainer", &bob_npub]).await?;
+    assert_eq!(
+        bob_repo.config("remote.origin.url").await?,
+        Some(bob_origin),
+        "repository edits must not change the selected remote",
+    );
+    assert_eq!(
+        bob_repo.config("nostr.repo").await?,
+        None,
+        "repository edits must not re-root nostr.repo on their publisher",
+    );
     let prepared = latest_announcement(&harness, bob, &published.identifier).await?;
     assert_eq!(
         tag_values(&prepared, "maintainers")

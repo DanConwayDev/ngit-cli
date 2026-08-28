@@ -516,6 +516,7 @@ pub async fn launch(
         replace_maintainers: relationship_action,
         clear_lead: args.no_lead_maintainer,
         role_tags,
+        preserve_selected_coordinate: true,
         hashtag: args.hashtag.clone(),
         earliest_unique_commit: args.earliest_unique_commit.clone(),
         clean: args.clean,

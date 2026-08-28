@@ -167,6 +167,7 @@ struct ResolvedFields {
     /// `--lead-maintainer`, or my own announcement's existing assertion
     /// while the lead remains in `maintainers`. `None` emits only `m` tags.
     lead: Option<PublicKey>,
+    preserve_selected_coordinate: bool,
 }
 
 /// Apply the resolved lead (`M` role) to the maintainer listing.
@@ -587,6 +588,9 @@ pub struct SubCommandArgs {
     /// Exact role history prepared by a named lifecycle action.
     #[clap(skip)]
     pub(crate) role_tags: Option<Vec<nostr::prelude::Tag>>,
+    /// Keep the checkout rooted at its selected maintainer after publication.
+    #[clap(skip)]
+    pub(crate) preserve_selected_coordinate: bool,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
     pub(crate) hashtag: Vec<String>,
@@ -1328,6 +1332,7 @@ fn resolve_fields(
         extra_tags,
         role_tags,
         lead,
+        preserve_selected_coordinate: args.preserve_selected_coordinate,
     })
 }
 
@@ -1447,6 +1452,7 @@ async fn publish_and_finalize(
     selected_repo: Option<&ResolvedRepoCoordinate>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
+    let preserve_selected_coordinate = fields.preserve_selected_coordinate;
 
     // Step 1: Build RepoRef
     //
@@ -1637,34 +1643,36 @@ async fn publish_and_finalize(
     )
     .await?;
 
-    // Step 6: Set git config
-    git_repo.save_git_config_item(
-        "nostr.repo",
-        &Nip19Coordinate {
-            coordinate: Coordinate {
-                kind: Kind::GitRepoAnnouncement,
-                public_key: user_ref.public_key,
-                identifier: fields.identifier.clone(),
-            },
-            relays: vec![],
-        }
-        .to_bech32()?,
-        false,
-    )?;
-
-    // Step 7: Set origin remote
     let nostr_url = nostr_url_decoded.to_string();
-    if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
-        let previous_url = remote.url().ok().map(std::string::ToString::to_string);
-        drop(remote);
-        if let Some(previous_url) = previous_url {
-            preserve_replaced_origin_remote(git_repo, &previous_url);
+    if !preserve_selected_coordinate {
+        // Step 6: Set git config
+        git_repo.save_git_config_item(
+            "nostr.repo",
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: user_ref.public_key,
+                    identifier: fields.identifier.clone(),
+                },
+                relays: vec![],
+            }
+            .to_bech32()?,
+            false,
+        )?;
+
+        // Step 7: Set origin remote
+        if let Ok(remote) = git_repo.git_repo.find_remote("origin") {
+            let previous_url = remote.url().ok().map(std::string::ToString::to_string);
+            drop(remote);
+            if let Some(previous_url) = previous_url {
+                preserve_replaced_origin_remote(git_repo, &previous_url);
+            }
+            git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
+        } else {
+            git_repo.git_repo.remote("origin", &nostr_url)?;
         }
-        git_repo.git_repo.remote_set_url("origin", &nostr_url)?;
-    } else {
-        git_repo.git_repo.remote("origin", &nostr_url)?;
+        println!("set remote origin to nostr url");
     }
-    println!("set remote origin to nostr url");
 
     // Step 8: Push/sync
     match state_action {
