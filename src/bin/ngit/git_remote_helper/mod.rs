@@ -88,6 +88,22 @@ fn command_config_value_from(command: &mut Command, key: &str) -> Result<Option<
     ))
 }
 
+/// Whether this repository operation still needs account-private relay
+/// discovery through kind 10318.
+///
+/// A verified repository announcement records its privacy classification in
+/// `nostr.private` and its repository relays in the local cache. An
+/// unclassified private-service URL can instead use its NIP-11 result. Only a
+/// still-unclassified repository without that direct private hint needs the
+/// account's encrypted relay list to search for a private announcement.
+fn needs_private_relay_discovery(
+    configured_privacy: Option<bool>,
+    has_cached_announcement: bool,
+    has_nip11_private_relays: bool,
+) -> bool {
+    !has_cached_announcement && configured_privacy != Some(false) && !has_nip11_private_relays
+}
+
 #[derive(Default, Clone)]
 struct PushOptions {
     title: Option<String>,
@@ -248,26 +264,36 @@ pub async fn run(args: &[String]) -> Result<()> {
     };
 
     let git_repo_path = git_repo.get_path()?;
-    // an explicit local classification answers the privacy question, so the
-    // NIP-11 probes (up to their full timeout on every git operation) are
-    // only paid when `nostr.private` is not set yet
+    let cached_repo_ref =
+        get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate)
+            .await
+            .ok();
+    // A cached announcement or explicit local classification answers the
+    // privacy question, so NIP-11 probes (up to their full timeout on every
+    // git operation) are only paid while the repository is unresolved.
     let configured_privacy = git_repo
         .git_repo
         .config()
         .ok()
         .and_then(|config| config.get_bool("nostr.private").ok());
-    let nip11_private_relays = if configured_privacy.is_some() {
+    let nip11_private_relays = if configured_privacy.is_some() || cached_repo_ref.is_some() {
         vec![]
     } else {
         discover_private_repository_relays(&decoded_nostr_url.coordinate.relays).await
     };
-    let repository_is_known_private =
-        configured_privacy == Some(true) || !nip11_private_relays.is_empty();
+    let repository_is_known_private = configured_privacy == Some(true)
+        || cached_repo_ref
+            .as_ref()
+            .is_some_and(|repo_ref| repo_ref.private)
+        || !nip11_private_relays.is_empty();
 
     let _ = set_git_timeout(Some(&git_repo));
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    if let Some(repo_ref) = cached_repo_ref.as_ref().filter(|repo_ref| repo_ref.private) {
+        client.nip42_register_private_repo_relays(repo_ref.relays.clone());
+    }
     client.nip42_register_private_repo_relays(nip11_private_relays.clone());
 
     let login = match load_existing_login(
@@ -284,31 +310,38 @@ pub async fn run(args: &[String]) -> Result<()> {
     {
         Ok((signer, cached_user_ref, _)) => {
             client.set_signer(signer.clone()).await;
-            // A cached NIP-65 list lets the steady-state path refresh public
-            // account data and kind 10318 in one REQ on each mailbox relay.
-            // If setup of that combined fetch fails, retain the old direct
-            // lookup as a degraded fallback.
-            let private_discovery = if let Ok((_, private_discovery)) =
-                refresh_user_and_private_git_relays(
+            let private_discovery = if needs_private_relay_discovery(
+                configured_privacy,
+                cached_repo_ref.is_some(),
+                !nip11_private_relays.is_empty(),
+            ) {
+                // A cached NIP-65 list lets the discovery path refresh public
+                // account data and kind 10318 in one REQ on each mailbox
+                // relay. If setup of that combined fetch fails, retain the
+                // old direct lookup as a degraded fallback.
+                if let Ok((_, private_discovery)) = refresh_user_and_private_git_relays(
                     &cached_user_ref.public_key,
                     &client,
                     Some(git_repo_path),
                     &signer,
                 )
                 .await
-            {
-                private_discovery
-            } else {
-                let mut discovery_relays = cached_user_ref.relays.read();
-                for relay in cached_user_ref.relays.write() {
-                    if !discovery_relays.contains(&relay) {
-                        discovery_relays.push(relay);
+                {
+                    private_discovery
+                } else {
+                    let mut discovery_relays = cached_user_ref.relays.read();
+                    for relay in cached_user_ref.relays.write() {
+                        if !discovery_relays.contains(&relay) {
+                            discovery_relays.push(relay);
+                        }
                     }
+                    if discovery_relays.is_empty() {
+                        discovery_relays.extend(client.get_relay_default_set().iter().cloned());
+                    }
+                    discover_private_git_relay_list(&client, discovery_relays, &signer).await
                 }
-                if discovery_relays.is_empty() {
-                    discovery_relays.extend(client.get_relay_default_set().iter().cloned());
-                }
-                discover_private_git_relay_list(&client, discovery_relays, &signer).await
+            } else {
+                PrivateGitRelayDiscovery::Absent
             };
             Some((signer, private_discovery))
         }
@@ -639,6 +672,28 @@ mod tests {
             command_config_value_from(&mut command, "nostr.signer").unwrap(),
             Some("Dan Conway".to_string())
         );
+    }
+
+    #[test]
+    fn classified_repository_skips_private_relay_discovery() {
+        assert!(!needs_private_relay_discovery(Some(false), false, false));
+    }
+
+    #[test]
+    fn cached_announcement_skips_private_relay_discovery() {
+        assert!(!needs_private_relay_discovery(None, true, false));
+        assert!(!needs_private_relay_discovery(Some(true), true, false));
+    }
+
+    #[test]
+    fn nip11_private_hint_skips_account_private_relay_discovery() {
+        assert!(!needs_private_relay_discovery(None, false, true));
+    }
+
+    #[test]
+    fn unresolved_repository_without_private_hint_needs_private_relay_discovery() {
+        assert!(needs_private_relay_discovery(None, false, false));
+        assert!(needs_private_relay_discovery(Some(true), false, false));
     }
 
     /// A `nostr.signer` from git *config* must never count as a per-command
