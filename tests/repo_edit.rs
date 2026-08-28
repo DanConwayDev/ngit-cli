@@ -181,3 +181,87 @@ async fn acknowledgement_adopts_the_confirmed_acceptance_start() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (alice_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("prepared handover".into()),
+            identifier: Some("prepared-handover".into()),
+            additional_maintainer_count: 2,
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = published.additional_maintainer_keys[0].clone();
+    let bob = bob_keys.public_key();
+    let carol = published.additional_maintainer_keys[1].public_key();
+    let bob_npub = bob.to_bech32()?;
+    harness.publish_user_relay_list(&bob_keys).await?;
+    let bob_repo = harness
+        .clone_published_repo_as(&published, &bob_keys)
+        .await?;
+    let accepted = bob_repo.ngit(["repo", "accept"]).output().await?;
+    if !accepted.status.success() {
+        bail!(
+            "ngit repo accept exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            accepted.status,
+            String::from_utf8_lossy(&accepted.stdout),
+            String::from_utf8_lossy(&accepted.stderr),
+        );
+    }
+
+    let before = latest_announcement(&harness, alice, &published.identifier).await?;
+    let premature = alice_repo
+        .ngit(["repo", "edit", "--lead-maintainer", &bob_npub])
+        .output()
+        .await?;
+    assert!(
+        !premature.status.success(),
+        "handover must wait for the candidate's complete active roster",
+    );
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        before.id,
+        "a premature handover must not publish",
+    );
+
+    edit_ok(&bob_repo, &["--lead-maintainer", &bob_npub]).await?;
+    let prepared = latest_announcement(&harness, bob, &published.identifier).await?;
+    assert_eq!(
+        tag_values(&prepared, "maintainers")
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        [alice.to_string(), bob.to_string(), carol.to_string()]
+            .into_iter()
+            .collect(),
+        "the candidate should actively list the complete current roster",
+    );
+    assert!(active_role_start(&prepared, "M", bob).is_some());
+
+    edit_ok(&alice_repo, &["--lead-maintainer", &bob_npub]).await?;
+    let handed_over = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        tag_values(&handed_over, "maintainers")
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        [alice.to_string(), bob.to_string()].into_iter().collect(),
+    );
+    assert!(handed_over.tags.iter().any(|tag| {
+        let tag = tag.as_slice();
+        tag.first().map(String::as_str) == Some("m")
+            && tag.get(1) == Some(&carol.to_string())
+            && tag.last().map(String::as_str) == Some("defer")
+    }));
+    Ok(())
+}

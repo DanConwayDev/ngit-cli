@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
-use test_harness::{FabricateAnnouncementOpts, Harness, tag_value, tag_values};
+use test_harness::{FabricateAnnouncementOpts, Harness, RoleEntry, tag_value, tag_values};
 
 /// The fabricated announcement's git server is unreachable, so a
 /// *successful* republish still exits non-zero at the post-publish push
@@ -193,13 +193,17 @@ async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
     let third = third_keys.public_key();
     let lead_npub = lead.to_bech32()?;
 
-    // The lead's own announcement keeps `third` listed *and* acknowledges
-    // me, so their listing carries authority the moment my collapsed
-    // listing publishes: no --force required.
+    // The proposed lead first declares themselves lead with the complete
+    // current roster.
     harness
         .publish_fabricated_announcement(
             &lead_keys,
             FabricateAnnouncementOpts {
+                roles: vec![
+                    RoleEntry::lead(lead),
+                    RoleEntry::co_maintainer(me),
+                    RoleEntry::co_maintainer(third),
+                ],
                 maintainers_tag: Some(vec![lead, me, third]),
                 created_at: Some(Timestamp::now() - 30u64),
                 ..FabricateAnnouncementOpts::new(identifier.clone(), vec![])
@@ -239,6 +243,13 @@ async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
     assert!(
         !maintainers.contains(&third.to_string()),
         "the covered member is still dropped from *my* listing; got {maintainers:?}",
+    );
+    let third_history = role_entries(&announcement, "m", &third);
+    assert_eq!(third_history.len(), 1);
+    assert_eq!(
+        third_history[0].last().map(String::as_str),
+        Some("defer"),
+        "the old lead should retain third-party history without assigning it",
     );
 
     Ok(())

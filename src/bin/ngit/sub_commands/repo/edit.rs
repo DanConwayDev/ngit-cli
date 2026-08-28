@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use clap::ArgGroup;
@@ -137,6 +137,81 @@ fn own_announcement(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Result<RepoRef>
                 &["if you are invited, run `ngit repo accept` first"],
             )
         })
+}
+
+fn announcement_by(repo_ref: &RepoRef, pubkey: PublicKey) -> Option<RepoRef> {
+    repo_ref
+        .events
+        .values()
+        .find(|event| event.pubkey == pubkey)
+        .cloned()
+        .and_then(|event| RepoRef::try_from((event, None)).ok())
+}
+
+fn npubs(pubkeys: impl IntoIterator<Item = PublicKey>) -> Vec<String> {
+    pubkeys
+        .into_iter()
+        .map(|pubkey| pubkey.to_bech32().unwrap_or_else(|_| pubkey.to_hex()))
+        .collect()
+}
+
+fn require_prepared_lead(
+    current_roster: &[PublicKey],
+    proposed_lead: PublicKey,
+    proposed_ref: Option<&RepoRef>,
+    author: PublicKey,
+) -> Result<()> {
+    let current: HashSet<PublicKey> = current_roster.iter().copied().collect();
+    let proposed: HashSet<PublicKey> = proposed_ref
+        .map(|repo_ref| repo_ref.maintainers.iter().copied().collect())
+        .unwrap_or_default();
+    let retained = HashSet::from([author, proposed_lead]);
+    let covered: HashSet<PublicKey> = proposed.union(&retained).copied().collect();
+    let removed = npubs(current.difference(&covered).copied());
+    if !removed.is_empty() {
+        let lead = proposed_lead
+            .to_bech32()
+            .unwrap_or_else(|_| proposed_lead.to_hex());
+        return Err(cli_error(
+            &format!(
+                "setting {lead} as lead would remove specific maintainers from your active graph: {}",
+                removed.join(", ")
+            ),
+            &[],
+            &[
+                &format!(
+                    "ask {lead} to add these maintainers first: {}",
+                    removed.join(", ")
+                ),
+                "or remove each named maintainer first with `ngit repo edit --remove-maintainer <npub>`",
+            ],
+        ));
+    }
+    let extra = npubs(proposed.difference(&current).copied());
+    if !extra.is_empty() {
+        return Err(cli_error(
+            "the proposed lead announcement contains additional active maintainers",
+            &[("additional maintainers", &extra.join(", "))],
+            &["reconcile the proposed lead's roster before retrying the handover"],
+        ));
+    }
+    let prepared = proposed_ref.is_some_and(|repo_ref| {
+        repo_ref.lead == Some(proposed_lead) && repo_ref.maintainers.contains(&proposed_lead)
+    });
+    if !prepared || proposed != current {
+        let lead = proposed_lead
+            .to_bech32()
+            .unwrap_or_else(|_| proposed_lead.to_hex());
+        return Err(cli_error(
+            "the proposed lead has not published a complete self-lead roster",
+            &[],
+            &[
+                &format!("ask {lead} to run `ngit repo edit --lead-maintainer {lead}` first"),
+                "retry after their announcement lists the complete current roster",
+            ],
+        ));
+    }
+    Ok(())
 }
 
 async fn latest_maintainer_announcement(
@@ -335,7 +410,35 @@ pub async fn launch(
     };
 
     let requested_lead = relationship_governance(args, &repo_ref, my_pubkey)?;
-    let mut maintainers = my_ref.maintainers.clone();
+    let resolution = repo_ref.lead_resolution();
+    let preparing_to_lead = args.lead_maintainer.is_some()
+        && requested_lead == Some(my_pubkey)
+        && resolution.source == LeadSource::Explicit
+        && resolution.lead != Some(my_pubkey);
+    let mut maintainers = if preparing_to_lead {
+        if !repo_ref.confirmed_maintainers().contains(&my_pubkey) {
+            return Err(cli_error(
+                "only a confirmed maintainer can prepare to receive the lead",
+                &[],
+                &["accept the maintainer invitation first"],
+            ));
+        }
+        let current_lead = resolution.lead.context("the resolved lead is missing")?;
+        let lead_ref = announcement_by(&repo_ref, current_lead)
+            .context("the resolved lead announcement is missing")?;
+        let canonical: HashSet<PublicKey> = lead_ref.maintainers.iter().copied().collect();
+        let discovered: HashSet<PublicKey> = repo_ref.maintainers.iter().copied().collect();
+        if canonical != discovered {
+            return Err(cli_error(
+                "the discovered maintainer graph does not match the lead's active roster",
+                &[],
+                &["run `ngit repo follow-lead` before preparing a handover"],
+            ));
+        }
+        lead_ref.maintainers
+    } else {
+        my_ref.maintainers.clone()
+    };
     if !maintainers.contains(&my_pubkey) {
         maintainers.insert(0, my_pubkey);
     }
@@ -367,6 +470,15 @@ pub async fn launch(
             ));
         }
         maintainers.retain(|pubkey| *pubkey != target);
+    }
+
+    let mut role_tags = acknowledgement.map(|_| my_ref.role_tags.clone());
+    if args.lead_maintainer.is_some() && requested_lead.is_some_and(|lead| lead != my_pubkey) {
+        let lead = requested_lead.unwrap();
+        let proposed_ref = announcement_by(&repo_ref, lead);
+        require_prepared_lead(&maintainers, lead, proposed_ref.as_ref(), my_pubkey)?;
+        my_ref.defer_third_party_roles(my_pubkey, lead);
+        role_tags = Some(my_ref.role_tags.clone());
     }
 
     let relationship_action = args.has_relationship_mutation()
@@ -403,7 +515,7 @@ pub async fn launch(
         lead_maintainer: requested_lead.and_then(|pubkey| pubkey.to_bech32().ok()),
         replace_maintainers: relationship_action,
         clear_lead: args.no_lead_maintainer,
-        role_tags: acknowledgement.map(|_| my_ref.role_tags.clone()),
+        role_tags,
         hashtag: args.hashtag.clone(),
         earliest_unique_commit: args.earliest_unique_commit.clone(),
         clean: args.clean,

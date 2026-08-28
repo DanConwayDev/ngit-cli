@@ -962,6 +962,37 @@ impl RepoRef {
         history
     }
 
+    /// Retain all known role history while delegating current third-party
+    /// assignments to a lead.
+    ///
+    /// Active maintainer records naming `author` or `lead` remain available
+    /// for the normal role-transition generator. Every other active role is
+    /// changed to a `defer`-ended copy so it carries history without making
+    /// an assignment from this announcement.
+    pub fn defer_third_party_roles(&mut self, author: PublicKey, lead: PublicKey) {
+        self.role_tags = self.role_history_for_republish();
+        let active_subjects = [author.to_string(), lead.to_string()];
+        for tag in &mut self.role_tags {
+            let slice = tag.as_slice();
+            let is_active_relationship =
+                matches!(slice.first().map(String::as_str), Some("M" | "m" | "o"))
+                    && role_entry_is_active(slice);
+            let keep_active = matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                && slice
+                    .get(1)
+                    .is_some_and(|subject| active_subjects.contains(subject));
+            if !is_active_relationship || keep_active {
+                continue;
+            }
+            let mut parts = slice.to_vec();
+            if parts.len().is_multiple_of(2) {
+                parts.push("0".to_string());
+            }
+            parts.push("defer".to_string());
+            *tag = Tag::parse(parts).unwrap();
+        }
+    }
+
     /// Record the target author's signed acceptance or departure boundary in
     /// this announcement's existing relationship to them.
     ///
@@ -4930,6 +4961,37 @@ mod tests {
                         tag(&["M", &lead.to_string(), &NOW.to_string()]),
                     ],
                 );
+            }
+
+            #[test]
+            fn handover_view_defers_every_active_third_party_role() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob = nostr::prelude::Keys::generate().public_key();
+                let carol = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &alice_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "100"]),
+                        tag(&["m", &bob.to_string(), "110"]),
+                        tag(&["m", &carol.to_string(), "120"]),
+                        tag(&["o", &moderator.to_string(), "130"]),
+                    ],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+
+                parsed.defer_third_party_roles(alice, bob);
+                let history = parsed
+                    .role_tags
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(history.contains(&tag(&["M", &alice.to_string(), "100"])));
+                assert!(history.contains(&tag(&["m", &bob.to_string(), "110"])));
+                assert!(history.contains(&tag(&["m", &carol.to_string(), "120", "defer"])));
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "130", "defer"])));
             }
         }
 
