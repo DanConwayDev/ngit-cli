@@ -1,4 +1,5 @@
 pub mod accept;
+pub mod edit;
 pub mod leave;
 
 use std::{collections::HashSet, path::Path};
@@ -33,9 +34,8 @@ pub async fn launch(
     signer: SignerParams<'_>,
 ) -> Result<()> {
     match repo_command {
-        Some(RepoCommands::Init(args) | RepoCommands::Edit(args)) => {
-            init::launch(cli_args, args, signer).await
-        }
+        Some(RepoCommands::Init(args)) => init::launch(cli_args, args, signer).await,
+        Some(RepoCommands::Edit(args)) => edit::launch(cli_args, args, signer).await,
         Some(RepoCommands::Accept(args)) => accept::launch(args, signer).await,
         Some(RepoCommands::Leave(args)) => leave::launch(args, signer).await,
         None => show_info(offline, json, signer).await,

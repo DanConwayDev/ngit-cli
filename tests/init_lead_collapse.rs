@@ -1,21 +1,13 @@
-//! `ngit init --lead-maintainer <someone else>` — the NIP-34 listing
-//! collapse and its `--force` gate, end-to-end against fabricated
+//! `ngit repo edit --lead-maintainer <someone else>` — the NIP-34 listing
+//! collapse safety gate, end-to-end against fabricated
 //! announcements.
 //!
 //! Designating another pubkey as lead follows NIP-34's SHOULD: the
 //! author's announcement then lists only themselves and the lead. When the
 //! collapse would drop a pubkey the author's current announcement lists
 //! without authoritative cover from the lead's own announcement, that
-//! pubkey would lose authorized-maintainer status and init must demand
-//! `--force` (`apply_lead_to_maintainers` in
-//! `src/bin/ngit/sub_commands/init.rs`; the unit tests there pin the
-//! decision table, these tests pin the wire round-trip).
-//!
-//! The arranged "my announcement" deliberately predates indexed role tags
-//! (deprecated `maintainers` tag only), so the forced republish also
-//! exercises history materialization: the dropped member must be closed
-//! with an end boundary (`["m", <pk>, "0", <end>]`) rather than silently
-//! unlisted, while continuing members stay untimed.
+//! pubkey would lose authorized-maintainer status, so the edit must identify
+//! that person and refuse the unnamed removal. There is no force override.
 //!
 //! Same error-message-substring caveat as `tests/init_state_fresh.rs`:
 //! asserting on a stable stderr fragment is the tolerated shortcut for
@@ -133,7 +125,7 @@ async fn arrange_three_member_announcement(
 }
 
 #[tokio::test]
-async fn collapse_without_lead_cover_requires_force_and_closes_dropped_member() -> Result<()> {
+async fn collapse_without_lead_cover_names_and_refuses_the_dropped_member() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -150,23 +142,22 @@ async fn collapse_without_lead_cover_requires_force_and_closes_dropped_member() 
     let lead_npub = lead.to_bech32()?;
     let third_npub = third.to_bech32()?;
 
-    // The lead has no announcement, so their listing covers nobody:
-    // dropping `third` needs --force.
+    // The lead has no announcement, so their listing covers nobody.
     let out = repo
-        .ngit(["init", "--lead-maintainer", &lead_npub])
+        .ngit(["repo", "edit", "--lead-maintainer", &lead_npub])
         .output()
         .await
-        .context("failed to spawn ngit init --lead-maintainer")?;
+        .context("failed to spawn ngit repo edit --lead-maintainer")?;
     assert!(
         !out.status.success(),
-        "collapse dropping an uncovered maintainer must require --force\nstdout: {}\nstderr: {}",
+        "collapse dropping an uncovered maintainer must fail\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
-        stderr.contains("authorized-maintainer status"),
-        "the error should explain the lost authorization, got: {stderr}",
+        stderr.contains("active graph"),
+        "the error should explain the graph removal, got: {stderr}",
     );
     assert!(
         stderr.contains(&third_npub),
@@ -179,99 +170,7 @@ async fn collapse_without_lead_cover_requires_force_and_closes_dropped_member() 
     let winner = latest_announcement(&harness, me, &identifier).await?;
     assert_eq!(
         winner.id, existing.id,
-        "a refused init must not publish a new announcement",
-    );
-
-    // --force acknowledges the drop and republishes the collapsed listing
-    // (then fails at the git-data push — the arranged server is inert).
-    let out = repo
-        .ngit(["init", "--lead-maintainer", &lead_npub, "--force"])
-        .output()
-        .await
-        .context("failed to spawn ngit init --lead-maintainer --force")?;
-    expect_announcement_published_but_push_failed("ngit init --lead-maintainer --force", &out)?;
-
-    let announcement = latest_announcement(&harness, me, &identifier).await?;
-    assert_ne!(announcement.id, existing.id, "a republish must have landed");
-
-    // The lead's role *transitions*: the pre-role-tag listing materializes
-    // as an `m` record, which the promotion closes at publish time while
-    // the `M` entry opens at it (per NIP-34 a pubkey may appear in one
-    // tag per letter to record transitions).
-    let lead_m_entries = role_entries(&announcement, "M", &lead);
-    assert_eq!(
-        lead_m_entries.len(),
-        1,
-        "the designated lead should carry one M entry; got {lead_m_entries:?}",
-    );
-    let m_entry = &lead_m_entries[0];
-    assert_eq!(
-        m_entry.len(),
-        3,
-        "the promotion opens the M entry at publish time: {m_entry:?}",
-    );
-    assert!(
-        m_entry[2].parse::<u64>().is_ok_and(|start| start > 0),
-        "the M start boundary must be a unix timestamp: {m_entry:?}",
-    );
-    let lead_old_entries = role_entries(&announcement, "m", &lead);
-    assert_eq!(
-        lead_old_entries.len(),
-        1,
-        "the lead's materialized m record must be kept, closed; got {lead_old_entries:?}",
-    );
-    assert_eq!(
-        (lead_old_entries[0].len(), lead_old_entries[0][2].as_str()),
-        (4, "0"),
-        "the closed m record covers the pre-role-tag history: {lead_old_entries:?}",
-    );
-
-    // The author continues under the same letter: untimed.
-    let my_entries = role_entries(&announcement, "m", &me);
-    assert_eq!(
-        my_entries,
-        vec![vec!["m".to_string(), me.to_string()]],
-        "the author should carry one untimed m entry",
-    );
-
-    // The dropped member's history is materialized from the pre-role-tag
-    // announcement and closed: active for the repository's entire history
-    // ("0" start) until the republish ended it.
-    let third_entries = role_entries(&announcement, "m", &third);
-    assert_eq!(
-        third_entries.len(),
-        1,
-        "the dropped member must keep exactly one closed entry; got {third_entries:?}",
-    );
-    let entry = &third_entries[0];
-    assert_eq!(
-        entry.len(),
-        4,
-        "materialized closure is [m, pk, 0, end]: {entry:?}"
-    );
-    assert_eq!(
-        entry[2], "0",
-        "materialized start is the whole history: {entry:?}"
-    );
-    assert!(
-        entry[3].parse::<u64>().is_ok_and(|end| end > 0),
-        "the end boundary must be a unix timestamp: {entry:?}",
-    );
-
-    // The degradation tag carries only the current members.
-    let maintainers = tag_values(&announcement, "maintainers");
-    assert_eq!(
-        {
-            let mut sorted = maintainers.clone();
-            sorted.sort();
-            sorted
-        },
-        {
-            let mut expected = vec![me.to_string(), lead.to_string()];
-            expected.sort();
-            expected
-        },
-        "the deprecated maintainers tag must list exactly [me, lead]",
+        "a refused edit must not publish a new announcement",
     );
 
     Ok(())
@@ -309,14 +208,14 @@ async fn collapse_with_lead_cover_needs_no_force() -> Result<()> {
         .await?;
 
     let out = repo
-        .ngit(["init", "--lead-maintainer", &lead_npub])
+        .ngit(["repo", "edit", "--lead-maintainer", &lead_npub])
         .output()
         .await
-        .context("failed to spawn ngit init --lead-maintainer")?;
-    // No --force gate: the collapse publishes straight away (and then
-    // fails at the git-data push against the inert arranged server).
+        .context("failed to spawn ngit repo edit --lead-maintainer")?;
+    // The prepared lead covers every existing maintainer, so the collapse
+    // publishes straight away (then the inert git-data push fails).
     expect_announcement_published_but_push_failed(
-        "ngit init --lead-maintainer (covered drop)",
+        "ngit repo edit --lead-maintainer (covered drop)",
         &out,
     )?;
 

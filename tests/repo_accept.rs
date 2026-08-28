@@ -130,12 +130,16 @@ async fn assert_announcement_published(
         maintainers.contains(&published.maintainer_keys.public_key().to_string()),
         "announcement should retain the inviting maintainer; got {maintainers:?}",
     );
-    // NIP-34 graceful degradation: the indexed `m` role tags carry exactly
-    // the same current members as the deprecated `maintainers` tag
-    let m_roles = tag_values_multiple(announcement, "m");
+    // NIP-34 graceful degradation: active lead and co-maintainer roles carry
+    // exactly the same current members as the deprecated compatibility tag.
+    let roles = [
+        tag_values_multiple(announcement, "m"),
+        tag_values_multiple(announcement, "M"),
+    ]
+    .concat();
     assert_eq!(
-        m_roles, maintainers,
-        "`m` role tags should list the same current members as the deprecated `maintainers` tag",
+        roles, maintainers,
+        "active `M`/`m` roles should match the deprecated `maintainers` tag",
     );
 
     let bare_repo = harness
@@ -222,11 +226,19 @@ async fn accept_and_assert_resolution_untouched(clone: &Repo, extra_args: &[&str
         .as_array()
         .context("members missing from ngit repo --json")?;
     assert_eq!(members.len(), 2, "one member entry per maintainer: {json}");
+    let lead = json["lead_maintainer"]
+        .as_str()
+        .context("first invitation should establish the inviter as lead")?;
     for member in members {
         assert!(member["pubkey"].is_string());
         assert_eq!(
-            member["role"], "co-maintainer",
-            "no announcement asserts an M lead here: {json}",
+            member["role"],
+            if member["pubkey"] == lead {
+                "lead"
+            } else {
+                "co-maintainer"
+            },
+            "the first inviter should be the sole lead: {json}",
         );
         assert_eq!(
             member["status"], "confirmed",

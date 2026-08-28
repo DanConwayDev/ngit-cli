@@ -75,20 +75,16 @@ pub struct PublishRepoOpts {
     /// before `ngit init` so HEAD has an oid for libgit2 to read.
     pub initial_file: Option<(String, String)>,
     /// Number of *additional* co-maintainers (beyond the publisher) to
-    /// list in the kind-30617 announcement. The harness mints that many
-    /// fresh [`Keys`] and passes their npubs to `ngit init` via
-    /// `--other-maintainers`. The resulting maintainer list on the
-    /// announcement is `[publisher, extra-1, extra-2, ...]`, matching
-    /// the order `init.rs` assembles it (see
-    /// `src/bin/ngit/sub_commands/init.rs:880-892`).
+    /// invite through one `ngit repo edit --add-maintainer` invocation per
+    /// fresh [`Keys`] value. The resulting maintainer list on the announcement
+    /// is `[publisher, extra-1, extra-2, ...]`.
     ///
     /// Defaults to `0` (single-maintainer announcement — the publisher).
     /// The minted keys are surfaced on
     /// [`PublishedRepo::additional_maintainer_keys`] so tests can assert
     /// on per-co-maintainer `p` / `a` tags downstream. The co-maintainers
-    /// themselves do **not** need to sign anything: an npub in the
-    /// `maintainers` tag is enough to make ngit treat that pubkey as a
-    /// maintainer for tag-generation purposes.
+    /// themselves do **not** sign anything, so they remain invited until a
+    /// scenario explicitly runs `ngit repo accept` as one of them.
     pub additional_maintainer_count: usize,
     /// Extra `--relay <url>` arguments to pass to `ngit init`, on top of
     /// the grasp's relay URL that `apply_grasp_infrastructure`
@@ -132,14 +128,13 @@ pub struct PublishRepoOpts {
     /// Requires one `with_grasp_server(role)` call per entry on the harness
     /// builder; panics at lookup time if any role has not been registered.
     pub additional_grasp_roles: Vec<String>,
-    /// Pass `--lead-maintainer <own npub>` to `ngit init` so the published
-    /// announcement asserts the publisher as the NIP-34 lead: an `M` role
-    /// tag instead of the plain `m` a lead-less init emits. Self-lead keeps
-    /// the full maintainer listing, so this composes with
-    /// [`PublishRepoOpts::additional_maintainer_count`] (a non-self lead
-    /// would reject `--other-maintainers`).
+    /// Run `ngit repo edit --lead-maintainer <own npub>` after initial
+    /// publication so the announcement asserts the publisher as the NIP-34
+    /// lead. This composes with
+    /// [`PublishRepoOpts::additional_maintainer_count`].
     ///
-    /// Defaults to `false` (no lead assertion — every maintainer is `m`).
+    /// Defaults to `false`. The first additional invitation still establishes
+    /// the publisher as lead through the normal edit workflow.
     pub assert_self_as_lead: bool,
 }
 
@@ -299,15 +294,8 @@ impl Harness {
         // form into defaults — there are no interactive prompts to drive
         // in the new harness.
         //
-        // `--other-maintainers <npub>...` injects the freshly-minted
-        // co-maintainer pubkeys into the announcement's `maintainers` tag.
-        // The init code path that consumes this lives at
-        // `src/bin/ngit/sub_commands/init.rs:880-892` — when the flag is
-        // present (or running non-interactively, as here), `base_maintainers`
-        // is taken straight from it without any prompt. The co-maintainer
-        // keypairs need not sign anything; an npub in the maintainers tag
-        // is enough for ngit to emit per-maintainer `p` / `a` tags on
-        // subsequent patches.
+        // Relationship changes happen only after the sole-maintainer
+        // repository has been published and graduated below.
         let additional_maintainer_keys: Vec<Keys> = (0..opts.additional_maintainer_count)
             .map(|_| Keys::generate())
             .collect();
@@ -331,16 +319,6 @@ impl Harness {
             grasp_url,
             "-d".into(),
         ];
-        if opts.assert_self_as_lead {
-            init_args.push("--lead-maintainer".into());
-            init_args.push(npub.clone());
-        }
-        if !additional_maintainer_npubs.is_empty() {
-            init_args.push("--other-maintainers".into());
-            for npub in &additional_maintainer_npubs {
-                init_args.push(npub.clone());
-            }
-        }
         // Additional grasp servers are appended in order so the kind-30617
         // `clone` tag ends up as [repo, ...additional_grasp_roles]. The
         // iteration order in push_refs_and_generate_pr_or_pr_update_event
@@ -399,6 +377,41 @@ impl Harness {
             .nostr_push(["-u", "origin", "main"])
             .await
             .context("git push -u origin main (publish_repo graduation)")?;
+
+        if opts.assert_self_as_lead {
+            let edit = publisher
+                .ngit(["repo", "edit", "--lead-maintainer", &npub])
+                .output()
+                .await
+                .context("failed to spawn ngit repo edit --lead-maintainer")?;
+            if !edit.status.success() {
+                bail!(
+                    "ngit repo edit --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                    edit.status,
+                    String::from_utf8_lossy(&edit.stdout),
+                    String::from_utf8_lossy(&edit.stderr),
+                );
+            }
+        }
+
+        // Membership changes use the same one-person-at-a-time public API as
+        // real callers. The first add automatically makes the publisher lead;
+        // subsequent adds retain that explicit lead.
+        for npub in &additional_maintainer_npubs {
+            let edit = publisher
+                .ngit(["repo", "edit", "--add-maintainer", npub])
+                .output()
+                .await
+                .context("failed to spawn ngit repo edit --add-maintainer")?;
+            if !edit.status.success() {
+                bail!(
+                    "ngit repo edit --add-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+                    edit.status,
+                    String::from_utf8_lossy(&edit.stdout),
+                    String::from_utf8_lossy(&edit.stderr),
+                );
+            }
+        }
 
         Ok((
             publisher,

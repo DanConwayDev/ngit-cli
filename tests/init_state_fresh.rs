@@ -907,15 +907,13 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
 }
 
 // ---------------------------------------------------------------------------
-// Success — self-lead (standalone, own init invocation)
+// Success — self-lead through the repository-edit API
 // ---------------------------------------------------------------------------
 
-/// `--lead-maintainer` with the publisher's own npub keeps the listing
-/// intact and asserts the publisher as lead: the announcement carries a
-/// single untimed `M` role tag (no `m` tags) alongside the deprecated
-/// `maintainers` tag with the same sole member. Exercises the flag's
-/// wiring end-to-end; non-self-lead collapse and `--force` gating are
-/// pinned by the `apply_lead_to_maintainers` unit tests in init.rs.
+/// `repo edit --lead-maintainer` with the publisher's own npub keeps the
+/// listing intact and asserts the publisher as lead. The replacement closes
+/// the author's implicit co-maintainer history and starts an `M` interval at
+/// the same transition time.
 #[tokio::test]
 async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
     let harness = Harness::builder(
@@ -937,18 +935,32 @@ async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
             DISPLAY_NAME,
             "--grasp-server",
             &grasp_http_url,
-            "--lead-maintainer",
-            &state.npub,
         ])
         .output()
         .await
-        .context("failed to spawn ngit init --lead-maintainer")?;
+        .context("failed to spawn ngit init")?;
     if !init_out.status.success() {
         bail!(
-            "ngit init --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            "ngit init exited non-zero ({:?})\nstdout: {}\nstderr: {}",
             init_out.status,
             String::from_utf8_lossy(&init_out.stdout),
             String::from_utf8_lossy(&init_out.stderr),
+        );
+    }
+    repo.nostr_push(["-u", "origin", "main"])
+        .await
+        .context("graduate sole-maintainer announcement")?;
+    let edit_out = repo
+        .ngit(["repo", "edit", "--lead-maintainer", &state.npub])
+        .output()
+        .await
+        .context("failed to spawn ngit repo edit --lead-maintainer")?;
+    if !edit_out.status.success() {
+        bail!(
+            "ngit repo edit --lead-maintainer exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            edit_out.status,
+            String::from_utf8_lossy(&edit_out.stdout),
+            String::from_utf8_lossy(&edit_out.stderr),
         );
     }
 
@@ -968,7 +980,7 @@ async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
         .with_context(|| {
             format!(
                 "no kind-30617 with `d` = {EXPECTED_IDENTIFIER:?} on the default \
-                 relay after `ngit init --lead-maintainer`"
+                 relay after `ngit repo edit --lead-maintainer`"
             )
         })?;
 
@@ -978,10 +990,22 @@ async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
         .map(|t| t.as_slice().to_vec())
         .filter(|t| t.first().is_some_and(|name| name == "M" || name == "m"))
         .collect();
+    let author = state.keys.public_key().to_string();
+    assert_eq!(role_tags.len(), 2, "expected M and closed m history");
+    assert_eq!(&role_tags[0][..2], &["M".to_string(), author.clone()]);
     assert_eq!(
-        role_tags,
-        vec![vec!["M".to_string(), state.keys.public_key().to_string()]],
-        "expected a single untimed `M` role tag for the self-designated lead",
+        &role_tags[1][..3],
+        &["m".to_string(), author, "0".to_string()]
+    );
+    assert_eq!(role_tags[0].len(), 3, "the M interval should be active");
+    assert_eq!(
+        role_tags[1].len(),
+        4,
+        "the prior m interval should be closed"
+    );
+    assert_eq!(
+        role_tags[0][2], role_tags[1][3],
+        "promotion should close m and start M at one boundary",
     );
     assert_eq!(
         tag_values(&announcement, "maintainers"),

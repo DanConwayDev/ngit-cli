@@ -177,11 +177,9 @@ struct ResolvedFields {
 /// Specifying someone else follows NIP-34's SHOULD — the announcement then
 /// lists only the author and the lead. When that collapse would drop a
 /// pubkey the author's current announcement lists without authoritative
-/// cover from the lead's own announcement, the pubkey would lose
-/// authorized-maintainer status, so `--force` is required.
+/// cover from the lead's own announcement, refuse the unnamed removal.
 fn apply_lead_to_maintainers(
     lead_arg: Option<PublicKey>,
-    force: bool,
     my_pubkey: &PublicKey,
     maintainers: Vec<PublicKey>,
     my_ref: Option<&RepoRef>,
@@ -197,23 +195,31 @@ fn apply_lead_to_maintainers(
         return Ok((maintainers, Some(lead)));
     }
     let listing = vec![*my_pubkey, lead];
-    if !force {
-        let dropped: Vec<String> =
-            drops_losing_authorized_status(&listing, &lead, my_pubkey, my_ref, consolidated)
+    let dropped: Vec<String> =
+        drops_losing_authorized_status(&listing, &lead, my_pubkey, my_ref, consolidated)
+            .iter()
+            .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
+            .collect();
+    if !dropped.is_empty() {
+        let lead_npub = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
+        let mut suggestions = vec![format!(
+            "ask {lead_npub} to add these maintainers first: {}",
+            dropped.join(", ")
+        )];
+        suggestions.extend(
+            dropped
                 .iter()
-                .map(|pk| pk.to_bech32().unwrap_or_else(|_| pk.to_hex()))
-                .collect();
-        if !dropped.is_empty() {
-            let lead_npub = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
-            let dropped = dropped.join(", ");
-            return Err(cli_error(
-                &format!(
-                    "listing {lead_npub} as lead removes the other maintainers from your announcement (per NIP-34 only the lead lists the full membership), and the lead's announcement doesn't list: {dropped}. they would lose authorized-maintainer status"
-                ),
-                &[],
-                &[&format!("ngit init --lead-maintainer {lead_npub} --force")],
-            ));
-        }
+                .map(|npub| format!("ngit repo edit --remove-maintainer {npub}")),
+        );
+        let suggestion_refs: Vec<&str> = suggestions.iter().map(String::as_str).collect();
+        return Err(cli_error(
+            &format!(
+                "setting {lead_npub} as lead would remove specific maintainers from your active graph: {}",
+                dropped.join(", ")
+            ),
+            &[],
+            &suggestion_refs,
+        ));
     }
     Ok((listing, Some(lead)))
 }
@@ -538,56 +544,64 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
 }
 
 #[derive(Debug, clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
     #[clap(long, alias = "title")]
     /// name of repository (preferred over --identifier); --title is an alias
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[clap(long)]
     /// shortname with no spaces or special characters
-    identifier: Option<String>,
+    pub(crate) identifier: Option<String>,
     #[clap(long)]
     /// optional description
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
     /// where your git+nostr data is hosted
-    grasp_server: Vec<String>,
+    pub(crate) grasp_server: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
-    relay: Vec<String>,
+    pub(crate) relay: Vec<String>,
     #[clap(long)]
     /// additional git server URLs beyond grasp servers
-    clone: Vec<String>,
+    pub(crate) clone: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
     /// homepage
-    web: Vec<String>,
+    pub(crate) web: Vec<String>,
     #[clap(short = 'u', long = "u", alias = "upstream", value_parser, num_args = 1..)]
     /// informational NIP-34 subordinate-fork `u` tag fields
-    upstream: Vec<String>,
-    #[clap(long, value_parser, num_args = 1..)]
-    /// npubs of other maintainers
-    other_maintainers: Vec<String>,
-    #[clap(long)]
-    /// npub of the lead maintainer, emitted as the NIP-34 `M` role; when the
-    /// lead is not you, your announcement lists only you and the lead
-    lead_maintainer: Option<String>,
+    pub(crate) upstream: Vec<String>,
+    /// Internal named-action projection used by `ngit repo edit`. It is not
+    /// part of the `ngit init` command surface.
+    #[clap(skip)]
+    pub(crate) other_maintainers: Vec<String>,
+    /// Internal governance choice used by `ngit repo edit`.
+    #[clap(skip)]
+    pub(crate) lead_maintainer: Option<String>,
+    /// Whether `other_maintainers` is an exact named-action result, including
+    /// the empty result of removing the final co-maintainer.
+    #[clap(skip)]
+    pub(crate) replace_maintainers: bool,
+    /// Explicitly clear this announcement's active lead declaration.
+    #[clap(skip)]
+    pub(crate) clear_lead: bool,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
-    hashtag: Vec<String>,
+    pub(crate) hashtag: Vec<String>,
     #[clap(long)]
     /// usually root commit but will be more recent commit for forks
-    earliest_unique_commit: Option<String>,
+    pub(crate) earliest_unique_commit: Option<String>,
     #[clap(long)]
     /// drop unknown tags from the existing announcement when republishing
     /// (default is to preserve them so tags added by future ngit versions
     /// or third-party tools aren't silently lost)
-    clean: bool,
+    pub(crate) clean: bool,
     #[clap(long, conflicts_with = "public")]
     /// mark the repository private and restrict discovery to its repository
     /// relays
-    private: bool,
+    pub(crate) private: bool,
     #[clap(long, conflicts_with = "private")]
     /// remove the private marker from this maintainer's announcement
-    public: bool,
+    pub(crate) public: bool,
 }
 
 impl SubCommandArgs {
@@ -600,7 +614,7 @@ impl SubCommandArgs {
             || !self.grasp_server.is_empty()
             || !self.web.is_empty()
             || !self.upstream.is_empty()
-            || !self.other_maintainers.is_empty()
+            || self.replace_maintainers
             || self.lead_maintainer.is_some()
             || !self.hashtag.is_empty()
             || self.earliest_unique_commit.is_some()
@@ -1039,9 +1053,7 @@ fn resolve_fields(
         vec![*my_pubkey]
     };
 
-    let base_maintainers = if args.other_maintainers.is_empty() {
-        maintainers_default
-    } else {
+    let base_maintainers = if args.replace_maintainers {
         let mut m = vec![user_ref.public_key];
         for npub in &args.other_maintainers {
             if let Ok(pk) = PublicKey::from_bech32(npub) {
@@ -1051,9 +1063,11 @@ fn resolve_fields(
             }
         }
         m
+    } else {
+        maintainers_default
     };
 
-    let maintainers = if !args.other_maintainers.is_empty()
+    let maintainers = if args.replace_maintainers
         || !interactive
         || (base_maintainers.len() == 1
             && Interactor::default().choice(
@@ -1101,30 +1115,17 @@ fn resolve_fields(
             })
         })
         .transpose()?;
-    if let Some(lead) = lead_arg {
-        // per NIP-34, listing maintainers beyond the lead is the lead's
-        // prerogative: a non-lead author's announcement lists only
-        // themselves and the lead
-        if lead != *my_pubkey
-            && args.other_maintainers.iter().any(|npub| {
-                PublicKey::from_bech32(npub).is_ok_and(|pk| pk != lead && pk != *my_pubkey)
-            })
-        {
-            return Err(cli_error(
-                "--other-maintainers conflicts with a --lead-maintainer who is not you: per NIP-34 your announcement then lists only you and the lead",
-                &[],
-                &["ask the lead to list the other maintainers in their announcement"],
-            ));
-        }
-    }
-    let (maintainers, lead) = apply_lead_to_maintainers(
-        lead_arg,
-        cli.force,
-        my_pubkey,
-        maintainers,
-        my_ref.as_ref(),
-        state.repo_ref(),
-    )?;
+    let (maintainers, lead) = if args.clear_lead {
+        (maintainers, None)
+    } else {
+        apply_lead_to_maintainers(
+            lead_arg,
+            my_pubkey,
+            maintainers,
+            my_ref.as_ref(),
+            state.repo_ref(),
+        )?
+    };
 
     // --- Interactive: github/codeberg warning ---
     if interactive
@@ -2710,15 +2711,14 @@ mod apply_lead_to_maintainers_tests {
         let my_ref = test_repo_ref(vec![me, lead], Some(lead));
 
         let (maintainers, resolved) =
-            apply_lead_to_maintainers(None, false, &me, vec![me, lead], Some(&my_ref), None)
-                .unwrap();
+            apply_lead_to_maintainers(None, &me, vec![me, lead], Some(&my_ref), None).unwrap();
         assert_eq!(maintainers, vec![me, lead]);
         assert_eq!(resolved, Some(lead));
 
         // the lead was removed from the resolved listing: the assertion is
         // not carried forward
         let (maintainers, resolved) =
-            apply_lead_to_maintainers(None, false, &me, vec![me], Some(&my_ref), None).unwrap();
+            apply_lead_to_maintainers(None, &me, vec![me], Some(&my_ref), None).unwrap();
         assert_eq!(maintainers, vec![me]);
         assert_eq!(resolved, None);
     }
@@ -2729,7 +2729,7 @@ mod apply_lead_to_maintainers_tests {
         let other = Keys::generate().public_key();
 
         let (maintainers, resolved) =
-            apply_lead_to_maintainers(Some(me), false, &me, vec![me, other], None, None).unwrap();
+            apply_lead_to_maintainers(Some(me), &me, vec![me, other], None, None).unwrap();
         assert_eq!(maintainers, vec![me, other]);
         assert_eq!(resolved, Some(me));
     }
@@ -2744,14 +2744,14 @@ mod apply_lead_to_maintainers_tests {
         // status, so no --force needed even though the resolved listing
         // shrinks
         let (maintainers, resolved) =
-            apply_lead_to_maintainers(Some(lead), false, &me, vec![me, default_listed], None, None)
+            apply_lead_to_maintainers(Some(lead), &me, vec![me, default_listed], None, None)
                 .unwrap();
         assert_eq!(maintainers, vec![me, lead]);
         assert_eq!(resolved, Some(lead));
     }
 
     #[test]
-    fn uncovered_drop_of_a_currently_listed_maintainer_requires_force() {
+    fn uncovered_drop_of_a_currently_listed_maintainer_is_refused() {
         let me = Keys::generate().public_key();
         let lead_keys = Keys::generate();
         let lead = lead_keys.public_key();
@@ -2776,7 +2776,6 @@ mod apply_lead_to_maintainers_tests {
         assert!(
             apply_lead_to_maintainers(
                 Some(lead),
-                false,
                 &me,
                 vec![me, dropped],
                 Some(&my_ref),
@@ -2784,18 +2783,6 @@ mod apply_lead_to_maintainers_tests {
             )
             .is_err()
         );
-
-        let (maintainers, resolved) = apply_lead_to_maintainers(
-            Some(lead),
-            true,
-            &me,
-            vec![me, dropped],
-            Some(&my_ref),
-            Some(&consolidated),
-        )
-        .unwrap();
-        assert_eq!(maintainers, vec![me, lead]);
-        assert_eq!(resolved, Some(lead));
     }
 
     #[test]
@@ -2812,7 +2799,6 @@ mod apply_lead_to_maintainers_tests {
 
         let (maintainers, resolved) = apply_lead_to_maintainers(
             Some(lead),
-            false,
             &me,
             vec![me, dropped],
             Some(&my_ref),
@@ -2848,7 +2834,6 @@ mod apply_lead_to_maintainers_tests {
         assert!(
             apply_lead_to_maintainers(
                 Some(lead),
-                false,
                 &me,
                 vec![me, dropped],
                 Some(&my_ref),
@@ -2882,7 +2867,6 @@ mod apply_lead_to_maintainers_tests {
 
         let (maintainers, resolved) = apply_lead_to_maintainers(
             Some(lead),
-            false,
             &me,
             vec![me, third, lead, dropped],
             Some(&my_ref),

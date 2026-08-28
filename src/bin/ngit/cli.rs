@@ -809,7 +809,7 @@ pub enum RepoCommands {
     #[command(
         long_about = "update repository metadata on nostr\n\nlike `ngit init` but makes clear you are editing an existing repository"
     )]
-    Edit(sub_commands::init::SubCommandArgs),
+    Edit(sub_commands::repo::edit::SubCommandArgs),
     /// accept an invitation to co-maintain a repository
     #[command(long_about = "accept an invitation to co-maintain a repository\n\n\
             publishes your repository announcement to nostr, confirming your co-maintainership.\n\n\
@@ -1159,5 +1159,48 @@ mod tests {
             let cli = Cli::try_parse_from(args).expect("command should parse");
             assert!(cli.repo_relay_only);
         }
+    }
+
+    #[test]
+    fn init_rejects_membership_edit_options() {
+        for option in ["--other-maintainers", "--lead-maintainer"] {
+            assert!(
+                Cli::try_parse_from(["ngit", "init", option, "npub1invalid"]).is_err(),
+                "ngit init unexpectedly accepted {option}",
+            );
+        }
+    }
+
+    #[test]
+    fn repo_edit_exposes_named_relationship_actions() {
+        for args in [
+            ["ngit", "repo", "edit", "--add-maintainer", "npub1invalid"].as_slice(),
+            [
+                "ngit",
+                "repo",
+                "edit",
+                "--remove-maintainer",
+                "npub1invalid",
+                "--no-lead-maintainer",
+            ]
+            .as_slice(),
+            ["ngit", "repo", "edit", "--lead-maintainer", "npub1invalid"].as_slice(),
+        ] {
+            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("failed to parse: {error}"));
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--add-maintainer",
+                "npub1invalid",
+                "--remove-maintainer",
+                "npub1alsoinvalid",
+            ])
+            .is_err(),
+            "one invocation must not accept two named relationship actions",
+        );
     }
 }
