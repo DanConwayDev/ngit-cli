@@ -450,8 +450,9 @@ and can later revoke or redirect its own forward.
 Although lead-aware tooling treats the lead as roster coordinator, the wire
 declarations are not cumulative. A lead's active self-`M` both confirms their
 maintainer role and declares them as lead; they do not also need an active
-self-`m`. A co-maintainer instead acknowledges their role with an active
-self-`m` and points to the lead with an active `M`.
+self-`m`. Ngit's canonical co-maintainer output instead acknowledges their role
+with an active self-`m` and points to the lead with an active `M`; protocol
+readers resolve authority from the reciprocal active-edge rules below.
 
 ## Protocol Model
 
@@ -479,14 +480,15 @@ self-`m` and points to the lead with an active `M`.
   `nostr.repo`, naddr, or explicit `--repo` coordinate where discovery starts.
 - A **maintainer listing** is an active `M` or `m` tag, or an entry in the
   legacy `maintainers` fallback.
-- A **confirmed maintainer** is actively assigned by a confirmed maintainer in
-  the selected component and has signed a matching acknowledgement. In the
-  normal topology the resolved lead's roster seeds this reciprocal fixpoint.
+- A **confirmed maintainer** is named by a valid, active `M` or `m` listing
+  from a confirmed maintainer in the selected component and has a valid,
+  active `M` or `m` listing back to a confirmed maintainer. In the normal
+  topology the resolved lead's roster seeds this reciprocal fixpoint.
 - An **invited maintainer** is listed by the discovered graph but has not made
   the acknowledgement needed to join it.
-- The **maintainer graph** contains active assignments, reciprocal self-role
-  acknowledgements, and lead-pointer relationships. Historical-only records do
-  not add current edges.
+- The **maintainer graph** contains valid, active `M` and `m` assignment edges.
+  A signed self-role end vetoes the author's maintainership even while another
+  member still lists them. Historical-only records do not add current edges.
 - The **virtual repository** is the confirmed component obtained from that
   graph for one identifier and one selected coordinate.
 - A **history view** is one announcement author's replicated account of
@@ -534,19 +536,20 @@ relationship to Bob. Bob's `m:Bob` is Bob's acknowledgement of his own role.
 The same subject in two events is not one shared record.
 
 Active `M` and `m` records have identical maintainer authorization weight. In
-the normal lead-shaped topology, the lead publishes an active self-`M` and the
-recommended active roster. A co-maintainer's minimum active shape reciprocates
-with the relationships needed to accept that assignment: an `M` naming the
-lead and an `m` naming themselves.
+the normal lead-shaped topology, ngit publishes an active self-`M` and the
+recommended active roster for the lead. Its canonical co-maintainer acceptance
+shape is an `M` naming the lead and an `m` naming the signer. That is a
+recommended publishing shape, not an additional read-side condition for
+reciprocal authority.
 
 A co-maintainer also publishes the complete resolved `M`, `m`, and `o` history.
 Every third-party interval copied solely as history, rather than as this
 author's assignment, ends in `defer` unless the author records a numeric end.
-Their active self-`m` is the signed acceptance of their assigned role, and their
-active `M` identifies and reciprocates with the lead. A current co-maintainer
-announcement that ends either of those two required records in `defer` is
-invalid as an acceptance: clients treat the record only as history and do not
-grant authority from it.
+Their active self-`m` records ngit's canonical signed acceptance of their
+assigned role, and their active `M` identifies and reciprocates with the lead.
+A record ending in `defer` is historical-only and contributes no current graph
+edge. It cannot satisfy reciprocity, whether it is a self-role, lead pointer,
+or third-party listing.
 
 The `defer` convention is a statement of intent, not a protocol restriction. A
 third-party client may publish an active `m` from a co-maintainer to somebody
@@ -711,11 +714,12 @@ retained copy.
 This precedence applies only to historical display and past-event filtering.
 Current authority in a lead-shaped repository is the reciprocal fixpoint seeded
 by the lead's active roster. An externally authored active `m` from a confirmed
-co-maintainer can extend that fixpoint when its subject publishes an active
-self-`m` plus active `M` path back to the same lead. A deliberately leadless
-repository uses its active reciprocal graph without that seed. A `defer`
-historical copy is always inactive for authorization and routing, regardless of
-which author published it.
+co-maintainer can extend that fixpoint when its subject publishes any valid,
+active `M` or `m` listing back to a confirmed maintainer. The reciprocal edge
+does not need to use a particular letter or point directly to the terminal
+lead. A deliberately leadless repository uses its active reciprocal graph
+without that seed. A `defer` historical copy is always inactive for
+authorization and routing, regardless of which author published it.
 
 When a lead removes Bob in the ordinary lead-shaped graph, the lead closes its
 edge and effective interval at the removal time. Bob leaves immediately only
@@ -745,14 +749,16 @@ For the normal lead-shaped topology:
 1. Starting from the selected coordinate, follow its active `M` view until an
    active self-`M` identifies the lead.
 2. Seed the candidate roster with the lead's active `M`, `m`, and `o` records.
-3. A candidate maintainer is confirmed only when their latest announcement
-   contains an active self-`m` and an active `M` path to the same lead.
-4. Add every subject of a confirmed maintainer's active third-party `m` to the
-   candidate roster and repeat confirmation to a fixpoint. Records ending in
-   `defer` never enter this step.
+3. A candidate maintainer is confirmed when a confirmed maintainer's valid,
+   active `M` or `m` names them and their latest announcement contains a valid,
+   active `M` or `m` naming a confirmed maintainer. The reciprocal listing need
+   not use a particular role letter or point directly to the lead.
+4. Add every subject of a confirmed maintainer's active third-party `M` or `m`
+   to the candidate roster and repeat confirmation to a fixpoint. Records
+   ending in `defer` never enter this step.
 5. A candidate whom a confirmed maintainer lists without that signed
-   acknowledgement remains invited. A numeric self-role end is an explicit
-   departure and takes precedence over the assignment.
+   reciprocal listing remains invited. A numeric self-role end is an explicit
+   departure and takes precedence over every assignment.
 6. When an assigning maintainer closes and later restarts a candidate's
    assignment, the new interval is a new invitation. An acknowledgement of the
    earlier interval cannot accept it; the candidate must append the new start
@@ -760,10 +766,20 @@ For the normal lead-shaped topology:
 
 This remains reciprocal: a confirmed maintainer assigns the role and the
 candidate signs an active acknowledgement bound to that repository. A
-co-maintainer's active lead `M` and self-`m` confirm the minimum relationship.
-An active third-party `m` may extend the roster and import its subject's state
-after reciprocity even though ngit flags that shape for convergence; a `defer`
-copy cannot.
+co-maintainer's active lead `M` and self-`m` are ngit's canonical way to record
+that relationship, but the resolver accepts any valid active reciprocal
+`M`/`m` edges. An active third-party `m` may extend the roster and import its
+subject's state after reciprocity even though ngit flags that shape for
+convergence; a `defer` copy cannot.
+
+Only syntactically valid, currently active `M` records create lead pointers. An
+`M` with malformed role history is ignored for authority and lead resolution
+and reported as repository health information; its mere presence does not turn
+the absence of a valid active `M` into an incomplete explicit path. When no
+valid active `M` remains at the selected coordinate, resolution uses the
+selected-rooted leadless graph. Once resolution follows a valid active `M`, a
+missing announcement, multiple active targets, or a cycle fails closed and
+seeds no authority.
 
 The deliberately leadless topology has no active lead roster, so it retains
 the reciprocal active-`m` fixpoint rooted at the selected maintainer. A cycle
@@ -1433,12 +1449,15 @@ the resolved lead's active roster itself needs to change, a co-maintainer asks
 that lead to add or remove the named person first. The compatibility repair is
 never a membership operation.
 
-#### A claimed acceptance makes its required roles historical-only
+#### Ngit's canonical acceptance makes a required role historical-only
 
-A current co-maintainer announcement is invalid as an acceptance if its lead
-`M` or self-`m` ends in `defer`. Both records must be active. Clients may retain
-the records as history, but they do not treat the author as confirmed, accept
-kind `30618` state from them, or use a `defer` `M` for forwarding.
+Ngit's canonical co-maintainer acceptance shape is incomplete if its lead `M`
+or self-`m` ends in `defer`; both records must be active for that publishing
+shape. Clients retain deferred records as history, but they contribute no
+current edge and a deferred `M` is never used for forwarding. Read-side
+confirmation still follows the reciprocal graph rule above, so a different
+valid active `M` or `m` edge can provide reciprocity unless the author has
+explicitly ended their own maintainer role.
 
 If the resolved lead still has an active invitation, every repository command
 for that signer reports the malformed acceptance and directs them to publish a
@@ -1772,10 +1791,11 @@ The implementation and tests must make these statements true:
 3. The normal first invitation materializes the inviter as `M` and invitee as
    `m`; supplying `--no-lead-maintainer` emits only `m`. A pending or
    conflicting lead path blocks instead of treating the flag as an override.
-4. Acceptance records an active `M` naming the inviter and an active self-`m`
-   naming the invitee. Both are required for current co-maintainer authority;
-   ending either in `defer` cannot accept an invitation. Acceptance cannot add
-   unrelated people or self-promote.
+4. Ngit's ordinary acceptance command records an active `M` naming the inviter
+   and an active self-`m` naming the invitee. Both are required for that
+   canonical emitted shape, and ending either in `defer` cannot satisfy it.
+   Read-side authority still follows the reciprocal active-edge rule in item
+   8. Acceptance cannot add unrelated people or self-promote.
 5. Discovering acceptance promptly shows the lead
    `--acknowledge-maintainer-change` and shows other co-maintainers
    `repo follow-lead`, without prompting. JSON returns the same actions as
@@ -1791,11 +1811,12 @@ The implementation and tests must make these statements true:
    sibling NIP-34 distance and pubkey precedence.
 8. Active `M` and `m` have identical maintainer authority. In a lead-shaped
    repository, the lead's active roster seeds a reciprocal fixpoint and each
-   confirmed co-maintainer reciprocates with an active lead `M` plus active
-   self-`m`. An active third-party `m` from any confirmed maintainer can extend
-   the fixpoint even though ngit treats that wire shape as an edge case; a
-   third-party `defer` history cannot. Explicit no-lead uses the reciprocal
-   active-`m` fixpoint without a lead seed.
+   confirmed candidate has a valid active `M` or `m` edge back to a confirmed
+   maintainer. Ngit's canonical co-maintainer shape is an active lead `M` plus
+   active self-`m`, but an active third-party `m` from any confirmed maintainer
+   can extend the fixpoint even though ngit treats that wire shape as an edge
+   case. A third-party `defer` history cannot. Explicit no-lead uses the
+   reciprocal active-`m` fixpoint without a lead seed.
 9. Lead resolution starts at the selected coordinate, follows one active `M`
    per announcement, and terminates only at a confirmed active self-`M`. An
    active pointer can preserve a removed maintainer's coordinate redirect, but
