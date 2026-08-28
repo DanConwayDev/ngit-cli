@@ -5,7 +5,7 @@ use ngit::{
     cli_interactor::cli_error,
     client::{
         Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
-        get_state_from_cache, send_events,
+        get_repo_ref_from_cache_for_lead_recovery, get_state_from_cache, send_events,
     },
     event_ordering::latest_event,
     git::nostr_url::NostrUrlDecoded,
@@ -193,7 +193,9 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         &private_discovery,
     )
     .await?;
-    let selected_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected_coordinate).await?;
+    let selected_ref =
+        get_repo_ref_from_cache_for_lead_recovery(Some(git_repo_path), &selected_coordinate)
+            .await?;
     let resolution = selected_ref.lead_resolution();
     if resolution.source != LeadSource::Explicit {
         return Err(cli_error(

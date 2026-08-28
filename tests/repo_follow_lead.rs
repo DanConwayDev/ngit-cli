@@ -11,10 +11,10 @@ async fn latest_announcement(
     author: PublicKey,
     identifier: &str,
 ) -> Result<Event> {
-    harness
-        .relay("default")
-        .events(Filter::new().author(author).kind(Kind::GitRepoAnnouncement))
-        .await?
+    let filter = Filter::new().author(author).kind(Kind::GitRepoAnnouncement);
+    let mut events = harness.relay("default").events(filter.clone()).await?;
+    events.extend(harness.grasp("repo").events(filter).await?);
+    events
         .into_iter()
         .filter(|event| tag_value(event, "d").as_deref() == Some(identifier))
         .max_by(|left, right| {
@@ -195,6 +195,96 @@ async fn removed_maintainer_adopts_the_lead_end_and_keeps_only_redirect_active()
             history.len() % 2 == 0 && history.last().is_some_and(|end| end.parse::<u64>().is_ok())
         }),
         "Carol's self-role should end at the lead's numeric boundary",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_removed_coordinate_rejects_push_until_following_the_lead() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (alice_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("stale selected removal".into()),
+            identifier: Some("stale-selected-removal".into()),
+            additional_maintainer_count: 1,
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let removed_keys = published.additional_maintainer_keys[0].clone();
+    let removed = removed_keys.public_key();
+    let removed_npub = removed.to_bech32()?;
+    let removed_repo = accept_as(&harness, &published, &removed_keys).await?;
+
+    let removed_coordinate = Nip19Coordinate {
+        coordinate: Coordinate {
+            kind: Kind::GitRepoAnnouncement,
+            public_key: removed,
+            identifier: published.identifier.clone(),
+        },
+        relays: vec![],
+    }
+    .to_bech32()?;
+    let removed_url = published
+        .clone_url
+        .replacen(&published.maintainer_npub, &removed_npub, 1);
+    assert_ne!(removed_url, published.clone_url);
+    removed_repo
+        .git_ok(
+            ["config", "--local", "nostr.repo", &removed_coordinate],
+            "select removed maintainer coordinate",
+        )
+        .await?;
+    removed_repo
+        .git_ok(
+            ["remote", "set-url", "origin", &removed_url],
+            "point origin at removed maintainer coordinate",
+        )
+        .await?;
+
+    command_ok(
+        &alice_repo,
+        &["repo", "edit", "--remove-maintainer", &removed_npub],
+    )
+    .await?;
+    std::fs::write(removed_repo.dir().join("stale.md"), "must not publish\n")?;
+    removed_repo.git_ok(["add", "stale.md"], "git add").await?;
+    removed_repo
+        .git_ok(
+            ["commit", "-m", "stale removed push", "--no-gpg-sign"],
+            "git commit",
+        )
+        .await?;
+
+    let rejected = removed_repo
+        .nostr_push_expecting_failure(["origin", "HEAD:main"])
+        .await?;
+    let rejection = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr),
+    );
+    assert!(
+        rejection.contains("no longer a confirmed maintainer")
+            && rejection.contains("ngit repo follow-lead"),
+        "unexpected push rejection: {rejection}",
+    );
+
+    command_ok(&removed_repo, &["repo", "follow-lead"]).await?;
+    assert_selected_lead(&removed_repo, alice).await?;
+    let followed = latest_announcement(&harness, removed, &published.identifier).await?;
+    assert!(active_role(&followed, "M", alice).is_some());
+    assert!(
+        active_role(&followed, "m", removed).is_none(),
+        "removed self-role stayed active: {:?}",
+        followed.tags,
     );
     Ok(())
 }

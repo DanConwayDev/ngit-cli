@@ -1962,6 +1962,24 @@ pub async fn get_repo_ref_from_cache(
     git_repo_path: Option<&Path>,
     repo_coordinate: &Nip19Coordinate,
 ) -> Result<RepoRef> {
+    get_repo_ref_from_cache_with_selected_recovery(git_repo_path, repo_coordinate, false).await
+}
+
+/// Resolve enough of an unconfirmed selected coordinate's explicit lead path
+/// for `ngit repo follow-lead` to move the checkout to the authoritative lead.
+/// No other command should opt into this recovery view.
+pub async fn get_repo_ref_from_cache_for_lead_recovery(
+    git_repo_path: Option<&Path>,
+    repo_coordinate: &Nip19Coordinate,
+) -> Result<RepoRef> {
+    get_repo_ref_from_cache_with_selected_recovery(git_repo_path, repo_coordinate, true).await
+}
+
+async fn get_repo_ref_from_cache_with_selected_recovery(
+    git_repo_path: Option<&Path>,
+    repo_coordinate: &Nip19Coordinate,
+    allow_unconfirmed_selected: bool,
+) -> Result<RepoRef> {
     // pubkeys whose announcements are fetched: per NIP-34 clients SHOULD
     // recursively fetch announcements from each pubkey assigned a role, so
     // `o`-assigned moderators are fetched alongside the maintainer listing —
@@ -2133,12 +2151,13 @@ pub async fn get_repo_ref_from_cache(
         ..repo_ref
     };
 
-    if !repo_ref
-        .confirmed_maintainers()
-        .contains(&repo_coordinate.public_key)
+    if !allow_unconfirmed_selected
+        && !repo_ref
+            .confirmed_maintainers()
+            .contains(&repo_coordinate.public_key)
     {
         bail!(
-            "the selected repository coordinate author is no longer a confirmed maintainer; forwarding through a selected non-member is not supported in this release"
+            "the selected repository coordinate author is no longer a confirmed maintainer; run `ngit repo follow-lead` to switch to the active lead"
         );
     }
 
@@ -5686,6 +5705,95 @@ mod confirmed_repository_data_tests {
                 "selected repository coordinate author is no longer a confirmed maintainer"
             ),
         );
+    }
+
+    #[tokio::test]
+    async fn removed_selected_coordinate_with_stale_self_role_fails_closed() {
+        let selected_keys = Keys::generate();
+        let lead_keys = Keys::generate();
+        let selected = selected_keys.public_key();
+        let lead = lead_keys.public_key();
+        let events = [
+            announcement(
+                &selected_keys,
+                Announcement {
+                    created_at: 10,
+                    name: "stale selected co-maintainer",
+                    clone_url: "https://selected.example/repo.git",
+                    relay: "wss://selected.example",
+                    blossom: "https://selected.example/blossom",
+                    private: false,
+                    roles: vec![
+                        vec!["M".to_string(), lead.to_string(), "2".to_string()],
+                        vec!["m".to_string(), selected.to_string(), "2".to_string()],
+                    ],
+                },
+            ),
+            announcement(
+                &lead_keys,
+                Announcement {
+                    created_at: 11,
+                    name: "lead after removal",
+                    clone_url: "https://lead.example/repo.git",
+                    relay: "wss://lead.example",
+                    blossom: "https://lead.example/blossom",
+                    private: false,
+                    roles: vec![
+                        vec!["M".to_string(), lead.to_string(), "1".to_string()],
+                        vec![
+                            "m".to_string(),
+                            selected.to_string(),
+                            "2".to_string(),
+                            "9".to_string(),
+                        ],
+                    ],
+                },
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        for event in events {
+            save_event_in_local_cache(dir.path(), &event).await.unwrap();
+        }
+
+        let error = match get_repo_ref_from_cache(
+            Some(dir.path()),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: selected,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("a stale selected co-maintainer must fail closed after removal"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(
+                "selected repository coordinate author is no longer a confirmed maintainer"
+            ),
+        );
+
+        let recovery = get_repo_ref_from_cache_for_lead_recovery(
+            Some(dir.path()),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: selected,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovery.confirmed_maintainers(), vec![lead]);
+        assert!(!recovery.is_authorized_maintainer(&selected));
+        assert_eq!(recovery.lead_maintainer(), Some(lead));
     }
 }
 

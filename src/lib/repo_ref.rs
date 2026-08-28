@@ -1392,14 +1392,15 @@ impl RepoRef {
         edges
     }
 
-    /// Maintainers in the selected maintainer's reciprocally connected group.
+    /// Maintainers in the selected coordinate's reciprocally connected group.
     ///
     /// Per NIP-34 a listed pubkey is only invited until their own announcement
     /// makes the relationship reciprocal, and an invited pubkey's events MUST
     /// NOT be treated as authoritative. Confirmed maintainers are therefore
     /// the authoritative set: see [`RepoRef::is_authorized_maintainer`].
     ///
-    /// Membership grows as a fixpoint from the selected maintainer: a
+    /// An explicit `M` path is rooted at its terminal self-`M` lead; a
+    /// leadless or legacy graph is rooted at the selected maintainer. A
     /// candidate is confirmed only when an already-confirmed member's
     /// announcement lists them *and* their own announcement lists an
     /// already-confirmed member. Mere reachability is not enough: in a cycle
@@ -1428,8 +1429,8 @@ impl RepoRef {
         declined: &HashSet<PublicKey>,
     ) -> Vec<PublicKey> {
         let mut confirmed: HashSet<PublicKey> = HashSet::new();
-        if !declined.contains(&self.selected_maintainer) {
-            confirmed.insert(self.selected_maintainer);
+        if let Some(seed) = self.confirmation_seed(declined) {
+            confirmed.insert(seed);
         }
         loop {
             let mut changed = false;
@@ -1457,6 +1458,46 @@ impl RepoRef {
             .copied()
             .filter(|maintainer| confirmed.contains(maintainer))
             .collect()
+    }
+
+    /// Choose the authority seed without granting authority merely because a
+    /// coordinate was selected. An indexed `M` path must terminate at one
+    /// active self-`M`; missing, conflicting, and cyclic paths seed nobody.
+    /// Announcements without an active `M` retain the legacy/leadless selected
+    /// coordinate seed.
+    fn confirmation_seed(&self, declined: &HashSet<PublicKey>) -> Option<PublicKey> {
+        let mut current = self.selected_maintainer;
+        let mut followed_explicit_lead = false;
+        let mut visited = HashSet::new();
+
+        loop {
+            if !visited.insert(current) {
+                return None;
+            }
+            let Some(event) = self.events.values().find(|event| event.pubkey == current) else {
+                return (!followed_explicit_lead && !declined.contains(&current))
+                    .then_some(current);
+            };
+            let mut leads = Vec::new();
+            for (letter, target) in active_role_entries(event) {
+                if letter == "M" && !leads.contains(&target) {
+                    leads.push(target);
+                }
+            }
+            if leads.is_empty() {
+                return (!followed_explicit_lead && !declined.contains(&current))
+                    .then_some(current);
+            }
+            if leads.len() != 1 {
+                return None;
+            }
+            let target = leads[0];
+            followed_explicit_lead = true;
+            if target == current {
+                return (!declined.contains(&target)).then_some(target);
+            }
+            current = target;
+        }
     }
 
     /// Whether `pubkey` holds maintainer authority.
@@ -1924,12 +1965,10 @@ impl RepoRef {
                     path,
                 };
             }
-            if !confirmed.contains(&target) {
+            if event_for(self, &target).is_some_and(announcement_author_declines_maintainership) {
                 return LeadResolution {
                     lead: None,
-                    source: event_for(self, &target)
-                        .filter(|event| announcement_author_declines_maintainership(event))
-                        .map_or(LeadSource::Pending, |_| LeadSource::Conflict),
+                    source: LeadSource::Conflict,
                     path,
                 };
             }
