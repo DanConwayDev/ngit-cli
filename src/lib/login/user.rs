@@ -733,7 +733,11 @@ async fn read_private_relay_list_replacement_base<C: Connect + Sync>(
         )
         .await
         .context("failed to read the private Git relay list from its write relays")?;
-    progress_reporter.finish(results.iter().any(Result::is_err), None)?;
+    progress_reporter.finish(
+        results.iter().any(Result::is_err),
+        !results.is_empty() && results.iter().all(Result::is_err),
+        None,
+    )?;
     if !results.iter().any(Result::is_ok) {
         let errors = results
             .iter()

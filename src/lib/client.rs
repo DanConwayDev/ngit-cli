@@ -196,9 +196,10 @@ enum RelayProgressMode {
 /// Owns the complete lifecycle of one multi-relay progress report.
 ///
 /// Normal commands start with one concise spinner and reveal per-relay rows
-/// only after the shared delay. Successful rows are transient; failures keep
-/// the detailed report visible. Verbose commands show details immediately and
-/// silent or test commands never expose a renderer.
+/// only after the shared delay. Partial failures remain transient once the
+/// operation completes; an unavailable required relay set retains its
+/// diagnostics. Verbose commands always retain details, while silent or test
+/// commands never expose a renderer.
 pub struct RelayProgressReporter {
     details: Option<MultiProgress>,
     mode: RelayProgressMode,
@@ -208,7 +209,14 @@ pub struct RelayProgressReporter {
     heading_message: String,
     reveal_state: Option<Arc<BarRevealState>>,
     timer_handle: Option<tokio::task::JoinHandle<()>>,
+    fetch_relay_health: FetchRelayHealth,
     finished: bool,
+}
+
+#[derive(Default)]
+struct FetchRelayHealth {
+    repository_relay_attempts: usize,
+    repository_relay_successes: usize,
 }
 
 #[derive(Clone)]
@@ -319,6 +327,7 @@ impl RelayProgressReporter {
             heading_message,
             reveal_state,
             timer_handle,
+            fetch_relay_health: FetchRelayHealth::default(),
             finished: false,
         }
     }
@@ -330,11 +339,16 @@ impl RelayProgressReporter {
         }
     }
 
-    pub fn finish(mut self, has_errors: bool, concise_summary: Option<String>) -> Result<()> {
+    pub fn finish(
+        mut self,
+        has_errors: bool,
+        show_concise_details: bool,
+        concise_summary: Option<String>,
+    ) -> Result<()> {
         if let Some(handle) = self.timer_handle.take() {
             handle.abort();
         }
-        if self.mode == RelayProgressMode::Concise && has_errors {
+        if self.mode == RelayProgressMode::Concise && show_concise_details {
             reveal_relay_progress(
                 self.details.as_ref().unwrap(),
                 self.spinner.as_ref(),
@@ -346,7 +360,7 @@ impl RelayProgressReporter {
             spinner.finish_and_clear();
         }
 
-        let retain_details = retain_relay_progress_details(self.mode, has_errors);
+        let retain_details = retain_relay_progress_details(self.mode, show_concise_details);
         let details = self.details.take().unwrap();
         if !retain_details {
             details.clear()?;
@@ -356,7 +370,7 @@ impl RelayProgressReporter {
         if self.mode == RelayProgressMode::Concise {
             if let Some(summary) = concise_summary {
                 console::Term::stderr().write_line(&summary)?;
-            } else if has_errors {
+            } else if show_concise_details && has_errors {
                 console::Term::stderr().write_line("")?;
             }
         } else if self.mode == RelayProgressMode::Detailed && has_errors {
@@ -367,8 +381,9 @@ impl RelayProgressReporter {
     }
 }
 
-fn retain_relay_progress_details(mode: RelayProgressMode, has_errors: bool) -> bool {
-    mode == RelayProgressMode::Detailed || (mode == RelayProgressMode::Concise && has_errors)
+fn retain_relay_progress_details(mode: RelayProgressMode, show_concise_details: bool) -> bool {
+    mode == RelayProgressMode::Detailed
+        || (mode == RelayProgressMode::Concise && show_concise_details)
 }
 
 impl Drop for RelayProgressReporter {
@@ -690,7 +705,11 @@ impl Connect for Client {
         let relay_results = self
             .get_events_per_relay(relay_urls, filters, progress_reporter.handle())
             .await?;
-        progress_reporter.finish(relay_results.iter().any(Result::is_err), None)?;
+        progress_reporter.finish(
+            relay_results.iter().any(Result::is_err),
+            !relay_results.is_empty() && relay_results.iter().all(Result::is_err),
+            None,
+        )?;
         // relay outages degrade to an empty result; callers that must not
         // mistake an outage for absent events consult their own caches or
         // use get_events_per_relay directly
@@ -839,13 +858,15 @@ impl Connect for Client {
         )
         .await?;
 
-        let progress_reporter = RelayProgressReporter::fetching();
+        let mut progress_reporter = RelayProgressReporter::fetching();
         let progress = progress_reporter.handle();
 
         let success_count = Arc::new(AtomicU64::new(0));
+        let repository_success_count = Arc::new(AtomicU64::new(0));
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
 
         let mut processed_relay_scopes = HashSet::new();
+        let mut repository_relay_attempts = 0;
 
         let mut relay_reports: Vec<Result<FetchReport>> = vec![];
 
@@ -877,6 +898,10 @@ impl Connect for Client {
             if relay_requests.is_empty() {
                 break;
             }
+            repository_relay_attempts += relay_requests
+                .iter()
+                .filter(|request| request.scope == RelayFetchScope::Repository)
+                .count();
             for relay in &request.repo_relays {
                 self.client
                     .add_relay(relay.as_str())
@@ -885,6 +910,7 @@ impl Connect for Client {
             }
 
             let success_count_for_loop = success_count.clone();
+            let repository_success_count_for_loop = repository_success_count.clone();
             let current_timeout_for_loop = current_timeout.clone();
             let total_relays = relay_requests.len() as u64;
             let processed_this_round = relay_requests
@@ -901,9 +927,12 @@ impl Connect for Client {
                 .into_iter()
                 .map(|request| {
                     let success_count_clone = success_count_for_loop.clone();
+                    let repository_success_count_clone =
+                        repository_success_count_for_loop.clone();
                     let current_timeout_clone = current_timeout_for_loop.clone();
                     let progress = progress.clone();
                     let total_relays_clone = total_relays;
+                    let is_repository_relay = request.scope == RelayFetchScope::Repository;
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -1001,6 +1030,9 @@ impl Connect for Client {
                             result = &mut fetch_future => {
                                 if result.is_ok() {
                                     let new_count = success_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if is_repository_relay {
+                                        repository_success_count_clone.fetch_add(1, Ordering::Relaxed);
+                                    }
                                     let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
 
                                     if new_count >= threshold {
@@ -1089,6 +1121,10 @@ impl Connect for Client {
             };
         }
 
+        progress_reporter.fetch_relay_health = FetchRelayHealth {
+            repository_relay_attempts,
+            repository_relay_successes: repository_success_count.load(Ordering::Relaxed) as usize,
+        };
         Ok((relay_reports, progress_reporter))
     }
 
@@ -1945,7 +1981,11 @@ pub async fn fetch_filters_to_local_cache(
         }
     }))
     .await;
-    progress_reporter.finish(results.iter().any(|(_, result)| result.is_err()), None)?;
+    progress_reporter.finish(
+        results.iter().any(|(_, result)| result.is_err()),
+        !results.is_empty() && results.iter().all(|(_, result)| result.is_err()),
+        None,
+    )?;
     Ok(results)
 }
 
@@ -3884,15 +3924,39 @@ pub async fn fetching_quietly(
 
 /// Finalize a repository fetch before its caller prints ordinary output.
 ///
-/// Keeping this operation on the reporter makes successful cleanup, error
-/// retention, and output separation identical for every fetch caller.
+/// Partial auxiliary or repository relay outages are routine and remain
+/// transient. Diagnostics are retained only when every attempted relay failed
+/// or no repository relay completed successfully.
 pub fn finish_fetch_progress<T>(
     reports: &[Result<T>],
     progress_reporter: RelayProgressReporter,
 ) -> Result<bool> {
     let had_errors = reports.iter().any(Result::is_err);
-    progress_reporter.finish(had_errors, None)?;
+    let successful_relays = reports.iter().filter(|report| report.is_ok()).count();
+    let show_diagnostics = fetch_failure_requires_diagnostics(
+        reports.len(),
+        successful_relays,
+        progress_reporter
+            .fetch_relay_health
+            .repository_relay_attempts,
+        progress_reporter
+            .fetch_relay_health
+            .repository_relay_successes,
+    );
+    progress_reporter.finish(had_errors, show_diagnostics, None)?;
     Ok(had_errors)
+}
+
+fn fetch_failure_requires_diagnostics(
+    relay_attempts: usize,
+    relay_successes: usize,
+    repository_relay_attempts: usize,
+    repository_relay_successes: usize,
+) -> bool {
+    let all_relays_failed = relay_attempts > 0 && relay_successes == 0;
+    let all_repository_relays_failed =
+        repository_relay_attempts > 0 && repository_relay_successes == 0;
+    all_relays_failed || all_repository_relays_failed
 }
 
 pub async fn get_issues_from_cache(
@@ -4367,7 +4431,11 @@ async fn send_events_with_cache_path(
         )
     };
 
-    progress_reporter.finish(succeeded_count != total_count, Some(finish_message))?;
+    progress_reporter.finish(
+        succeeded_count != total_count,
+        total_count > 0 && succeeded_count == 0,
+        Some(finish_message),
+    )?;
 
     Ok(relay_results)
 }
@@ -4689,7 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_relay_progress_is_cleared_centrally() {
+    fn partial_relay_failure_is_cleared_in_concise_mode() {
         let clears = Arc::new(AtomicUsize::new(0));
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
             ClearTrackingTerm {
@@ -4700,7 +4768,7 @@ mod tests {
             ProgressBar::new(1)
                 .with_style(ProgressStyle::with_template("{msg}").expect("valid style")),
         );
-        bar.finish_with_message("0 events from mailbox relay");
+        bar.finish_with_message("timeout after 7s timeout");
         let clears_before_finish = clears.load(Ordering::Relaxed);
 
         let reporter = RelayProgressReporter {
@@ -4710,18 +4778,28 @@ mod tests {
             spinner: None,
             heading: None,
             heading_message: RELAY_FETCH_HEADING.to_owned(),
-            reveal_state: None,
+            reveal_state: Some(Arc::new(BarRevealState {
+                revealed: AtomicBool::new(false),
+                deferred: Mutex::new(Vec::new()),
+            })),
             timer_handle: None,
+            fetch_relay_health: FetchRelayHealth {
+                repository_relay_attempts: 1,
+                repository_relay_successes: 1,
+            },
             finished: false,
         };
 
-        let had_errors = finish_fetch_progress(&[Ok(FetchReport::default())], reporter)
-            .expect("successful progress cleanup");
+        let had_errors = finish_fetch_progress::<FetchReport>(
+            &[Err(anyhow!("relay timed out")), Ok(FetchReport::default())],
+            reporter,
+        )
+        .expect("partial progress cleanup");
 
-        assert!(!had_errors);
+        assert!(had_errors);
         assert!(
             clears.load(Ordering::Relaxed) > clears_before_finish,
-            "successful direct relay reads must clear their transient detail lines"
+            "concise relay reads must clear transient detail after a partial outage"
         );
     }
 
@@ -4743,6 +4821,14 @@ mod tests {
             RelayProgressMode::Hidden,
             true
         ));
+    }
+
+    #[test]
+    fn fetch_diagnostics_require_total_or_repository_outage() {
+        assert!(!fetch_failure_requires_diagnostics(0, 0, 0, 0));
+        assert!(!fetch_failure_requires_diagnostics(3, 2, 2, 1));
+        assert!(fetch_failure_requires_diagnostics(3, 0, 0, 0));
+        assert!(fetch_failure_requires_diagnostics(3, 1, 2, 0));
     }
 
     #[test]
