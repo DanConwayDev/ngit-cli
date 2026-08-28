@@ -1,7 +1,6 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
-use console::Style;
 use ngit::{
     cli_interactor::cli_error,
     client::{
@@ -92,6 +91,94 @@ fn refusal_error(refusal: &LeaveRefusal) -> anyhow::Error {
             &["your announcement already records your role as ended"],
         ),
     }
+}
+
+fn require_safe_leave(repo_ref: &RepoRef, my_ref: &RepoRef, my_pubkey: PublicKey) -> Result<()> {
+    let before_maintainers: HashSet<PublicKey> =
+        repo_ref.confirmed_maintainers().into_iter().collect();
+    let before_moderators: HashSet<PublicKey> =
+        repo_ref.confirmed_moderators().into_iter().collect();
+    let (after_maintainers, after_moderators) =
+        repo_ref.membership_after_author_change(my_pubkey, &my_ref.maintainers, false, Some(false));
+    let after_maintainers: HashSet<PublicKey> = after_maintainers.into_iter().collect();
+    let after_moderators: HashSet<PublicKey> = after_moderators.into_iter().collect();
+
+    let unexpected_maintainer_removals = npubs(
+        before_maintainers
+            .difference(&after_maintainers)
+            .copied()
+            .filter(|pubkey| *pubkey != my_pubkey),
+    );
+    let unexpected_moderator_removals = npubs(
+        before_moderators
+            .difference(&after_moderators)
+            .copied()
+            .filter(|pubkey| *pubkey != my_pubkey),
+    );
+    let unexpected_maintainer_additions =
+        npubs(after_maintainers.difference(&before_maintainers).copied());
+    let unexpected_moderator_additions =
+        npubs(after_moderators.difference(&before_moderators).copied());
+    if unexpected_maintainer_removals.is_empty()
+        && unexpected_moderator_removals.is_empty()
+        && unexpected_maintainer_additions.is_empty()
+        && unexpected_moderator_additions.is_empty()
+    {
+        return Ok(());
+    }
+
+    let guidance = if repo_ref.lead_maintainer() == Some(my_pubkey) {
+        vec![
+            "prepare and complete a lead handover before leaving",
+            "or complete each dependent member's separate transition before ending your role",
+        ]
+    } else {
+        vec![
+            "ask each affected member to establish another reciprocal path first",
+            "or complete each dependent member's separate transition before ending your role",
+        ]
+    };
+    let mut details = Vec::new();
+    if !unexpected_maintainer_removals.is_empty() {
+        details.push((
+            "other maintainers removed",
+            unexpected_maintainer_removals.join(", "),
+        ));
+    }
+    if !unexpected_moderator_removals.is_empty() {
+        details.push((
+            "moderators removed",
+            unexpected_moderator_removals.join(", "),
+        ));
+    }
+    if !unexpected_maintainer_additions.is_empty() {
+        details.push((
+            "maintainers added",
+            unexpected_maintainer_additions.join(", "),
+        ));
+    }
+    if !unexpected_moderator_additions.is_empty() {
+        details.push((
+            "moderators added",
+            unexpected_moderator_additions.join(", "),
+        ));
+    }
+    let detail_refs: Vec<(&str, &str)> = details
+        .iter()
+        .map(|(label, value)| (*label, value.as_str()))
+        .collect();
+    Err(cli_error(
+        "leaving now would also remove other confirmed repository members",
+        &detail_refs,
+        &guidance,
+    ))
+}
+
+fn npubs(pubkeys: impl IntoIterator<Item = PublicKey>) -> Vec<String> {
+    pubkeys
+        .into_iter()
+        .map(|pubkey| pubkey.to_bech32().unwrap_or_else(|_| pubkey.to_hex()))
+        .collect()
 }
 
 /// The latest announcement `my_pubkey` published for this repository. The
@@ -187,18 +274,7 @@ pub async fn launch(_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<
         return Err(refusal_error(&LeaveRefusal::NotAMember));
     };
 
-    // Leaving as the lead is allowed but may leave the repository leadless:
-    // co-maintainers under a lead SHOULD list only themselves and the lead,
-    // so nobody else's announcement may assert a replacement yet.
-    if repo_ref.lead_maintainer() == Some(my_pubkey) {
-        let warn_style = Style::new().yellow();
-        eprintln!(
-            "{}",
-            warn_style.apply_to(
-                "warning: you are the lead maintainer; leaving may leave the repository without a lead"
-            ),
-        );
-    }
+    require_safe_leave(&repo_ref, &my_ref, my_pubkey)?;
 
     let repo_name = my_ref.name.clone();
     println!("leaving '{repo_name}'");
@@ -272,6 +348,20 @@ mod tests {
             .tags(event_tags)
             .finalize(keys)
             .unwrap()
+    }
+
+    fn insert(repo_ref: &mut RepoRef, event: Event) {
+        repo_ref.events.insert(
+            nostr::prelude::Nip19Coordinate {
+                coordinate: nostr::prelude::Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: event.pubkey,
+                    identifier: "test-repo".to_string(),
+                },
+                relays: vec![],
+            },
+            event,
+        );
     }
 
     /// [`leave_refusal`]: selects the refusal from my own announcement when
@@ -437,5 +527,69 @@ mod tests {
             .unwrap();
             assert_eq!(leave_refusal(&repo_ref, Some(&my_ref), &me), None);
         }
+    }
+
+    #[test]
+    fn lead_cannot_leave_while_other_members_depend_on_their_coordinate() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let bob = bob_keys.public_key();
+        let alice_event = role_event(
+            &alice_keys,
+            vec![
+                tag(&["M", &alice.to_string()]),
+                tag(&["m", &bob.to_string()]),
+            ],
+        );
+        let alice_ref = RepoRef::try_from((alice_event.clone(), None)).unwrap();
+        let mut repo_ref = RepoRef::try_from((alice_event, None)).unwrap();
+        insert(
+            &mut repo_ref,
+            role_event(
+                &bob_keys,
+                vec![
+                    tag(&["M", &alice.to_string()]),
+                    tag(&["m", &bob.to_string()]),
+                ],
+            ),
+        );
+        repo_ref.maintainers = vec![alice, bob];
+
+        let error = require_safe_leave(&repo_ref, &alice_ref, alice)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("would also remove other confirmed repository members"));
+    }
+
+    #[test]
+    fn co_maintainer_can_leave_without_removing_the_lead() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let bob = bob_keys.public_key();
+        let bob_event = role_event(
+            &bob_keys,
+            vec![
+                tag(&["M", &alice.to_string()]),
+                tag(&["m", &bob.to_string()]),
+            ],
+        );
+        let bob_ref = RepoRef::try_from((bob_event.clone(), None)).unwrap();
+        let mut repo_ref = RepoRef::try_from((
+            role_event(
+                &alice_keys,
+                vec![
+                    tag(&["M", &alice.to_string()]),
+                    tag(&["m", &bob.to_string()]),
+                ],
+            ),
+            None,
+        ))
+        .unwrap();
+        insert(&mut repo_ref, bob_event);
+        repo_ref.maintainers = vec![alice, bob];
+
+        require_safe_leave(&repo_ref, &bob_ref, bob).unwrap();
     }
 }

@@ -158,6 +158,117 @@ fn npubs(pubkeys: impl IntoIterator<Item = PublicKey>) -> Vec<String> {
         .collect()
 }
 
+fn require_safe_named_removal(
+    repo_ref: &RepoRef,
+    author: PublicKey,
+    target: PublicKey,
+    replacement_maintainers: &[PublicKey],
+) -> Result<()> {
+    let before_maintainers: HashSet<PublicKey> =
+        repo_ref.confirmed_maintainers().into_iter().collect();
+    let before_moderators: HashSet<PublicKey> =
+        repo_ref.confirmed_moderators().into_iter().collect();
+    let (after_maintainers, after_moderators) =
+        repo_ref.membership_after_author_change(author, replacement_maintainers, true, None);
+    let after_maintainers: HashSet<PublicKey> = after_maintainers.into_iter().collect();
+    let after_moderators: HashSet<PublicKey> = after_moderators.into_iter().collect();
+    let target_npub = target.to_bech32().unwrap_or_else(|_| target.to_hex());
+
+    if before_maintainers.contains(&target) && after_maintainers.contains(&target) {
+        let retaining_assigners = npubs(
+            repo_ref
+                .maintainer_edges()
+                .into_iter()
+                .filter(|edge| {
+                    edge.from != author
+                        && edge.to == target
+                        && after_maintainers.contains(&edge.from)
+                })
+                .map(|edge| edge.from),
+        );
+        let source = if target == repo_ref.selected_maintainer {
+            "the currently selected repository coordinate still seeds their authority".to_string()
+        } else if retaining_assigners.is_empty() {
+            "another active reciprocal path still confirms them".to_string()
+        } else {
+            format!(
+                "they are still assigned by {}",
+                retaining_assigners.join(", ")
+            )
+        };
+        return Err(cli_error_with_category(
+            "membership_removal_ineffective",
+            &format!(
+                "removing {target_npub} from your announcement would not remove their maintainer authority"
+            ),
+            &[("remaining authority", &source)],
+            &[
+                "ask each retaining co-maintainer to run `ngit repo follow-lead` first",
+                "then retry this named removal",
+            ],
+        ));
+    }
+
+    let unexpected_maintainer_removals = npubs(
+        before_maintainers
+            .difference(&after_maintainers)
+            .copied()
+            .filter(|pubkey| *pubkey != target),
+    );
+    let unexpected_moderator_removals =
+        npubs(before_moderators.difference(&after_moderators).copied());
+    let unexpected_maintainer_additions =
+        npubs(after_maintainers.difference(&before_maintainers).copied());
+    let unexpected_moderator_additions =
+        npubs(after_moderators.difference(&before_moderators).copied());
+    if unexpected_maintainer_removals.is_empty()
+        && unexpected_moderator_removals.is_empty()
+        && unexpected_maintainer_additions.is_empty()
+        && unexpected_moderator_additions.is_empty()
+    {
+        return Ok(());
+    }
+
+    let mut details = Vec::new();
+    if !unexpected_maintainer_removals.is_empty() {
+        details.push((
+            "other maintainers removed",
+            unexpected_maintainer_removals.join(", "),
+        ));
+    }
+    if !unexpected_moderator_removals.is_empty() {
+        details.push((
+            "moderators removed",
+            unexpected_moderator_removals.join(", "),
+        ));
+    }
+    if !unexpected_maintainer_additions.is_empty() {
+        details.push((
+            "maintainers added",
+            unexpected_maintainer_additions.join(", "),
+        ));
+    }
+    if !unexpected_moderator_additions.is_empty() {
+        details.push((
+            "moderators added",
+            unexpected_moderator_additions.join(", "),
+        ));
+    }
+    let detail_refs: Vec<(&str, &str)> = details
+        .iter()
+        .map(|(label, value)| (*label, value.as_str()))
+        .collect();
+    Err(cli_error_with_category(
+        "membership_removal_consequences",
+        &format!("removing {target_npub} would also change other confirmed repository members"),
+        &detail_refs,
+        &[
+            "establish replacement graph paths for every affected member first",
+            "retry only when this named removal has no other membership consequences",
+        ],
+    ))
+}
+
 fn require_prepared_lead(
     current_roster: &[PublicKey],
     proposed_lead: PublicKey,
@@ -489,7 +600,7 @@ pub async fn launch(
         }
         maintainers.push(target);
     }
-    if let Some(value) = &args.remove_maintainer {
+    let removed_target = if let Some(value) = &args.remove_maintainer {
         let target = parse_pubkey("--remove-maintainer", value)?;
         if target == my_pubkey {
             return Err(cli_error(
@@ -507,7 +618,10 @@ pub async fn launch(
             ));
         }
         maintainers.retain(|pubkey| *pubkey != target);
-    }
+        Some(target)
+    } else {
+        None
+    };
 
     let mut role_tags = acknowledgement.map(|_| my_ref.role_tags.clone());
     if args.lead_maintainer.is_some() && requested_lead.is_some_and(|lead| lead != my_pubkey) {
@@ -516,6 +630,13 @@ pub async fn launch(
         require_prepared_lead(&maintainers, lead, proposed_ref.as_ref(), my_pubkey)?;
         my_ref.defer_third_party_roles(my_pubkey, lead);
         role_tags = Some(my_ref.role_tags.clone());
+    }
+
+    if let Some(target) = removed_target {
+        let active_projection = requested_lead
+            .filter(|lead| *lead != my_pubkey)
+            .map_or_else(|| maintainers.clone(), |lead| vec![my_pubkey, lead]);
+        require_safe_named_removal(&repo_ref, my_pubkey, target, &active_projection)?;
     }
 
     let relationship_action = args.has_relationship_mutation()
@@ -561,4 +682,118 @@ pub async fn launch(
         public: args.public,
     };
     init::launch_repo_edit(cli, &internal_args, signer_params).await
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::{EventBuilder, Keys, Tag, event::FinalizeEvent, nip01::Coordinate};
+
+    use super::*;
+
+    fn role_event(keys: &Keys, roles: Vec<Vec<String>>) -> Event {
+        let mut tags = vec![Tag::identifier("repo")];
+        tags.extend(roles.into_iter().map(|role| Tag::parse(role).unwrap()));
+        EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags(tags)
+            .finalize(keys)
+            .unwrap()
+    }
+
+    fn insert(repo_ref: &mut RepoRef, event: Event) {
+        repo_ref.events.insert(
+            nostr::prelude::Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: event.pubkey,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+            event,
+        );
+    }
+
+    fn tag(letter: &str, pubkey: PublicKey) -> Vec<String> {
+        vec![letter.to_string(), pubkey.to_string()]
+    }
+
+    #[test]
+    fn named_removal_refuses_when_another_co_maintainer_retains_the_target() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let carol_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let bob = bob_keys.public_key();
+        let carol = carol_keys.public_key();
+        let mut repo_ref = RepoRef::try_from((
+            role_event(
+                &alice_keys,
+                vec![tag("M", alice), tag("m", bob), tag("m", carol)],
+            ),
+            None,
+        ))
+        .unwrap();
+        insert(
+            &mut repo_ref,
+            role_event(
+                &bob_keys,
+                vec![tag("M", alice), tag("m", bob), tag("m", carol)],
+            ),
+        );
+        insert(
+            &mut repo_ref,
+            role_event(&carol_keys, vec![tag("M", alice), tag("m", carol)]),
+        );
+        repo_ref.maintainers = vec![alice, bob, carol];
+
+        let error = require_safe_named_removal(&repo_ref, alice, carol, &[alice, bob])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&carol.to_bech32().unwrap()));
+        assert!(error.contains("would not remove their maintainer authority"));
+    }
+
+    #[test]
+    fn named_removal_names_dependent_maintainers_and_moderators() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let dave_keys = Keys::generate();
+        let moderator_keys = Keys::generate();
+        let alice = alice_keys.public_key();
+        let bob = bob_keys.public_key();
+        let dave = dave_keys.public_key();
+        let moderator = moderator_keys.public_key();
+        let mut repo_ref = RepoRef::try_from((
+            role_event(&alice_keys, vec![tag("M", alice), tag("m", bob)]),
+            None,
+        ))
+        .unwrap();
+        insert(
+            &mut repo_ref,
+            role_event(
+                &bob_keys,
+                vec![
+                    tag("M", alice),
+                    tag("m", bob),
+                    tag("m", dave),
+                    tag("o", moderator),
+                ],
+            ),
+        );
+        insert(
+            &mut repo_ref,
+            role_event(&dave_keys, vec![tag("M", bob), tag("m", dave)]),
+        );
+        insert(
+            &mut repo_ref,
+            role_event(&moderator_keys, vec![tag("M", bob), tag("o", moderator)]),
+        );
+        repo_ref.maintainers = vec![alice, bob, dave];
+        repo_ref.moderators = vec![moderator];
+
+        let error = require_safe_named_removal(&repo_ref, alice, bob, &[alice])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("would also change other confirmed repository members"));
+    }
 }

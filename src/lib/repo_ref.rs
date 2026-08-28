@@ -1380,13 +1380,22 @@ impl RepoRef {
             .filter(|event| announcement_author_declines_maintainership(event))
             .map(|event| event.pubkey)
             .collect();
+        self.resolve_confirmed_maintainers(&self.maintainers, &edges, &declined)
+    }
+
+    fn resolve_confirmed_maintainers(
+        &self,
+        candidates: &[PublicKey],
+        edges: &[MaintainerEdge],
+        declined: &HashSet<PublicKey>,
+    ) -> Vec<PublicKey> {
         let mut confirmed: HashSet<PublicKey> = HashSet::new();
         if !declined.contains(&self.selected_maintainer) {
             confirmed.insert(self.selected_maintainer);
         }
         loop {
             let mut changed = false;
-            for candidate in &self.maintainers {
+            for candidate in candidates {
                 if confirmed.contains(candidate) || declined.contains(candidate) {
                     continue;
                 }
@@ -1405,7 +1414,7 @@ impl RepoRef {
                 break;
             }
         }
-        self.maintainers
+        candidates
             .iter()
             .copied()
             .filter(|maintainer| confirmed.contains(maintainer))
@@ -1497,12 +1506,28 @@ impl RepoRef {
     /// confirmed moderator also confirms.
     pub fn confirmed_moderators(&self) -> Vec<PublicKey> {
         let assigned = self.assigned_moderators();
-        let mut members: HashSet<PublicKey> = self.confirmed_maintainers().into_iter().collect();
+        let confirmed_maintainers = self.confirmed_maintainers();
+        let declined: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_moderatorship(event))
+            .map(|event| event.pubkey)
+            .collect();
+        self.resolve_confirmed_moderators(&confirmed_maintainers, &assigned, &declined)
+    }
+
+    fn resolve_confirmed_moderators(
+        &self,
+        confirmed_maintainers: &[PublicKey],
+        assigned: &[PublicKey],
+        declined: &HashSet<PublicKey>,
+    ) -> Vec<PublicKey> {
+        let mut members: HashSet<PublicKey> = confirmed_maintainers.iter().copied().collect();
         let mut confirmed: Vec<PublicKey> = Vec::new();
         loop {
             let mut changed = false;
-            for candidate in &assigned {
-                if confirmed.contains(candidate) {
+            for candidate in assigned {
+                if confirmed.contains(candidate) || declined.contains(candidate) {
                     continue;
                 }
                 let Some(event) = self.events.get(&self.announcement_coordinate(candidate)) else {
@@ -1526,6 +1551,91 @@ impl RepoRef {
             }
         }
         confirmed
+    }
+
+    /// Resolve the membership that would result from replacing one author's
+    /// active maintainer projection, without signing or publishing an event.
+    ///
+    /// `author_keeps_maintainership` is false for `repo leave`; an ordinary
+    /// roster edit passes true. `author_keeps_moderatorship` is `None` when the
+    /// edit preserves the author's current moderator self-role and
+    /// `Some(false)` when leaving ends it. The author's third-party moderator
+    /// assignments are unchanged, but cease to assign roles if the author is
+    /// no longer a confirmed maintainer.
+    pub fn membership_after_author_change(
+        &self,
+        author: PublicKey,
+        replacement_maintainers: &[PublicKey],
+        author_keeps_maintainership: bool,
+        author_keeps_moderatorship: Option<bool>,
+    ) -> (Vec<PublicKey>, Vec<PublicKey>) {
+        let mut candidates = self.maintainers.clone();
+        for candidate in replacement_maintainers {
+            if !candidates.contains(candidate) {
+                candidates.push(*candidate);
+            }
+        }
+
+        let mut edges = self.maintainer_edges();
+        edges.retain(|edge| edge.from != author);
+        for target in replacement_maintainers {
+            if *target != author
+                && !edges
+                    .iter()
+                    .any(|edge| edge.from == author && edge.to == *target)
+            {
+                edges.push(MaintainerEdge {
+                    from: author,
+                    to: *target,
+                });
+            }
+        }
+
+        let mut declined_maintainers: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_maintainership(event))
+            .map(|event| event.pubkey)
+            .collect();
+        if author_keeps_maintainership {
+            declined_maintainers.remove(&author);
+        } else {
+            declined_maintainers.insert(author);
+        }
+        let maintainers =
+            self.resolve_confirmed_maintainers(&candidates, &edges, &declined_maintainers);
+
+        let mut assigned_moderators = Vec::new();
+        for maintainer in &maintainers {
+            let Some(event) = self.events.get(&self.announcement_coordinate(maintainer)) else {
+                continue;
+            };
+            for (letter, pubkey) in active_role_entries(event) {
+                if letter == "o" && !assigned_moderators.contains(&pubkey) {
+                    assigned_moderators.push(pubkey);
+                }
+            }
+        }
+        let mut declined_moderators: HashSet<PublicKey> = self
+            .events
+            .values()
+            .filter(|event| announcement_author_declines_moderatorship(event))
+            .map(|event| event.pubkey)
+            .collect();
+        if let Some(keeps_role) = author_keeps_moderatorship {
+            if keeps_role {
+                declined_moderators.remove(&author);
+            } else {
+                declined_moderators.insert(author);
+            }
+        }
+        let moderators = self.resolve_confirmed_moderators(
+            &maintainers,
+            &assigned_moderators,
+            &declined_moderators,
+        );
+
+        (maintainers, moderators)
     }
 
     /// All current members: confirmed maintainers followed by confirmed
@@ -3252,6 +3362,66 @@ mod tests {
             assert!(repo_ref.invited_maintainers().is_empty());
         }
 
+        #[tokio::test]
+        async fn simulated_removal_resolves_reciprocal_consequences() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let bridge_keys = &*TEST_KEY_2_KEYS;
+            let bridge = bridge_keys.public_key();
+            let dependent_keys = nostr::prelude::Keys::generate();
+            let dependent = dependent_keys.public_key();
+
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, bridge, dependent], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, bridge]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(bridge_keys, vec![bridge, selected, dependent]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&dependent_keys, vec![dependent, bridge]).await,
+            );
+            assert_eq!(
+                repo_ref.confirmed_maintainers(),
+                vec![selected, bridge, dependent]
+            );
+
+            let (after, _) =
+                repo_ref.membership_after_author_change(selected, &[selected], true, None);
+            assert_eq!(after, vec![selected]);
+        }
+
+        #[tokio::test]
+        async fn simulated_removal_detects_a_retaining_co_maintainer_edge() {
+            let selected = TEST_KEY_1_KEYS.public_key();
+            let co_keys = &*TEST_KEY_2_KEYS;
+            let co = co_keys.public_key();
+            let target_keys = nostr::prelude::Keys::generate();
+            let target = target_keys.public_key();
+
+            let mut repo_ref =
+                create_repo_ref_for_maintainer_order(vec![selected, co, target], vec![]);
+            insert_event(
+                &mut repo_ref,
+                announcement(&TEST_KEY_1_KEYS, vec![selected, co, target]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(co_keys, vec![co, selected, target]).await,
+            );
+            insert_event(
+                &mut repo_ref,
+                announcement(&target_keys, vec![target, selected]).await,
+            );
+
+            let (after, _) =
+                repo_ref.membership_after_author_change(selected, &[selected, co], true, None);
+            assert_eq!(after, vec![selected, co, target]);
+        }
+
         async fn announcement_with_lead(
             keys: &nostr::prelude::Keys,
             listed: Vec<PublicKey>,
@@ -4219,6 +4389,54 @@ mod tests {
                 },
                 event,
             );
+        }
+
+        #[test]
+        fn simulated_graph_change_reports_dependent_moderator_loss() {
+            let owner_keys = nostr::prelude::Keys::generate();
+            let owner = owner_keys.public_key();
+            let bridge_keys = nostr::prelude::Keys::generate();
+            let bridge = bridge_keys.public_key();
+            let moderator_keys = nostr::prelude::Keys::generate();
+            let moderator = moderator_keys.public_key();
+
+            let owner_event = role_event(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string()]),
+                    tag(&["m", &bridge.to_string()]),
+                ],
+            );
+            let mut repo_ref = RepoRef::try_from((owner_event, None)).unwrap();
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &bridge_keys,
+                    vec![
+                        tag(&["M", &owner.to_string()]),
+                        tag(&["m", &bridge.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            insert_announcement(
+                &mut repo_ref,
+                role_event(
+                    &moderator_keys,
+                    vec![
+                        tag(&["M", &bridge.to_string()]),
+                        tag(&["o", &moderator.to_string()]),
+                    ],
+                ),
+            );
+            repo_ref.maintainers = vec![owner, bridge];
+            repo_ref.moderators = vec![moderator];
+            assert_eq!(repo_ref.confirmed_moderators(), vec![moderator]);
+
+            let (maintainers, moderators) =
+                repo_ref.membership_after_author_change(owner, &[owner], true, None);
+            assert_eq!(maintainers, vec![owner]);
+            assert!(moderators.is_empty());
         }
 
         #[test]
