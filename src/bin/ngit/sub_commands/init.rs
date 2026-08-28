@@ -584,6 +584,9 @@ pub struct SubCommandArgs {
     /// Explicitly clear this announcement's active lead declaration.
     #[clap(skip)]
     pub(crate) clear_lead: bool,
+    /// Exact role history prepared by a named lifecycle action.
+    #[clap(skip)]
+    pub(crate) role_tags: Option<Vec<nostr::prelude::Tag>>,
     #[clap(long, value_parser, num_args = 1..)]
     /// hashtags for repository discovery
     pub(crate) hashtag: Vec<String>,
@@ -1290,9 +1293,11 @@ fn resolve_fields(
     // tags, untimed entries are materialized from its maintainer listing so
     // a member this republish drops is closed with an end boundary rather
     // than silently unlisted.
-    let role_tags = my_ref
-        .as_ref()
-        .map_or_else(Vec::new, RepoRef::role_history_for_republish);
+    let role_tags = args.role_tags.clone().unwrap_or_else(|| {
+        my_ref
+            .as_ref()
+            .map_or_else(Vec::new, RepoRef::role_history_for_republish)
+    });
 
     let private = if args.private {
         true

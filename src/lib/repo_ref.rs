@@ -172,6 +172,14 @@ pub enum RoleBoundary {
     Defer,
 }
 
+/// Signed membership transition copied into another maintainer's retained
+/// history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaintainerAcknowledgement {
+    Accepted { at: u64, changed: bool },
+    Departed { at: u64, changed: bool },
+}
+
 /// Names of tags ngit itself parses on `kind:30617` (`GitRepoAnnouncement`)
 /// events. Used by [`RepoRef::try_from`] to decide whether a tag is "ours"
 /// (consumed by a typed field, with duplicates collapsed on re-emission) or
@@ -952,6 +960,164 @@ impl RepoRef {
             );
         }
         history
+    }
+
+    /// Record the target author's signed acceptance or departure boundary in
+    /// this announcement's existing relationship to them.
+    ///
+    /// Active local assignments remain active when an acceptance start is
+    /// adopted. A local `defer` copy remains inactive. A signed departure
+    /// closes either form and removes only that target from the typed active
+    /// roster.
+    pub fn acknowledge_maintainer_event(
+        &mut self,
+        target_event: &nostr::prelude::Event,
+    ) -> Result<MaintainerAcknowledgement> {
+        let target = target_event.pubkey;
+        let target_hex = target.to_string();
+        let target_self_records: Vec<Vec<String>> = target_event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .filter(|slice| {
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&target_hex)
+                    && role_boundaries(slice).is_some()
+            })
+            .map(<[String]>::to_vec)
+            .collect();
+        let active_self_records: Vec<&Vec<String>> = target_self_records
+            .iter()
+            .filter(|record| role_entry_is_active(record))
+            .collect();
+        if active_self_records.len() > 1 {
+            bail!("the target announcement has conflicting active self roles");
+        }
+
+        let observation = if let Some(record) = active_self_records.first() {
+            let at = role_boundaries(record)
+                .and_then(|boundaries| boundaries.last().copied())
+                .and_then(|boundary| match boundary {
+                    RoleBoundary::Timestamp(timestamp) => Some(timestamp),
+                    RoleBoundary::Defer => None,
+                })
+                .unwrap_or_else(|| target_event.created_at.as_secs());
+            (true, at)
+        } else if announcement_author_declines_maintainership(target_event) {
+            let at = target_self_records
+                .iter()
+                .filter_map(|record| role_boundaries(record))
+                .filter_map(|boundaries| match boundaries.last() {
+                    Some(RoleBoundary::Timestamp(timestamp)) if boundaries.len() % 2 == 0 => {
+                        Some(*timestamp)
+                    }
+                    _ => None,
+                })
+                .max()
+                .context("the target departure has no signed numeric end boundary")?;
+            (false, at)
+        } else if target_self_records.is_empty() {
+            (true, target_event.created_at.as_secs())
+        } else {
+            bail!("the target announcement records no active maintainer self role");
+        };
+
+        self.role_tags = self.role_history_for_republish();
+        let mut candidates: Vec<usize> = self
+            .role_tags
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tag)| {
+                let slice = tag.as_slice();
+                (matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && slice.get(1) == Some(&target_hex)
+                    && role_boundaries(slice).is_some())
+                .then_some(index)
+            })
+            .collect();
+        candidates.sort_by_key(|index| {
+            let slice = self.role_tags[*index].as_slice();
+            if role_entry_is_active(slice) {
+                0
+            } else if slice.last().is_some_and(|value| value == "defer") {
+                1
+            } else {
+                2
+            }
+        });
+        let index = candidates
+            .first()
+            .copied()
+            .context("your announcement has no relationship to that maintainer")?;
+        let mut parts = self.role_tags[index].as_slice().to_vec();
+        let boundaries = role_boundaries(&parts).unwrap();
+        let (accepted, at) = observation;
+        let changed = if accepted {
+            if !role_entry_is_active(&parts) && parts.last().is_none_or(|value| value != "defer") {
+                bail!("your relationship to that maintainer has already ended");
+            }
+            let prior_start = boundaries
+                .iter()
+                .rev()
+                .find_map(|boundary| match boundary {
+                    RoleBoundary::Timestamp(timestamp) => Some(*timestamp),
+                    RoleBoundary::Defer => None,
+                })
+                .unwrap_or(0);
+            if at < prior_start {
+                bail!("the signed acceptance predates your invitation boundary");
+            }
+            let start_index = if parts.last().is_some_and(|value| value == "defer") {
+                parts.len() - 2
+            } else if boundaries.is_empty() {
+                parts.push(at.to_string());
+                parts.len() - 1
+            } else {
+                parts.len() - 1
+            };
+            let changed = parts[start_index] != at.to_string();
+            parts[start_index] = at.to_string();
+            changed
+        } else {
+            let start_boundary = if boundaries.len().is_multiple_of(2) {
+                boundaries
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|index| boundaries.get(index))
+            } else {
+                boundaries.last()
+            };
+            let start = match start_boundary {
+                Some(RoleBoundary::Timestamp(timestamp)) => *timestamp,
+                Some(RoleBoundary::Defer) | None => 0,
+            };
+            if at < start {
+                bail!("the signed departure predates your relationship start");
+            }
+            if role_entry_is_active(&parts) {
+                if boundaries.is_empty() {
+                    parts.push("0".to_string());
+                }
+                parts.push(at.to_string());
+                true
+            } else {
+                let end = at.to_string();
+                let changed = parts.last() != Some(&end);
+                *parts.last_mut().unwrap() = end;
+                changed
+            }
+        };
+        self.role_tags[index] = Tag::parse(parts).unwrap();
+
+        if accepted {
+            Ok(MaintainerAcknowledgement::Accepted { at, changed })
+        } else {
+            self.maintainers.retain(|maintainer| *maintainer != target);
+            if self.lead == Some(target) {
+                self.lead = None;
+            }
+            Ok(MaintainerAcknowledgement::Departed { at, changed })
+        }
     }
 
     /// End the author's own self-role in this announcement, per NIP-34's "a
@@ -4764,6 +4930,158 @@ mod tests {
                         tag(&["M", &lead.to_string(), &NOW.to_string()]),
                     ],
                 );
+            }
+        }
+
+        mod acknowledge_maintainer_event {
+            use super::*;
+
+            fn history(repo_ref: &RepoRef) -> Vec<Vec<String>> {
+                repo_ref
+                    .role_tags
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect()
+            }
+
+            #[test]
+            fn replaces_an_active_invitation_start_with_the_acceptance_start() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200"]),
+                    ],
+                );
+
+                assert_eq!(
+                    alice_ref.acknowledge_maintainer_event(&bob_event).unwrap(),
+                    MaintainerAcknowledgement::Accepted {
+                        at: 200,
+                        changed: true,
+                    },
+                );
+                assert!(history(&alice_ref).contains(&tag(&["m", &bob.to_string(), "200"])));
+                assert!(alice_ref.maintainers.contains(&bob));
+            }
+
+            #[test]
+            fn a_deferred_copy_stays_deferred_when_acceptance_is_recorded() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["m", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200"]),
+                    ],
+                );
+
+                alice_ref.acknowledge_maintainer_event(&bob_event).unwrap();
+                assert!(history(&alice_ref).contains(&tag(&[
+                    "m",
+                    &bob.to_string(),
+                    "200",
+                    "defer"
+                ])));
+                assert!(!alice_ref.maintainers.contains(&bob));
+            }
+
+            #[test]
+            fn adopts_a_signed_departure_end_without_changing_other_roles() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol = nostr::prelude::Keys::generate().public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "200"]),
+                            tag(&["m", &carol.to_string(), "210"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &bob.to_string(), "200", "300"]),
+                    ],
+                );
+
+                assert_eq!(
+                    alice_ref.acknowledge_maintainer_event(&bob_event).unwrap(),
+                    MaintainerAcknowledgement::Departed {
+                        at: 300,
+                        changed: true,
+                    },
+                );
+                let history = history(&alice_ref);
+                assert!(history.contains(&tag(&["m", &bob.to_string(), "200", "300"])));
+                assert!(history.contains(&tag(&["m", &carol.to_string(), "210"])));
+                assert!(!alice_ref.maintainers.contains(&bob));
+                assert!(alice_ref.maintainers.contains(&carol));
+            }
+
+            #[test]
+            fn refuses_an_acceptance_that_predates_the_invitation() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let mut alice_ref = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "200"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let bob_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "150"]),
+                        tag(&["m", &bob.to_string(), "150"]),
+                    ],
+                );
+
+                assert!(alice_ref.acknowledge_maintainer_event(&bob_event).is_err());
             }
         }
 

@@ -1185,6 +1185,14 @@ mod tests {
             ]
             .as_slice(),
             ["ngit", "repo", "edit", "--lead-maintainer", "npub1invalid"].as_slice(),
+            [
+                "ngit",
+                "repo",
+                "edit",
+                "--acknowledge-maintainer-change",
+                "npub1invalid",
+            ]
+            .as_slice(),
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|error| panic!("failed to parse: {error}"));
         }
@@ -1201,6 +1209,19 @@ mod tests {
             ])
             .is_err(),
             "one invocation must not accept two named relationship actions",
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "repo",
+                "edit",
+                "--acknowledge-maintainer-change",
+                "npub1invalid",
+                "--name",
+                "changed too",
+            ])
+            .is_err(),
+            "the history acknowledgement must be standalone",
         );
     }
 }

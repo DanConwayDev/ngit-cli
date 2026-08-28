@@ -1,11 +1,18 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use clap::ArgGroup;
 use ngit::{
     cli_interactor::cli_error,
-    client::{Params, get_repo_ref_from_cache},
-    repo_ref::{LeadSource, RepoRef},
+    client::{
+        Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
+    },
+    event_ordering::latest_event,
+    repo_ref::{
+        LeadSource, MaintainerAcknowledgement, RepoRef, announcement_author_declines_maintainership,
+    },
 };
-use nostr::prelude::{PublicKey, ToBech32};
+use nostr::prelude::{Event, Filter, Kind, PublicKey, ToBech32};
 
 use crate::{
     cli::{Cli, SignerParams},
@@ -20,7 +27,11 @@ use crate::{
 #[allow(clippy::struct_excessive_bools)]
 #[command(group(
     ArgGroup::new("relationship_action")
-        .args(["add_maintainer", "remove_maintainer"])
+        .args([
+            "add_maintainer",
+            "remove_maintainer",
+            "acknowledge_maintainer_change",
+        ])
         .multiple(false)
 ))]
 pub struct SubCommandArgs {
@@ -54,6 +65,29 @@ pub struct SubCommandArgs {
     #[arg(long, value_name = "NPUB")]
     /// remove one maintainer relationship
     pub(crate) remove_maintainer: Option<String>,
+    #[arg(
+        long,
+        value_name = "NPUB",
+        conflicts_with_all = [
+            "lead_maintainer",
+            "no_lead_maintainer",
+            "name",
+            "identifier",
+            "description",
+            "grasp_server",
+            "relay",
+            "clone",
+            "web",
+            "upstream",
+            "hashtag",
+            "earliest_unique_commit",
+            "clean",
+            "private",
+            "public",
+        ]
+    )]
+    /// record one maintainer's signed acceptance or departure boundary
+    pub(crate) acknowledge_maintainer_change: Option<String>,
     #[arg(long, value_name = "NPUB", conflicts_with = "no_lead_maintainer")]
     /// assign the lead maintainer
     pub(crate) lead_maintainer: Option<String>,
@@ -103,6 +137,26 @@ fn own_announcement(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Result<RepoRef>
                 &["if you are invited, run `ngit repo accept` first"],
             )
         })
+}
+
+async fn latest_maintainer_announcement(
+    git_repo_path: &Path,
+    identifier: &str,
+    pubkey: PublicKey,
+) -> Option<Event> {
+    let filter = Filter::new()
+        .kind(Kind::GitRepoAnnouncement)
+        .author(pubkey)
+        .identifier(identifier.to_string());
+    let mut candidates = get_event_from_global_cache(Some(git_repo_path), vec![filter.clone()])
+        .await
+        .unwrap_or_default();
+    candidates.extend(
+        get_events_from_local_cache(git_repo_path, vec![filter])
+            .await
+            .unwrap_or_default(),
+    );
+    latest_event(&candidates).cloned()
 }
 
 fn relationship_governance(
@@ -221,7 +275,64 @@ pub async fn launch(
         .await
         .context("no repository announcement found on relays")?;
     let my_pubkey = user_ref.public_key;
-    let my_ref = own_announcement(&repo_ref, my_pubkey)?;
+    let mut my_ref = own_announcement(&repo_ref, my_pubkey)?;
+
+    let acknowledgement = if let Some(value) = &args.acknowledge_maintainer_change {
+        let target = parse_pubkey("--acknowledge-maintainer-change", value)?;
+        if target == my_pubkey {
+            return Err(cli_error(
+                "you cannot acknowledge your own maintainer history",
+                &[],
+                &[],
+            ));
+        }
+        let target_event =
+            latest_maintainer_announcement(git_repo_path, &repo_ref.identifier, target)
+                .await
+                .ok_or_else(|| {
+                    cli_error(
+                        "no signed maintainer change was found for that pubkey",
+                        &[],
+                        &["fetch again after that maintainer publishes their announcement"],
+                    )
+                })?;
+        let departed = announcement_author_declines_maintainership(&target_event);
+        if !departed && !repo_ref.confirmed_maintainers().contains(&target) {
+            return Err(cli_error(
+                "that pubkey has not published a confirmed maintainer acceptance",
+                &[],
+                &["ask them to run `ngit repo accept` first"],
+            ));
+        }
+        if departed && my_ref.lead == Some(target) {
+            return Err(cli_error(
+                "the active lead has ended their own role",
+                &[],
+                &["resolve the lead transition before acknowledging other history"],
+            ));
+        }
+        let acknowledgement = my_ref
+            .acknowledge_maintainer_event(&target_event)
+            .with_context(|| format!("cannot acknowledge maintainer change for {value}"))?;
+        let changed = match acknowledgement {
+            MaintainerAcknowledgement::Accepted { changed, .. }
+            | MaintainerAcknowledgement::Departed { changed, .. } => changed,
+        };
+        if !changed {
+            if crate::output::is_json() {
+                crate::output::set_value(serde_json::json!({
+                    "status": "ok",
+                    "action": "maintainer_change_already_acknowledged",
+                    "pubkey": target.to_string(),
+                }));
+            }
+            println!("that maintainer change is already recorded.");
+            return Ok(());
+        }
+        Some(acknowledgement)
+    } else {
+        None
+    };
 
     let requested_lead = relationship_governance(args, &repo_ref, my_pubkey)?;
     let mut maintainers = my_ref.maintainers.clone();
@@ -260,7 +371,8 @@ pub async fn launch(
 
     let relationship_action = args.has_relationship_mutation()
         || args.lead_maintainer.is_some()
-        || args.no_lead_maintainer;
+        || args.no_lead_maintainer
+        || acknowledgement.is_some();
     if let Some(lead) = requested_lead {
         if !maintainers.contains(&lead) {
             let lead = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
@@ -291,6 +403,7 @@ pub async fn launch(
         lead_maintainer: requested_lead.and_then(|pubkey| pubkey.to_bech32().ok()),
         replace_maintainers: relationship_action,
         clear_lead: args.no_lead_maintainer,
+        role_tags: acknowledgement.map(|_| my_ref.role_tags.clone()),
         hashtag: args.hashtag.clone(),
         earliest_unique_commit: args.earliest_unique_commit.clone(),
         clean: args.clean,

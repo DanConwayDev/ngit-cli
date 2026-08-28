@@ -38,6 +38,20 @@ async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn active_role_start(event: &Event, letter: &str, subject: PublicKey) -> Option<u64> {
+    let subject = subject.to_string();
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .find(|tag| {
+            tag.first().map(String::as_str) == Some(letter)
+                && tag.get(1) == Some(&subject)
+                && tag.len() % 2 == 1
+        })
+        .and_then(|tag| tag.last()?.parse().ok())
+}
+
 #[tokio::test]
 async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
     let harness = Harness::builder(
@@ -114,6 +128,56 @@ async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
     assert!(
         bob_history[0][2].parse::<u64>().is_ok() && bob_history[0][3].parse::<u64>().is_ok(),
         "Bob's invitation history should retain numeric start/end boundaries",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn acknowledgement_adopts_the_confirmed_acceptance_start() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("acknowledged acceptance".into()),
+            identifier: Some("acknowledged-acceptance".into()),
+            additional_maintainer_count: 1,
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = published.additional_maintainer_keys[0].clone();
+    let bob = bob_keys.public_key();
+    harness.publish_user_relay_list(&bob_keys).await?;
+    let bob_repo = harness
+        .clone_published_repo_as(&published, &bob_keys)
+        .await?;
+    let accepted = bob_repo.ngit(["repo", "accept"]).output().await?;
+    if !accepted.status.success() {
+        bail!(
+            "ngit repo accept exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            accepted.status,
+            String::from_utf8_lossy(&accepted.stdout),
+            String::from_utf8_lossy(&accepted.stderr),
+        );
+    }
+
+    let bob_announcement = latest_announcement(&harness, bob, &published.identifier).await?;
+    let accepted_at = active_role_start(&bob_announcement, "m", bob)
+        .context("Bob's acceptance has no numeric active self-role start")?;
+    let bob_npub = bob.to_bech32()?;
+    edit_ok(&publisher, &["--acknowledge-maintainer-change", &bob_npub]).await?;
+
+    let alice_announcement = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        active_role_start(&alice_announcement, "m", bob),
+        Some(accepted_at),
+        "Alice should retain Bob's signed acceptance boundary",
     );
     Ok(())
 }
