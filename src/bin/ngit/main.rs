@@ -19,6 +19,7 @@ use ngit::{
 };
 
 mod ci_commit;
+mod docs_export;
 mod git_remote_helper;
 #[macro_use]
 mod output;
@@ -32,6 +33,17 @@ mod sub_commands;
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    // Documentation builds need the command model without touching a git
+    // repository, cache, signer, or relay. Keep this raw internal dispatch
+    // ahead of every startup side effect, just like the remote helper.
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new(docs_export::INTERNAL_COMMAND)) {
+        if let Err(err) = docs_export::write_stdout() {
+            eprintln!("Error: {err:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // The remote-helper entry point must dispatch before anything that
     // could write to stdout (update notices, skill notices, clap
     // output): stray stdout would corrupt git's remote-helper protocol.
