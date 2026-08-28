@@ -81,15 +81,26 @@ pub fn finish_and_exit(code: i32) -> ! {
 }
 
 pub fn finish_error(error: &anyhow::Error) {
-    let mut value = serde_json::json!({
-        "status": "error",
-        "error": format!("{error:#}"),
-    });
+    let mut value = JSON_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "status": "error",
+                "error": format!("{error:#}"),
+            })
+        });
     if let Some(category) = error
         .downcast_ref::<ngit::cli_interactor::CliError>()
         .and_then(ngit::cli_interactor::CliError::category)
     {
-        value["category"] = serde_json::Value::String(category.to_string());
+        if let Some(document) = value.as_object_mut() {
+            document.insert(
+                "category".to_string(),
+                serde_json::Value::String(category.to_string()),
+            );
+        }
     }
     let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     std::println!("{rendered}");

@@ -18,6 +18,7 @@ pub mod logout;
 pub mod merge;
 pub mod pr_merge;
 pub mod pr_status;
+pub mod release;
 pub mod repo;
 pub mod repository_fetch;
 pub mod send;

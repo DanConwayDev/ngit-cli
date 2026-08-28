@@ -1,6 +1,6 @@
 //! Shared NIP-01 ordering policy for events that replace an earlier event.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use nostr::prelude::{
     Event, EventBuilder, EventId, PublicKey, Tag, Timestamp,
     event::{FinalizeUnsignedEvent, UnsignedEvent},
@@ -35,6 +35,29 @@ pub fn finalize_ordered_unsigned(
         public_key,
         reference,
         Timestamp::now(),
+        MAX_GRIND_ATTEMPTS,
+    )
+}
+
+/// Finalize a replaceable event while keeping an explicit semantic timestamp.
+///
+/// Some addressable events use `created_at` as domain data as well as NIP-01
+/// ordering. NIP-82 releases, for example, require it to remain the release
+/// date when metadata or asset pointers are corrected. If the timestamp ties
+/// the current event this function grinds an ngit-owned nonce for a lower ID;
+/// unlike [`finalize_ordered_unsigned`], it fails rather than advancing the
+/// timestamp when the bounded search cannot produce a winner.
+pub fn finalize_fixed_timestamp_ordered_unsigned(
+    builder: EventBuilder,
+    public_key: PublicKey,
+    reference: Option<&Event>,
+    created_at: Timestamp,
+) -> Result<UnsignedEvent> {
+    finalize_fixed_timestamp_ordered_unsigned_with_limit(
+        builder,
+        public_key,
+        reference,
+        created_at,
         MAX_GRIND_ATTEMPTS,
     )
 }
@@ -135,6 +158,56 @@ fn finalize_ordered_unsigned_at(
     Ok(builder
         .custom_created_at(created_at)
         .finalize_unsigned(public_key))
+}
+
+fn finalize_fixed_timestamp_ordered_unsigned_with_limit(
+    mut builder: EventBuilder,
+    public_key: PublicKey,
+    reference: Option<&Event>,
+    created_at: Timestamp,
+    max_grind_attempts: u128,
+) -> Result<UnsignedEvent> {
+    builder.tags = nostr::prelude::Tags::from_list(
+        builder
+            .tags
+            .into_iter()
+            .filter(|tag| !is_ngit_nonce(tag))
+            .collect(),
+    );
+
+    let Some(reference) = reference else {
+        return Ok(builder
+            .custom_created_at(created_at)
+            .finalize_unsigned(public_key));
+    };
+
+    if created_at > reference.created_at {
+        return Ok(builder
+            .custom_created_at(created_at)
+            .finalize_unsigned(public_key));
+    }
+    if created_at < reference.created_at {
+        bail!(
+            "fixed replacement timestamp {} predates current event timestamp {}",
+            created_at.as_secs(),
+            reference.created_at.as_secs()
+        );
+    }
+
+    if expected_attempts_at_most(&reference.id, MAX_EXPECTED_ATTEMPTS) {
+        for nonce in 0..max_grind_attempts {
+            let candidate = builder
+                .clone()
+                .custom_created_at(created_at)
+                .tag(ngit_nonce(nonce))
+                .finalize_unsigned(public_key);
+            if candidate.compute_id() < reference.id {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    bail!("replacement ordering exhausted while preserving fixed timestamp")
 }
 
 fn is_ngit_nonce(tag: &Tag) -> bool {
@@ -319,6 +392,90 @@ mod tests {
         assert_eq!(after_exhaustion.created_at, Timestamp::from_secs(21));
         assert!(!after_infeasible.tags.iter().any(is_ngit_nonce));
         assert!(!after_exhaustion.tags.iter().any(is_ngit_nonce));
+    }
+
+    #[test]
+    fn fixed_timestamp_grinds_without_changing_the_domain_date() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"ff".repeat(32), 20);
+
+        let event = finalize_fixed_timestamp_ordered_unsigned_with_limit(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+            Timestamp::from_secs(20),
+            MAX_GRIND_ATTEMPTS,
+        )
+        .unwrap();
+
+        assert_eq!(event.created_at, Timestamp::from_secs(20));
+        assert!(event.compute_id() < reference.id);
+        assert!(event.tags.iter().any(is_ngit_nonce));
+    }
+
+    #[test]
+    fn fixed_timestamp_accepts_an_explicitly_later_date() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"00".repeat(32), 20);
+
+        let event = finalize_fixed_timestamp_ordered_unsigned_with_limit(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+            Timestamp::from_secs(21),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(event.created_at, Timestamp::from_secs(21));
+        assert!(!event.tags.iter().any(is_ngit_nonce));
+    }
+
+    #[test]
+    fn fixed_timestamp_rejects_older_or_unbeatable_dates() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"ff".repeat(32), 20);
+
+        let older = finalize_fixed_timestamp_ordered_unsigned_with_limit(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+            Timestamp::from_secs(19),
+            MAX_GRIND_ATTEMPTS,
+        )
+        .unwrap_err();
+        let exhausted = finalize_fixed_timestamp_ordered_unsigned_with_limit(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+            Timestamp::from_secs(20),
+            0,
+        )
+        .unwrap_err();
+
+        assert!(older.to_string().contains("predates current event"));
+        assert!(exhausted.to_string().contains("ordering exhausted"));
+    }
+
+    #[test]
+    fn fixed_timestamp_replaces_only_the_owned_nonce() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"00".repeat(32), 20);
+        let other_nonce = Tag::parse(["nonce", "42", "0", "other-tool"]).unwrap();
+
+        let event = finalize_fixed_timestamp_ordered_unsigned_with_limit(
+            candidate_builder()
+                .tag(ngit_nonce(123))
+                .tag(other_nonce.clone()),
+            keys.public_key(),
+            Some(&reference),
+            Timestamp::from_secs(21),
+            0,
+        )
+        .unwrap();
+
+        assert!(event.tags.iter().any(|tag| tag == &other_nonce));
+        assert!(!event.tags.iter().any(is_ngit_nonce));
     }
 
     #[test]

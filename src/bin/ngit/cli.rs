@@ -419,6 +419,9 @@ pub enum Commands {
     Issue(IssueSubCommandArgs),
     /// inspect CI results and the trust context behind them
     Ci(CiSubCommandArgs),
+    /// work with software applications, releases, and release assets
+    #[command(alias = "releases")]
+    Release(ReleaseSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
@@ -491,6 +494,470 @@ pub struct RepoSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Software release subcommand group
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+pub struct ReleaseSubCommandArgs {
+    #[command(subcommand)]
+    pub release_command: ReleaseCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ReleaseCommands {
+    /// list releases for applications linked to this repository
+    List(ReleaseListArgs),
+    /// view a release and all of its referenced assets
+    View(ReleaseViewArgs),
+    /// publish a new release or explicitly edit an existing release
+    Publish(ReleasePublishArgs),
+    /// work with software applications
+    #[command(alias = "application")]
+    App(ReleaseAppSubCommandArgs),
+    /// work with release assets
+    Asset(ReleaseAssetSubCommandArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseListArgs {
+    /// Filter by application identifier, naddr, or application coordinate
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Filter by release channel
+    #[arg(long, value_name = "CHANNEL")]
+    pub channel: Option<String>,
+    /// Filter by target platform (repeatable, OR logic)
+    #[arg(long = "platform", value_name = "PLATFORM")]
+    pub platforms: Vec<String>,
+    /// Filter by an explicit trusted application author
+    #[arg(long, value_name = "PUBKEY")]
+    pub author: Option<String>,
+    /// Limit the number of releases returned
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseViewArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Download release assets and verify their hashes and sizes
+    #[arg(long)]
+    pub verify: bool,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleasePublishArgs {
+    /// Exact release version; identifiers are not normalized
+    #[arg(value_name = "VERSION")]
+    pub release_version: String,
+    /// Application identifier, naddr, or application coordinate
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Release channel (defaults to main when creating)
+    #[arg(long, value_name = "CHANNEL")]
+    pub channel: Option<String>,
+    /// Release notes
+    #[arg(long, value_name = "TEXT", conflicts_with = "notes_file")]
+    pub notes: Option<String>,
+    /// Read release notes from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "notes")]
+    pub notes_file: Option<PathBuf>,
+    /// Release date as Unix seconds (defaults to now when creating)
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub released_at: Option<u64>,
+    /// Git tag used for {tag} manifest expansion
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+    /// Git commit represented by this release (defaults to HEAD when creating)
+    #[arg(long, value_name = "COMMIT")]
+    pub commit: Option<String>,
+    /// Release manifest; creation also discovers .ngit/release.yaml
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
+    /// Add a URL-backed asset as PLATFORM=URL (repeatable)
+    #[arg(long = "asset", value_name = "PLATFORM=URL")]
+    pub assets: Vec<String>,
+    /// Reuse an existing kind 3063 asset event (repeatable)
+    #[arg(long = "asset-event", value_name = "ASSET")]
+    pub asset_events: Vec<String>,
+    /// Add a URL-backed asset with no target platform (repeatable)
+    #[arg(long = "platform-agnostic-asset", value_name = "URL")]
+    pub platform_agnostic_assets: Vec<String>,
+    /// Acknowledge reused asset events which have no platform tags
+    #[arg(long)]
+    pub accept_platform_agnostic_assets: bool,
+    /// Add release-only platforms to the replaceable application event
+    #[arg(long)]
+    pub add_application_platforms: bool,
+    /// Permit a non-main release to omit application platforms
+    #[arg(long)]
+    pub allow_partial_platforms: bool,
+    /// Explicitly replace an existing release; never creates a missing release
+    #[arg(long)]
+    pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Parser)]
+pub struct ReleaseAppSubCommandArgs {
+    #[command(subcommand)]
+    pub app_command: ReleaseAppCommands,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum ReleaseAppCommands {
+    /// list applications linked to this repository or owned by a user
+    List(ReleaseAppListArgs),
+    /// view an application and its publication authority
+    View(ReleaseAppViewArgs),
+    /// create a linked application or explicitly edit one
+    Init(ReleaseAppInitArgs),
+    /// link an existing application to this repository
+    Link(ReleaseAppLinkArgs),
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleaseAppListArgs {
+    /// List applications authored by the active user
+    #[arg(long, group = "application_owner")]
+    pub mine: bool,
+    /// Filter user or author applications to those not linked to this
+    /// repository
+    #[arg(long, conflicts_with = "linked", requires = "application_owner")]
+    pub unlinked: bool,
+    /// Filter user or author applications to those linked to this repository
+    #[arg(long, conflicts_with = "unlinked", requires = "application_owner")]
+    pub linked: bool,
+    /// List applications by an explicit author
+    #[arg(long, value_name = "PUBKEY", group = "application_owner")]
+    pub author: Option<String>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAppViewArgs {
+    /// Application identifier, naddr, or application coordinate
+    #[arg(value_name = "APP")]
+    pub app: String,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleaseAppInitArgs {
+    /// Application identifier (defaults to the repository identifier)
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
+    /// Application display name (required when no repository default exists)
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Application description
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with_all = ["description_file", "clear_description"]
+    )]
+    pub description: Option<String>,
+    /// Read the application description from a file
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["description", "clear_description"]
+    )]
+    pub description_file: Option<PathBuf>,
+    /// Remove the application description when editing
+    #[arg(long, conflicts_with_all = ["description", "description_file"])]
+    pub clear_description: bool,
+    /// Short application summary
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_summary")]
+    pub summary: Option<String>,
+    /// Remove the application summary when editing
+    #[arg(long, conflicts_with = "summary")]
+    pub clear_summary: bool,
+    /// Application icon URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_icon")]
+    pub icon: Option<String>,
+    /// Remove the application icon when editing
+    #[arg(long, conflicts_with = "icon")]
+    pub clear_icon: bool,
+    /// Application image URL (repeatable)
+    #[arg(long = "image", value_name = "URL", conflicts_with = "clear_images")]
+    pub images: Vec<String>,
+    /// Remove all application images when editing
+    #[arg(long, conflicts_with = "images")]
+    pub clear_images: bool,
+    /// Application topic (repeatable)
+    #[arg(long = "topic", value_name = "TOPIC", conflicts_with = "clear_topics")]
+    pub topics: Vec<String>,
+    /// Remove all application topics when editing
+    #[arg(long, conflicts_with = "topics")]
+    pub clear_topics: bool,
+    /// Application website URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_website")]
+    pub website: Option<String>,
+    /// Remove the application website when editing
+    #[arg(long, conflicts_with = "website")]
+    pub clear_website: bool,
+    /// Canonical repository clone URL
+    #[arg(long, value_name = "URL", conflicts_with = "clear_repository")]
+    pub repository: Option<String>,
+    /// Remove the canonical repository clone URL when editing
+    #[arg(long, conflicts_with = "repository")]
+    pub clear_repository: bool,
+    /// Supported platform (repeatable)
+    #[arg(
+        long = "platform",
+        value_name = "PLATFORM",
+        conflicts_with = "clear_platforms"
+    )]
+    pub platforms: Vec<String>,
+    /// Remove all application platform hints when editing
+    #[arg(long, conflicts_with = "platforms")]
+    pub clear_platforms: bool,
+    /// SPDX license expression
+    #[arg(long, value_name = "SPDX", conflicts_with = "clear_license")]
+    pub license: Option<String>,
+    /// Remove the application license when editing
+    #[arg(long, conflicts_with = "license")]
+    pub clear_license: bool,
+    /// Explicitly replace an existing application; never creates a missing app
+    #[arg(long)]
+    pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAppLinkArgs {
+    /// Application identifier, naddr, or application coordinate
+    #[arg(value_name = "APP")]
+    pub app: String,
+    /// Confirm replacement of the existing application event
+    #[arg(long, required = true)]
+    pub edit: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Parser)]
+pub struct ReleaseAssetSubCommandArgs {
+    #[command(subcommand)]
+    pub asset_command: ReleaseAssetCommands,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum ReleaseAssetCommands {
+    /// list the assets referenced by a release
+    List(ReleaseAssetListArgs),
+    /// view complete metadata for a release asset
+    View(ReleaseAssetViewArgs),
+    /// attach an existing asset and explicitly replace a release
+    Add(ReleaseAssetAddArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAssetListArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReleaseAssetViewArgs {
+    /// Asset event-id, nevent, or a filename unique within --release
+    #[arg(value_name = "ASSET")]
+    pub asset: String,
+    /// Release context used to validate membership and authority
+    #[arg(long, value_name = "RELEASE")]
+    pub release: Option<String>,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP", requires = "release")]
+    pub app: Option<String>,
+    /// Download the asset and verify its hash and size
+    #[arg(long)]
+    pub verify: bool,
+    /// Extend discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Use local cache only, skip network fetch
+    #[arg(long)]
+    pub offline: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ReleaseAssetAddArgs {
+    /// Release app@version, naddr, event-id, nevent, or unambiguous version
+    #[arg(value_name = "RELEASE")]
+    pub release: String,
+    /// Application context for a bare release version
+    #[arg(long, value_name = "APP")]
+    pub app: Option<String>,
+    /// URL of a new asset to download, hash, and publish
+    #[arg(
+        long,
+        value_name = "URL",
+        required_unless_present = "event",
+        conflicts_with = "event"
+    )]
+    pub url: Option<String>,
+    /// Existing kind 3063 asset event to attach
+    #[arg(long, value_name = "ASSET", required_unless_present = "url")]
+    pub event: Option<String>,
+    /// Target platform (repeatable)
+    #[arg(
+        long = "platform",
+        value_name = "PLATFORM",
+        conflicts_with_all = ["event", "platform_agnostic"]
+    )]
+    pub platforms: Vec<String>,
+    /// Explicitly acknowledge that the asset has no target platform
+    #[arg(long, conflicts_with = "platforms")]
+    pub platform_agnostic: bool,
+    /// Asset identifier (defaults to the application identifier)
+    #[arg(long, value_name = "ID", conflicts_with = "event")]
+    pub asset_id: Option<String>,
+    /// Asset version (defaults to the release version)
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub asset_version: Option<String>,
+    /// Published filename override
+    #[arg(long, value_name = "NAME", conflicts_with = "event")]
+    pub filename: Option<String>,
+    /// MIME type override
+    #[arg(long, value_name = "MIME", conflicts_with = "event")]
+    pub mime: Option<String>,
+    /// Minimum supported platform version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub min_platform_version: Option<String>,
+    /// Target platform version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub target_platform_version: Option<String>,
+    /// Supported NIP number (repeatable)
+    #[arg(long = "supported-nip", value_name = "NIP", conflicts_with = "event")]
+    pub supported_nips: Vec<String>,
+    /// Build variant
+    #[arg(long, value_name = "VARIANT", conflicts_with = "event")]
+    pub variant: Option<String>,
+    /// Source commit identifier
+    #[arg(long, value_name = "COMMIT", conflicts_with = "event")]
+    pub commit: Option<String>,
+    /// Minimum allowed asset version
+    #[arg(long, value_name = "VERSION", conflicts_with = "event")]
+    pub min_allowed_version: Option<String>,
+    /// Android version code
+    #[arg(long, value_name = "CODE", conflicts_with = "event")]
+    pub android_version_code: Option<u64>,
+    /// Minimum allowed Android version code
+    #[arg(long, value_name = "CODE", conflicts_with = "event")]
+    pub android_min_allowed_version_code: Option<u64>,
+    /// Android signing certificate SHA-256 (repeatable)
+    #[arg(
+        long = "android-certificate-sha256",
+        value_name = "SHA256",
+        conflicts_with = "event"
+    )]
+    pub android_certificate_sha256: Vec<String>,
+    /// Original web source when it differs from the asset URL
+    #[arg(long, value_name = "URL", conflicts_with = "event")]
+    pub original_url: Option<String>,
+    /// Add release-only platforms to the replaceable application event
+    #[arg(long)]
+    pub add_application_platforms: bool,
+    /// Permit a non-main release to omit application platforms
+    #[arg(long)]
+    pub allow_partial_platforms: bool,
+    /// Confirm replacement of the existing release event
+    #[arg(long, required = true)]
+    pub edit: bool,
+    /// Treat metadata warnings as errors
+    #[arg(long)]
+    pub strict_metadata: bool,
+    /// Extend discovery and publication with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,7 +1488,10 @@ mod tests {
     use clap::{Command, CommandFactory, Parser};
     use tempfile::tempdir;
 
-    use super::{AccountCommands, Cli, Commands, extract_signer_cli_arguments, read_nsec_file};
+    use super::{
+        AccountCommands, Cli, Commands, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands,
+        extract_signer_cli_arguments, read_nsec_file,
+    };
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {
         if command.has_subcommands() {
@@ -1061,7 +1531,6 @@ mod tests {
             );
         }
     }
-
     fn key_file(path: &Path, value: &[u8]) {
         fs::write(path, value).unwrap();
         #[cfg(unix)]
@@ -1365,7 +1834,6 @@ mod tests {
         handle.join().unwrap();
         assert!(result.is_err());
     }
-
     #[test]
     fn repo_arg_is_accepted_at_every_command_position() {
         // Documented policy: `--repo` is a global argument accepted at any
@@ -1420,6 +1888,258 @@ mod tests {
             let cli = Cli::try_parse_from(args).expect("command should parse");
             assert!(cli.repo_relay_only);
         }
+    }
+
+    #[test]
+    fn release_application_commands_and_aliases_parse() {
+        for args in [
+            ["ngit", "release", "app", "list", "--json", "--offline"].as_slice(),
+            [
+                "ngit",
+                "releases",
+                "application",
+                "view",
+                "ngit",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+            ["ngit", "release", "app", "init", "--name", "ngit", "--json"].as_slice(),
+            ["ngit", "release", "app", "link", "ngit", "--edit", "--json"].as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_read_commands_parse() {
+        for args in [
+            ["ngit", "release", "list", "--json", "--offline"].as_slice(),
+            [
+                "ngit",
+                "releases",
+                "view",
+                "ngit@1.8.0",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_publish_commands_parse() {
+        for args in [
+            [
+                "ngit",
+                "release",
+                "publish",
+                "1.8.0",
+                "--asset-event",
+                "deadbeef",
+                "--commit",
+                "HEAD~1",
+                "--json",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "release",
+                "publish",
+                "1.8.0",
+                "--asset",
+                "linux-x86_64=https://example.com/ngit.tar.gz",
+                "--json",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_asset_commands_parse() {
+        for args in [
+            [
+                "ngit",
+                "release",
+                "asset",
+                "list",
+                "ngit@1.8.0",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "view",
+                "deadbeef",
+                "--json",
+                "--offline",
+            ]
+            .as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--event",
+                "deadbeef",
+                "--edit",
+                "--json",
+            ]
+            .as_slice(),
+        ] {
+            Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn release_asset_command_type_is_exposed_to_dispatch() {
+        let cli = Cli::try_parse_from(["ngit", "release", "asset", "view", "deadbeef"])
+            .expect("asset view should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Asset(asset) = release.release_command else {
+            panic!("expected asset command group");
+        };
+        assert!(matches!(asset.asset_command, ReleaseAssetCommands::View(_)));
+    }
+
+    #[test]
+    fn release_replacement_commands_require_edit() {
+        for args in [
+            ["ngit", "release", "app", "link", "ngit"].as_slice(),
+            [
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--event",
+                "deadbeef",
+            ]
+            .as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "command unexpectedly accepted without --edit: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_app_link_filters_require_an_author_scope() {
+        assert!(Cli::try_parse_from(["ngit", "release", "app", "list", "--unlinked"]).is_err());
+        Cli::try_parse_from(["ngit", "release", "app", "list", "--mine", "--unlinked"])
+            .expect("--mine --unlinked should parse");
+        Cli::try_parse_from([
+            "ngit", "release", "app", "list", "--author", "deadbeef", "--linked",
+        ])
+        .expect("--author --linked should parse");
+    }
+
+    #[test]
+    fn release_asset_add_requires_exactly_one_source() {
+        assert!(
+            Cli::try_parse_from(["ngit", "release", "asset", "add", "ngit@1.8.0", "--edit",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "ngit@1.8.0",
+                "--url",
+                "https://example.com/ngit.tar.gz",
+                "--event",
+                "deadbeef",
+                "--edit",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn release_asset_add_preserves_detailed_url_metadata() {
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "release",
+            "asset",
+            "add",
+            "ngit@1.8.0",
+            "--url",
+            "https://example.com/ngit.apk",
+            "--platform",
+            "android-arm64-v8a",
+            "--filename",
+            "ngit.apk",
+            "--mime",
+            "application/vnd.android.package-archive",
+            "--android-version-code",
+            "42",
+            "--supported-nip",
+            "82",
+            "--edit",
+        ])
+        .expect("detailed URL asset should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Asset(asset) = release.release_command else {
+            panic!("expected release asset command");
+        };
+        let ReleaseAssetCommands::Add(args) = asset.asset_command else {
+            panic!("expected release asset add command");
+        };
+
+        assert_eq!(args.filename.as_deref(), Some("ngit.apk"));
+        assert_eq!(args.platforms, ["android-arm64-v8a"]);
+        assert_eq!(args.android_version_code, Some(42));
+        assert_eq!(args.supported_nips, ["82"]);
+    }
+
+    #[test]
+    fn release_edit_fields_preserve_omission() {
+        let cli = Cli::try_parse_from(["ngit", "release", "publish", "1.8.0", "--edit"])
+            .expect("release edit should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::Publish(args) = release.release_command else {
+            panic!("expected release publish command");
+        };
+
+        assert!(args.edit);
+        assert!(args.channel.is_none());
+        assert!(args.notes.is_none());
+        assert!(args.released_at.is_none());
+        assert!(args.commit.is_none());
+    }
+
+    #[test]
+    fn release_nested_command_types_are_exposed_to_dispatch() {
+        let cli = Cli::try_parse_from(["ngit", "release", "app", "list"])
+            .expect("application list should parse");
+        let Some(Commands::Release(release)) = cli.command else {
+            panic!("expected release command");
+        };
+        let ReleaseCommands::App(app) = release.release_command else {
+            panic!("expected application command group");
+        };
+        assert!(matches!(app.app_command, ReleaseAppCommands::List(_)));
     }
 
     #[test]

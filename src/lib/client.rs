@@ -33,7 +33,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 #[cfg(test)]
 use mockall::*;
 use nostr::prelude::{
-    Event, EventBuilder, EventId, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
+    Event, EventBuilder, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
+    Url,
     event::UnsignedEvent,
     message::MachineReadablePrefix,
     nip01::Coordinate,
@@ -1922,6 +1923,57 @@ pub async fn save_event_in_local_cache(
         SaveEventStatus::Success => Ok(true),
         _ => Ok(false),
     }
+}
+
+/// Fetch arbitrary filters from each relay and cache every successful result.
+///
+/// The repository-wide fetch plan intentionally knows only about repository,
+/// proposal, issue, and profile events. Feature-specific event families such
+/// as NIP-82 releases need a small, explicit escape hatch which retains the
+/// relay associated with each success or failure. The shared relay progress
+/// report keeps this path consistent with repository-wide fetches. Read
+/// commands can merge the successful routes while reporting incomplete
+/// discovery; mutation preflights can fail closed when any required
+/// publication route was not queried completely.
+pub async fn fetch_filters_to_local_cache(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: &Path,
+    relays: &[RelayUrl],
+    filters: &[Filter],
+) -> Result<Vec<(RelayUrl, Result<Vec<Event>>)>> {
+    let progress_reporter = RelayProgressReporter::fetching();
+    let progress = progress_reporter.handle();
+    let results = join_all(relays.iter().cloned().map(|relay| {
+        let progress = progress.clone();
+        async move {
+            let result = async {
+                let mut relay_results = client
+                    .get_events_per_relay(vec![relay.clone()], filters.to_vec(), progress)
+                    .await
+                    .with_context(|| format!("failed to query relay {relay}"))?;
+                if relay_results.len() != 1 {
+                    bail!(
+                        "relay {relay} did not produce exactly one query result (got {})",
+                        relay_results.len()
+                    );
+                }
+                let events = relay_results
+                    .pop()
+                    .expect("length was checked")
+                    .with_context(|| format!("failed to fetch events from {relay}"))?;
+                for event in &events {
+                    save_event_in_local_cache(git_repo_path, event).await?;
+                }
+                Ok(events)
+            }
+            .await;
+            (relay, result)
+        }
+    }))
+    .await;
+    progress_reporter.finish(results.iter().any(|(_, result)| result.is_err()), None)?;
+    Ok(results)
 }
 
 pub async fn save_event_in_global_cache(
