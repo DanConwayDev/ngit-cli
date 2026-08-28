@@ -869,6 +869,57 @@ fn resolve_signer_for_npub(
     Ok(None)
 }
 
+/// Resolve explicitly supplied signer material to a public key without
+/// contacting a remote signer.
+///
+/// `Ok(None)` means the signer is a fresh bunker connection whose user public
+/// key can only be learned from the remote signer. Callers that only need
+/// optional identity metadata should preserve that unknown result rather than
+/// falling back to a configured account.
+pub fn command_signer_public_key(
+    signer_info: &SignerInfo,
+    password: &Option<String>,
+) -> Result<Option<PublicKey>> {
+    match signer_info {
+        SignerInfo::Nsec {
+            nsec,
+            password: signer_password,
+            npub,
+            verify_npub,
+        } => {
+            let keys = if nsec.contains("ncryptsec") {
+                let password = signer_password
+                    .as_ref()
+                    .or(password.as_ref())
+                    .context("command signer ncryptsec requires a password")?;
+                decrypt_key(nsec, password).context("failed to decrypt command signer ncryptsec")?
+            } else {
+                Keys::parse(nsec).context("command signer has an invalid nsec")?
+            };
+            let public_key = keys.public_key();
+            if *verify_npub {
+                let expected = PublicKey::parse(
+                    npub.as_deref()
+                        .context("selected command signer has no expected npub")?,
+                )
+                .context("selected command signer has an invalid npub")?;
+                if public_key != expected {
+                    bail!("selected command signer belongs to a different npub");
+                }
+            }
+            Ok(Some(public_key))
+        }
+        SignerInfo::Bunker { npub, .. } => npub
+            .as_deref()
+            .map(PublicKey::parse)
+            .transpose()
+            .context("command remote signer has an invalid npub"),
+        SignerInfo::Selection { .. } => {
+            bail!("internal error: unresolved signer selection during identity lookup")
+        }
+    }
+}
+
 fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
     if selector.starts_with("npub1") {
         return PublicKey::parse(selector)

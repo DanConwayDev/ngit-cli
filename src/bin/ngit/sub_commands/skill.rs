@@ -3,11 +3,15 @@ use ngit::{
     agent_guidance,
     client::get_repo_ref_from_cache,
     git::{Repo, RepoActions},
-    login::get_likely_logged_in_user,
+    login::{
+        SignerInfo,
+        existing::{command_signer_public_key, resolve_selection},
+        get_likely_logged_in_user,
+    },
 };
 use serde::Serialize;
 
-use crate::cli::{SkillCommands, SkillOptOutArgs};
+use crate::cli::{SignerParams, SkillCommands, SkillOptOutArgs};
 
 struct SkillContext {
     repo: Repo,
@@ -22,18 +26,23 @@ struct Output {
     reminders_enabled: bool,
 }
 
-pub async fn launch(command: &SkillCommands, force: bool, json: bool) -> Result<()> {
+pub async fn launch(
+    command: &SkillCommands,
+    force: bool,
+    json: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     if let SkillCommands::OptOut(args) = command {
         return opt_out(args);
     }
 
     let context = resolve_context()?;
     match command {
-        SkillCommands::Install | SkillCommands::Upgrade => reconcile(&context, force).await,
+        SkillCommands::Install | SkillCommands::Upgrade => reconcile(&context, force, auth).await,
         SkillCommands::Status => {
             let output = Output {
                 guidance: agent_guidance::status(&context.root)?,
-                is_maintainer: resolve_maintainer(&context).await,
+                is_maintainer: resolve_maintainer(&context, auth).await,
                 reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
             };
             if json {
@@ -63,8 +72,8 @@ fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
     Ok(())
 }
 
-async fn reconcile(context: &SkillContext, force: bool) -> Result<()> {
-    let is_maintainer = resolve_maintainer(context).await;
+async fn reconcile(context: &SkillContext, force: bool, auth: SignerParams<'_>) -> Result<()> {
+    let is_maintainer = resolve_maintainer(context, auth).await;
     reconcile_for_account(context, force, is_maintainer)
 }
 
@@ -183,7 +192,7 @@ fn resolve_context() -> Result<SkillContext> {
     Ok(SkillContext { repo, root })
 }
 
-async fn resolve_maintainer(context: &SkillContext) -> Option<bool> {
+async fn resolve_maintainer(context: &SkillContext, auth: SignerParams<'_>) -> Option<bool> {
     // Status remains useful without a Nostr remote, cached announcement, or
     // login. Resolve this extra metadata only when every local lookup works.
     let (_, decoded) = context
@@ -194,8 +203,25 @@ async fn resolve_maintainer(context: &SkillContext) -> Option<bool> {
     let repo_ref = get_repo_ref_from_cache(Some(&context.root), &decoded.coordinate)
         .await
         .ok()?;
-    let account = get_likely_logged_in_user(&context.root).await.ok()??;
+    let account = resolve_account(context, auth).await.ok()??;
     Some(repo_ref.is_authorized_maintainer(&account))
+}
+
+async fn resolve_account(
+    context: &SkillContext,
+    auth: SignerParams<'_>,
+) -> Result<Option<nostr::prelude::PublicKey>> {
+    if let Some(signer_info) = auth.info {
+        if let SignerInfo::Selection { selector } = signer_info {
+            let selected =
+                resolve_selection(&Some(&context.repo), selector, auth.password, true).await?;
+            return nostr::prelude::PublicKey::parse(&selected.npub)
+                .context("selected signer has an invalid npub")
+                .map(Some);
+        }
+        return command_signer_public_key(signer_info, auth.password);
+    }
+    get_likely_logged_in_user(&context.root).await
 }
 
 #[cfg(test)]
@@ -205,6 +231,8 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    use nostr::prelude::Keys;
 
     use super::*;
 
@@ -239,6 +267,111 @@ mod tests {
             )
             .unwrap();
         (Repo { git_repo }, root)
+    }
+
+    #[tokio::test]
+    async fn command_signer_overrides_the_configured_account() {
+        let (repo, root) = repository();
+        let configured = Keys::generate();
+        let selected = Keys::generate();
+        repo.save_git_config_item("nostr.npub", &configured.public_key().to_string(), false)
+            .unwrap();
+        repo.save_git_config_item(
+            "nostr.signer-alias.selected",
+            &selected.public_key().to_string(),
+            false,
+        )
+        .unwrap();
+        repo.save_git_config_item("nostr.nsec", &selected.secret_key().to_secret_hex(), false)
+            .unwrap();
+        let context = SkillContext { repo, root };
+        let info = Some(SignerInfo::Selection {
+            selector: "selected".to_string(),
+        });
+        let password = None;
+
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &info,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            Some(selected.public_key())
+        );
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &None,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            Some(configured.public_key())
+        );
+    }
+
+    #[tokio::test]
+    async fn command_nsec_overrides_the_configured_account() {
+        let (repo, root) = repository();
+        let configured = Keys::generate();
+        let selected = Keys::generate();
+        repo.save_git_config_item("nostr.npub", &configured.public_key().to_string(), false)
+            .unwrap();
+        let context = SkillContext { repo, root };
+        let info = Some(SignerInfo::Nsec {
+            nsec: selected.secret_key().to_secret_hex(),
+            password: None,
+            npub: None,
+            verify_npub: false,
+        });
+        let password = None;
+
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &info,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            Some(selected.public_key())
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_command_bunker_does_not_use_the_configured_account() {
+        let (repo, root) = repository();
+        let configured = Keys::generate();
+        repo.save_git_config_item("nostr.npub", &configured.public_key().to_string(), false)
+            .unwrap();
+        let context = SkillContext { repo, root };
+        let info = Some(SignerInfo::Bunker {
+            bunker_uri: "unused".to_string(),
+            bunker_app_key: "unused".to_string(),
+            npub: None,
+        });
+        let password = None;
+
+        assert_eq!(
+            resolve_account(
+                &context,
+                SignerParams {
+                    info: &info,
+                    password: &password,
+                },
+            )
+            .await
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

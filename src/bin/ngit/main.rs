@@ -430,7 +430,8 @@ async fn main() {
             },
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
-                sub_commands::skill::launch(&args.skill_command, cli.force, cli.json).await
+                sub_commands::skill::launch(&args.skill_command, cli.force, cli.json, signer_params)
+                    .await
             }
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
