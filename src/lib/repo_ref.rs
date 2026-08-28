@@ -286,6 +286,30 @@ fn active_role_entries(event: &nostr::prelude::Event) -> Vec<(String, PublicKey)
     entries
 }
 
+/// Active maintainer subjects represented by indexed `M` and `m` tags, in
+/// tag order with duplicates removed. This is also the exact compatibility
+/// projection emitted in the deprecated `maintainers` tag.
+fn active_maintainer_projection(tags: &[Tag]) -> Vec<PublicKey> {
+    let mut maintainers = Vec::new();
+    for tag in tags {
+        let slice = tag.as_slice();
+        if !matches!(slice.first().map(String::as_str), Some("M" | "m"))
+            || !role_entry_is_active(slice)
+        {
+            continue;
+        }
+        if let Some(pubkey) = slice
+            .get(1)
+            .and_then(|value| PublicKey::from_str(value).ok())
+        {
+            if !maintainers.contains(&pubkey) {
+                maintainers.push(pubkey);
+            }
+        }
+    }
+    maintainers
+}
+
 /// Whether `event`'s author does not assert maintainership: at least one
 /// role tag names the author but none of them is an active maintainer
 /// (`M`/`m`) entry — the author left by ending their self-role, or their
@@ -572,6 +596,32 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
 impl RepoRef {
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
         let public_key = signer.get_public_key().await?;
+        let implicit_sole = self.role_tags.is_empty()
+            && self.moderators.is_empty()
+            && self.lead.is_none()
+            && self.maintainers.as_slice() == [public_key];
+        let generated_role_tags = if implicit_sole {
+            Vec::new()
+        } else {
+            self.generate_role_tags(&public_key, Timestamp::now().as_secs())
+        };
+        let compatibility_maintainers = active_maintainer_projection(&generated_role_tags);
+        let compatibility_tag = (!implicit_sole)
+            .then(|| {
+                Tag::parse(
+                    [
+                        vec!["maintainers".to_string()],
+                        compatibility_maintainers
+                            .iter()
+                            .map(PublicKey::to_string)
+                            .collect::<Vec<_>>(),
+                    ]
+                    .concat(),
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
         let builder =
             nostr::prelude::EventBuilder::new(nostr::event::Kind::GitRepoAnnouncement, "").tags(
                 [
@@ -611,19 +661,9 @@ impl RepoRef {
                             .concat(),
                         )
                         .unwrap(),
-                        Tag::parse(
-                            [
-                                vec!["maintainers".to_string()],
-                                self.maintainers
-                                    .iter()
-                                    .map(|pk| pk.to_string())
-                                    .collect::<Vec<_>>(),
-                            ]
-                            .concat(),
-                        )
-                        .unwrap(),
                         Tag::parse(["alt", &format!("git repository: {}", self.name)]).unwrap(),
                     ],
+                    compatibility_tag,
                     self.hashtags
                         .iter()
                         .map(|h| Tag::parse(["t", h]).unwrap())
@@ -664,7 +704,7 @@ impl RepoRef {
                     // clients. History boundaries come from the source
                     // announcement's role tags and moderator (`o`) tags are
                     // preserved verbatim. See [`RepoRef::generate_role_tags`].
-                    self.generate_role_tags(&public_key, Timestamp::now().as_secs()),
+                    generated_role_tags,
                     // Unknown tags carried over verbatim from the source
                     // announcement. See [`RepoRef::extra_tags`] and
                     // [`is_known_tag_name`]: ngit-known names never end up
@@ -5073,6 +5113,72 @@ mod tests {
                     maintainers_tag.as_slice()[2],
                     TEST_KEY_2_KEYS.public_key().to_string()
                 );
+            }
+
+            #[tokio::test]
+            async fn implicit_sole_maintainer_emits_no_membership_tags() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let repo_ref = create_repo_ref_for_maintainer_order(vec![author], vec![]);
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+
+                assert!(!event.tags.iter().any(|tag| {
+                    matches!(
+                        tag.as_slice().first().map(String::as_str),
+                        Some("M" | "m" | "o" | "maintainers")
+                    )
+                }));
+            }
+
+            #[tokio::test]
+            async fn maintainers_tag_is_the_active_role_projection() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let historical = TEST_KEY_2_KEYS.public_key();
+                let mut repo_ref = create_repo_ref_for_maintainer_order(vec![author], vec![]);
+                repo_ref.lead = Some(author);
+                repo_ref.role_tags = vec![
+                    Tag::parse(["M", &author.to_string(), "100"]).unwrap(),
+                    Tag::parse(["m", &historical.to_string(), "100", "defer"]).unwrap(),
+                ];
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let maintainers = event
+                    .tags
+                    .iter()
+                    .find(|tag| {
+                        tag.as_slice()
+                            .first()
+                            .is_some_and(|name| name == "maintainers")
+                    })
+                    .unwrap()
+                    .as_slice();
+
+                assert_eq!(
+                    maintainers,
+                    &["maintainers".to_string(), author.to_string()]
+                );
+            }
+
+            #[tokio::test]
+            async fn role_aware_departure_emits_an_empty_compatibility_roster() {
+                let author = TEST_KEY_1_KEYS.public_key();
+                let mut repo_ref = create_repo_ref_for_maintainer_order(Vec::new(), vec![]);
+                repo_ref.role_tags =
+                    vec![Tag::parse(["m", &author.to_string(), "100", "200"]).unwrap()];
+
+                let event = repo_ref.to_event(&TEST_KEY_1_SIGNER).await.unwrap();
+                let maintainers = event
+                    .tags
+                    .iter()
+                    .find(|tag| {
+                        tag.as_slice()
+                            .first()
+                            .is_some_and(|name| name == "maintainers")
+                    })
+                    .unwrap()
+                    .as_slice();
+
+                assert_eq!(maintainers, &["maintainers".to_string()]);
             }
 
             #[tokio::test]

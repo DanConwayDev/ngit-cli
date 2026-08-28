@@ -258,11 +258,10 @@ async fn relays_only_errors_missing_required_fields() -> Result<()> {
 ///
 /// Holds the announcement event itself (rather than pre-extracted tag
 /// values) so future cases asserting on additional tags don't have to
-/// re-run setup; the maintainer pubkey + grasp URL prefix are surfaced
+/// re-run setup; the maintainer npub + grasp URL prefix are surfaced
 /// alongside because more than one case asserts on them.
 struct Snapshot {
     announcement: Event,
-    maintainer_pubkey: PublicKey,
     /// `http://127.0.0.1:<port>` — the grasp's URL the test passed to
     /// `--grasp-server`. Cloned URLs in the announcement should start
     /// with this prefix (and end with `/<npub>/<identifier>.git`).
@@ -360,7 +359,6 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     Ok(Snapshot {
         announcement,
-        maintainer_pubkey: state.keys.public_key(),
         grasp_http_url,
         grasp_relay_url,
         maintainer_npub: state.npub,
@@ -465,38 +463,29 @@ async fn relays_include_grasp_derived(#[future] snapshot: Arc<Snapshot>) -> Resu
     Ok(())
 }
 
-/// Equivalent of legacy
-/// `with_name_and_grasp_server::maintainers_is_just_me`. With no
-/// `--other-maintainers`, the announcement lists only the publishing
-/// pubkey.
+/// A fresh one-person repository uses NIP-34's implicit-author form. It does
+/// not need an indexed role or deprecated compatibility roster until another
+/// role is introduced.
 #[rstest]
 #[tokio::test]
-async fn maintainers_is_just_me(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
+async fn sole_maintainer_is_implicit(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     let s = snapshot.await;
-    let maintainers = tag_values(&s.announcement, "maintainers");
-    assert_eq!(
-        maintainers.len(),
-        1,
-        "expected single maintainer; got {maintainers:?}",
-    );
-    assert_eq!(
-        maintainers[0],
-        s.maintainer_pubkey.to_string(),
-        "expected sole maintainer to be the publisher",
-    );
-    // first use of NIP-34 role tags on a fresh announcement: one untimed
-    // `m` entry for the publisher, same membership as `maintainers`
-    let m_tags: Vec<Vec<String>> = s
+    let membership_tags: Vec<Vec<String>> = s
         .announcement
         .tags
         .iter()
         .map(|t| t.as_slice().to_vec())
-        .filter(|t| t.first().map(String::as_str) == Some("m"))
+        .filter(|tag| {
+            matches!(
+                tag.first().map(String::as_str),
+                Some("M" | "m" | "o" | "maintainers")
+            )
+        })
         .collect();
     assert_eq!(
-        m_tags,
-        vec![vec!["m".to_string(), s.maintainer_pubkey.to_string()]],
-        "expected a single untimed `m` role tag for the publisher",
+        membership_tags,
+        Vec::<Vec<String>>::new(),
+        "the announcement author should remain the implicit sole maintainer",
     );
     Ok(())
 }
