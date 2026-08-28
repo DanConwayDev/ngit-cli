@@ -10,11 +10,12 @@ use indicatif::TermLike;
 #[cfg(test)]
 use mockall::*;
 
-/// Sentinel error type indicating the error has already been printed to stderr.
+/// Sentinel error type indicating the command has already handled presentation
+/// of the error.
 ///
-/// When this propagates up to `main()`, it signals "already printed styled
-/// output to stderr, don't double-print". This is the same pattern clap uses
-/// internally.
+/// When this propagates up to `main()`, it suppresses duplicate human output.
+/// Most callers print a styled error to stderr; JSON-first commands may store
+/// a complete error document for the global output path instead.
 #[derive(Debug)]
 pub struct CliError {
     message: String,
@@ -22,6 +23,16 @@ pub struct CliError {
 }
 
 impl CliError {
+    /// Return a sentinel for an error whose output has already been handled.
+    #[must_use]
+    pub fn already_handled() -> anyhow::Error {
+        Self {
+            message: String::new(),
+            category: None,
+        }
+        .into()
+    }
+
     #[must_use]
     pub fn category(&self) -> Option<&'static str> {
         self.category

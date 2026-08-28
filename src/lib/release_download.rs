@@ -330,8 +330,12 @@ fn has_credentials(url: &Url) -> bool {
 
 fn embedded_sha256(url: &Url) -> Option<String> {
     let segment = url.path_segments()?.rfind(|segment| !segment.is_empty())?;
-    (segment.len() == 64 && segment.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| segment.to_ascii_lowercase())
+    let candidate = segment
+        .split_once('.')
+        .filter(|(_, extension)| !extension.is_empty())
+        .map_or(segment, |(digest, _)| digest);
+    (candidate.len() == 64 && candidate.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| candidate.to_ascii_lowercase())
 }
 
 fn url_warnings(url: &Url) -> Vec<DownloadWarning> {
@@ -849,6 +853,25 @@ mod tests {
     }
 
     #[test]
+    fn finds_bare_and_extension_suffixed_url_hashes() {
+        let digest = "ABCDEF0000000000000000000000000000000000000000000000000000000000";
+        let lowercase_digest = digest.to_ascii_lowercase();
+        for path in [digest.to_owned(), format!("{digest}.tar.gz")] {
+            let url = Url::parse(&format!("https://blossom.example/{path}"))
+                .expect("content-addressed URL");
+            assert_eq!(
+                embedded_sha256(&url).as_deref(),
+                Some(lowercase_digest.as_str())
+            );
+        }
+        for path in [format!("{digest}."), format!("x{digest}.zip")] {
+            let url = Url::parse(&format!("https://blossom.example/{path}"))
+                .expect("non-content-addressed URL");
+            assert_eq!(embedded_sha256(&url), None);
+        }
+    }
+
+    #[test]
     fn parses_regular_and_extended_content_disposition_filenames() {
         assert_eq!(
             filename_from_content_disposition("attachment; filename=\"release; one.zip\""),
@@ -1050,13 +1073,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_bytes_that_do_not_match_a_url_embedded_sha256() {
+    async fn rejects_bytes_that_do_not_match_an_extension_suffixed_url_sha256() {
         let body = b"not the advertised digest";
         let content_length = body.len().to_string();
         let response = http_response("200 OK", &[("Content-Length", &content_length)], body);
         let (address, server) = spawn_one_shot_http_server(response).await;
         let embedded_digest = "0000000000000000000000000000000000000000000000000000000000000000";
-        let source_url = format!("http://{address}/{embedded_digest}");
+        let source_url = format!("http://{address}/{embedded_digest}.zip");
 
         let error = download_url_asset(UrlAssetRequest::new(source_url))
             .await

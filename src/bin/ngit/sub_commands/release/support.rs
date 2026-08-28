@@ -30,10 +30,19 @@ use serde_json::{Value, json};
 
 use crate::{cli::SignerParams, sub_commands::id_resolver::parse_event_id};
 
+pub(super) const ZAPSTORE_RELAY_URL: &str = "wss://relay.zapstore.dev";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LoginMode {
     Optional,
     Required,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueryPolicy {
+    Discovery,
+    AtLeastOneDiscoveryRoute,
+    PublicationPreflight,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -237,6 +246,7 @@ pub(super) struct ReleaseContext {
     pub user_ref: Option<UserRef>,
     pub explicit_relays: Vec<RelayUrl>,
     pub discovery_relays: Vec<RelayUrl>,
+    zapstore_relay: Option<RelayUrl>,
     pub offline: bool,
     pub warnings: Vec<WarningJson>,
 }
@@ -310,9 +320,23 @@ impl ReleaseContext {
             user_ref,
             explicit_relays,
             discovery_relays,
+            zapstore_relay: None,
             offline,
             warnings: Vec::new(),
         })
+    }
+
+    pub(super) async fn load_for_write(
+        explicit_relays: &[String],
+        zapstore_relay: bool,
+        auth: SignerParams<'_>,
+    ) -> Result<Self> {
+        let mut context = Self::load(false, explicit_relays, LoginMode::Required, auth).await?;
+        context.zapstore_relay = zapstore_relay
+            .then(|| RelayUrl::parse(ZAPSTORE_RELAY_URL))
+            .transpose()
+            .context("built-in Zapstore relay URL is invalid")?;
+        Ok(context)
     }
 
     pub(super) fn git_repo_path(&self) -> Result<&std::path::Path> {
@@ -350,7 +374,7 @@ impl ReleaseContext {
 
     pub(super) fn repo_coordinate_keys(&self) -> BTreeSet<String> {
         self.repo_ref
-            .maintainers_for_announcement_tags()
+            .members_for_announcement_tags()
             .into_iter()
             .map(|author| {
                 coordinate_key(
@@ -364,7 +388,7 @@ impl ReleaseContext {
     pub(super) fn ordered_repo_coordinates(&self) -> Vec<ngit::software_release::AddressPointer> {
         let relay_hint = self.repo_ref.relays.first().map(ToString::to_string);
         self.repo_ref
-            .maintainers_for_announcement_tags()
+            .members_for_announcement_tags()
             .into_iter()
             .map(|author| ngit::software_release::AddressPointer {
                 coordinate: Coordinate::new(Kind::GitRepoAnnouncement, author)
@@ -393,15 +417,14 @@ impl ReleaseContext {
 
     pub(super) fn application_is_trusted(&self, application: &SoftwareApplication) -> bool {
         self.repo_ref
-            .maintainers
-            .contains(&application.raw_event.pubkey)
+            .is_authorized_maintainer(&application.raw_event.pubkey)
             && self.application_is_linked(application)
     }
 
     pub(super) fn authority(&self, application: &SoftwareApplication) -> AuthorityJson {
         let current_signer = self.current_signer();
         let is_current_maintainer =
-            current_signer.is_some_and(|signer| self.repo_ref.maintainers.contains(&signer));
+            current_signer.is_some_and(|signer| self.repo_ref.is_authorized_maintainer(&signer));
         let linked = self.application_is_linked(application);
         let author_matches = current_signer == Some(application.raw_event.pubkey);
         let blocker = if current_signer.is_none() {
@@ -469,7 +492,7 @@ impl ReleaseContext {
         let signer = self
             .current_signer()
             .ok_or_else(|| coded_error("not_logged_in", "nostr account required"))?;
-        if !self.repo_ref.maintainers.contains(&signer) {
+        if !self.repo_ref.is_authorized_maintainer(&signer) {
             return Err(coded_error(
                 "not_repository_maintainer",
                 "the active signer is not a current repository maintainer",
@@ -499,6 +522,7 @@ impl ReleaseContext {
             .map_or_else(Vec::new, |user| user.relays.write());
         let mut repo = self.repo_ref.relays.clone();
         repo.extend(self.explicit_relays.iter().cloned());
+        add_zapstore_publication_relay(&mut repo, self.zapstore_relay.as_ref());
         dedup_relays(&mut repo);
         (user_write, repo)
     }
@@ -559,8 +583,29 @@ impl ReleaseContext {
     }
 
     pub(super) async fn query(&mut self, filters: Vec<Filter>, strict: bool) -> Result<Vec<Event>> {
+        let policy = if strict {
+            QueryPolicy::PublicationPreflight
+        } else {
+            QueryPolicy::Discovery
+        };
+        self.query_with_policy(filters, policy).await
+    }
+
+    pub(super) async fn query_with_required_discovery_route(
+        &mut self,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Event>> {
+        self.query_with_policy(filters, QueryPolicy::AtLeastOneDiscoveryRoute)
+            .await
+    }
+
+    async fn query_with_policy(
+        &mut self,
+        filters: Vec<Filter>,
+        policy: QueryPolicy,
+    ) -> Result<Vec<Event>> {
         if !self.offline {
-            let relays = if strict {
+            let relays = if policy == QueryPolicy::PublicationPreflight {
                 self.publication_query_relays()?
             } else {
                 self.discovery_relays.clone()
@@ -576,13 +621,22 @@ impl ReleaseContext {
                 .iter()
                 .filter_map(|(relay, result)| result.as_ref().err().map(|_| relay.to_string()))
                 .collect();
-            if strict && !failed.is_empty() {
+            if policy == QueryPolicy::PublicationPreflight && !failed.is_empty() {
                 return Err(coded_error_with_details(
                     "relay_preflight_incomplete",
                     format!(
                         "release preflight did not complete on: {}",
                         failed.join(", ")
                     ),
+                    json!({ "relays": failed }),
+                ));
+            }
+            if policy == QueryPolicy::AtLeastOneDiscoveryRoute
+                && (results.is_empty() || failed.len() == results.len())
+            {
+                return Err(coded_error_with_details(
+                    "relay_discovery_unavailable",
+                    "Blossom server discovery did not complete on any relay; provide --blossom-server or retry",
                     json!({ "relays": failed }),
                 ));
             }
@@ -613,6 +667,12 @@ fn parse_relays(values: &[String]) -> Result<Vec<RelayUrl>> {
         .iter()
         .map(|value| RelayUrl::parse(value).with_context(|| format!("invalid relay URL {value:?}")))
         .collect()
+}
+
+fn add_zapstore_publication_relay(relays: &mut Vec<RelayUrl>, zapstore: Option<&RelayUrl>) {
+    if let Some(zapstore) = zapstore {
+        relays.push(zapstore.clone());
+    }
 }
 
 fn dedup_relays(relays: &mut Vec<RelayUrl>) {
@@ -683,7 +743,7 @@ pub(super) async fn load_applications(
 pub(super) async fn load_trusted_linked_applications(
     context: &mut ReleaseContext,
 ) -> Result<Vec<SoftwareApplication>> {
-    let maintainers = context.repo_ref.maintainers.clone();
+    let maintainers = context.repo_ref.confirmed_maintainers();
     let applications = load_applications(context, maintainers, false).await?;
     Ok(applications
         .into_iter()
@@ -1109,11 +1169,12 @@ fn event_id_bech32(event: &Event) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use nostr::prelude::EventId;
+    use nostr::prelude::{EventId, RelayUrl};
 
     use super::{
-        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, optional_login,
-        publication_failure_message, publication_json, publication_recovery,
+        AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, ZAPSTORE_RELAY_URL,
+        add_zapstore_publication_relay, optional_login, publication_failure_message,
+        publication_json, publication_recovery,
     };
 
     #[test]
@@ -1125,6 +1186,20 @@ mod tests {
         let configured =
             optional_login::<()>(Err(anyhow::anyhow!("configured signer failed")), false).unwrap();
         assert!(configured.is_none());
+    }
+
+    #[test]
+    fn zapstore_relay_is_an_additive_publication_target() {
+        let existing = RelayUrl::parse("wss://repo.example").unwrap();
+        let zapstore = RelayUrl::parse(ZAPSTORE_RELAY_URL).unwrap();
+        let mut relays = vec![existing.clone()];
+
+        add_zapstore_publication_relay(&mut relays, Some(&zapstore));
+        assert_eq!(relays, [existing.clone(), zapstore]);
+
+        let mut relays = vec![existing.clone()];
+        add_zapstore_publication_relay(&mut relays, None);
+        assert_eq!(relays, [existing]);
     }
 
     #[test]

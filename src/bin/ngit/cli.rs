@@ -391,6 +391,7 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// create and publish a new repository on nostr
     Init(sub_commands::init::SubCommandArgs),
@@ -598,18 +599,28 @@ pub struct ReleasePublishArgs {
     /// Git commit represented by this release (defaults to HEAD when creating)
     #[arg(long, value_name = "COMMIT")]
     pub commit: Option<String>,
-    /// Release manifest; creation also discovers .ngit/release.yaml
+    /// Release assets and publication defaults; creation also discovers
+    /// .ngit/release.yaml
     #[arg(long, value_name = "PATH")]
     pub manifest: Option<PathBuf>,
     /// Add a URL-backed asset as PLATFORM=URL (repeatable)
     #[arg(long = "asset", value_name = "PLATFORM=URL")]
     pub assets: Vec<String>,
+    /// Upload PATH, or use PLATFORM=PATH shorthand (repeatable)
+    #[arg(long = "file", value_name = "[PLATFORM=]PATH")]
+    pub files: Vec<String>,
+    /// Target platform for one bare --file PATH (repeatable)
+    #[arg(long = "platform", value_name = "PLATFORM")]
+    pub file_platforms: Vec<String>,
     /// Reuse an existing kind 3063 asset event (repeatable)
     #[arg(long = "asset-event", value_name = "ASSET")]
     pub asset_events: Vec<String>,
     /// Add a URL-backed asset with no target platform (repeatable)
     #[arg(long = "platform-agnostic-asset", value_name = "URL")]
     pub platform_agnostic_assets: Vec<String>,
+    /// Upload a local platform-agnostic asset to Blossom (repeatable)
+    #[arg(long = "platform-agnostic-file", value_name = "PATH")]
+    pub platform_agnostic_files: Vec<PathBuf>,
     /// Acknowledge reused asset events which have no platform tags
     #[arg(long)]
     pub accept_platform_agnostic_assets: bool,
@@ -619,6 +630,10 @@ pub struct ReleasePublishArgs {
     /// Permit a non-main release to omit application platforms
     #[arg(long)]
     pub allow_partial_platforms: bool,
+    /// Override kind-10063 discovery with an ordered Blossom server
+    /// (repeatable)
+    #[arg(long = "blossom-server", value_name = "URL")]
+    pub blossom_servers: Vec<String>,
     /// Explicitly replace an existing release; never creates a missing release
     #[arg(long)]
     pub edit: bool,
@@ -628,6 +643,9 @@ pub struct ReleasePublishArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -782,6 +800,9 @@ pub struct ReleaseAppInitArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -798,6 +819,9 @@ pub struct ReleaseAppLinkArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -877,12 +901,25 @@ pub struct ReleaseAssetAddArgs {
     #[arg(
         long,
         value_name = "URL",
-        required_unless_present = "event",
-        conflicts_with = "event"
+        required_unless_present_any = ["event", "file"],
+        conflicts_with_all = ["event", "file"]
     )]
     pub url: Option<String>,
+    /// Local asset to upload to Blossom
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present_any = ["url", "event"],
+        conflicts_with_all = ["url", "event"]
+    )]
+    pub file: Option<PathBuf>,
     /// Existing kind 3063 asset event to attach
-    #[arg(long, value_name = "ASSET", required_unless_present = "url")]
+    #[arg(
+        long,
+        value_name = "ASSET",
+        required_unless_present_any = ["url", "file"],
+        conflicts_with_all = ["url", "file"]
+    )]
     pub event: Option<String>,
     /// Target platform (repeatable)
     #[arg(
@@ -946,6 +983,14 @@ pub struct ReleaseAssetAddArgs {
     /// Permit a non-main release to omit application platforms
     #[arg(long)]
     pub allow_partial_platforms: bool,
+    /// Override kind-10063 discovery with an ordered Blossom server
+    /// (repeatable)
+    #[arg(
+        long = "blossom-server",
+        value_name = "URL",
+        conflicts_with_all = ["url", "event"]
+    )]
+    pub blossom_servers: Vec<String>,
     /// Confirm replacement of the existing release event
     #[arg(long, required = true)]
     pub edit: bool,
@@ -955,6 +1000,9 @@ pub struct ReleaseAssetAddArgs {
     /// Extend discovery and publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
+    /// Also publish to the Zapstore catalog relay; does not change Blossom
+    #[arg(long)]
+    pub zapstore_relay: bool,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -1958,6 +2006,19 @@ mod tests {
             .as_slice(),
         ] {
             Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn zapstore_relay_is_available_to_release_mutations() {
+        for args in [
+            "ngit release app init --name ngit --zapstore-relay",
+            "ngit release app link ngit --edit --zapstore-relay",
+            "ngit release publish 1.8.0 --asset-event deadbeef --zapstore-relay",
+            "ngit release asset add ngit@1.8.0 --event deadbeef --edit --zapstore-relay",
+        ] {
+            Cli::try_parse_from(args.split_ascii_whitespace())
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
     }

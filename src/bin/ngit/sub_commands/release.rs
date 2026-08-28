@@ -84,7 +84,7 @@ pub async fn launch(
                     "details": details,
                 }
             }));
-            Err(CliError.into())
+            Err(CliError::already_handled())
         }
         Err(error) => Err(error),
     }

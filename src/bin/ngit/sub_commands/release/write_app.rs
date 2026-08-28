@@ -12,7 +12,7 @@ use nostr::prelude::{Coordinate, Filter, FromBech32, PublicKey, ToBech32, nip19:
 use serde_json::{Value, json};
 
 use super::support::{
-    CommandOutput, LoginMode, ReleaseContext, WarningJson, application_json, coded_error,
+    CommandOutput, ReleaseContext, WarningJson, application_json, coded_error,
     coded_error_with_details, coordinate_key, load_applications, resolve_application,
 };
 use crate::cli::{ReleaseAppInitArgs, ReleaseAppLinkArgs, SignerParams};
@@ -23,7 +23,7 @@ pub(super) async fn app_init(
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
+        ReleaseContext::load_for_write(&args.relays, args.zapstore_relay, signer).await?;
     let signer_public_key = require_current_maintainer(&context)?;
     let identifier = args
         .id
@@ -143,11 +143,11 @@ pub(super) async fn app_link(
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
     let mut context =
-        ReleaseContext::load(false, &args.relays, LoginMode::Required, signer).await?;
+        ReleaseContext::load_for_write(&args.relays, args.zapstore_relay, signer).await?;
     let signer_public_key = require_current_maintainer(&context)?;
 
     let authors = selector_author(&args.app).map_or_else(
-        || context.repo_ref.maintainers.clone(),
+        || context.repo_ref.confirmed_maintainers(),
         |author| vec![author],
     );
     for author in &authors {
@@ -528,7 +528,7 @@ fn require_current_maintainer(context: &ReleaseContext) -> Result<PublicKey> {
     let signer = context
         .current_signer()
         .ok_or_else(|| coded_error("not_logged_in", "application publication requires login"))?;
-    if !context.repo_ref.maintainers.contains(&signer) {
+    if !context.repo_ref.is_authorized_maintainer(&signer) {
         return Err(coded_error_with_details(
             "not_repository_maintainer",
             format!(

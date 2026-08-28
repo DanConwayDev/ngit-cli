@@ -1,9 +1,9 @@
 //! Strict parsing and resolution of `.ngit/release.yaml` manifests.
 //!
-//! A parsed manifest is intentionally not ready for publication: URL and
+//! A parsed manifest is intentionally not ready for publication: source and
 //! filename templates are resolved only after the release version and optional
 //! Git tag are known. Resolution returns a separate type so callers cannot
-//! accidentally pass an unresolved source URL to the downloader.
+//! confuse a local file with a URL-backed asset.
 
 use std::{
     collections::HashMap,
@@ -14,6 +14,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Url;
 use serde::Deserialize;
+
+use crate::apk::APK_MIME_TYPE;
 
 /// Project-relative location used when no explicit manifest path is supplied.
 pub const DEFAULT_RELEASE_MANIFEST_PATH: &str = ".ngit/release.yaml";
@@ -27,14 +29,35 @@ pub struct ReleaseManifest {
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub commit: Option<String>,
+    #[serde(default)]
+    pub publication: ReleaseManifestPublication,
     pub assets: Vec<ReleaseManifestAsset>,
 }
 
-/// One URL-backed asset in a release manifest.
+/// Stable publication and policy defaults for CI release jobs.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseManifestPublication {
+    #[serde(default)]
+    pub blossom_servers: Vec<String>,
+    #[serde(default)]
+    pub relays: Vec<String>,
+    #[serde(default)]
+    pub zapstore_relay: bool,
+    #[serde(default)]
+    pub strict_metadata: bool,
+    #[serde(default)]
+    pub allow_partial_platforms: bool,
+    #[serde(default)]
+    pub add_application_platforms: bool,
+}
+
+/// One URL- or local-file-backed asset in a release manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseManifestAsset {
-    pub source: String,
+    pub source: Option<String>,
+    pub file: Option<String>,
     pub identifier: Option<String>,
     pub version: Option<String>,
     pub filename: Option<String>,
@@ -71,7 +94,7 @@ pub struct LoadedReleaseManifest {
     pub manifest: ReleaseManifest,
 }
 
-/// A manifest whose controlled templates have been expanded and whose URLs
+/// A manifest whose controlled templates have been expanded and whose sources
 /// have been validated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedReleaseManifest {
@@ -79,13 +102,21 @@ pub struct ResolvedReleaseManifest {
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub commit: Option<String>,
+    pub publication: ReleaseManifestPublication,
     pub assets: Vec<ResolvedReleaseManifestAsset>,
 }
 
-/// One resolved URL-backed asset, ready to be passed to source acquisition.
+/// The unambiguous source of a resolved manifest asset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedReleaseManifestSource {
+    Url(String),
+    File(PathBuf),
+}
+
+/// One resolved asset, ready to be passed to source acquisition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedReleaseManifestAsset {
-    pub source: String,
+    pub source: ResolvedReleaseManifestSource,
     pub identifier: Option<String>,
     pub version: Option<String>,
     pub filename: Option<String>,
@@ -164,22 +195,41 @@ impl ReleaseManifest {
 
         let mut assets = Vec::with_capacity(self.assets.len());
         let mut source_urls: HashMap<Url, usize> = HashMap::new();
+        let mut source_paths: HashMap<PathBuf, usize> = HashMap::new();
         let mut filenames: HashMap<String, usize> = HashMap::new();
 
         for (index, asset) in self.assets.iter().enumerate() {
-            let source = expand_template(
-                &asset.source,
-                release_version,
-                tag,
-                TemplateEncoding::UrlComponent,
-            )
-            .with_context(|| format!("invalid template in assets[{index}].source"))?;
-            let source_url = parse_public_url(&source, &format!("assets[{index}].source"))?;
-            if let Some(previous) = source_urls.insert(source_url, index) {
-                bail!(
-                    "assets[{index}].source resolves to the same URL as assets[{previous}].source"
-                );
-            }
+            let source = match (&asset.source, &asset.file) {
+                (Some(source), None) => {
+                    let source = expand_template(
+                        source,
+                        release_version,
+                        tag,
+                        TemplateEncoding::UrlComponent,
+                    )
+                    .with_context(|| format!("invalid template in assets[{index}].source"))?;
+                    let source_url = parse_public_url(&source, &format!("assets[{index}].source"))?;
+                    if let Some(previous) = source_urls.insert(source_url, index) {
+                        bail!(
+                            "assets[{index}].source resolves to the same URL as assets[{previous}].source"
+                        );
+                    }
+                    ResolvedReleaseManifestSource::Url(source)
+                }
+                (None, Some(file)) => {
+                    let file = PathBuf::from(
+                        expand_template(file, release_version, tag, TemplateEncoding::Literal)
+                            .with_context(|| format!("invalid template in assets[{index}].file"))?,
+                    );
+                    if let Some(previous) = source_paths.insert(file.clone(), index) {
+                        bail!(
+                            "assets[{index}].file resolves to the same local path as assets[{previous}].file"
+                        );
+                    }
+                    ResolvedReleaseManifestSource::File(file)
+                }
+                _ => unreachable!("manifest source kind is validated during parsing"),
+            };
 
             let filename = asset
                 .filename
@@ -239,6 +289,7 @@ impl ReleaseManifest {
             channel: self.channel.clone(),
             notes: self.notes.clone(),
             commit: self.commit.clone(),
+            publication: self.publication.clone(),
             assets,
         })
     }
@@ -264,6 +315,8 @@ impl ReleaseManifest {
             bail!("release manifest must contain at least one asset");
         }
 
+        self.publication.validate_and_normalize()?;
+
         for (index, asset) in self.assets.iter_mut().enumerate() {
             asset
                 .validate_and_normalize()
@@ -273,10 +326,28 @@ impl ReleaseManifest {
     }
 }
 
+impl ReleaseManifestPublication {
+    fn validate_and_normalize(&mut self) -> Result<()> {
+        normalize_string_list("publication.blossom_servers", &mut self.blossom_servers)?;
+        normalize_string_list("publication.relays", &mut self.relays)?;
+        Ok(())
+    }
+}
+
 impl ReleaseManifestAsset {
     fn validate_and_normalize(&mut self) -> Result<()> {
-        validate_clean_value("source", &self.source)?;
-        validate_template(&self.source).context("invalid source template")?;
+        match (&self.source, &self.file) {
+            (Some(source), None) => {
+                validate_clean_value("source", source)?;
+                validate_template(source).context("invalid source template")?;
+            }
+            (None, Some(file)) => {
+                validate_clean_value("file", file)?;
+                validate_template(file).context("invalid file template")?;
+            }
+            (Some(_), Some(_)) => bail!("source and file are mutually exclusive"),
+            (None, None) => bail!("provide exactly one of source or file"),
+        }
         validate_optional_clean_value("identifier", self.identifier.as_deref())?;
         validate_optional_clean_value("version", self.version.as_deref())?;
         validate_optional_clean_value("filename", self.filename.as_deref())?;
@@ -303,19 +374,34 @@ impl ReleaseManifestAsset {
         normalize_string_list("platforms", &mut self.platforms)?;
         normalize_string_list("supported_nips", &mut self.supported_nips)?;
 
+        let apk = self
+            .mime
+            .as_deref()
+            .is_some_and(|mime| mime.eq_ignore_ascii_case(APK_MIME_TYPE))
+            || self
+                .file
+                .as_deref()
+                .is_some_and(|file| file.to_ascii_lowercase().ends_with(".apk"))
+            || self
+                .filename
+                .as_deref()
+                .is_some_and(|filename| filename.to_ascii_lowercase().ends_with(".apk"));
+        let local_apk = apk && self.file.is_some();
+
         if self.platform_agnostic && !self.platforms.is_empty() {
             bail!("platforms and platform_agnostic: true are mutually exclusive");
         }
-        if !self.platform_agnostic && self.platforms.is_empty() {
+        if self.platform_agnostic && apk {
+            bail!("Android APK assets cannot be platform agnostic");
+        }
+        if !self.platform_agnostic && self.platforms.is_empty() && !local_apk {
             bail!("provide at least one platform or set platform_agnostic: true");
         }
 
         if let Some(android) = &mut self.android {
             android.validate_and_normalize()?;
         }
-        if self.mime.as_deref().is_some_and(|mime| {
-            mime.eq_ignore_ascii_case("application/vnd.android.package-archive")
-        }) {
+        if apk {
             let android = self
                 .android
                 .as_ref()
@@ -514,6 +600,18 @@ application: ngit
 channel: main
 notes: Release notes
 commit: main
+publication:
+  blossom_servers:
+    - " https://blossom.example.com "
+    - https://blossom.example.com
+    - https://mirror.example.com
+  relays:
+    - " wss://relay.example.com "
+    - wss://relay.example.com
+  zapstore_relay: true
+  strict_metadata: true
+  allow_partial_platforms: true
+  add_application_platforms: true
 assets:
   - source: https://downloads.example.com/ngit/{version}/ngit-{tag}.tar.gz
     identifier: dev.ngit.cli
@@ -539,6 +637,15 @@ assets:
     fn parses_normalizes_and_resolves_complete_manifest() {
         let manifest = parse_release_manifest(COMPLETE_MANIFEST).unwrap();
         assert_eq!(manifest.commit.as_deref(), Some("main"));
+        assert_eq!(
+            manifest.publication.blossom_servers,
+            ["https://blossom.example.com", "https://mirror.example.com"]
+        );
+        assert_eq!(manifest.publication.relays, ["wss://relay.example.com"]);
+        assert!(manifest.publication.zapstore_relay);
+        assert!(manifest.publication.strict_metadata);
+        assert!(manifest.publication.allow_partial_platforms);
+        assert!(manifest.publication.add_application_platforms);
         assert_eq!(manifest.assets[0].platforms, ["linux-x86_64"]);
         assert_eq!(manifest.assets[0].supported_nips, ["34", "65"]);
         assert_eq!(
@@ -552,10 +659,14 @@ assets:
 
         let resolved = manifest.resolve("2.7.0/rc 1", Some("v2.7.0-rc.1")).unwrap();
         assert_eq!(resolved.commit.as_deref(), Some("main"));
+        assert_eq!(resolved.publication, manifest.publication);
         let asset = &resolved.assets[0];
         assert_eq!(
             asset.source,
-            "https://downloads.example.com/ngit/2.7.0%2Frc%201/ngit-v2.7.0-rc.1.tar.gz"
+            ResolvedReleaseManifestSource::Url(
+                "https://downloads.example.com/ngit/2.7.0%2Frc%201/ngit-v2.7.0-rc.1.tar.gz"
+                    .to_owned()
+            )
         );
         assert_eq!(asset.filename.as_deref(), Some("ngit-v2.7.0-rc.1.tar.gz"));
         assert_eq!(
@@ -580,10 +691,30 @@ assets:
             "schema: 1\nunknown: true\nassets: []\n",
             "schema: 1\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n    platfroms: [linux]\n",
             "schema: 1\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n    android:\n      certificate_sha: []\n",
+            "schema: 1\npublication:\n  blossom_server: https://example.com\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
         ] {
             let error = parse_release_manifest(yaml).unwrap_err();
             assert!(format!("{error:#}").contains("unknown field"));
         }
+    }
+
+    #[test]
+    fn requires_exactly_one_asset_source_kind() {
+        let both = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - source: https://example.com/app.apk
+    file: dist/app.apk
+    platforms: [android-arm64-v8a]
+"#,
+        )
+        .unwrap_err();
+        assert!(format!("{both:#}").contains("source and file are mutually exclusive"));
+
+        let neither = parse_release_manifest("schema: 1\nassets:\n  - platform_agnostic: true\n")
+            .unwrap_err();
+        assert!(format!("{neither:#}").contains("exactly one of source or file"));
     }
 
     #[test]
@@ -649,11 +780,14 @@ assets:
         )
         .unwrap();
         let resolved = manifest.resolve("{tag}", None).unwrap();
-        assert_eq!(resolved.assets[0].source, "https://example.com/%7Btag%7D/a");
+        assert_eq!(
+            resolved.assets[0].source,
+            ResolvedReleaseManifestSource::Url("https://example.com/%7Btag%7D/a".to_owned())
+        );
     }
 
     #[test]
-    fn rejects_duplicate_resolved_urls_and_filenames() {
+    fn rejects_duplicate_resolved_urls_local_paths_and_filenames() {
         let duplicate_url = parse_release_manifest(
             r#"
 schema: 1
@@ -670,6 +804,22 @@ assets:
         let error = duplicate_url.resolve("1", None).unwrap_err();
         assert!(error.to_string().contains("same URL"));
 
+        let duplicate_path = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - file: dist/{version}/ngit.zip
+    filename: one.zip
+    platforms: [linux-x86_64]
+  - file: dist/1/ngit.zip
+    filename: two.zip
+    platforms: [linux-x86_64]
+"#,
+        )
+        .unwrap();
+        let error = duplicate_path.resolve("1", None).unwrap_err();
+        assert!(error.to_string().contains("same local path"));
+
         let duplicate_filename = parse_release_manifest(
             r#"
 schema: 1
@@ -685,6 +835,57 @@ assets:
         .unwrap();
         let error = duplicate_filename.resolve("1", None).unwrap_err();
         assert!(error.to_string().contains("same filename"));
+    }
+
+    #[test]
+    fn parses_and_resolves_android_local_file_metadata() {
+        let manifest = parse_release_manifest(
+            r#"
+schema: 1
+application: com.example.app
+channel: beta
+assets:
+  - file: artifacts/{tag}/app-{version}.apk
+    identifier: com.example.app.android
+    version: 42.0-beta
+    filename: example-{tag}.apk
+    mime: application/vnd.android.package-archive
+    platforms: [android-arm64-v8a, android-x86_64]
+    min_platform_version: "26"
+    target_platform_version: "35"
+    variant: play
+    min_allowed_version: "41.0"
+    android:
+      version_code: 4200
+      min_allowed_version_code: 4100
+      certificate_sha256:
+        - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    original_url: https://example.com/releases/{version}/{tag}
+"#,
+        )
+        .unwrap();
+
+        let resolved = manifest
+            .resolve("42.0/beta 1", Some("v42.0-beta.1"))
+            .unwrap();
+        let asset = &resolved.assets[0];
+        assert_eq!(
+            asset.source,
+            ResolvedReleaseManifestSource::File(PathBuf::from(
+                "artifacts/v42.0-beta.1/app-42.0/beta 1.apk"
+            ))
+        );
+        assert_eq!(asset.filename.as_deref(), Some("example-v42.0-beta.1.apk"));
+        assert_eq!(
+            asset.original_url.as_deref(),
+            Some("https://example.com/releases/42.0%2Fbeta%201/v42.0-beta.1")
+        );
+        assert_eq!(asset.platforms, ["android-arm64-v8a", "android-x86_64"]);
+        assert_eq!(asset.android.as_ref().unwrap().version_code, Some(4200));
+        assert_eq!(
+            asset.android.as_ref().unwrap().certificate_sha256,
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        );
     }
 
     #[test]
@@ -737,6 +938,45 @@ assets:
         )
         .unwrap_err();
         assert!(format!("{invalid_hash:#}").contains("64 hexadecimal"));
+    }
+
+    #[test]
+    fn local_apks_may_leave_platforms_for_snapshot_inference() {
+        let manifest = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - file: dist/app.apk
+    android:
+      version_code: 1
+      certificate_sha256:
+        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        )
+        .unwrap();
+        assert!(manifest.assets[0].platforms.is_empty());
+
+        let error = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - file: dist/app.apk
+    platform_agnostic: true
+    android:
+      version_code: 1
+      certificate_sha256:
+        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("cannot be platform agnostic"));
+    }
+
+    #[test]
+    fn local_apks_still_require_explicit_android_identity_metadata() {
+        let error =
+            parse_release_manifest("schema: 1\nassets:\n  - file: dist/app.apk\n").unwrap_err();
+        assert!(format!("{error:#}").contains("android metadata block"));
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub(super) async fn app_list(
     } else if let Some(author) = &args.author {
         vec![PublicKey::parse(author).context("invalid --author public key")?]
     } else {
-        context.repo_ref.maintainers.clone()
+        context.repo_ref.confirmed_maintainers()
     };
     for author in &authors {
         context.add_author_relays(*author).await?;
@@ -116,7 +116,11 @@ pub(super) async fn app_view(
 ) -> Result<CommandOutput> {
     let mut context =
         ReleaseContext::load(args.offline, &args.relays, LoginMode::Optional, signer).await?;
-    let mut authors: BTreeSet<PublicKey> = context.repo_ref.maintainers.iter().copied().collect();
+    let mut authors: BTreeSet<PublicKey> = context
+        .repo_ref
+        .confirmed_maintainers()
+        .into_iter()
+        .collect();
     if let Some(signer) = context.current_signer() {
         authors.insert(signer);
     }
@@ -168,7 +172,7 @@ pub(super) async fn release_list(
     }
     if let Some(author) = &args.author {
         let author = PublicKey::parse(author).context("invalid --author public key")?;
-        if !context.repo_ref.maintainers.contains(&author) {
+        if !context.repo_ref.is_authorized_maintainer(&author) {
             return Err(coded_error(
                 "not_repository_maintainer",
                 "--author is not a current repository maintainer",

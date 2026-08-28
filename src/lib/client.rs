@@ -34,7 +34,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, P
 use mockall::*;
 use nostr::prelude::{
     Event, EventBuilder, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp,
-    Url,
     event::UnsignedEvent,
     message::MachineReadablePrefix,
     nip01::Coordinate,
