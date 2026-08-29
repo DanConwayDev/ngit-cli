@@ -4,10 +4,11 @@
 container repository. `ngit oci publish` is a visible alias for the same
 command.
 
-The command uses the container repository protocol implemented by
-[ncontainer](https://ncontainer.io): OCI blobs and Blossom blobs are the same
-SHA-256-addressed bytes, while a signed addressable event of kind `30624`
-maps mutable image tags to manifest digests.
+The command implements the
+[ncontainer Container Repositories draft](https://gitworkshop.dev/alex%40gleasonator.com/relay.ngit.dev/ncontainer/tree/main/ncontainer.md).
+That draft is authoritative for the kind-30624 wire format and gateway
+behavior: OCI blobs and Blossom blobs are the same SHA-256-addressed bytes,
+while a signed addressable event maps mutable image tags to manifest digests.
 
 For the complete CLI, wire-event, update, and JSON contracts, see the
 [container publishing API](container-api.md).

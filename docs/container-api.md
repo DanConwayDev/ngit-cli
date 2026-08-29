@@ -6,6 +6,13 @@ This document specifies how ngit validates and publishes OCI image layouts
 using Blossom storage and kind-30624 Nostr repository events. It is the
 contract for the human-facing CLI and machine-facing `--json` result.
 
+ngit implements the
+[ncontainer Container Repositories draft](https://gitworkshop.dev/alex%40gleasonator.com/relay.ngit.dev/ncontainer/tree/main/ncontainer.md),
+maintained in the authoritative
+`nostr://alex@gleasonator.com/relay.ngit.dev/ncontainer` repository. That draft
+is normative for the kind-30624 wire format and gateway behavior; this document
+specifies ngit's CLI, validation, publication, and JSON contracts.
+
 For a task-oriented walkthrough, see [Publishing containers](containers.md).
 The canonical command group is `ngit container`; `ngit oci` is a visible alias.
 
