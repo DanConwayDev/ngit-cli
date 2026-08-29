@@ -607,7 +607,13 @@ pub struct ContainerPublishArgs {
     pub repository: String,
     /// OCI image-layout directory containing index.json and blobs/sha256
     #[arg(long, value_name = "PATH")]
-    pub layout: PathBuf,
+    pub layout: Option<PathBuf>,
+    /// Container settings; otherwise discover .ngit/containers.yaml
+    #[arg(long, value_name = "PATH", conflicts_with = "no_manifest")]
+    pub manifest: Option<PathBuf>,
+    /// Ignore .ngit/containers.yaml
+    #[arg(long, conflicts_with = "manifest")]
+    pub no_manifest: bool,
     /// Override kind-10063 discovery with a Blossom server (repeatable)
     #[arg(long = "blossom-server", value_name = "URL")]
     pub blossom_servers: Vec<String>,
@@ -2107,6 +2113,15 @@ mod tests {
                 "--json",
             ]
             .as_slice(),
+            [
+                "ngit",
+                "container",
+                "publish",
+                "my-app",
+                "--manifest",
+                "ci/containers.yaml",
+            ]
+            .as_slice(),
         ] {
             let cli = Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -2118,6 +2133,19 @@ mod tests {
                 ContainerCommands::Publish(_)
             ));
         }
+
+        assert!(
+            Cli::try_parse_from([
+                "ngit",
+                "container",
+                "publish",
+                "my-app",
+                "--manifest",
+                "ci/containers.yaml",
+                "--no-manifest",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

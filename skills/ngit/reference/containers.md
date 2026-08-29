@@ -39,6 +39,27 @@ ngit container publish myimage \
   --json
 ```
 
+For CI, prefer checked-in `.ngit/containers.yaml` settings:
+
+```yaml
+schema: 1
+publication:
+  blossom_servers: [https://blossom-one.example, https://blossom-two.example]
+  relays: [wss://relay.example]
+containers:
+  myimage:
+    layout: artifacts/myimage
+    source: https://example.com/myimage
+```
+
+Then `ngit container publish myimage --json` selects that entry. Relative
+manifest and layout paths resolve from the repository root. `--manifest PATH`
+selects another YAML file; `--no-manifest` ignores the default and requires
+`--layout`. A loaded manifest must define `NAME`. CLI layout/metadata override
+the entry, a non-empty CLI Blossom list replaces the configured list, and CLI
+relays extend configured relays. Keep signer selection, `--replace`, and output
+mode on the command line.
+
 `ngit oci publish` is a visible alias. Use the active ngit account or a global
 signer selector such as `--signer`; do not expose an nsec when a stored account
 is available.
@@ -91,6 +112,7 @@ Always use `--json`. A successful result has `command: "container.publish"`
 and includes:
 
 - `result.repository`, `git_repository`, `npub`, `name`, and `naddr`;
+- resolved `manifest_path`, or `null` when no manifest was loaded;
 - raw-hex `event_id` (unlike collaboration commands' `id` fields);
 - `tags` for the final repository and `updated_tags` from this layout;
 - each blob's SHA-256, size, and per-server upload/mirror outcomes;

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, ensure};
 use futures::future::join_all;
@@ -13,6 +17,7 @@ use ngit::{
         Connect, Params, RelayProgressReporter, fetching_with_report, get_repo_ref_from_cache,
         send_events, sign_draft_event,
     },
+    container_manifest::{load_container_manifest, resolve_container_manifest_path},
     event_ordering::{finalize_ordered_unsigned, latest_event},
     git::{Repo, RepoActions},
     login,
@@ -37,18 +42,14 @@ pub async fn publish(
     signer_params: SignerParams<'_>,
     json_output: bool,
 ) -> Result<()> {
-    validate_metadata_args(args)?;
-    let explicit_servers = parse_blossom_servers(&args.blossom_servers)?;
-    let source = args.source.as_deref().map(parse_source_url).transpose()?;
-    let layout = OciLayout::load(&args.layout).with_context(|| {
-        format!(
-            "failed to validate OCI image layout {}",
-            args.layout.display()
-        )
-    })?;
+    let PreparedContainerPublish {
+        git_repo,
+        resolved,
+        explicit_servers,
+        source,
+        layout,
+    } = prepare_container_publish(args)?;
 
-    let git_repo =
-        Repo::discover().context("container publication must run inside a Nostr Git repository")?;
     let git_repo_ref = Some(&git_repo);
     let mut client = Client::new(Params::with_git_config_relay_defaults(&git_repo_ref));
     let (signer, user, _) = login::login_or_signup(
@@ -70,17 +71,22 @@ pub async fn publish(
         "active signer does not match the loaded Nostr account"
     );
     let (repository_coordinate, repository_relays) =
-        resolve_repository_context(&git_repo, &mut client, public_key, &args.relays).await?;
+        resolve_repository_context(&git_repo, &mut client, public_key, &resolved.relays).await?;
     client.nip42_register_publish_relays(repository_relays.clone());
     let servers = if explicit_servers.is_empty() {
         discover_blossom_servers(&client, &repository_relays, public_key).await?
     } else {
         explicit_servers
     };
-    let existing =
-        fetch_current_repository(&client, &repository_relays, public_key, &args.repository).await?;
+    let existing = fetch_current_repository(
+        &client,
+        &repository_relays,
+        public_key,
+        &resolved.repository,
+    )
+    .await?;
     let repository = merged_repository(
-        args,
+        &resolved,
         &repository_coordinate,
         &layout,
         &servers,
@@ -93,10 +99,14 @@ pub async fn publish(
 
     let uploads = upload_layout(&layout, &servers, &signer, json_output).await?;
 
-    let rechecked =
-        fetch_current_repository(&client, &repository_relays, public_key, &args.repository)
-            .await
-            .context("failed to re-check the container repository after uploading blobs")?;
+    let rechecked = fetch_current_repository(
+        &client,
+        &repository_relays,
+        public_key,
+        &resolved.repository,
+    )
+    .await
+    .context("failed to re-check the container repository after uploading blobs")?;
     ensure_unchanged(existing.as_ref(), rechecked.as_ref())?;
 
     let unsigned = finalize_ordered_unsigned(event_builder, public_key, existing.as_ref())
@@ -122,7 +132,7 @@ pub async fn publish(
 
     render_success(
         &PublishSuccess {
-            args,
+            settings: &resolved,
             public_key,
             repository_relays: &repository_relays,
             event: &event,
@@ -136,6 +146,40 @@ pub async fn publish(
 
     client.disconnect().await?;
     Ok(())
+}
+
+struct PreparedContainerPublish {
+    git_repo: Repo,
+    resolved: ResolvedContainerPublish,
+    explicit_servers: Vec<Url>,
+    source: Option<Url>,
+    layout: OciLayout,
+}
+
+fn prepare_container_publish(args: &ContainerPublishArgs) -> Result<PreparedContainerPublish> {
+    let git_repo =
+        Repo::discover().context("container publication must run inside a Nostr Git repository")?;
+    let resolved = resolve_publish_settings(git_repo.get_path()?, args)?;
+    validate_metadata_args(&resolved)?;
+    let explicit_servers = parse_blossom_servers(&resolved.blossom_servers)?;
+    let source = resolved
+        .source
+        .as_deref()
+        .map(parse_source_url)
+        .transpose()?;
+    let layout = OciLayout::load(&resolved.layout).with_context(|| {
+        format!(
+            "failed to validate OCI image layout {}",
+            resolved.layout.display()
+        )
+    })?;
+    Ok(PreparedContainerPublish {
+        git_repo,
+        resolved,
+        explicit_servers,
+        source,
+        layout,
+    })
 }
 
 async fn resolve_repository_context(
@@ -159,7 +203,7 @@ async fn resolve_repository_context(
 }
 
 struct PublishSuccess<'a> {
-    args: &'a ContainerPublishArgs,
+    settings: &'a ResolvedContainerPublish,
     public_key: PublicKey,
     repository_relays: &'a [RelayUrl],
     event: &'a Event,
@@ -172,7 +216,7 @@ struct PublishSuccess<'a> {
 fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()> {
     let naddr = Nip19Coordinate {
         coordinate: Coordinate::new(CONTAINER_REPOSITORY_KIND, success.public_key)
-            .identifier(success.args.repository.clone()),
+            .identifier(success.settings.repository.clone()),
         relays: success.repository_relays.to_vec(),
     }
     .to_bech32()?;
@@ -184,9 +228,10 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
             "ok": true,
             "command": "container.publish",
             "result": {
-                "repository": success.args.repository,
+                "repository": success.settings.repository,
+                "manifest_path": success.settings.manifest_path,
                 "npub": npub,
-                "name": format!("{npub}/{}", success.args.repository),
+                "name": format!("{npub}/{}", success.settings.repository),
                 "naddr": naddr,
                 "event_id": success.event.id.to_hex(),
                 "git_repository": success.repository.repository.to_string(),
@@ -203,7 +248,7 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
     } else {
         println!(
             "published container repository {npub}/{}",
-            success.args.repository
+            success.settings.repository
         );
         println!("  git repository: {}", success.repository.repository);
         for tag in &success.layout.tags {
@@ -214,7 +259,97 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
     Ok(())
 }
 
-fn validate_metadata_args(args: &ContainerPublishArgs) -> Result<()> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedContainerPublish {
+    repository: String,
+    layout: PathBuf,
+    blossom_servers: Vec<String>,
+    relays: Vec<String>,
+    title: Option<String>,
+    description: Option<String>,
+    source: Option<String>,
+    replace: bool,
+    manifest_path: Option<PathBuf>,
+}
+
+fn resolve_publish_settings(
+    repository_root: &Path,
+    args: &ContainerPublishArgs,
+) -> Result<ResolvedContainerPublish> {
+    let default_path = resolve_container_manifest_path(repository_root, None)?;
+    let loaded = if args.no_manifest {
+        None
+    } else if args.manifest.is_some() || default_path.exists() {
+        Some(load_container_manifest(
+            repository_root,
+            args.manifest.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let entry = loaded
+        .as_ref()
+        .map(|loaded| {
+            loaded
+                .manifest
+                .containers
+                .get(&args.repository)
+                .with_context(|| {
+                    format!(
+                        "container manifest {} does not define repository {:?}",
+                        loaded.path.display(),
+                        args.repository
+                    )
+                })
+        })
+        .transpose()?;
+    let layout = match (
+        args.layout.as_ref(),
+        entry.and_then(|entry| entry.layout.as_ref()),
+    ) {
+        (Some(layout), _) => layout.clone(),
+        (None, Some(layout)) if layout.is_absolute() => layout.clone(),
+        (None, Some(layout)) => repository_root.join(layout),
+        (None, None) => anyhow::bail!(
+            "container publication requires --layout PATH or a layout in the selected manifest entry"
+        ),
+    };
+    let manifest_publication = loaded.as_ref().map(|loaded| &loaded.manifest.publication);
+    let blossom_servers = if args.blossom_servers.is_empty() {
+        manifest_publication
+            .map(|publication| publication.blossom_servers.clone())
+            .unwrap_or_default()
+    } else {
+        args.blossom_servers.clone()
+    };
+    let mut relays = manifest_publication
+        .map(|publication| publication.relays.clone())
+        .unwrap_or_default();
+    relays.extend(args.relays.iter().cloned());
+
+    Ok(ResolvedContainerPublish {
+        repository: args.repository.clone(),
+        layout,
+        blossom_servers,
+        relays,
+        title: args
+            .title
+            .clone()
+            .or_else(|| entry.and_then(|entry| entry.title.clone())),
+        description: args
+            .description
+            .clone()
+            .or_else(|| entry.and_then(|entry| entry.description.clone())),
+        source: args
+            .source
+            .clone()
+            .or_else(|| entry.and_then(|entry| entry.source.clone())),
+        replace: args.replace,
+        manifest_path: loaded.map(|loaded| loaded.path),
+    })
+}
+
+fn validate_metadata_args(args: &ResolvedContainerPublish) -> Result<()> {
     ensure!(
         is_valid_repository_name(&args.repository),
         "container repository name {:?} is invalid; use lowercase letters, digits, and . _ - separators",
@@ -230,7 +365,7 @@ fn validate_metadata_args(args: &ContainerPublishArgs) -> Result<()> {
 }
 
 fn merged_repository(
-    args: &ContainerPublishArgs,
+    args: &ResolvedContainerPublish,
     git_repository: &Coordinate,
     layout: &OciLayout,
     uploaded_servers: &[Url],
@@ -308,7 +443,7 @@ fn merged_repository(
 }
 
 fn new_repository(
-    args: &ContainerPublishArgs,
+    args: &ResolvedContainerPublish,
     git_repository: &Coordinate,
     layout: &OciLayout,
     servers: &[Url],
@@ -569,13 +704,14 @@ fn upload_json((blob, upload): &(OciBlob, MultiServerUpload)) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use ngit::oci::ContainerTag;
     use nostr::prelude::{
         EventBuilder, Keys, Kind, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
     };
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -605,6 +741,110 @@ mod tests {
         ensure_unchanged(Some(&before), Some(&before))?;
         assert!(ensure_unchanged(Some(&before), Some(&after)).is_err());
         assert!(ensure_unchanged(None, Some(&after)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_settings_are_resolved_with_cli_precedence() -> Result<()> {
+        let root = tempdir()?;
+        fs::create_dir_all(root.path().join(".ngit"))?;
+        fs::write(
+            root.path().join(".ngit/containers.yaml"),
+            r#"schema: 1
+publication:
+  blossom_servers: [https://manifest-blossom.example]
+  relays: [wss://manifest-relay.example]
+containers:
+  app:
+    layout: artifacts/app
+    title: Manifest title
+    description: Manifest description
+    source: https://manifest-source.example/app
+"#,
+        )?;
+        let args = ContainerPublishArgs {
+            repository: "app".to_owned(),
+            layout: None,
+            manifest: None,
+            no_manifest: false,
+            blossom_servers: vec!["https://cli-blossom.example".to_owned()],
+            relays: vec!["wss://cli-relay.example".to_owned()],
+            title: Some("CLI title".to_owned()),
+            description: None,
+            source: None,
+            replace: false,
+        };
+
+        let resolved = resolve_publish_settings(root.path(), &args)?;
+        assert_eq!(resolved.layout, root.path().join("artifacts/app"));
+        assert_eq!(resolved.blossom_servers, ["https://cli-blossom.example"]);
+        assert_eq!(
+            resolved.relays,
+            ["wss://manifest-relay.example", "wss://cli-relay.example"]
+        );
+        assert_eq!(resolved.title.as_deref(), Some("CLI title"));
+        assert_eq!(
+            resolved.description.as_deref(),
+            Some("Manifest description")
+        );
+        assert_eq!(
+            resolved.source.as_deref(),
+            Some("https://manifest-source.example/app")
+        );
+        assert_eq!(
+            resolved.manifest_path.as_deref(),
+            Some(root.path().join(".ngit/containers.yaml").as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_manifest_requires_an_explicit_layout() -> Result<()> {
+        let root = tempdir()?;
+        let args = ContainerPublishArgs {
+            repository: "app".to_owned(),
+            layout: None,
+            manifest: None,
+            no_manifest: true,
+            blossom_servers: vec![],
+            relays: vec![],
+            title: None,
+            description: None,
+            source: None,
+            replace: false,
+        };
+        let error = resolve_publish_settings(root.path(), &args).unwrap_err();
+        assert!(error.to_string().contains("requires --layout PATH"));
+        Ok(())
+    }
+
+    #[test]
+    fn discovered_manifest_must_define_the_requested_repository() -> Result<()> {
+        let root = tempdir()?;
+        fs::create_dir_all(root.path().join(".ngit"))?;
+        fs::write(
+            root.path().join(".ngit/containers.yaml"),
+            "schema: 1\ncontainers:\n  other:\n    layout: artifacts/other\n",
+        )?;
+        let args = ContainerPublishArgs {
+            repository: "app".to_owned(),
+            layout: Some(PathBuf::from("artifacts/app")),
+            manifest: None,
+            no_manifest: false,
+            blossom_servers: vec![],
+            relays: vec![],
+            title: None,
+            description: None,
+            source: None,
+            replace: false,
+        };
+
+        let error = resolve_publish_settings(root.path(), &args).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not define repository \"app\"")
+        );
         Ok(())
     }
 
@@ -644,7 +884,7 @@ mod tests {
             }],
             blobs: vec![],
         };
-        let args = ContainerPublishArgs {
+        let args = ResolvedContainerPublish {
             repository: "app".to_owned(),
             layout: PathBuf::from("layout"),
             blossom_servers: vec![],
@@ -653,6 +893,7 @@ mod tests {
             description: None,
             source: None,
             replace: false,
+            manifest_path: None,
         };
 
         let merged = merged_repository(
