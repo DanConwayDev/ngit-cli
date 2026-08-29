@@ -7,14 +7,18 @@ use ngit::{
         blossom_server_list_from_events, canonicalize_blossom_server_root,
         upload_snapshot_batch_to_servers,
     },
-    client::{send_public_events, sign_event},
-    event_ordering::latest_event,
+    client::{send_public_events, sign_draft_event},
+    event_ordering::{latest_event, wait_for_strictly_later_timestamp},
     nsite::{
-        NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, manifest_event_builder,
-        snapshot_nsite_directory, unique_blob_snapshots, validate_named_site_identifier,
+        NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, event_matches_manifest,
+        manifest_event_builder, snapshot_nsite_directory, unique_blob_snapshots,
+        validate_named_site_identifier,
     },
 };
-use nostr::prelude::{Event, Filter, PublicKey, ToBech32 as _, Url, nip19::Nip19Event};
+use nostr::prelude::{
+    Event, Filter, PublicKey, ToBech32 as _, Url, event::FinalizeUnsignedEvent as _,
+    nip19::Nip19Event,
+};
 use serde_json::{Value, json};
 
 use super::release::support::{
@@ -166,8 +170,29 @@ async fn publish(
 
     let (builder, rebuilt_aggregate) = manifest_event_builder(&files, &manifest_input)?;
     debug_assert_eq!(aggregate, rebuilt_aggregate);
-    let event = sign_event(builder, &signer, "NIP-5A nsite manifest".to_owned()).await?;
-    let publication = publish_manifest(&context, &event, json_output).await?;
+    let unchanged_event = current
+        .as_ref()
+        .filter(|event| event_matches_manifest(event, &builder))
+        .cloned();
+    let unchanged = unchanged_event.is_some();
+    let (event, publication) = if let Some(event) = unchanged_event {
+        (
+            event,
+            json!({
+                "status": "not_attempted",
+                "reason": "manifest_unchanged",
+                "relays": [],
+            }),
+        )
+    } else {
+        let created_at = wait_for_strictly_later_timestamp(current.as_ref()).await?;
+        let unsigned = builder
+            .custom_created_at(created_at)
+            .finalize_unsigned(author);
+        let event = sign_draft_event(unsigned, &signer, "NIP-5A nsite manifest".to_owned()).await?;
+        let publication = publish_manifest(&context, &event, json_output).await?;
+        (event, publication)
+    };
     let coordinate = manifest_coordinate(author, args.identifier.as_deref());
     let npub = author.to_bech32()?;
     let warnings = std::mem::take(&mut context.warnings);
@@ -184,6 +209,7 @@ async fn publish(
         "file_count": files.len(),
         "unique_blob_count": blobs.len(),
         "previous_event_id": previous.as_ref().map(|event| event.id.to_hex()),
+        "changed": !unchanged,
         "servers": servers.iter().map(Url::as_str).collect::<Vec<_>>(),
         "blossom": blossom_summary(&blossom),
         "publication": publication,
@@ -203,11 +229,19 @@ async fn publish(
         }),
         warnings: serde_json::to_value(warnings)?,
         result,
-        human: format!(
-            "published {site_label} with {} file(s)\nevent: {}",
-            files.len(),
-            event.id
-        ),
+        human: if unchanged {
+            format!(
+                "{site_label} is unchanged with {} file(s)\nevent: {}",
+                files.len(),
+                event.id
+            )
+        } else {
+            format!(
+                "published {site_label} with {} file(s)\nevent: {}",
+                files.len(),
+                event.id
+            )
+        },
     })
 }
 

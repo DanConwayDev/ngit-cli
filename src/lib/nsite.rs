@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use bitcoin_hashes::{HashEngine as _, sha256};
-use nostr::prelude::{EventBuilder, Kind, Tag, Url};
+use nostr::prelude::{Event, EventBuilder, Kind, Tag, Url};
 
 use crate::blossom::{FileSnapshot, LocalFileRequest, snapshot_local_file};
 
@@ -132,6 +132,15 @@ pub fn manifest_event_builder(
     append_optional_tag(&mut tags, "source", input.source.as_deref())?;
 
     Ok((EventBuilder::new(kind, "").tags(tags), aggregate))
+}
+
+/// Return whether an existing event already carries the desired manifest.
+///
+/// Replacement metadata (`created_at`, ID, and signature) is deliberately
+/// ignored. The builder is deterministic, so equality of kind, tags, and
+/// content means publishing another replaceable event would be a no-op.
+pub fn event_matches_manifest(event: &Event, builder: &EventBuilder) -> bool {
+    event.kind == builder.kind && event.tags == builder.tags && event.content == builder.content
 }
 
 pub fn validate_named_site_identifier(identifier: &str) -> Result<()> {
@@ -425,6 +434,33 @@ mod tests {
                 .iter()
                 .all(|tag| tag.as_slice().first().map(String::as_str) != Some("d"))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manifest_comparison_ignores_only_replacement_metadata() -> Result<()> {
+        use nostr::prelude::{Keys, Timestamp, event::SignEvent as _};
+
+        let directory = tempfile::tempdir()?;
+        fs::write(directory.path().join("index.html"), "hello")?;
+        let files = snapshot_nsite_directory(directory.path()).await?;
+        let (builder, _) = manifest_event_builder(&files, &NsiteManifestInput::default())?;
+        let keys = Keys::generate();
+        let event = keys.sign_event(
+            builder
+                .clone()
+                .custom_created_at(Timestamp::from_secs(1))
+                .finalize_unsigned(keys.public_key()),
+        )?;
+
+        assert!(event_matches_manifest(&event, &builder));
+        let mut changed_content = builder.clone();
+        changed_content.content = "changed".to_owned();
+        assert!(!event_matches_manifest(&event, &changed_content));
+        assert!(!event_matches_manifest(
+            &event,
+            &builder.tag(Tag::parse(["title", "changed"])?)
+        ));
         Ok(())
     }
 
