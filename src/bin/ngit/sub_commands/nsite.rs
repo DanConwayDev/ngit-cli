@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use ngit::{
@@ -10,9 +10,9 @@ use ngit::{
     client::{send_public_events, sign_draft_event},
     event_ordering::{latest_event, wait_for_strictly_later_timestamp},
     nsite::{
-        NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, event_matches_manifest,
-        manifest_event_builder, snapshot_nsite_directory, unique_blob_snapshots,
-        validate_named_site_identifier,
+        NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, apply_nsite_fallback,
+        event_matches_manifest, load_nsite_project_config, manifest_event_builder,
+        snapshot_nsite_directory, unique_blob_snapshots, validate_named_site_identifier,
     },
 };
 use nostr::prelude::{
@@ -39,6 +39,18 @@ struct NsiteOutput {
     warnings: Value,
     result: Value,
     human: String,
+}
+
+struct ResolvedNsitePublish {
+    config_path: Option<PathBuf>,
+    identifier: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    source: Option<String>,
+    fallback: Option<String>,
+    blossom_servers: Vec<String>,
+    relays: Vec<String>,
+    unsupported_config_publications: Vec<&'static str>,
 }
 
 pub(crate) async fn launch(
@@ -103,10 +115,21 @@ async fn publish(
     signer_params: SignerParams<'_>,
     json_output: bool,
 ) -> Result<NsiteOutput> {
-    if let Some(identifier) = args.identifier.as_deref() {
+    let resolved = resolve_publish_settings(args)?;
+    if let Some(identifier) = resolved.identifier.as_deref() {
         validate_named_site_identifier(identifier)?;
     }
-    let mut context = ReleaseContext::load_for_write(&args.relays, false, signer_params).await?;
+    let mut context =
+        ReleaseContext::load_for_write(&resolved.relays, false, signer_params).await?;
+    for option in &resolved.unsupported_config_publications {
+        context.warnings.push(WarningJson {
+            code: "unsupported_nsite_config_option".to_owned(),
+            message: format!(
+                ".nsite/config.json option {option} is not published by ngit nsite yet"
+            ),
+            details: json!({ "option": option }),
+        });
+    }
     let author = context
         .current_signer()
         .ok_or_else(|| coded_error("not_logged_in", "nostr account required"))?;
@@ -115,14 +138,17 @@ async fn publish(
         .as_ref()
         .context("nostr signer was not initialized")?
         .clone();
-    let description = resolve_description(args)?;
-    let servers = resolve_servers(&mut context, author, &args.blossom_servers).await?;
-    let previous = load_current_manifest(&mut context, author, args.identifier.as_deref()).await?;
+    let servers = resolve_servers(&mut context, author, &resolved.blossom_servers).await?;
+    let previous =
+        load_current_manifest(&mut context, author, resolved.identifier.as_deref()).await?;
 
-    let files = snapshot_nsite_directory(&args.directory).await?;
+    let mut files = snapshot_nsite_directory(&args.directory).await?;
+    if let Some(fallback) = resolved.fallback.as_deref() {
+        apply_nsite_fallback(&mut files, fallback)?;
+    }
     append_snapshot_warnings(&mut context, &files)?;
     let blobs = unique_blob_snapshots(&files)?;
-    let source = args.source.clone().or_else(|| {
+    let source = resolved.source.clone().or_else(|| {
         (!context.repo_ref.private).then(|| {
             context
                 .repo_ref
@@ -131,11 +157,12 @@ async fn publish(
         })
     });
     let manifest_input = NsiteManifestInput {
-        identifier: args.identifier.clone(),
-        title: args.title.clone(),
-        description,
+        identifier: resolved.identifier.clone(),
+        title: resolved.title.clone(),
+        description: resolved.description.clone(),
         source,
         servers: servers.clone(),
+        relays: context.explicit_relays.clone(),
     };
     // Validate all manifest values before invoking the signer or touching a
     // Blossom server.
@@ -157,7 +184,8 @@ async fn publish(
                 coded_error_with_details("blossom_upload_failed", error.message, details)
             })?;
 
-    let current = load_current_manifest(&mut context, author, args.identifier.as_deref()).await?;
+    let current =
+        load_current_manifest(&mut context, author, resolved.identifier.as_deref()).await?;
     if current.as_ref().map(|event| event.id) != previous.as_ref().map(|event| event.id) {
         return Err(coded_error_with_details(
             "concurrent_state_changed",
@@ -195,7 +223,7 @@ async fn publish(
         let publication = publish_manifest(&context, &event, json_output).await?;
         (event, publication)
     };
-    let coordinate = manifest_coordinate(author, args.identifier.as_deref());
+    let coordinate = manifest_coordinate(author, resolved.identifier.as_deref());
     let npub = author.to_bech32()?;
     let warnings = std::mem::take(&mut context.warnings);
     let repository = serde_json::to_value(repository_json(&context))?;
@@ -206,17 +234,24 @@ async fn publish(
         "event_id_bech32": event_id_bech32(&event),
         "author": author.to_hex(),
         "author_npub": npub,
-        "identifier": args.identifier,
+        "identifier": resolved.identifier,
+        "config_path": resolved.config_path,
+        "fallback": resolved.fallback,
         "aggregate_sha256": aggregate,
         "file_count": files.len(),
         "unique_blob_count": blobs.len(),
         "previous_event_id": previous.as_ref().map(|event| event.id.to_hex()),
         "changed": !unchanged,
         "servers": servers.iter().map(Url::as_str).collect::<Vec<_>>(),
+        "relays": context
+            .explicit_relays
+            .iter()
+            .map(nostr::types::RelayUrl::as_str)
+            .collect::<Vec<_>>(),
         "blossom": blossom_summary(&blossom),
         "publication": publication,
     });
-    let site_label = args.identifier.as_deref().map_or_else(
+    let site_label = resolved.identifier.as_deref().map_or_else(
         || format!("root site for {npub}"),
         |identifier| format!("named site {identifier:?} for {npub}"),
     );
@@ -245,6 +280,68 @@ async fn publish(
             )
         },
     })
+}
+
+fn resolve_publish_settings(args: &NsitePublishArgs) -> Result<ResolvedNsitePublish> {
+    let loaded =
+        load_nsite_project_config(args.config.as_deref(), args.no_config).map_err(|error| {
+            coded_error(
+                "invalid_nsite_config",
+                format!("failed to load nsite project configuration: {error:#}"),
+            )
+        })?;
+    let config_path = loaded.as_ref().map(|loaded| loaded.path.clone());
+    let config = loaded.map(|loaded| loaded.config).unwrap_or_default();
+    let cli_description = resolve_description(args)?;
+    let mut unsupported_config_publications = Vec::new();
+    if config.publish_profile {
+        unsupported_config_publications.push("publishProfile");
+    }
+    if config.publish_relay_list {
+        unsupported_config_publications.push("publishRelayList");
+    }
+    if config.publish_server_list {
+        unsupported_config_publications.push("publishServerList");
+    }
+    if config.publish_app_handler {
+        unsupported_config_publications.push("publishAppHandler");
+    }
+
+    Ok(ResolvedNsitePublish {
+        config_path,
+        identifier: args
+            .identifier
+            .clone()
+            .or_else(|| nonempty_config_value(config.id)),
+        title: args
+            .title
+            .clone()
+            .or_else(|| nonempty_config_value(config.title)),
+        description: cli_description.or_else(|| nonempty_config_value(config.description)),
+        source: args
+            .source
+            .clone()
+            .or_else(|| nonempty_config_value(config.source)),
+        fallback: args
+            .fallback
+            .clone()
+            .or_else(|| nonempty_config_value(config.fallback)),
+        blossom_servers: if args.blossom_servers.is_empty() {
+            config.servers
+        } else {
+            args.blossom_servers.clone()
+        },
+        relays: if args.relays.is_empty() {
+            config.relays
+        } else {
+            args.relays.clone()
+        },
+        unsupported_config_publications,
+    })
+}
+
+fn nonempty_config_value(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 fn resolve_description(args: &NsitePublishArgs) -> Result<Option<String>> {
@@ -488,7 +585,84 @@ mod tests {
             let NsiteCommands::Publish(args) = nsite.nsite_command;
             assert_eq!(args.identifier.as_deref(), Some("workshop"));
             assert_eq!(args.directory, std::path::Path::new("dist"));
+            assert!(args.config.is_none());
+            assert!(!args.no_config);
         }
+    }
+
+    #[test]
+    fn nsyte_config_supplies_defaults_and_cli_values_win() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = directory.path().join("config.json");
+        fs::write(
+            &config_path,
+            r#"{
+                "id": "docs",
+                "title": "Config title",
+                "description": "Config description",
+                "source": "https://config.example/repo",
+                "fallback": "/index.html",
+                "servers": ["https://config-blossom.example"],
+                "relays": ["wss://config-relay.example"],
+                "publishServerList": true
+            }"#,
+        )?;
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "nsite",
+            "publish",
+            "dist",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--title",
+            "CLI title",
+            "--fallback",
+            "app.html",
+            "--blossom-server",
+            "https://cli-blossom.example",
+            "--relay",
+            "wss://cli-relay.example",
+        ])?;
+        let Some(Commands::Nsite(nsite)) = cli.command else {
+            panic!("nsite command was not parsed");
+        };
+        let NsiteCommands::Publish(args) = nsite.nsite_command;
+
+        let resolved = resolve_publish_settings(&args)?;
+
+        assert_eq!(resolved.config_path.as_deref(), Some(config_path.as_path()));
+        assert_eq!(resolved.identifier.as_deref(), Some("docs"));
+        assert_eq!(resolved.title.as_deref(), Some("CLI title"));
+        assert_eq!(resolved.description.as_deref(), Some("Config description"));
+        assert_eq!(
+            resolved.source.as_deref(),
+            Some("https://config.example/repo")
+        );
+        assert_eq!(resolved.fallback.as_deref(), Some("app.html"));
+        assert_eq!(resolved.blossom_servers, ["https://cli-blossom.example"]);
+        assert_eq!(resolved.relays, ["wss://cli-relay.example"]);
+        assert_eq!(
+            resolved.unsupported_config_publications,
+            ["publishServerList"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_config_and_no_config_conflict() {
+        let Err(error) = Cli::try_parse_from([
+            "ngit",
+            "nsite",
+            "publish",
+            "dist",
+            "--config",
+            ".nsite/config.json",
+            "--no-config",
+        ]) else {
+            panic!("conflicting config options were accepted");
+        };
+
+        assert!(error.to_string().contains("cannot be used with"));
     }
 
     #[test]

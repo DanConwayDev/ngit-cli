@@ -455,6 +455,12 @@ pub struct NsitePublishArgs {
     /// Directory containing already-built static assets
     #[arg(value_name = "DIRECTORY")]
     pub directory: PathBuf,
+    /// Read nsyte-compatible defaults from this JSON file
+    #[arg(long, value_name = "PATH", conflicts_with = "no_config")]
+    pub config: Option<PathBuf>,
+    /// Ignore .nsite/config.json
+    #[arg(long, conflicts_with = "config")]
+    pub no_config: bool,
     /// Publish a named site with this identifier; omit for the root site
     #[arg(long = "id", visible_alias = "name", value_name = "ID")]
     pub identifier: Option<String>,
@@ -470,6 +476,9 @@ pub struct NsitePublishArgs {
     /// Source repository or archive URL (https:// or nostr://)
     #[arg(long, value_name = "URL")]
     pub source: Option<String>,
+    /// Map this build-output path to /404.html
+    #[arg(long, value_name = "SITE_PATH")]
+    pub fallback: Option<String>,
     /// Override kind-10063 discovery with a Blossom server (repeatable)
     #[arg(long = "blossom-server", value_name = "URL")]
     pub blossom_servers: Vec<String>,

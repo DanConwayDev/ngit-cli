@@ -4,23 +4,65 @@ use std::{
     collections::HashMap,
     fs,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use bitcoin_hashes::{HashEngine as _, sha256};
-use nostr::prelude::{Event, EventBuilder, Kind, Tag, Url};
+use nostr::prelude::{Event, EventBuilder, Kind, RelayUrl, Tag, Url};
+use serde::Deserialize;
 
 use crate::blossom::{FileSnapshot, LocalFileRequest, snapshot_local_file};
 
 pub const NSITE_ROOT_KIND: Kind = Kind::Custom(15_128);
 pub const NSITE_NAMED_KIND: Kind = Kind::Custom(35_128);
 pub const MAX_NAMED_SITE_IDENTIFIER_BYTES: usize = 13;
+pub const DEFAULT_NSITE_CONFIG_PATH: &str = ".nsite/config.json";
+const MAX_NSITE_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// The publication fields ngit consumes from nsyte's `.nsite/config.json`.
+///
+/// Unknown fields remain accepted so projects can keep profile, list, and
+/// application-handler settings for nsyte while using ngit for the site
+/// publication itself.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NsiteProjectConfig {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<String>,
+    #[serde(default)]
+    pub servers: Vec<String>,
+    #[serde(default)]
+    pub relays: Vec<String>,
+    #[serde(default)]
+    pub publish_profile: bool,
+    #[serde(default)]
+    pub publish_relay_list: bool,
+    #[serde(default)]
+    pub publish_server_list: bool,
+    #[serde(default)]
+    pub publish_app_handler: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoadedNsiteProjectConfig {
+    pub path: PathBuf,
+    pub config: NsiteProjectConfig,
+}
 
 /// One stable local file and the absolute path published for it.
 #[derive(Debug)]
 pub struct NsiteFileSnapshot {
     pub path: String,
-    pub snapshot: FileSnapshot,
+    pub snapshot: Arc<FileSnapshot>,
 }
 
 /// Typed input for a root or named NIP-5A manifest.
@@ -32,6 +74,44 @@ pub struct NsiteManifestInput {
     pub description: Option<String>,
     pub source: Option<String>,
     pub servers: Vec<Url>,
+    pub relays: Vec<RelayUrl>,
+}
+
+/// Load nsyte-compatible publication defaults.
+///
+/// An explicit path is required to exist. Without one, the conventional
+/// `.nsite/config.json` is loaded only when present in the current directory.
+/// YAML is deliberately unsupported because nsyte's project format is JSON.
+pub fn load_nsite_project_config(
+    explicit_path: Option<&Path>,
+    disabled: bool,
+) -> Result<Option<LoadedNsiteProjectConfig>> {
+    if disabled {
+        return Ok(None);
+    }
+    let (path, required) = explicit_path.map_or_else(
+        || (PathBuf::from(DEFAULT_NSITE_CONFIG_PATH), false),
+        |path| (path.to_path_buf(), true),
+    );
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect nsite config {}", path.display()));
+        }
+    };
+    if !metadata.is_file() || metadata.len() > MAX_NSITE_CONFIG_BYTES {
+        bail!(
+            "nsite config must be a regular file no larger than {MAX_NSITE_CONFIG_BYTES} bytes: {}",
+            path.display()
+        );
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read nsite config {}", path.display()))?;
+    let config = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse nsite config {} as JSON", path.display()))?;
+    Ok(Some(LoadedNsiteProjectConfig { path, config }))
 }
 
 /// Snapshot every regular file below a directory in deterministic path order.
@@ -52,7 +132,7 @@ pub async fn snapshot_nsite_directory(root: &Path) -> Result<Vec<NsiteFileSnapsh
             .with_context(|| format!("failed to snapshot nsite path {public_path}"))?;
         snapshots.push(NsiteFileSnapshot {
             path: public_path,
-            snapshot,
+            snapshot: Arc::new(snapshot),
         });
     }
     Ok(snapshots)
@@ -79,10 +159,41 @@ pub fn unique_blob_snapshots(files: &[NsiteFileSnapshot]) -> Result<Vec<&FileSna
                 file.snapshot.sha256.as_str(),
                 (file.path.as_str(), file.snapshot.mime_type.as_str()),
             );
-            unique.push(&file.snapshot);
+            unique.push(file.snapshot.as_ref());
         }
     }
     Ok(unique)
+}
+
+/// Add or replace `/404.html` with the configured fallback file's immutable
+/// snapshot, matching nsyte's manifest behavior without copying bytes again.
+pub fn apply_nsite_fallback(files: &mut Vec<NsiteFileSnapshot>, fallback: &str) -> Result<()> {
+    let relative = fallback.trim_start_matches('/');
+    let fallback_path = public_site_path(Path::new(relative))?;
+    let fallback_file = files
+        .iter()
+        .find(|file| file.path == fallback_path)
+        .with_context(|| {
+            format!("nsite fallback {fallback:?} is not present in the build output")
+        })?;
+    if fallback_file.snapshot.mime_type != "text/html" {
+        bail!(
+            "nsite fallback {fallback:?} must resolve to an HTML file, but {fallback_path} has MIME type {}",
+            fallback_file.snapshot.mime_type
+        );
+    }
+    let fallback_snapshot = Arc::clone(&fallback_file.snapshot);
+
+    if let Some(not_found) = files.iter_mut().find(|file| file.path == "/404.html") {
+        not_found.snapshot = fallback_snapshot;
+    } else {
+        files.push(NsiteFileSnapshot {
+            path: "/404.html".to_owned(),
+            snapshot: fallback_snapshot,
+        });
+    }
+    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    Ok(())
 }
 
 /// Compute the order-independent aggregate hash required by NIP-5A.
@@ -109,7 +220,7 @@ pub fn manifest_event_builder(
     }
     validate_manifest_input(input)?;
 
-    let mut tags = Vec::with_capacity(files.len() + input.servers.len() + 6);
+    let mut tags = Vec::with_capacity(files.len() + input.servers.len() + input.relays.len() + 6);
     let kind = if let Some(identifier) = &input.identifier {
         tags.push(Tag::parse(["d", identifier]).context("invalid nsite identifier tag")?);
         NSITE_NAMED_KIND
@@ -130,6 +241,9 @@ pub fn manifest_event_builder(
     );
     for server in &input.servers {
         tags.push(Tag::parse(["server", server.as_str()]).context("invalid nsite server tag")?);
+    }
+    for relay in &input.relays {
+        tags.push(Tag::parse(["relay", relay.as_str()]).context("invalid nsite relay tag")?);
     }
     append_optional_tag(&mut tags, "title", input.title.as_deref())?;
     append_optional_tag(&mut tags, "description", input.description.as_deref())?;
@@ -402,6 +516,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fallback_adds_404_mapping_without_another_blob() -> Result<()> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("index.html"), b"home")?;
+        let mut files = snapshot_nsite_directory(directory.path()).await?;
+
+        apply_nsite_fallback(&mut files, "/index.html")?;
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/404.html", "/index.html"]
+        );
+        assert!(Arc::ptr_eq(&files[0].snapshot, &files[1].snapshot));
+        assert_eq!(unique_blob_snapshots(&files)?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fallback_replaces_an_existing_404_mapping() -> Result<()> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("404.html"), b"old")?;
+        fs::write(directory.path().join("index.html"), b"home")?;
+        let mut files = snapshot_nsite_directory(directory.path()).await?;
+
+        apply_nsite_fallback(&mut files, "index.html")?;
+
+        let not_found = files.iter().find(|file| file.path == "/404.html").unwrap();
+        let index = files
+            .iter()
+            .find(|file| file.path == "/index.html")
+            .unwrap();
+        assert!(Arc::ptr_eq(&not_found.snapshot, &index.snapshot));
+        assert_eq!(unique_blob_snapshots(&files)?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fallback_must_name_a_safe_file_in_the_snapshot() -> Result<()> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("index.html"), b"home")?;
+        fs::write(directory.path().join("app.js"), b"script")?;
+        let mut files = snapshot_nsite_directory(directory.path()).await?;
+
+        assert!(
+            apply_nsite_fallback(&mut files, "missing.html")
+                .unwrap_err()
+                .to_string()
+                .contains("not present")
+        );
+        assert!(apply_nsite_fallback(&mut files, "../index.html").is_err());
+        assert!(
+            apply_nsite_fallback(&mut files, "app.js")
+                .unwrap_err()
+                .to_string()
+                .contains("must resolve to an HTML file")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn loads_supported_nsyte_config_fields_and_ignores_future_fields() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "id": "docs",
+                "title": "Documentation",
+                "description": "Project docs",
+                "source": "https://example.com/repo",
+                "fallback": "/index.html",
+                "servers": ["https://blossom.example"],
+                "relays": ["wss://relay.example"],
+                "publishProfile": true,
+                "profile": {"name": "Alice"}
+            }"#,
+        )?;
+
+        let loaded = load_nsite_project_config(Some(&path), false)?.unwrap();
+
+        assert_eq!(loaded.path, path);
+        assert_eq!(loaded.config.id.as_deref(), Some("docs"));
+        assert_eq!(loaded.config.fallback.as_deref(), Some("/index.html"));
+        assert_eq!(loaded.config.servers, ["https://blossom.example"]);
+        assert_eq!(loaded.config.relays, ["wss://relay.example"]);
+        assert!(loaded.config.publish_profile);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_nsite_config_must_exist_unless_disabled() -> Result<()> {
+        let path = Path::new("does-not-exist/config.json");
+
+        assert!(load_nsite_project_config(Some(path), false).is_err());
+        assert!(load_nsite_project_config(Some(path), true)?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rejects_unsafe_paths_and_requires_extensions() -> Result<()> {
         let unsafe_directory = tempdir()?;
         fs::write(unsafe_directory.path().join("bad\nname.html"), b"hello")?;
@@ -433,6 +648,7 @@ mod tests {
             description: Some("Nostr-native collaboration".to_owned()),
             source: Some("nostr://example/repository".to_owned()),
             servers: vec![Url::parse("https://blossom.example")?],
+            relays: vec![RelayUrl::parse("wss://relay.example")?],
         };
 
         let (builder, aggregate) = manifest_event_builder(&files, &input)?;
@@ -442,6 +658,10 @@ mod tests {
         assert_eq!(unsigned.kind, NSITE_NAMED_KIND);
         assert!(tags.iter().any(|tag| tag == &["d", "workshop"]));
         assert!(tags.iter().any(|tag| tag == &["title", "Git Workshop"]));
+        assert!(
+            tags.iter()
+                .any(|tag| tag == &["relay", "wss://relay.example"])
+        );
         assert!(
             tags.iter()
                 .any(|tag| tag == &["x", aggregate.as_str(), "aggregate"])

@@ -6,6 +6,31 @@ path mapping is signed as one replaceable Nostr manifest.
 
 ## Command API
 
+Ngit reuses nsyte's `.nsite/config.json` when it exists in the current
+directory. The supported project fields are `id`, `title`, `description`,
+`source`, `fallback`, `servers`, and `relays`; the file is JSON, not YAML. This
+makes the normal publication command a direct replacement for `nsyte deploy`
+once the static assets have been built:
+
+```sh
+ngit nsite publish dist --json
+```
+
+Use `--config PATH` to select another JSON file or `--no-config` to ignore the
+project file. Explicit command-line values take precedence over config values.
+For repeatable `--blossom-server` and `--relay` options, specifying any values
+on the command line replaces the corresponding config array. With neither an
+option nor a configured server list, ngit discovers the active account's
+kind-10063 Blossom server list.
+
+Nsyte's profile, relay-list, server-list, and NIP-89 app-handler publication
+options are not implemented yet. A true `publishProfile`, `publishRelayList`,
+`publishServerList`, or `publishAppHandler` config value produces an
+`unsupported_nsite_config_option` warning while the site itself is published.
+Signer credentials in nsyte configuration are not imported; select one of
+ngit's stored accounts or pass an established `nbunksec` through ngit's signer
+options.
+
 Publish the active account's root site with explicit servers:
 
 ```sh
@@ -17,9 +42,9 @@ ngit nsite publish dist \
   --json
 ```
 
-Omit `--blossom-server` to discover the active account's latest kind-10063
-server list. Repeat `--relay` to extend repository and account relay defaults
-for manifest discovery and publication.
+Selected relays are used for manifest discovery and publication and are
+included as `relay` hints in the manifest. Without configured or explicit
+relays, ngit uses its existing repository and account relay selection.
 
 Publish a named site with `--id` (or its `--name` alias):
 
@@ -37,7 +62,9 @@ Available metadata is:
 - `--title TEXT`;
 - `--description TEXT` or `--description-file PATH`;
 - `--source URL`, accepting `https://` archives/repositories and `nostr://`
-  repositories.
+  repositories;
+- `--fallback SITE_PATH`, mapping an existing HTML file in the build output to
+  `/404.html` for single-page applications and custom not-found handling.
 
 When `--source` is absent, ngit records a public selected repository's
 canonical `nostr://` URL. It omits the inferred source for a private repository
@@ -49,6 +76,11 @@ NIP-5A does not define a logo metadata tag. Include a conventional asset such
 as `/favicon.ico` or `/favicon.svg` in the build directory; it is published in
 the path manifest like every other site file. Copy lineage, manifest snapshots,
 and upstream app-descriptor links are not created by this first publish API.
+
+Fallback mapping reuses the selected file's immutable snapshot and Blossom
+hash, so it does not upload another blob. It replaces a real `/404.html`
+mapping when both are present. The configured path must exist in the captured
+build output and resolve to `text/html`.
 
 `--concurrency N` controls simultaneous Blossom presence checks and uploads
 and defaults to four. It does not increase signer concurrency.
@@ -116,9 +148,10 @@ the extended NIP-44 format.
 `--json` writes one terminal object to stdout. A successful
 `nsite.publish` result includes the manifest coordinate and event ID, author,
 aggregate hash, file and unique-blob counts, previous event ID, selected
-servers, summarized Blossom work with per-blob/per-server outcomes, and relay
-acknowledgements. Runtime failures use `ok: false` with a stable error code;
-progress and signer diagnostics remain on stderr.
+servers and relays, loaded config path, configured fallback, summarized
+Blossom work with per-blob/per-server outcomes, and relay acknowledgements.
+Runtime failures use `ok: false` with a stable error code; progress and signer
+diagnostics remain on stderr.
 
 Blobs which were stored before a later failure are safe to reuse because their
 identity is their SHA-256. Rerunning the same command confirms them with HEAD
