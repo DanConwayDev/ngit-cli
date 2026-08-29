@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Summary:** Private repos via private GRASP service (GRASP-08), basic Buzz Git
 support, portable local and remote signer management, stacked PRs, target
-branches, and a skill installer/upgrader.
+branches, a skill installer/upgrader, and NIP-5A site and OCI container
+publication.
 
 ### Added
 
@@ -21,6 +22,11 @@ branches, and a skill installer/upgrader.
   explicitly, read with site metadata, fallback routing, and relay hints from
   nsyte's `.nsite/config.json`, or discovered from the account's kind-10063
   server list.
+- Add `ngit container publish <OCI_LAYOUT>` for publishing verified OCI image
+  layouts through Blossom and repository-bound Nostr kind-30624 state. The
+  command uploads every reachable blob, preserves existing remote tags by
+  default, publishes through repository relays, and supports NIP-42 and
+  structured CI output.
 - **Private repositories via GRASP-08**: discover private repositories through
   encrypted kind-10318 relay lists, then clone, fetch, push, and collaborate
   using NIP-42 relay authentication and repository-scoped NIP-98 Git HTTP
@@ -119,6 +125,11 @@ branches, and a skill installer/upgrader.
 - `ngit init` first-time use no longer fails to publish git data for existing `origin` refs that were never downloaded locally (e.g. tags after a `--no-tags` or single-branch clone): the missing objects are now fetched from the origin by ref name before the repository state is signed, and refs whose objects still cannot be obtained are excluded from the state event instead of being advertised as oids no git server holds.
 - Fix silent mis-targeting of repo-scoped events (`ngit send`, `ngit issue create`, `ngit pr *`, `ngit repo`, etc.) when a repository had multiple `nostr://` remotes with disagreeing coordinates. Previously the resolver iterated a `HashMap` and picked the first key it saw, ignored `nostr.repo`, and printed no diagnostic; the effect was that PRs and issues could be published against the wrong repository coordinate without warning. See the documented priority under "Changed".
 - `ngit merge` run with no argument on a bare `pr/<name>` branch now falls back to matching the branch's tip commit against the published tips of open and draft PRs when the logged-in-author mapping finds zero or several candidates. A maintainer merging a contributor's PR from a hand-made bare branch, and a logged-out user merging their own, now resolve the PR instead of erroring; when several open PRs share both the branch name and the tip commit, merge still asks for an explicit event-id.
+
+## [3.0.0-rc.3] - 2026-08-29
+
+- Third v3 release candidate, adding NIP-5A static-site and OCI container
+  publishing and fixing maintainer state handoff and TLS provider selection.
 
 ## [3.0.0-rc.2] - 2026-08-29
 
