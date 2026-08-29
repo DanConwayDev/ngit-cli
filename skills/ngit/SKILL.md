@@ -1,9 +1,9 @@
 ---
 name: ngit
-description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
+description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, NIP-5A nsites, Blossom static-site publication, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.9"
+  version: "1.10"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -75,6 +75,7 @@ Detailed command references live in `reference/*.md` in this skill's directory. 
 | Task | Reference |
 | ---- | --------- |
 | Publish/clone repos, URL forms | `reference/repositories.md` |
+| Publish NIP-5A static sites through Blossom | `reference/nsites.md` |
 | Repository settings and membership | `reference/repo-settings.md` |
 | Open, stack, review, merge PRs | `reference/prs.md` |
 | Create/view/comment/close issues | `reference/issues.md` |
