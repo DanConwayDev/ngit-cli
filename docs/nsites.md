@@ -66,9 +66,11 @@ Symlinks and other non-regular entries are rejected rather than followed, so a
 site cannot accidentally depend on files outside the declared build output.
 Each file is copied into an immutable temporary snapshot before network work;
 the manifest hash and uploaded bytes therefore cannot diverge if the original
-build directory changes during publication. Common web extensions such as
-HTML, CSS, JavaScript, images, WebAssembly, and fonts determine the Blossom
-MIME metadata.
+build directory changes during publication. A standard web MIME database maps
+filename extensions to Blossom metadata, including formats beyond ngit's
+software-release MIME list. Unknown extensions remain publishable as
+`application/octet-stream`, with a path-specific warning in human and JSON
+output.
 
 ## Upload and signing behavior
 
@@ -81,19 +83,25 @@ manifest is signed.
 
 Missing hashes are grouped into BUD-11 kind-24242 authorization events of up
 to twenty hashes each. Each authorization is scoped to the selected server
-domains and reused across those servers. A batch is authorized only when its
-bounded upload work is ready to begin, and its expiration covers both remote
-signer latency and the maximum queued request window. A deployment with
-hundreds of files therefore does not require one remote-signer approval per
-file. Duplicate file contents are uploaded once while retaining every path in
-the manifest; identical bytes inferred as different MIME types are rejected
-because Blossom stores one MIME type per hash.
+domains and reused across those servers. Ngit sends the current URL-safe,
+unpadded BUD-11 encoding first; a server which responds with `401` is retried
+once with the legacy padded encoding using the same signed event. A batch is
+authorized only when its bounded upload work is ready to begin, and its
+expiration covers both remote signer latency and the maximum queued request
+window. A deployment with hundreds of files therefore does not require one
+remote-signer approval per file. Duplicate file contents are uploaded once
+while retaining every path in the manifest; identical bytes inferred as
+different MIME types are rejected because Blossom stores one MIME type per
+hash.
 
 Ngit queries the exact current manifest before uploads and checks it again
 afterwards. If another publisher changed the site, ngit leaves the
 content-addressed blobs in place and refuses to sign over the concurrent
-manifest. Relay publication succeeds when at least one selected relay
-acknowledges the signed event; per-relay outcomes are returned in JSON.
+manifest. Transient presence and upload failures use bounded retries, and an
+accepted or uncertain upload must pass another exact length-and-MIME `HEAD`
+check before publication can continue. Relay publication succeeds when at
+least one selected relay acknowledges the signed event; per-relay outcomes are
+returned in JSON.
 Nsite manifests are account-scoped public events: private-repository and
 repository-only routing never suppresses account write relays, and private
 repository relays are excluded unless repeated explicitly with `--relay`.
@@ -108,10 +116,13 @@ the extended NIP-44 format.
 `--json` writes one terminal object to stdout. A successful
 `nsite.publish` result includes the manifest coordinate and event ID, author,
 aggregate hash, file and unique-blob counts, previous event ID, selected
-servers, summarized Blossom work, and relay acknowledgements. Runtime failures
-use `ok: false` with a stable error code; progress and signer diagnostics remain
-on stderr.
+servers, summarized Blossom work with per-blob/per-server outcomes, and relay
+acknowledgements. Runtime failures use `ok: false` with a stable error code;
+progress and signer diagnostics remain on stderr.
 
 Blobs which were stored before a later failure are safe to reuse because their
 identity is their SHA-256. Rerunning the same command confirms them with HEAD
-and skips their upload.
+and skips their upload. If the resulting manifest is also unchanged, ngit
+reports `changed: false` and reuses its event without another signer prompt or
+relay write. A changed manifest waits for a strictly later wall-clock second
+than its predecessor before it is signed once.
