@@ -1,5 +1,5 @@
 mod read;
-mod support;
+pub(crate) mod support;
 mod write;
 mod write_app;
 

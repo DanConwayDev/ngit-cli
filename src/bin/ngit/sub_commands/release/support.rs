@@ -46,7 +46,7 @@ enum QueryPolicy {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct WarningJson {
+pub(crate) struct WarningJson {
     pub code: String,
     pub message: String,
     pub details: Value,
@@ -68,7 +68,7 @@ impl WarningJson {
 }
 
 #[derive(Debug)]
-pub(super) struct ReleaseError {
+pub(crate) struct ReleaseError {
     pub code: &'static str,
     pub message: String,
     pub details: Value,
@@ -82,7 +82,7 @@ impl fmt::Display for ReleaseError {
 
 impl std::error::Error for ReleaseError {}
 
-pub(super) fn coded_error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn coded_error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     ReleaseError {
         code,
         message: message.into(),
@@ -91,7 +91,7 @@ pub(super) fn coded_error(code: &'static str, message: impl Into<String>) -> any
     .into()
 }
 
-pub(super) fn coded_error_with_details(
+pub(crate) fn coded_error_with_details(
     code: &'static str,
     message: impl Into<String>,
     details: Value,
@@ -237,7 +237,7 @@ fn publication_failure_message(
     )
 }
 
-pub(super) struct ReleaseContext {
+pub(crate) struct ReleaseContext {
     pub git_repo: Repo,
     pub client: Client,
     pub selected_coordinate: Nip19Coordinate,
@@ -326,7 +326,7 @@ impl ReleaseContext {
         })
     }
 
-    pub(super) async fn load_for_write(
+    pub(crate) async fn load_for_write(
         explicit_relays: &[String],
         zapstore_relay: bool,
         auth: SignerParams<'_>,
@@ -339,7 +339,7 @@ impl ReleaseContext {
         Ok(context)
     }
 
-    pub(super) fn git_repo_path(&self) -> Result<&std::path::Path> {
+    pub(crate) fn git_repo_path(&self) -> Result<&std::path::Path> {
         self.git_repo.get_path()
     }
 
@@ -355,11 +355,11 @@ impl ReleaseContext {
         Ok(())
     }
 
-    pub(super) fn current_signer(&self) -> Option<PublicKey> {
+    pub(crate) fn current_signer(&self) -> Option<PublicKey> {
         self.user_ref.as_ref().map(|user| user.public_key)
     }
 
-    pub(super) fn emit_human_warnings_before_signing(&mut self, json_output: bool) {
+    pub(crate) fn emit_human_warnings_before_signing(&mut self, json_output: bool) {
         if json_output {
             return;
         }
@@ -515,7 +515,7 @@ impl ReleaseContext {
         Ok(())
     }
 
-    pub(super) fn publication_relays(&self) -> (Vec<String>, Vec<RelayUrl>) {
+    pub(crate) fn publication_relays(&self) -> (Vec<String>, Vec<RelayUrl>) {
         let user_write = self
             .user_ref
             .as_ref()
@@ -569,7 +569,7 @@ impl ReleaseContext {
         Ok(publication)
     }
 
-    pub(super) async fn add_author_relays(&mut self, author: PublicKey) -> Result<()> {
+    pub(crate) async fn add_author_relays(&mut self, author: PublicKey) -> Result<()> {
         if let Ok(user) =
             ngit::login::user::get_user_ref_from_cache(Some(self.git_repo_path()?), &author).await
         {
@@ -582,7 +582,7 @@ impl ReleaseContext {
         Ok(())
     }
 
-    pub(super) async fn query(&mut self, filters: Vec<Filter>, strict: bool) -> Result<Vec<Event>> {
+    pub(crate) async fn query(&mut self, filters: Vec<Filter>, strict: bool) -> Result<Vec<Event>> {
         let policy = if strict {
             QueryPolicy::PublicationPreflight
         } else {
@@ -591,7 +591,7 @@ impl ReleaseContext {
         self.query_with_policy(filters, policy).await
     }
 
-    pub(super) async fn query_with_required_discovery_route(
+    pub(crate) async fn query_with_required_discovery_route(
         &mut self,
         filters: Vec<Filter>,
     ) -> Result<Vec<Event>> {
@@ -996,7 +996,7 @@ pub(super) fn resolve_asset<'a>(
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct RepositoryJson {
+pub(crate) struct RepositoryJson {
     pub selected_coordinate: String,
     pub coordinates: Vec<String>,
 }
@@ -1052,7 +1052,7 @@ impl AuthorityJson {
     }
 }
 
-pub(super) fn repository_json(context: &ReleaseContext) -> RepositoryJson {
+pub(crate) fn repository_json(context: &ReleaseContext) -> RepositoryJson {
     RepositoryJson {
         selected_coordinate: coordinate_key(&context.selected_coordinate.coordinate),
         coordinates: context.repo_coordinate_keys().into_iter().collect(),

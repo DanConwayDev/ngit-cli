@@ -2078,8 +2078,7 @@ dependencies = [
 [[package]]
 name = "nostr"
 version = "0.45.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0ba32ce43631188586469ba1a4c40bcfa63641f1ad5de89ef77f74d801cc17a"
+source = "git+https://github.com/nostrdevkit/nostr.git?rev=7f50222fff8dc2e446b0bb4ea9c2bc7a9be35fba#7f50222fff8dc2e446b0bb4ea9c2bc7a9be35fba"
 dependencies = [
  "aes",
  "base64 0.22.1",

@@ -5,7 +5,7 @@
 //! server one immutable unit even if the source path changes later.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashMap, HashSet},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -15,6 +15,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bitcoin_hashes::{HashEngine as _, sha256};
+use futures::{StreamExt as _, stream};
 use nostr::prelude::{Event, EventBuilder, EventId, Filter, Kind, PublicKey, Tag, Timestamp};
 use reqwest::{
     StatusCode, Url,
@@ -41,6 +42,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+pub const DEFAULT_AUTHORIZATION_BATCH_SIZE: usize = 20;
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
 /// A local file which should be staged for a Blossom upload.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,6 +165,35 @@ pub struct MultiServerUploadError {
     pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
+/// Per-blob output from a batch which places every blob on every server.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BatchBlobUploadOutcome {
+    pub sha256: String,
+    pub servers: Vec<BlossomServerOutcome>,
+}
+
+/// Successful all-blob, all-server upload result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BatchUploadResult {
+    pub blobs: Vec<BatchBlobUploadOutcome>,
+}
+
+/// Complete failure record for a batch upload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BatchUploadError {
+    pub message: String,
+    pub blobs: Vec<BatchBlobUploadOutcome>,
+    pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
+}
+
+impl std::fmt::Display for BatchUploadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BatchUploadError {}
+
 impl std::fmt::Display for MultiServerUploadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -225,25 +257,39 @@ async fn upload_snapshot_inner(
     signer: &NgitSigner,
     deadline: tokio::time::Instant,
 ) -> std::result::Result<BlobUpload, BlobRequestError> {
-    let upload_url = blossom_endpoint_url(server_url, "upload")
-        .map_err(|error| BlobRequestError::definite(error, false))?;
-    let event = tokio::time::timeout_at(deadline, upload_authorization(snapshot, signer))
-        .await
-        .map_err(|_| {
-            BlobRequestError::definite(
-                anyhow!("Blossom upload authorization exceeded its total timeout"),
-                false,
-            )
-        })?
-        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let event = tokio::time::timeout_at(
+        deadline,
+        upload_authorization(&[snapshot.sha256.as_str()], &[], signer),
+    )
+    .await
+    .map_err(|_| {
+        BlobRequestError::definite(
+            anyhow!("Blossom upload authorization exceeded its total timeout"),
+            false,
+        )
+    })?
+    .map_err(|error| BlobRequestError::definite(error, false))?;
     let authorization =
         authorization_header(&event).map_err(|error| BlobRequestError::definite(error, false))?;
+    let client = blossom_http_client().map_err(|error| BlobRequestError::definite(error, false))?;
+    upload_snapshot_with_authorization_inner(&client, server_url, snapshot, authorization, deadline)
+        .await
+}
+
+async fn upload_snapshot_with_authorization_inner(
+    client: &reqwest::Client,
+    server_url: &str,
+    snapshot: &FileSnapshot,
+    authorization: HeaderValue,
+    deadline: tokio::time::Instant,
+) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let upload_url = blossom_endpoint_url(server_url, "upload")
+        .map_err(|error| BlobRequestError::definite(error, false))?;
     let file = snapshot
         .reopen()
         .map_err(|error| BlobRequestError::definite(error, false))?;
     let body = reqwest::Body::wrap_stream(ReaderStream::new(tokio::fs::File::from_std(file)));
 
-    let client = blossom_http_client().map_err(|error| BlobRequestError::definite(error, false))?;
     let request = client
         .put(upload_url)
         .header(CONTENT_LENGTH, snapshot.size)
@@ -260,6 +306,270 @@ async fn upload_snapshot_inner(
         .map_err(|error| classify_send_error(error, "upload"))?;
 
     read_store_response(response, snapshot, deadline, "upload").await
+}
+
+/// Confirm every unique snapshot on every server, uploading only missing
+/// blobs. Upload authorizations cover batches of hashes and are scoped to all
+/// selected server domains, so remote signers perform at most
+/// `ceil(missing_hashes / 20)` authorization signatures.
+///
+/// `snapshots` must contain unique SHA-256 hashes. Every HEAD preflight
+/// completes before an authorization is signed or a PUT is attempted. Upload
+/// failures retain a complete outcome matrix and possible-orphan report.
+pub async fn upload_snapshot_batch_to_servers(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    if servers.is_empty() {
+        return Err(empty_batch_error("at least one Blossom server is required"));
+    }
+    if snapshots.is_empty() {
+        return Err(empty_batch_error(
+            "at least one Blossom snapshot is required",
+        ));
+    }
+    if concurrency == 0 {
+        return Err(empty_batch_error(
+            "Blossom upload concurrency must be greater than zero",
+        ));
+    }
+    let mut seen_hashes = HashSet::new();
+    if snapshots
+        .iter()
+        .any(|snapshot| !seen_hashes.insert(snapshot.sha256.as_str()))
+    {
+        return Err(empty_batch_error(
+            "Blossom batch snapshots must have unique SHA-256 hashes",
+        ));
+    }
+
+    let mut blobs = snapshots
+        .iter()
+        .map(|snapshot| BatchBlobUploadOutcome {
+            sha256: snapshot.sha256.clone(),
+            servers: servers
+                .iter()
+                .map(|server| BlossomServerOutcome {
+                    server: server.clone(),
+                    operation: BlossomServerOperation::Upload,
+                    status: BlossomServerStatus::NotAttempted,
+                    descriptor: None,
+                    message: None,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let client = blossom_http_client().map_err(|error| BatchUploadError {
+        message: format!("failed to prepare Blossom batch client: {error:#}"),
+        blobs: blobs.clone(),
+        possible_orphan_blobs: Vec::new(),
+    })?;
+
+    let presence_checks = snapshots
+        .iter()
+        .enumerate()
+        .flat_map(|(blob_index, snapshot)| {
+            servers
+                .iter()
+                .enumerate()
+                .map(move |(server_index, server)| (blob_index, server_index, *snapshot, server))
+        });
+    let presence_results = stream::iter(presence_checks)
+        .map(|(blob_index, server_index, snapshot, server)| {
+            let client = client.clone();
+            async move {
+                (
+                    blob_index,
+                    server_index,
+                    snapshot_is_present(&client, server, snapshot).await,
+                )
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut presence_failed = false;
+    let mut missing = Vec::new();
+    for (blob_index, server_index, result) in presence_results {
+        match result {
+            Ok(true) => {
+                blobs[blob_index].servers[server_index].status = BlossomServerStatus::AlreadyPresent
+            }
+            Ok(false) => missing.push((blob_index, server_index)),
+            Err(error) => {
+                presence_failed = true;
+                let outcome = &mut blobs[blob_index].servers[server_index];
+                outcome.status = match error.kind {
+                    RequestFailureKind::Definite => BlossomServerStatus::Failed,
+                    RequestFailureKind::Unknown => BlossomServerStatus::Unknown,
+                };
+                outcome.message = Some(error.message);
+            }
+        }
+    }
+    if presence_failed {
+        return Err(BatchUploadError {
+            message:
+                "one or more Blossom presence checks failed; no upload authorization was signed"
+                    .to_owned(),
+            blobs,
+            possible_orphan_blobs: Vec::new(),
+        });
+    }
+    if missing.is_empty() {
+        return Ok(BatchUploadResult { blobs });
+    }
+
+    let missing_blob_indices = missing
+        .iter()
+        .map(|(blob_index, _)| *blob_index)
+        .collect::<BTreeSet<_>>();
+    let missing_hashes = missing_blob_indices
+        .into_iter()
+        .map(|blob_index| snapshots[blob_index].sha256.as_str())
+        .collect::<Vec<_>>();
+    let mut authorizations = HashMap::new();
+    for hashes in missing_hashes.chunks(DEFAULT_AUTHORIZATION_BATCH_SIZE) {
+        let event = upload_authorization(hashes, servers, signer)
+            .await
+            .map_err(|error| BatchUploadError {
+                message: format!("failed to authorize Blossom batch upload: {error:#}"),
+                blobs: blobs.clone(),
+                possible_orphan_blobs: Vec::new(),
+            })?;
+        let header = authorization_header(&event).map_err(|error| BatchUploadError {
+            message: format!("failed to encode Blossom batch authorization: {error:#}"),
+            blobs: blobs.clone(),
+            possible_orphan_blobs: Vec::new(),
+        })?;
+        for hash in hashes {
+            authorizations.insert((*hash).to_owned(), header.clone());
+        }
+    }
+
+    let uploads = missing.into_iter().map(|(blob_index, server_index)| {
+        let snapshot = snapshots[blob_index];
+        let server = &servers[server_index];
+        let authorization = authorizations
+            .get(&snapshot.sha256)
+            .expect("every missing hash received an authorization")
+            .clone();
+        (blob_index, server_index, snapshot, server, authorization)
+    });
+    let upload_results = stream::iter(uploads)
+        .map(
+            |(blob_index, server_index, snapshot, server, authorization)| {
+                let client = client.clone();
+                async move {
+                    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+                    (
+                        blob_index,
+                        server_index,
+                        upload_snapshot_with_authorization_inner(
+                            &client,
+                            server.as_str(),
+                            snapshot,
+                            authorization,
+                            deadline,
+                        )
+                        .await,
+                    )
+                }
+            },
+        )
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut upload_failed = false;
+    let mut uncertain = Vec::new();
+    for (blob_index, server_index, result) in upload_results {
+        let sha256 = blobs[blob_index].sha256.clone();
+        let outcome = &mut blobs[blob_index].servers[server_index];
+        match result {
+            Ok(upload) => record_server_success(outcome, &upload),
+            Err(error) => {
+                upload_failed = true;
+                outcome.status = match error.kind {
+                    RequestFailureKind::Definite => BlossomServerStatus::Failed,
+                    RequestFailureKind::Unknown => BlossomServerStatus::Unknown,
+                };
+                outcome.message = Some(error.message);
+                if error.possible_orphan {
+                    uncertain.push(PossibleOrphanBlob {
+                        server: outcome.server.clone(),
+                        sha256,
+                        url: None,
+                    });
+                }
+            }
+        }
+    }
+    if upload_failed {
+        let mut possible_orphan_blobs = blobs
+            .iter()
+            .flat_map(|blob| {
+                blob.servers
+                    .iter()
+                    .filter(|outcome| outcome.status == BlossomServerStatus::Stored)
+                    .map(|outcome| PossibleOrphanBlob {
+                        server: outcome.server.clone(),
+                        sha256: blob.sha256.clone(),
+                        url: outcome
+                            .descriptor
+                            .as_ref()
+                            .map(|descriptor| descriptor.url.clone()),
+                    })
+            })
+            .collect::<Vec<_>>();
+        possible_orphan_blobs.extend(uncertain);
+        return Err(BatchUploadError {
+            message: "one or more Blossom uploads failed; the nsite manifest was not signed"
+                .to_owned(),
+            blobs,
+            possible_orphan_blobs,
+        });
+    }
+
+    Ok(BatchUploadResult { blobs })
+}
+
+fn empty_batch_error(message: &str) -> BatchUploadError {
+    BatchUploadError {
+        message: message.to_owned(),
+        blobs: Vec::new(),
+        possible_orphan_blobs: Vec::new(),
+    }
+}
+
+async fn snapshot_is_present(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+) -> std::result::Result<bool, BlobRequestError> {
+    let url = blossom_endpoint_url(server.as_str(), &snapshot.sha256)
+        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+    let response = tokio::time::timeout_at(deadline, client.head(url).send())
+        .await
+        .map_err(|_| {
+            BlobRequestError::definite(
+                anyhow!("Blossom presence check exceeded its total timeout"),
+                false,
+            )
+        })?
+        .map_err(|error| classify_send_error(error, "presence check"))?;
+    match response.status() {
+        StatusCode::OK => Ok(true),
+        StatusCode::NOT_FOUND => Ok(false),
+        status => Err(BlobRequestError::definite(
+            anyhow!("Blossom presence check returned HTTP {status}"),
+            false,
+        )),
+    }
 }
 
 /// Upload to the first server, then mirror sequentially to every other server.
@@ -408,15 +718,18 @@ async fn mirror_snapshot_with_timeout(
     validate_blob_url(primary_url, &snapshot.sha256)
         .context("invalid Blossom mirror source URL")
         .map_err(|error| BlobRequestError::definite(error, false))?;
-    let event = tokio::time::timeout_at(deadline, upload_authorization(snapshot, signer))
-        .await
-        .map_err(|_| {
-            BlobRequestError::definite(
-                anyhow!("Blossom mirror authorization exceeded its total timeout"),
-                false,
-            )
-        })?
-        .map_err(|error| BlobRequestError::definite(error, false))?;
+    let event = tokio::time::timeout_at(
+        deadline,
+        upload_authorization(&[snapshot.sha256.as_str()], &[], signer),
+    )
+    .await
+    .map_err(|_| {
+        BlobRequestError::definite(
+            anyhow!("Blossom mirror authorization exceeded its total timeout"),
+            false,
+        )
+    })?
+    .map_err(|error| BlobRequestError::definite(error, false))?;
     let authorization =
         authorization_header(&event).map_err(|error| BlobRequestError::definite(error, false))?;
     let client = blossom_http_client().map_err(|error| BlobRequestError::definite(error, false))?;
@@ -613,13 +926,39 @@ fn is_bidi_control(character: char) -> bool {
     )
 }
 
-async fn upload_authorization(snapshot: &FileSnapshot, signer: &NgitSigner) -> Result<Event> {
+async fn upload_authorization(
+    hashes: &[&str],
+    servers: &[Url],
+    signer: &NgitSigner,
+) -> Result<Event> {
+    if hashes.is_empty() {
+        bail!("Blossom upload authorization requires at least one hash");
+    }
     let expires = Timestamp::now() + AUTHORIZATION_LIFETIME;
-    let builder = EventBuilder::new(Kind::BlossomAuth, "Authorize Blossom upload").tags([
-        Tag::parse(["t", "upload"]).expect("static Blossom action tag is valid"),
-        Tag::parse(["x", &snapshot.sha256]).expect("computed SHA-256 tag is valid"),
-        Tag::expiration(expires),
-    ]);
+    let mut tags = vec![Tag::parse(["t", "upload"]).expect("static Blossom action tag is valid")];
+    for hash in hashes {
+        tags.push(Tag::parse(["x", *hash]).context("invalid Blossom upload hash tag")?);
+    }
+    let mut seen_servers = HashSet::new();
+    for server in servers {
+        let domain = server
+            .host_str()
+            .context("Blossom authorization server has no domain")?
+            .to_ascii_lowercase();
+        if seen_servers.insert(domain.clone()) {
+            tags.push(
+                Tag::parse(["server", domain.as_str()])
+                    .context("invalid Blossom authorization server tag")?,
+            );
+        }
+    }
+    tags.push(Tag::expiration(expires));
+    let content = if hashes.len() == 1 && servers.is_empty() {
+        "Authorize Blossom upload".to_owned()
+    } else {
+        format!("Authorize Blossom upload of {} blob(s)", hashes.len())
+    };
+    let builder = EventBuilder::new(Kind::BlossomAuth, content).tags(tags);
     signer
         .sign_event_builder_with_description(builder, "Blossom upload authorization")
         .await
@@ -981,6 +1320,48 @@ mod tests {
         Ok((base_url, task))
     }
 
+    async fn spawn_presence_then_upload_server(
+        sha256: String,
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest)>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response_base = base_url.clone();
+        let task = tokio::spawn(async move {
+            let (mut head_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom presence check")??;
+            let head = read_header_only_request(&mut head_stream).await?;
+            tokio::time::timeout(
+                SERVER_TIMEOUT,
+                head_stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ),
+            )
+            .await
+            .context("timed out writing Blossom presence response")??;
+
+            let (mut upload_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom upload")??;
+            let upload = read_request(&mut upload_stream).await?;
+            let body = descriptor_json(&response_base, &sha256, size, &mime_type);
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            tokio::time::timeout(SERVER_TIMEOUT, upload_stream.write_all(response.as_bytes()))
+                .await
+                .context("timed out writing Blossom upload response")??;
+            Ok((head, upload))
+        });
+        Ok((base_url, task))
+    }
+
     async fn read_request(stream: &mut TcpStream) -> Result<CapturedRequest> {
         let mut bytes = Vec::new();
         let header_end = loop {
@@ -1022,6 +1403,29 @@ mod tests {
         }
         let body = bytes[header_end..header_end + content_length].to_vec();
         Ok(CapturedRequest { head, body })
+    }
+
+    async fn read_header_only_request(stream: &mut TcpStream) -> Result<CapturedRequest> {
+        let mut bytes = Vec::new();
+        loop {
+            if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                return Ok(CapturedRequest {
+                    head: String::from_utf8(bytes[..offset + 4].to_vec())?,
+                    body: Vec::new(),
+                });
+            }
+            if bytes.len() >= MAX_TEST_REQUEST_BYTES {
+                bail!("test request headers exceeded limit");
+            }
+            let mut chunk = [0_u8; 8192];
+            let read = tokio::time::timeout(SERVER_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .context("timed out reading Blossom request headers")??;
+            if read == 0 {
+                bail!("connection closed before request headers completed");
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
     }
 
     fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
@@ -1077,6 +1481,69 @@ mod tests {
 
         assert_eq!(encoded, expected);
         assert_eq!(STANDARD.decode(encoded)?, event_json);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_authorization_scopes_all_hashes_and_server_domains() -> Result<()> {
+        let signer = NgitSigner::Keys(Keys::generate());
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let servers = [
+            Url::parse("https://BLOSSOM.example:443")?,
+            Url::parse("http://localhost:3000")?,
+        ];
+
+        let event =
+            upload_authorization(&[first.as_str(), second.as_str()], &servers, &signer).await?;
+        let tags = event.tags.iter().map(Tag::as_slice).collect::<Vec<_>>();
+
+        assert!(tags.iter().any(|tag| tag == &["t", "upload"]));
+        assert!(tags.iter().any(|tag| tag == &["x", first.as_str()]));
+        assert!(tags.iter().any(|tag| tag == &["x", second.as_str()]));
+        assert!(tags.iter().any(|tag| tag == &["server", "blossom.example"]));
+        assert!(tags.iter().any(|tag| tag == &["server", "localhost"]));
+        assert_eq!(event.content, "Authorize Blossom upload of 2 blob(s)");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_upload_checks_presence_then_reuses_authorization_for_put() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let result = upload_snapshot_batch_to_servers(
+            std::slice::from_ref(&server_url),
+            &[&snapshot],
+            &signer,
+            2,
+        )
+        .await?;
+        let (head, upload) = tokio::time::timeout(SERVER_TIMEOUT, server)
+            .await
+            .context("timed out waiting for batch upload server")???;
+
+        assert!(
+            head.head
+                .starts_with(&format!("HEAD /{} HTTP/1.1\r\n", snapshot.sha256))
+        );
+        assert!(upload.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        assert_eq!(upload.body, b"static site");
+        assert!(request_header(&upload.head, "authorization").is_some());
+        assert_eq!(result.blobs.len(), 1);
+        assert_eq!(
+            result.blobs[0].servers[0].status,
+            BlossomServerStatus::Stored
+        );
         Ok(())
     }
 

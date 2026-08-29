@@ -13,6 +13,12 @@ branches, and a skill installer/upgrader.
 
 ### Added
 
+- Add `ngit nsite publish <DIRECTORY>` for publishing an already-built static
+  site as a root or named NIP-5A manifest. The command snapshots files
+  deterministically, confirms every unique blob on every selected Blossom
+  server with batched BUD-11 authorization, then signs and publishes the
+  manifest with local or remote signers. Blossom servers may be supplied
+  explicitly or discovered from the account's kind-10063 server list.
 - **Private repositories via GRASP-08**: discover private repositories through
   encrypted kind-10318 relay lists, then clone, fetch, push, and collaborate
   using NIP-42 relay authentication and repository-scoped NIP-98 Git HTTP

@@ -506,6 +506,15 @@ mod tests {
                 .any(|alias| alias == &serde_json::json!({"name": "releases", "visible": false}))
         );
 
+        let nsite_publish = command_at_path(&export["command"], &["nsite", "publish"]);
+        assert_eq!(nsite_publish["id"], "ngit.command.nsite.publish");
+        assert!(
+            nsite_publish["usage"]
+                .as_str()
+                .unwrap()
+                .contains("ngit nsite publish")
+        );
+
         let root_args = export["command"]["args"].as_array().unwrap();
         let defaults = root_args
             .iter()

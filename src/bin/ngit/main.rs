@@ -509,6 +509,9 @@ async fn main() {
             Commands::Release(args) => {
                 sub_commands::release::launch(args, signer_params, cli.json).await
             }
+            Commands::Nsite(args) => {
+                sub_commands::nsite::launch(args, signer_params, cli.json).await
+            }
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
                 sub_commands::skill::launch(&args.skill_command, cli.force, cli.json, signer_params)

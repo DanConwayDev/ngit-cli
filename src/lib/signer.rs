@@ -193,6 +193,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_nip44_round_trips_manifest_sized_payloads() -> Result<()> {
+        let sender = NgitSigner::Keys(Keys::generate());
+        let receiver = NgitSigner::Keys(Keys::generate());
+        let plaintext = "n".repeat(80 * 1024);
+        let receiver_public_key = receiver.get_public_key().await?;
+        let sender_public_key = sender.get_public_key().await?;
+
+        let encrypted = sender
+            .nip44_encrypt(&receiver_public_key, &plaintext)
+            .await?;
+        let decrypted = receiver
+            .nip44_decrypt(&sender_public_key, &encrypted)
+            .await?;
+
+        assert_eq!(decrypted, plaintext);
+        Ok(())
+    }
+
     #[test]
     fn accepts_the_requested_event_with_a_valid_signature() {
         let keys = Keys::generate();
