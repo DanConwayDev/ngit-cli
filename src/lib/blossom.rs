@@ -44,6 +44,9 @@ const AUTHORIZATION_SIGNING_ALLOWANCE: Duration = Duration::from_secs(2 * 60 * 6
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const NSITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const NSITE_MAX_ATTEMPTS: usize = 3;
+const NSITE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_PRESENCE_REDIRECTS: usize = 5;
@@ -219,6 +222,7 @@ struct BlobRequestError {
     message: String,
     possible_orphan: bool,
     status: Option<StatusCode>,
+    retryable: bool,
 }
 
 impl BlobRequestError {
@@ -228,6 +232,7 @@ impl BlobRequestError {
             message: format!("{error:#}"),
             possible_orphan,
             status: None,
+            retryable: false,
         }
     }
 
@@ -237,6 +242,7 @@ impl BlobRequestError {
             message: format!("{error:#}"),
             possible_orphan,
             status: None,
+            retryable: true,
         }
     }
 
@@ -251,6 +257,21 @@ impl BlobRequestError {
             message: format!("{error:#}"),
             possible_orphan,
             status: Some(status),
+            retryable: is_transient_status(status),
+        }
+    }
+
+    fn transport(error: anyhow::Error, possible_orphan: bool) -> Self {
+        Self {
+            kind: if possible_orphan {
+                RequestFailureKind::Unknown
+            } else {
+                RequestFailureKind::Definite
+            },
+            message: format!("{error:#}"),
+            possible_orphan,
+            status: None,
+            retryable: true,
         }
     }
 }
@@ -325,7 +346,7 @@ async fn upload_snapshot_with_authorization_inner(
         .map_err(|_| {
             BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
         })?
-        .map_err(|error| classify_send_error(error, "upload"))?;
+        .map_err(|error| classify_send_error(error, "upload", true))?;
 
     read_store_response(response, snapshot, deadline, "upload").await
 }
@@ -361,6 +382,75 @@ async fn upload_snapshot_with_compatible_authorization(
     primary
 }
 
+enum BatchStoreConfirmation {
+    Response(BlobUpload),
+    Presence,
+}
+
+async fn upload_snapshot_for_nsite(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    authorization: &CompatibleAuthorization,
+) -> std::result::Result<BatchStoreConfirmation, BlobRequestError> {
+    let mut last_error = None;
+    for attempt in 0..NSITE_MAX_ATTEMPTS {
+        let deadline = tokio::time::Instant::now() + NSITE_REQUEST_TIMEOUT;
+        match upload_snapshot_with_compatible_authorization(
+            client,
+            server.as_str(),
+            snapshot,
+            authorization,
+            deadline,
+        )
+        .await
+        {
+            Ok(upload) => match snapshot_is_present_with_retry(client, server, snapshot).await {
+                Ok(true) => return Ok(BatchStoreConfirmation::Response(upload)),
+                Ok(false) => {
+                    last_error = Some(BlobRequestError::unknown(
+                        anyhow!(
+                            "Blossom upload was accepted but the blob was not queryable with matching metadata"
+                        ),
+                        true,
+                    ));
+                }
+                Err(mut error) => {
+                    error.kind = RequestFailureKind::Unknown;
+                    error.possible_orphan = true;
+                    error.message = format!(
+                        "Blossom upload was accepted but post-upload verification failed: {}",
+                        error.message
+                    );
+                    if !error.retryable {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
+                }
+            },
+            Err(error) => {
+                if error.possible_orphan {
+                    if let Ok(true) = snapshot_is_present_with_retry(client, server, snapshot).await
+                    {
+                        return Ok(BatchStoreConfirmation::Presence);
+                    }
+                }
+                if !error.retryable {
+                    return Err(error);
+                }
+                last_error = Some(error);
+            }
+        }
+
+        if attempt + 1 < NSITE_MAX_ATTEMPTS {
+            tokio::time::sleep(nsite_retry_delay(attempt)).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        BlobRequestError::definite(anyhow!("Blossom upload exhausted its retry plan"), false)
+    }))
+}
+
 /// Confirm every unique snapshot on every server, uploading only missing
 /// blobs. Upload authorizations cover batches of hashes and are scoped to all
 /// selected server domains, so remote signers perform at most
@@ -369,6 +459,8 @@ async fn upload_snapshot_with_compatible_authorization(
 /// `snapshots` must contain unique SHA-256 hashes. Every HEAD preflight
 /// completes before an authorization is signed or a PUT is attempted. Upload
 /// failures retain a complete outcome matrix and possible-orphan report.
+/// Transient batch requests are retried with bounded backoff, and every
+/// accepted or uncertain PUT is followed by a strict metadata presence check.
 pub async fn upload_snapshot_batch_to_servers(
     servers: &[Url],
     snapshots: &[&FileSnapshot],
@@ -436,7 +528,7 @@ pub async fn upload_snapshot_batch_to_servers(
                 (
                     blob_index,
                     server_index,
-                    snapshot_is_present(&client, server, snapshot).await,
+                    snapshot_is_present_with_retry(&client, server, snapshot).await,
                 )
             }
         })
@@ -546,18 +638,10 @@ pub async fn upload_snapshot_batch_to_servers(
                 let snapshot = snapshots[blob_index];
                 let server = &servers[server_index];
                 async move {
-                    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
                     (
                         blob_index,
                         server_index,
-                        upload_snapshot_with_compatible_authorization(
-                            &client,
-                            server.as_str(),
-                            snapshot,
-                            &authorization,
-                            deadline,
-                        )
-                        .await,
+                        upload_snapshot_for_nsite(&client, server, snapshot, &authorization).await,
                     )
                 }
             })
@@ -570,7 +654,12 @@ pub async fn upload_snapshot_batch_to_servers(
             let sha256 = blobs[blob_index].sha256.clone();
             let outcome = &mut blobs[blob_index].servers[server_index];
             match result {
-                Ok(upload) => record_server_success(outcome, &upload),
+                Ok(BatchStoreConfirmation::Response(upload)) => {
+                    record_server_success(outcome, &upload);
+                }
+                Ok(BatchStoreConfirmation::Presence) => {
+                    outcome.status = BlossomServerStatus::Stored;
+                }
                 Err(error) => {
                     chunk_failed = true;
                     outcome.status = match error.kind {
@@ -621,9 +710,27 @@ fn batch_upload_window(operation_count: usize, concurrency: usize) -> Result<Dur
     }
     let waves = operation_count.div_ceil(concurrency);
     let waves = u64::try_from(waves).context("Blossom upload wave count does not fit in u64")?;
-    TOTAL_TIMEOUT
+    let attempts =
+        u32::try_from(NSITE_MAX_ATTEMPTS).context("Blossom retry count does not fit in u32")?;
+    // Each upload attempt has one PUT window followed by up to `attempts`
+    // verification HEAD windows. Keep the authorization valid for every
+    // bounded operation even though normal successful uploads use only two.
+    let request_windows = attempts
+        .checked_mul(attempts.saturating_add(1))
+        .context("Blossom upload request window count overflowed")?;
+    let operation_window = NSITE_REQUEST_TIMEOUT
+        .checked_mul(request_windows)
+        .context("Blossom upload operation window overflowed")?;
+    operation_window
         .checked_mul(u32::try_from(waves).context("Blossom upload wave count is too large")?)
         .context("Blossom upload window overflowed")
+}
+
+fn nsite_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1_u32.checked_shl(attempt.try_into().unwrap_or(u32::MAX));
+    multiplier
+        .and_then(|multiplier| NSITE_RETRY_BASE_DELAY.checked_mul(multiplier))
+        .unwrap_or(NSITE_RETRY_BASE_DELAY)
 }
 
 fn stored_batch_blobs(blobs: &[BatchBlobUploadOutcome]) -> Vec<PossibleOrphanBlob> {
@@ -658,19 +765,52 @@ async fn snapshot_is_present(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
+    snapshot_is_present_once(client, server, snapshot, NSITE_REQUEST_TIMEOUT).await
+}
+
+async fn snapshot_is_present_with_retry(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+) -> std::result::Result<bool, BlobRequestError> {
+    let mut last_error = None;
+    for attempt in 0..NSITE_MAX_ATTEMPTS {
+        match snapshot_is_present(client, server, snapshot).await {
+            Ok(present) => return Ok(present),
+            Err(error) if error.retryable => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < NSITE_MAX_ATTEMPTS {
+            tokio::time::sleep(nsite_retry_delay(attempt)).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        BlobRequestError::definite(
+            anyhow!("Blossom presence check exhausted its retry plan"),
+            false,
+        )
+    }))
+}
+
+async fn snapshot_is_present_once(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    total_timeout: Duration,
+) -> std::result::Result<bool, BlobRequestError> {
     let mut url = blossom_endpoint_url(server.as_str(), &snapshot.sha256)
         .map_err(|error| BlobRequestError::definite(error, false))?;
-    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + total_timeout;
     for redirects in 0..=MAX_PRESENCE_REDIRECTS {
         let response = tokio::time::timeout_at(deadline, client.head(url.clone()).send())
             .await
             .map_err(|_| {
-                BlobRequestError::definite(
+                BlobRequestError::transport(
                     anyhow!("Blossom presence check exceeded its total timeout"),
                     false,
                 )
             })?
-            .map_err(|error| classify_send_error(error, "presence check"))?;
+            .map_err(|error| classify_send_error(error, "presence check", false))?;
         match response.status() {
             StatusCode::OK => {
                 validate_presence_metadata(&response, snapshot)
@@ -691,8 +831,10 @@ async fn snapshot_is_present(
                     .map_err(|error| BlobRequestError::definite(error, false))?;
             }
             status => {
-                return Err(BlobRequestError::definite(
+                return Err(BlobRequestError::http(
                     anyhow!("Blossom presence check returned HTTP {status}"),
+                    status,
+                    RequestFailureKind::Definite,
                     false,
                 ));
             }
@@ -932,19 +1074,25 @@ async fn mirror_snapshot_with_timeout(
         .map_err(|_| {
             BlobRequestError::unknown(anyhow!("Blossom mirror exceeded its total timeout"), true)
         })?
-        .map_err(|error| classify_send_error(error, "mirror"))?;
+        .map_err(|error| classify_send_error(error, "mirror", true))?;
 
     read_store_response(response, snapshot, deadline, "mirror").await
 }
 
-fn classify_send_error(error: reqwest::Error, operation: &str) -> BlobRequestError {
+fn classify_send_error(
+    error: reqwest::Error,
+    operation: &str,
+    may_have_stored: bool,
+) -> BlobRequestError {
     let definitely_not_stored = error.is_builder() || error.is_connect();
     let error = anyhow!(error).context(format!("failed to send the Blossom {operation} request"));
-    if definitely_not_stored {
-        BlobRequestError::definite(error, false)
-    } else {
-        BlobRequestError::unknown(error, true)
-    }
+    BlobRequestError::transport(error, may_have_stored && !definitely_not_stored)
+}
+
+fn is_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 fn blossom_http_client() -> Result<reqwest::Client> {
@@ -1567,7 +1715,7 @@ mod tests {
         mime_type: String,
     ) -> Result<(
         String,
-        JoinHandle<Result<(CapturedRequest, CapturedRequest)>>,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
     )> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
@@ -1598,7 +1746,16 @@ mod tests {
             tokio::time::timeout(SERVER_TIMEOUT, upload_stream.write_all(response.as_bytes()))
                 .await
                 .context("timed out writing Blossom upload response")??;
-            Ok((head, upload))
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom post-upload verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((head, upload, verify))
         });
         Ok((base_url, task))
     }
@@ -1609,7 +1766,14 @@ mod tests {
         mime_type: String,
     ) -> Result<(
         String,
-        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
+        JoinHandle<
+            Result<(
+                CapturedRequest,
+                CapturedRequest,
+                CapturedRequest,
+                CapturedRequest,
+            )>,
+        >,
     )> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base_url = format!("http://{}", listener.local_addr()?);
@@ -1645,7 +1809,118 @@ mod tests {
                 body.len()
             );
             legacy_stream.write_all(response.as_bytes()).await?;
-            Ok((head, primary, legacy))
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom post-upload verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((head, primary, legacy, verify))
+        });
+        Ok((base_url, task))
+    }
+
+    async fn spawn_uncertain_upload_server(
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let task = tokio::spawn(async move {
+            let (mut preflight_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom presence check")??;
+            let preflight = read_header_only_request(&mut preflight_stream).await?;
+            preflight_stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut upload_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom upload")??;
+            let upload = read_request(&mut upload_stream).await?;
+            drop(upload_stream);
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom recovery verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((preflight, upload, verify))
+        });
+        Ok((base_url, task))
+    }
+
+    async fn spawn_transient_presence_server(
+        sha256: String,
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<
+            Result<(
+                CapturedRequest,
+                CapturedRequest,
+                CapturedRequest,
+                CapturedRequest,
+            )>,
+        >,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response_base = base_url.clone();
+        let task = tokio::spawn(async move {
+            let (mut transient_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for transient Blossom presence check")??;
+            let transient = read_header_only_request(&mut transient_stream).await?;
+            transient_stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut missing_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for retried Blossom presence check")??;
+            let missing = read_header_only_request(&mut missing_stream).await?;
+            missing_stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut upload_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom upload")??;
+            let upload = read_request(&mut upload_stream).await?;
+            let body = descriptor_json(&response_base, &sha256, size, &mime_type);
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            upload_stream.write_all(response.as_bytes()).await?;
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom post-upload verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((transient, missing, upload, verify))
         });
         Ok((base_url, task))
     }
@@ -1828,7 +2103,7 @@ mod tests {
             2,
         )
         .await?;
-        let (head, upload) = tokio::time::timeout(SERVER_TIMEOUT, server)
+        let (head, upload, verify) = tokio::time::timeout(SERVER_TIMEOUT, server)
             .await
             .context("timed out waiting for batch upload server")???;
 
@@ -1837,6 +2112,11 @@ mod tests {
                 .starts_with(&format!("HEAD /{} HTTP/1.1\r\n", snapshot.sha256))
         );
         assert!(upload.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        assert!(
+            verify
+                .head
+                .starts_with(&format!("HEAD /{} HTTP/1.1\r\n", snapshot.sha256))
+        );
         assert_eq!(upload.body, b"static site");
         assert!(request_header(&upload.head, "authorization").is_some());
         assert_eq!(result.blobs.len(), 1);
@@ -1868,7 +2148,7 @@ mod tests {
             1,
         )
         .await?;
-        let (_, primary, legacy) = tokio::time::timeout(SERVER_TIMEOUT, server)
+        let (_, primary, legacy, _) = tokio::time::timeout(SERVER_TIMEOUT, server)
             .await
             .context("timed out waiting for authorization fallback server")???;
         let encoded = |request: &CapturedRequest| -> Result<String> {
@@ -1882,6 +2162,75 @@ mod tests {
         let legacy_json = STANDARD.decode(encoded(&legacy)?)?;
 
         assert_eq!(primary_json, legacy_json);
+        assert_eq!(
+            result.blobs[0].servers[0].status,
+            BlossomServerStatus::Stored
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_upload_recovers_an_uncertain_put_with_strict_presence() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) =
+            spawn_uncertain_upload_server(snapshot.size, snapshot.mime_type.clone()).await?;
+        let server_url = Url::parse(&server_url)?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let result = upload_snapshot_batch_to_servers(
+            std::slice::from_ref(&server_url),
+            &[&snapshot],
+            &signer,
+            1,
+        )
+        .await?;
+        let (_, upload, verify) = tokio::time::timeout(SERVER_TIMEOUT, server)
+            .await
+            .context("timed out waiting for uncertain upload server")???;
+
+        assert!(upload.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        assert!(
+            verify
+                .head
+                .starts_with(&format!("HEAD /{} HTTP/1.1\r\n", snapshot.sha256))
+        );
+        assert_eq!(
+            result.blobs[0].servers[0].status,
+            BlossomServerStatus::Stored
+        );
+        assert!(result.blobs[0].servers[0].descriptor.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_upload_retries_a_transient_presence_response() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_transient_presence_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let result = upload_snapshot_batch_to_servers(
+            std::slice::from_ref(&server_url),
+            &[&snapshot],
+            &signer,
+            1,
+        )
+        .await?;
+        let (transient, retry, _, _) = tokio::time::timeout(SERVER_TIMEOUT, server)
+            .await
+            .context("timed out waiting for transient presence server")???;
+
+        assert!(transient.head.starts_with("HEAD /"));
+        assert!(retry.head.starts_with("HEAD /"));
         assert_eq!(
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
@@ -2011,9 +2360,11 @@ mod tests {
 
     #[test]
     fn batch_authorization_window_covers_every_bounded_upload_wave() -> Result<()> {
-        assert_eq!(batch_upload_window(1, 4)?, TOTAL_TIMEOUT);
-        assert_eq!(batch_upload_window(8, 4)?, TOTAL_TIMEOUT * 2);
-        assert_eq!(batch_upload_window(9, 4)?, TOTAL_TIMEOUT * 3);
+        let attempts = NSITE_MAX_ATTEMPTS as u32;
+        let operation_window = NSITE_REQUEST_TIMEOUT * (attempts * (attempts + 1));
+        assert_eq!(batch_upload_window(1, 4)?, operation_window);
+        assert_eq!(batch_upload_window(8, 4)?, operation_window * 2);
+        assert_eq!(batch_upload_window(9, 4)?, operation_window * 3);
         Ok(())
     }
 
