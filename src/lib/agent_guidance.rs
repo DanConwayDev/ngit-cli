@@ -115,7 +115,7 @@ fn skill_paths() -> [&'static str; 2] {
 /// Managed reference locations: `<skill dir>/reference/<file>` for every
 /// bundled reference in both discovery paths. Kept static so per-path checks
 /// never allocate.
-const REFERENCE_PATHS: [&str; 16] = [
+const REFERENCE_PATHS: [&str; 18] = [
     ".agents/skills/ngit/reference/accounts.md",
     ".agents/skills/ngit/reference/ci.md",
     ".agents/skills/ngit/reference/containers.md",
@@ -136,7 +136,7 @@ const REFERENCE_PATHS: [&str; 16] = [
     ".claude/skills/ngit/reference/sync-config.md",
 ];
 
-fn reference_paths() -> [&'static str; 16] {
+fn reference_paths() -> [&'static str; 18] {
     REFERENCE_PATHS
 }
 
