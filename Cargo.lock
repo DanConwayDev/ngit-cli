@@ -2060,6 +2060,7 @@ dependencies = [
  "qrcode",
  "reqwest",
  "rstest",
+ "rustls",
  "scrypt",
  "serde",
  "serde_json",

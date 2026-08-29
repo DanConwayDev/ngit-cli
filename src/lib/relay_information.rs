@@ -78,7 +78,10 @@ pub async fn discover_private_repository_relays(relays: &[RelayUrl]) -> Vec<Rela
         }
     }
     if !to_probe.is_empty() {
-        if let Ok(client) = reqwest::Client::builder().timeout(NIP11_TIMEOUT).build() {
+        if let Ok(client) = crate::tls::http_client_builder()
+            .timeout(NIP11_TIMEOUT)
+            .build()
+        {
             let results = join_all(to_probe.into_iter().map(|relay| {
                 let client = client.clone();
                 async move {

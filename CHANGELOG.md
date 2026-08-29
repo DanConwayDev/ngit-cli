@@ -89,8 +89,9 @@ branches, and a skill installer/upgrader.
 ### Fixed
 
 - Prevent TLS client initialization from panicking after Reqwest 0.13 selected
-  AWS-LC alongside rust-nostr's Ring provider. Reqwest now uses the existing
-  Ring provider while retaining its non-TLS default features.
+  AWS-LC alongside rust-nostr's Ring provider. Reqwest remains
+  provider-neutral while ngit explicitly installs Ring before constructing
+  either its application or library HTTP clients.
 - Repository-conditioned global signer identities, aliases, and secret-storage
   policies selected through Git `includeIf` `gitdir` conditions are now
   resolved in repository context. Conditional signers work for

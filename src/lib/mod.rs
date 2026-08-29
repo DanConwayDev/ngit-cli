@@ -24,6 +24,7 @@ pub mod repo_ref;
 pub mod repo_state;
 pub mod signer;
 pub mod software_release;
+pub mod tls;
 pub mod utils;
 pub mod version_check;
 

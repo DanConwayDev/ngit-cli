@@ -187,7 +187,7 @@ async fn download_url_asset_inner(
         attempt.follow()
     });
 
-    let client = reqwest::Client::builder()
+    let client = crate::tls::http_client_builder()
         .connect_timeout(limits.connect_timeout)
         .read_timeout(limits.idle_timeout)
         .redirect(redirect_policy)

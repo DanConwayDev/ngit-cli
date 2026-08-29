@@ -449,7 +449,7 @@ fn classify_send_error(error: reqwest::Error, operation: &str) -> BlobRequestErr
 }
 
 fn blossom_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::tls::http_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(IDLE_TIMEOUT)
         .redirect(Policy::none())

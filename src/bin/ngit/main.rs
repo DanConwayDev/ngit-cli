@@ -44,6 +44,11 @@ async fn main() {
         return;
     }
 
+    // Reqwest is intentionally compiled without its own provider. Select Ring
+    // before any network-capable command path can construct an HTTP or relay
+    // TLS client.
+    ngit::tls::install_default_crypto_provider();
+
     // The remote-helper entry point must dispatch before anything that
     // could write to stdout (update notices, skill notices, clap
     // output): stray stdout would corrupt git's remote-helper protocol.

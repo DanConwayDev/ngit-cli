@@ -152,6 +152,7 @@ fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
 /// has the policy authenticator installed, but it cannot sign until the command
 /// explicitly attaches a signer.
 fn build_nostr_client(auth_policy: Arc<RelayAuthPolicy>) -> nostr_sdk::client::Client {
+    crate::tls::install_default_crypto_provider();
     apply_onion_proxy(
         ClientBuilder::default()
             .relay_limits(RelayLimits::disable())
@@ -1734,7 +1735,9 @@ pub async fn nip05_query(nip05_addr: &str) -> Result<Nip05Profile> {
 /// Returns an error when the `.well-known` document cannot be fetched, is
 /// not JSON, or names no public key for the address.
 pub async fn nip05_query_address(nip05_addr: &Nip05Address) -> Result<Nip05Profile> {
-    let json_res: Value = reqwest::Client::new()
+    let json_res: Value = crate::tls::http_client_builder()
+        .build()
+        .context("failed to create the NIP-05 HTTP client")?
         .get(nip05_addr.url().to_string())
         .send()
         .await
