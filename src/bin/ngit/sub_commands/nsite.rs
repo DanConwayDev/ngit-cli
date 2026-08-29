@@ -22,7 +22,8 @@ use nostr::prelude::{
 use serde_json::{Value, json};
 
 use super::release::support::{
-    ReleaseContext, ReleaseError, coded_error, coded_error_with_details, repository_json,
+    ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
+    repository_json,
 };
 use crate::{
     cli::{NsiteCommands, NsitePublishArgs, NsiteSubCommandArgs, SignerParams},
@@ -119,6 +120,7 @@ async fn publish(
     let previous = load_current_manifest(&mut context, author, args.identifier.as_deref()).await?;
 
     let files = snapshot_nsite_directory(&args.directory).await?;
+    append_snapshot_warnings(&mut context, &files)?;
     let blobs = unique_blob_snapshots(&files)?;
     let source = args.source.clone().or_else(|| {
         (!context.repo_ref.private).then(|| {
@@ -435,13 +437,30 @@ fn blossom_summary(result: &BatchUploadResult) -> Value {
     })
 }
 
+fn append_snapshot_warnings(
+    context: &mut ReleaseContext,
+    files: &[ngit::nsite::NsiteFileSnapshot],
+) -> Result<()> {
+    for file in files {
+        for warning in &file.snapshot.warnings {
+            let code = serde_json::to_value(warning.code)?
+                .as_str()
+                .unwrap_or("nsite_snapshot_warning")
+                .to_owned();
+            context.warnings.push(WarningJson {
+                code,
+                message: warning.message.clone(),
+                details: json!({ "path": file.path }),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
-    use nostr::prelude::{
-        EventBuilder, Keys, RelayUrl,
-        event::{FinalizeUnsignedEvent as _, SignEvent as _},
-    };
+    use nostr::prelude::{EventBuilder, Keys, RelayUrl, event::SignEvent as _};
 
     use super::*;
     use crate::cli::{Cli, Commands};

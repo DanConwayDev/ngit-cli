@@ -37,6 +37,7 @@ indicatif = "0.18.6"
 # them makes `keyring` reject the build instead of selecting a real store.
 keyring = "4.1.6"
 mailparse = "0.16.1"
+mime_guess = "2.0"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.

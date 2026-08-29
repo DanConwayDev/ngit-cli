@@ -43,7 +43,11 @@ pub async fn snapshot_nsite_directory(root: &Path) -> Result<Vec<NsiteFileSnapsh
     let files = collect_site_files(root)?;
     let mut snapshots = Vec::with_capacity(files.len());
     for (source_path, public_path) in files {
-        let snapshot = snapshot_local_file(LocalFileRequest::new(&source_path))
+        let mut request = LocalFileRequest::new(&source_path);
+        request.mime_type = mime_guess::from_path(&public_path)
+            .first_raw()
+            .map(str::to_owned);
+        let snapshot = snapshot_local_file(request)
             .await
             .with_context(|| format!("failed to snapshot nsite path {public_path}"))?;
         snapshots.push(NsiteFileSnapshot {
@@ -307,6 +311,38 @@ mod tests {
         assert_eq!(
             files[0].snapshot.sha256,
             sha256::Hash::hash(b"app").to_string()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshots_use_the_web_mime_database_beyond_release_formats() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::write(directory.path().join("readme.md"), "hello")?;
+
+        let files = snapshot_nsite_directory(directory.path()).await?;
+
+        assert_eq!(files[0].snapshot.mime_type, "text/markdown");
+        assert!(files[0].snapshot.warnings.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshots_retain_a_warning_for_unknown_mime_types() -> Result<()> {
+        use crate::release_download::DownloadWarningCode;
+
+        let directory = tempfile::tempdir()?;
+        fs::write(directory.path().join("data.unknown-ngit-type"), "hello")?;
+
+        let files = snapshot_nsite_directory(directory.path()).await?;
+
+        assert_eq!(files[0].snapshot.mime_type, "application/octet-stream");
+        assert!(
+            files[0]
+                .snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.code == DownloadWarningCode::GenericMime)
         );
         Ok(())
     }
