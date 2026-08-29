@@ -55,8 +55,9 @@ safe, but must not silently guess at membership, history, or repository state.
 - Reconcile a maintainer's existing same-identifier announcement during
   acceptance without losing metadata, personal infrastructure, `r`/`u`
   identity, unknown tags, moderator acknowledgement, or numeric/deferred role
-  history. Reinvitation must append a fresh acceptance interval rather than
-  reusing an acknowledgement from an earlier interval.
+  history. Preserve a still-active self-role as standing acceptance when a
+  removed maintainer has not acknowledged the removal; after they end that
+  self-role, reinvitation must append a fresh acceptance interval.
 - Resolve the complete reachable component on both sides of add and accept,
   including announcements, role history, repository identity, `r` and `u`
   relationships, state events, default branch, and the complete ref/OID map.

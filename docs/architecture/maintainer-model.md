@@ -1986,9 +1986,10 @@ authored active third-party `m` assignments, warnings to co-maintainer and lead,
 both edit gates, refusal to follow before lead coverage, safe conversion after
 coverage, rejection of a lead removal while such an edge retains its subject,
 immediate removal without such an edge, the removed-author warning and follow
-repair, reinvitation requiring a new self-role start, a dead coordinate after
-an externally authored redirect end, and an externally authored
-same-identifier self-led fork.
+repair, immediate reconfirmation from a standing self-role before removal
+acknowledgement, reinvitation requiring a new self-role start after that role
+ends, a dead coordinate after an externally authored redirect end, and an
+externally authored same-identifier self-led fork.
 
 The state-collision fixtures cover an invitee's older state winning, the
 inviting state winning, an add that confirms immediately, a transitive
