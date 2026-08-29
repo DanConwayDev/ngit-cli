@@ -89,6 +89,13 @@ place for reuse and refuses to overwrite the newer event. Replacement events
 use ngit's NIP-01 timestamp/ID ordering policy so rapid consecutive updates
 remain deterministic.
 
+This is best-effort race detection, not a conditional relay write. Nostr
+relays provide no compare-and-swap for addressable events, so an update made
+after ngit's second query can still race its publication and NIP-01 will select
+one replacement. Container repositories are intended to have one active
+publisher at a time; coordinate publication externally when several processes
+share the same signing identity and repository name.
+
 ## Choosing servers
 
 At least one explicit `--blossom-server` is required. Multiple servers are

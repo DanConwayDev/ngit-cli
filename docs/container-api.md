@@ -150,6 +150,13 @@ event, and sends it to the selected relays. Overall command success requires at
 least one relay acknowledgement. Callers requiring complete replication must
 inspect every per-relay result.
 
+The two reads detect changes visible during the upload interval but do not
+provide compare-and-swap semantics. A publisher that updates the address after
+the second read can still race this event; NIP-01 replacement ordering chooses
+the winner rather than merging both events. The v1 API assumes one active
+publisher for a given signing pubkey and repository name. Deployments sharing
+that identity must serialize publication outside ngit.
+
 ## JSON result
 
 `--json` writes exactly one JSON document to stdout. Human diagnostics and
