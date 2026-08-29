@@ -23,10 +23,10 @@ run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in you
 
 ### trusting locally installed certificate authorities
 
-Release binaries use the self-contained WebPKI root store. To additionally
-trust certificate authorities installed on the local system, such as an
-`mkcert` authority used by a development grasp server, build ngit with the
-`native-tls-roots` feature:
+Relay connections in release binaries use the self-contained WebPKI root
+store. To additionally trust certificate authorities installed on the local
+system, such as an `mkcert` authority used by a development grasp server, build
+ngit with the `native-tls-roots` feature:
 
 ```sh
 cargo build --release --features native-tls-roots
@@ -40,7 +40,10 @@ cargo install ngit --features native-tls-roots
 
 This expands which certificate authorities ngit trusts and can vary by
 platform, so enable it only when the system trust store is appropriate for the
-environment. WebPKI roots remain enabled alongside the native roots.
+environment. WebPKI roots remain enabled alongside the native roots. This
+changes the relay TLS root stores, not the Rustls cryptographic provider; Ring
+remains the sole provider. Other HTTPS transports use their own platform
+verification behavior.
 
 ## configuration
 
