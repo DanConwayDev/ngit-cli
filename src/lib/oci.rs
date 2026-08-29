@@ -152,7 +152,7 @@ impl OciLayout {
         );
 
         let mut blobs = BTreeMap::new();
-        let mut parsed_manifests = HashSet::new();
+        let mut parsed_manifests = BTreeMap::new();
         for root in roots {
             visit_manifest(path, &root, 0, true, &mut parsed_manifests, &mut blobs)?;
         }
@@ -169,7 +169,7 @@ fn visit_manifest(
     descriptor: &Descriptor,
     depth: usize,
     repository_root: bool,
-    parsed_manifests: &mut HashSet<String>,
+    parsed_manifests: &mut BTreeMap<String, String>,
     blobs: &mut BTreeMap<String, OciBlob>,
 ) -> Result<()> {
     ensure!(
@@ -182,9 +182,15 @@ fn visit_manifest(
         descriptor.media_type
     );
     let digest = verify_blob(layout, descriptor, blobs)?;
-    if !parsed_manifests.insert(digest.clone()) {
+    if let Some(previous_media_type) = parsed_manifests.get(&digest) {
+        ensure!(
+            previous_media_type == &descriptor.media_type,
+            "manifest {digest} is referenced with conflicting media types {previous_media_type:?} and {:?}",
+            descriptor.media_type
+        );
         return Ok(());
     }
+    parsed_manifests.insert(digest.clone(), descriptor.media_type.clone());
     ensure!(
         descriptor.size <= MAX_MANIFEST_BYTES,
         "manifest {digest} is larger than {MAX_MANIFEST_BYTES} bytes"
@@ -678,6 +684,40 @@ mod tests {
         let error = OciLayout::load(directory.path()).unwrap_err();
         assert!(
             error.to_string().contains("has size") || error.to_string().contains("hashes to"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_manifest_digest_referenced_with_conflicting_media_types() -> Result<()> {
+        let (directory, manifest_digest, _) = valid_layout()?;
+        let manifest_size =
+            fs::metadata(directory.path().join("blobs/sha256").join(&manifest_digest))?.len();
+        fs::write(
+            directory.path().join("index.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "mediaType": OCI_IMAGE_MANIFEST,
+                        "digest": format!("sha256:{manifest_digest}"),
+                        "size": manifest_size,
+                        "annotations": {OCI_REF_NAME_ANNOTATION: "latest"},
+                    },
+                    {
+                        "mediaType": OCI_IMAGE_INDEX,
+                        "digest": format!("sha256:{manifest_digest}"),
+                        "size": manifest_size,
+                        "annotations": {OCI_REF_NAME_ANNOTATION: "edge"},
+                    },
+                ],
+            }))?,
+        )?;
+
+        let error = OciLayout::load(directory.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("conflicting media types"),
             "{error:#}"
         );
         Ok(())
