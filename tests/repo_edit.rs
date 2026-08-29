@@ -1,8 +1,12 @@
 //! Normal-path coverage for named repository relationship edits.
 
+use std::{collections::BTreeMap, time::Duration};
+
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
-use test_harness::{Harness, PublishRepoOpts, tag_value, tag_values, tag_values_multiple};
+use test_harness::{
+    Harness, PublishRepoOpts, UnavailableTcpEndpoint, tag_value, tag_values, tag_values_multiple,
+};
 
 async fn latest_announcement(
     harness: &Harness,
@@ -21,6 +25,48 @@ async fn latest_announcement(
                 .then_with(|| right.id.cmp(&left.id))
         })
         .context("repository announcement is missing")
+}
+
+async fn latest_state(harness: &Harness, identifier: &str) -> Result<Event> {
+    harness
+        .relay("default")
+        .events(Filter::new().kind(Kind::Custom(30618)))
+        .await?
+        .into_iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(identifier))
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .context("repository state is missing")
+}
+
+fn state_refs(event: &Event) -> BTreeMap<String, String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let tag = tag.as_slice();
+            let name = tag.first()?;
+            (name == "HEAD" || name.starts_with("refs/"))
+                .then(|| (name.clone(), tag.get(1).cloned().unwrap_or_default()))
+        })
+        .collect()
+}
+
+fn replace_clone(event: &Event, keys: &Keys, clone_url: &str) -> Result<Event> {
+    let mut tags: Vec<Tag> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) != Some("clone"))
+        .cloned()
+        .collect();
+    tags.push(Tag::parse(["clone", clone_url])?);
+    Ok(EventBuilder::new(event.kind, event.content.clone())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
+        .finalize(keys)?)
 }
 
 async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
@@ -264,6 +310,165 @@ async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
     assert!(
         bob_history[0][2].parse::<u64>().is_ok() && bob_history[0][3].parse::<u64>().is_ok(),
         "Bob's invitation history should retain numeric start/end boundaries",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removal_hands_current_state_to_the_remaining_maintainer() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (alice_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("remove-state-author".into()),
+            additional_maintainer_count: 1,
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = published.additional_maintainer_keys[0].clone();
+    let bob = bob_keys.public_key();
+    harness.publish_user_relay_list(&bob_keys).await?;
+    let bob_repo = harness
+        .clone_published_repo_as(&published, &bob_keys)
+        .await?;
+    let accepted = bob_repo.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        accepted.status.success(),
+        "Bob must be confirmed before removal"
+    );
+
+    bob_repo
+        .git_ok(
+            [
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "state authored by Bob",
+            ],
+            "git commit as Bob",
+        )
+        .await?;
+    bob_repo.nostr_push(["origin", "main"]).await?;
+    let bob_state = latest_state(&harness, &published.identifier).await?;
+    assert_eq!(bob_state.pubkey, bob, "Bob's pushed state must be current");
+
+    edit_ok(&alice_repo, &["--remove-maintainer", &bob.to_bech32()?]).await?;
+
+    let removed = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert!(
+        !tag_values(&removed, "maintainers").contains(&bob.to_string()),
+        "the successful edit must remove Bob from Alice's active roster",
+    );
+    let handed_off = latest_state(&harness, &published.identifier).await?;
+    assert_eq!(
+        handed_off.pubkey, alice,
+        "the removing maintainer must author the resolved replacement state",
+    );
+    assert_ne!(handed_off.id, bob_state.id);
+    assert_eq!(
+        state_refs(&handed_off),
+        state_refs(&bob_state),
+        "the handoff must preserve the complete resolved ref map",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_state_handoff_does_not_remove_the_maintainer() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (alice_repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("failed-remove-state-author".into()),
+            additional_maintainer_count: 1,
+            extra_repo_relays: vec![harness.relay("default").url().to_string()],
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let bob_keys = published.additional_maintainer_keys[0].clone();
+    let bob = bob_keys.public_key();
+    harness.publish_user_relay_list(&bob_keys).await?;
+    let bob_repo = harness
+        .clone_published_repo_as(&published, &bob_keys)
+        .await?;
+    let accepted = bob_repo.ngit(["repo", "accept"]).output().await?;
+    assert!(
+        accepted.status.success(),
+        "Bob must be confirmed before removal"
+    );
+    bob_repo
+        .git_ok(
+            [
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "state that must survive removal",
+            ],
+            "git commit as Bob",
+        )
+        .await?;
+    bob_repo.nostr_push(["origin", "main"]).await?;
+    let bob_state = latest_state(&harness, &published.identifier).await?;
+    assert_eq!(bob_state.pubkey, bob, "Bob's pushed state must be current");
+
+    // Publish otherwise equivalent announcements that point every confirmed
+    // maintainer at a test-owned endpoint which fails promptly. The removal
+    // can still resolve its membership preview from the relay, but cannot
+    // reproduce the state on a git server and therefore must not close Bob's
+    // assignment.
+    let unavailable = UnavailableTcpEndpoint::start().await?;
+    let dead_url = format!("http://{}/repo.git", unavailable.addr());
+    let alice_before = latest_announcement(&harness, alice, &published.identifier).await?;
+    let bob_before = latest_announcement(&harness, bob, &published.identifier).await?;
+    let alice_dead = replace_clone(&alice_before, &published.maintainer_keys, &dead_url)?;
+    let bob_dead = replace_clone(&bob_before, &bob_keys, &dead_url)?;
+    publish_to_relay(harness.relay("default").url(), &[&alice_dead, &bob_dead]).await?;
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        alice_dead.id,
+    );
+
+    let failed = tokio::time::timeout(
+        Duration::from_secs(10),
+        alice_repo
+            .ngit(["repo", "edit", "--remove-maintainer", &bob.to_bech32()?])
+            .output(),
+    )
+    .await
+    .context("maintainer removal did not fail promptly")??;
+    assert!(
+        !failed.status.success(),
+        "removal must fail when the current state cannot be handed off",
+    );
+    assert_eq!(
+        latest_announcement(&harness, alice, &published.identifier)
+            .await?
+            .id,
+        alice_dead.id,
+        "a failed handoff must leave the membership announcement untouched",
+    );
+    assert_eq!(
+        latest_state(&harness, &published.identifier).await?.id,
+        bob_state.id,
+        "a failed handoff must not publish a partial replacement state",
     );
     Ok(())
 }

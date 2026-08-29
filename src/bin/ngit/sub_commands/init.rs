@@ -12,8 +12,8 @@ use ngit::{
     accept_maintainership::{grasp_servers_from_user_or_fallback, wait_for_grasp_servers},
     agent_guidance,
     cli_interactor::{
-        PromptChoiceParms, PromptConfirmParms, cli_error, multi_select_with_custom_value,
-        show_multi_input_prompt_success,
+        PromptChoiceParms, PromptConfirmParms, cli_error, cli_error_with_category,
+        multi_select_with_custom_value, show_multi_input_prompt_success,
     },
     client::{
         Params, get_events_from_local_cache, get_filter_state_events, get_state_from_cache,
@@ -37,7 +37,8 @@ use ngit::{
     utils::join_with_and,
 };
 use nostr::prelude::{
-    FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url, nip01::Coordinate, nip19::Nip19Coordinate,
+    Event, EventId, FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url, nip01::Coordinate,
+    nip19::Nip19Coordinate,
 };
 
 use crate::{
@@ -93,6 +94,42 @@ enum InitState {
 enum LaunchMode {
     Init,
     RepoEdit,
+}
+
+/// Network state used to ensure a named removal still applies to the graph
+/// that its caller previewed before the internal announcement publisher runs.
+pub(crate) struct RepoEditPreflight {
+    removed_maintainer: PublicKey,
+    announcement_frontier: HashMap<PublicKey, EventId>,
+}
+
+impl RepoEditPreflight {
+    pub(crate) fn removal(repo_ref: &RepoRef, removed_maintainer: PublicKey) -> Self {
+        Self {
+            removed_maintainer,
+            announcement_frontier: announcement_frontier(repo_ref),
+        }
+    }
+
+    fn require_unchanged(&self, repo_ref: &RepoRef) -> Result<()> {
+        if self.announcement_frontier == announcement_frontier(repo_ref) {
+            return Ok(());
+        }
+        Err(cli_error_with_category(
+            "membership_preflight_changed",
+            "the repository membership changed after the removal preview",
+            &[],
+            &["fetch and rerun the named removal against the current membership"],
+        ))
+    }
+}
+
+fn announcement_frontier(repo_ref: &RepoRef) -> HashMap<PublicKey, EventId> {
+    repo_ref
+        .events
+        .values()
+        .map(|event| (event.pubkey, event.id))
+        .collect()
 }
 
 fn may_suggest_skill(state: &InitState) -> bool {
@@ -1535,9 +1572,15 @@ async fn publish_and_finalize(
     git_repo: &Repo,
     repo_config_result: &Result<ngit::repo_ref::RepoConfigYaml>,
     selected_repo: Option<&ResolvedRepoCoordinate>,
+    private_discovery: &PrivateGitRelayDiscovery,
+    pre_edit_repo_ref: Option<&RepoRef>,
+    repo_edit_preflight: Option<&RepoEditPreflight>,
 ) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
     let preserve_selected_coordinate = fields.preserve_selected_coordinate;
+    let infrastructure_changed = pre_edit_repo_ref.is_some_and(|current| {
+        current.git_server != fields.git_servers || current.relays != fields.relays
+    });
 
     // Step 1: Build RepoRef
     //
@@ -1588,6 +1631,10 @@ async fn publish_and_finalize(
         lead: fields.lead,
     };
     clear_private_git_auth();
+    if let Some(current) = pre_edit_repo_ref.filter(|current| current.private) {
+        client.nip42_register_private_repo_relays(current.relays.clone());
+        prepare_private_git_auth(&current.git_server, &signer).await?;
+    }
     if repo_ref.private {
         client.nip42_register_private_repo_relays(repo_ref.relays.clone());
         prepare_private_git_auth(&repo_ref.git_server, &signer).await?;
@@ -1618,6 +1665,30 @@ async fn publish_and_finalize(
             remote: None,
         });
     print_selected_repo(&selected_repo);
+
+    client.set_signer(signer.clone()).await;
+
+    // A removal cannot make the state event it currently resolves from
+    // ineligible. Hand the exact state to the removing maintainer before
+    // signing or publishing the membership replacement, then refresh and
+    // verify both frontiers. An equivalent handoff may remain published if a
+    // later check fails, but the membership event is still untouched.
+    let state_handed_off =
+        if let (Some(current), Some(preflight)) = (pre_edit_repo_ref, repo_edit_preflight) {
+            handoff_removed_maintainer_state(
+                git_repo,
+                current,
+                preflight,
+                user_ref,
+                client,
+                &signer,
+                &selected_repo,
+                private_discovery,
+            )
+            .await?
+        } else {
+            false
+        };
 
     // Step 2: Create event
     let repo_event = repo_ref.to_event(&signer).await?;
@@ -1661,8 +1732,9 @@ async fn publish_and_finalize(
         }
     }
 
-    let state_action = if no_state {
-        // user explicitly opted out of state-event creation
+    let state_action = if no_state || (state_handed_off && !infrastructure_changed) {
+        // The user opted out, or the pre-announcement handoff already
+        // established the required state on the unchanged infrastructure.
         StateAction::None
     } else if get_state_from_cache(Some(git_repo.get_path()?), &repo_ref)
         .await
@@ -1711,8 +1783,6 @@ async fn publish_and_finalize(
     };
 
     // Step 5: Publish events
-    client.set_signer(signer.clone()).await;
-
     if repo_ref.private {
         publish_private_git_relay_list(client, &repo_ref.relays, user_ref, &signer).await?;
     }
@@ -1807,11 +1877,19 @@ async fn publish_and_finalize(
             println!(
                 "republishing your repository state to nostr and syncing your git server(s) with it..."
             );
-            republish_cached_state(git_repo, &repo_ref, user_ref, client, &signer, &nostr_url_decoded)
-                .await
-                .context(
-                    "your repository announcement was published to nostr but republishing its repository state failed. fix the reported issue and run `ngit sync`",
-                )?;
+            republish_cached_state(
+                git_repo,
+                &repo_ref,
+                user_ref,
+                client,
+                &signer,
+                &nostr_url_decoded,
+                false,
+            )
+            .await
+            .context(
+                "your repository announcement was published to nostr but republishing its repository state failed. fix the reported issue and run `ngit sync`",
+            )?;
         }
         StateAction::PublishOriginState {
             origin_url,
@@ -1904,15 +1982,16 @@ async fn publish_and_finalize(
 }
 
 pub async fn launch(cli_args: &Cli, args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
-    launch_with_mode(cli_args, args, signer, LaunchMode::Init).await
+    launch_with_mode(cli_args, args, signer, LaunchMode::Init, None).await
 }
 
 pub(crate) async fn launch_repo_edit(
     cli_args: &Cli,
     args: &SubCommandArgs,
     signer: SignerParams<'_>,
+    preflight: Option<RepoEditPreflight>,
 ) -> Result<()> {
-    launch_with_mode(cli_args, args, signer, LaunchMode::RepoEdit).await
+    launch_with_mode(cli_args, args, signer, LaunchMode::RepoEdit, preflight).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1921,6 +2000,7 @@ async fn launch_with_mode(
     args: &SubCommandArgs,
     signer: SignerParams<'_>,
     mode: LaunchMode,
+    repo_edit_preflight: Option<RepoEditPreflight>,
 ) -> Result<()> {
     // Phase 1: Local-only setup
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -1982,6 +2062,13 @@ async fn launch_with_mode(
     } else {
         None
     };
+
+    if let Some(preflight) = &repo_edit_preflight {
+        let current = repo_ref
+            .as_ref()
+            .context("the repository announcement disappeared after the removal preview")?;
+        preflight.require_unchanged(current)?;
+    }
 
     // Phase 4: Determine state + post-fetch validation
     let state = match (&repo_coordinate, &repo_ref) {
@@ -2051,6 +2138,9 @@ async fn launch_with_mode(
         &git_repo,
         &repo_config_result,
         resolved_repo_coordinate.as_ref(),
+        &private_discovery,
+        state.repo_ref(),
+        repo_edit_preflight.as_ref(),
     )
     .await;
     if result.is_ok() && suggest_skill && should_suggest_skill(&git_repo, git_repo_path) {
@@ -2249,6 +2339,86 @@ async fn push_initial_branch(
 /// this arm after fetching state events for the announced coordinate in
 /// this invocation, and the candidate is ordered after the newest
 /// cached kind-30618 across maintainer coordinates.
+#[allow(clippy::too_many_arguments)]
+async fn handoff_removed_maintainer_state(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    preflight: &RepoEditPreflight,
+    user_ref: &ngit::login::user::UserRef,
+    client: &Client,
+    signer: &Arc<ngit::signer::NgitSigner>,
+    selected_repo: &ResolvedRepoCoordinate,
+    private_discovery: &PrivateGitRelayDiscovery,
+) -> Result<bool> {
+    let authoritative_authors = repo_ref.confirmed_maintainers();
+    let authoritative_events = get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![get_filter_state_events(&repo_ref.coordinates(), true)],
+    )
+    .await
+    .context(
+        "failed to inspect repository state before removal; the maintainer relationship was not removed",
+    )?
+    .into_iter()
+    .filter(|event| authoritative_authors.contains(&event.pubkey))
+    .collect::<Vec<_>>();
+    if authoritative_events.is_empty() {
+        return Ok(false);
+    }
+    let current_state = RepoState::try_from(authoritative_events).context(
+        "failed to resolve repository state before removal; the maintainer relationship was not removed",
+    )?;
+    if current_state.event.pubkey != preflight.removed_maintainer {
+        return Ok(false);
+    }
+    let expected_state = current_state.state;
+    let nostr_url = repo_ref.to_nostr_git_url(&Some(git_repo));
+
+    println!("handing repository state to a remaining maintainer before removal...");
+    let handoff = republish_cached_state(
+        git_repo, repo_ref, user_ref, client, signer, &nostr_url, true,
+    )
+    .await
+    .context("repository state handoff failed; the maintainer relationship was not removed")?;
+
+    let mut coordinate = selected_repo.coordinate.clone();
+    fetching_with_private_discovery(
+        git_repo.get_path()?,
+        client,
+        &mut coordinate,
+        private_discovery,
+    )
+    .await
+    .context(
+        "failed to refresh the repository after state handoff; the maintainer relationship was not removed",
+    )?;
+    let refreshed = get_repo_ref_from_cache(Some(git_repo.get_path()?), &coordinate)
+        .await
+        .context(
+            "failed to resolve the repository after state handoff; the maintainer relationship was not removed",
+        )?;
+    preflight.require_unchanged(&refreshed)?;
+
+    let verified = get_state_from_cache(Some(git_repo.get_path()?), &refreshed)
+        .await
+        .context(
+            "failed to verify the repository state handoff; the maintainer relationship was not removed",
+        )?;
+    if verified.event.id != handoff.id
+        || verified.event.pubkey != user_ref.public_key
+        || verified.state != expected_state
+    {
+        return Err(cli_error_with_category(
+            "membership_state_handoff_changed",
+            "the repository state changed while handing it to a remaining maintainer",
+            &[],
+            &["fetch and rerun the named removal against the current state"],
+        ));
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_lines)]
 async fn republish_cached_state(
     git_repo: &Repo,
     repo_ref: &RepoRef,
@@ -2256,7 +2426,8 @@ async fn republish_cached_state(
     client: &Client,
     signer: &Arc<ngit::signer::NgitSigner>,
     nostr_url_decoded: &NostrUrlDecoded,
-) -> Result<()> {
+    require_complete_state: bool,
+) -> Result<Event> {
     let term = Term::stderr();
 
     let cached_state = get_state_from_cache(Some(git_repo.get_path()?), repo_ref)
@@ -2283,6 +2454,7 @@ async fn republish_cached_state(
         old_state_event.as_ref(),
     )
     .await?;
+    let candidate_event = candidate.event.clone();
 
     // Git-server reality must come from a same-invocation listing;
     // refs/remotes/* may be stale or absent. Requiring at least one
@@ -2316,6 +2488,12 @@ async fn republish_cached_state(
         Some(signer),
     )
     .await?;
+    if require_complete_state && !missing_refs.is_empty() {
+        bail!(
+            "failed to reproduce the complete repository state; missing {}",
+            join_with_and(&missing_refs)
+        );
+    }
 
     // Plans source branch pushes from the candidate's own oids: the
     // nostr remote's tracking refs may not exist yet on a repository
@@ -2384,7 +2562,7 @@ async fn republish_cached_state(
             join_with_and(&missing_refs)
         );
     }
-    Ok(())
+    Ok(candidate_event)
 }
 
 /// Establish the state event built from the pre-existing `origin`'s

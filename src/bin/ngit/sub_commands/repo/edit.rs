@@ -1047,7 +1047,9 @@ pub async fn launch(
         private: args.private,
         public: args.public,
     };
-    init::launch_repo_edit(cli, &internal_args, signer_params).await
+    let preflight =
+        removed_target.map(|target| init::RepoEditPreflight::removal(&repo_ref, target));
+    init::launch_repo_edit(cli, &internal_args, signer_params, preflight).await
 }
 
 #[cfg(test)]
