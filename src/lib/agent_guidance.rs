@@ -35,6 +35,10 @@ const REFERENCE_FILES: &[(&str, &str)] = &[
     ),
     ("ci.md", include_str!("../../skills/ngit/reference/ci.md")),
     (
+        "containers.md",
+        include_str!("../../skills/ngit/reference/containers.md"),
+    ),
+    (
         "issues.md",
         include_str!("../../skills/ngit/reference/issues.md"),
     ),
@@ -114,6 +118,7 @@ fn skill_paths() -> [&'static str; 2] {
 const REFERENCE_PATHS: [&str; 16] = [
     ".agents/skills/ngit/reference/accounts.md",
     ".agents/skills/ngit/reference/ci.md",
+    ".agents/skills/ngit/reference/containers.md",
     ".agents/skills/ngit/reference/issues.md",
     ".agents/skills/ngit/reference/nsites.md",
     ".agents/skills/ngit/reference/prs.md",
@@ -122,6 +127,7 @@ const REFERENCE_PATHS: [&str; 16] = [
     ".agents/skills/ngit/reference/sync-config.md",
     ".claude/skills/ngit/reference/accounts.md",
     ".claude/skills/ngit/reference/ci.md",
+    ".claude/skills/ngit/reference/containers.md",
     ".claude/skills/ngit/reference/issues.md",
     ".claude/skills/ngit/reference/nsites.md",
     ".claude/skills/ngit/reference/prs.md",
@@ -954,6 +960,15 @@ mod tests {
     fn newer_versions_are_decided_without_io() {
         assert!(version_is_newer("1.0", "1.1"));
         assert!(!version_is_newer("1.1", "1.0"));
+    }
+    #[test]
+    fn bundled_skill_routes_container_publication() {
+        assert!(CANONICAL_SKILL.contains("`reference/containers.md`"));
+        let (_, reference) = REFERENCE_FILES
+            .iter()
+            .find(|(name, _)| *name == "containers.md")
+            .expect("container reference should be bundled");
+        assert!(reference.contains("ncontainer.io/<npub>/<repository>:<tag>"));
     }
     #[test]
     fn generated_commit_messages_have_distinct_subjects_and_bodies() {

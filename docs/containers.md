@@ -9,6 +9,9 @@ The command uses the container repository protocol implemented by
 SHA-256-addressed bytes, while a signed addressable event of kind `30624`
 maps mutable image tags to manifest digests.
 
+For the complete CLI, wire-event, update, and JSON contracts, see the
+[container publishing API](container-api.md).
+
 ## Publish an image
 
 First export an image as an OCI image layout. For example, with Podman:
@@ -47,7 +50,8 @@ By default, publishing behaves like adding tags to a registry:
 
 Pass `--replace` when the layout and supplied metadata should become the
 complete repository state. This removes older tags, older server hints,
-omitted optional metadata, and unknown tags.
+omitted description/source metadata, and unknown tags. The title becomes the
+explicit `--title` or defaults to the repository name.
 
 After publication, pull through any gateway implementing the protocol:
 
