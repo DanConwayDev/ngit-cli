@@ -611,7 +611,7 @@ pub struct ContainerPublishArgs {
     /// Override kind-10063 discovery with a Blossom server (repeatable)
     #[arg(long = "blossom-server", value_name = "URL")]
     pub blossom_servers: Vec<String>,
-    /// Extend publication with a relay (repeatable)
+    /// Extend the current repository relay set (repeatable)
     #[arg(long = "relay", value_name = "URL")]
     pub relays: Vec<String>,
     /// Human-readable repository title (defaults to NAME)

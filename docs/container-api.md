@@ -10,8 +10,11 @@ ngit implements the
 [ncontainer Container Repositories draft](https://gitworkshop.dev/alex%40gleasonator.com/relay.ngit.dev/ncontainer/tree/main/ncontainer.md),
 maintained in the authoritative
 `nostr://alex@gleasonator.com/relay.ngit.dev/ncontainer` repository. That draft
-is normative for the kind-30624 wire format and gateway behavior; this document
-specifies ngit's CLI, validation, publication, and JSON contracts.
+is normative for the core kind-30624 wire format and gateway behavior. ngit
+also requires the repository-binding `a` tag specified below. That extension
+is expected to move into ncontainer when its relay discovery catches up with
+NIP-34 repository relays. This document specifies that extension together with
+ngit's CLI, validation, publication, and JSON contracts.
 
 For a task-oriented walkthrough, see [Publishing containers](containers.md).
 The canonical command group is `ngit container`; `ngit oci` is a visible alias.
@@ -46,6 +49,7 @@ The event content is empty. It contains:
 | Tag | Cardinality | Meaning |
 | --- | ---: | --- |
 | `["d", NAME]` | exactly one | repository identifier |
+| `["a", "30617:PUBKEY:IDENTIFIER"]` | exactly one | current NIP-34 Git repository coordinate |
 | `["tag", TAG, SHA256]` | one or more | mutable tag to bare lowercase manifest digest |
 | `["server", URL]` | one or more | HTTP(S) Blossom server-root hint |
 | `["title", TEXT]` | zero or one | display title |
@@ -55,6 +59,12 @@ The event content is empty. It contains:
 `TAG` matches `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`. `SHA256` is exactly 64
 lowercase hexadecimal characters without an algorithm prefix. Ordinary updates
 preserve event tags unknown to this ngit version.
+
+The `a` tag is an ngit-required extension to the current ncontainer draft.
+ngit accepts only kind-30624 events whose single `a` tag is a kind-30617
+coordinate. It must equal the repository selected from the current Git
+checkout. This makes the container state repository-scoped even though the
+addressable event coordinate remains publisher plus `NAME`.
 
 The server tags are hints rather than per-blob availability proofs. Gateways
 may also use the publisher's Blossom server list.
@@ -71,26 +81,31 @@ ngit container publish NAME \
 
 Global account selectors and `--json` apply normally.
 
+The command must run inside a Nostr Git repository. The active signer must be
+a confirmed maintainer of the selected repository.
+
 | Input | Contract |
 | --- | --- |
 | `NAME` | required lowercase repository-name component |
 | `--layout PATH` | required OCI image-layout directory |
 | `--blossom-server URL` | optional repeatable override; HTTP(S) roots are deduplicated in order |
-| `--relay URL` | repeatable addition to the active account's write relays |
+| `--relay URL` | repeatable addition to the current repository's relays |
 | `--title TEXT` | optional non-empty display title |
 | `--description TEXT` | optional non-empty description |
 | `--source URL` | optional absolute credential-free HTTP(S) URL |
 | `--replace` | replace complete tag/server state instead of merging |
 
-If neither account write relays nor explicit relays exist, ngit uses its
-configured default relay set. An explicit relay extends rather than replaces
-account write relays.
+ngit gets the base relay set from the consolidated kind-30617 announcement for
+the current repository. It does not add the active account's NIP-65 read or
+write relays, nor ngit's configured default relays. An explicit relay extends
+rather than replaces the repository relay set. At least one repository relay
+is required.
 
-When no Blossom override is supplied, ngit queries the publication relays for
+When no Blossom override is supplied, ngit queries those repository relays for
 the latest kind-10063 server-list event authored by the active publisher and
-uses its ordered `server` tags. At least one relay must complete discovery. A
-missing or invalid latest list fails before upload rather than falling back to
-an older event. An explicit list bypasses this discovery.
+uses its ordered `server` tags. At least one repository relay must complete
+discovery. A missing or invalid latest list fails before upload rather than
+falling back to an older event. An explicit list bypasses this discovery.
 
 ## OCI layout contract
 
@@ -98,6 +113,14 @@ an older event. An explicit list bypasses this discovery.
 `imageLayoutVersion: "1.0.0"`. `PATH/index.json` must be a regular JSON file
 with `schemaVersion: 2` and at least one manifest descriptor carrying the
 `org.opencontainers.image.ref.name` annotation.
+
+This `index.json` is only the local OCI image-layout table of contents. ngit
+does not download it from Nostr and does not upload it to Blossom. The remotely
+synchronized index is the `tag` map in the latest kind-30624 event: ngit fetches
+that event, merges the new layout's tags, and republishes the complete event
+state. An OCI multi-platform image index referenced by the local layout is a
+different, content-addressed JSON blob under `blobs/sha256`; it is uploaded like
+every other reachable OCI blob.
 
 ngit supports these manifest media types:
 
@@ -132,13 +155,14 @@ Without `--replace`, ngit reads the latest repository event and merges:
 With `--replace`:
 
 - only tags found in the new layout are published;
-- only supplied Blossom server hints are published;
+- only the selected Blossom server hints are published;
 - omitted description and source are removed;
 - unknown event tags are removed;
 - title becomes `--title` or `NAME`.
 
-Repository identity—the signing pubkey and `NAME`—never changes during an
-update.
+Repository identity—the signing pubkey, `NAME`, and NIP-34 `a` coordinate—never
+changes during an update. A latest event bound to a different Git repository
+fails closed rather than being merged or overwritten.
 
 ## Upload and publication ordering
 
@@ -146,15 +170,21 @@ The first Blossom server receives a BUD-02 upload for each snapshot. Remaining
 servers receive mirror requests in supplied order. Every upload or mirror must
 return a valid descriptor and succeed before ngit signs a repository event.
 
-Before uploading, ngit queries every selected relay for the exact author,
-kind, and `d` identifier. Failure to query any relay aborts the operation. It
-repeats that query after all uploads; if the latest event ID changed, ngit
-refuses to overwrite the concurrent update. Uploaded blobs remain reusable.
+Before uploading, ngit queries each current repository relay independently for
+the exact author, kind, and `d` identifier. At least one repository-relay query
+must complete; failures from the others produce warnings. ngit chooses the
+NIP-01 latest event across all successful responses, requires its `a` tag to
+match the selected Git repository, and merges the new tags into that complete
+event state.
+
+ngit repeats the repository-relay query after all uploads. Again, at least one
+relay must complete. If the latest event ID changed, ngit refuses to overwrite
+the concurrent update. Uploaded blobs remain reusable.
 
 After the second preflight, ngit applies NIP-01 replacement ordering, signs the
-event, and sends it to the selected relays. Overall command success requires at
-least one relay acknowledgement. Callers requiring complete replication must
-inspect every per-relay result.
+event, and sends it to the repository relays. Overall command success requires
+at least one relay acknowledgement. Callers requiring complete replication
+must inspect every per-relay result.
 
 The two reads detect changes visible during the upload interval but do not
 provide compare-and-swap semantics. A publisher that updates the address after
@@ -162,6 +192,19 @@ the second read can still race this event; NIP-01 replacement ordering chooses
 the winner rather than merging both events. The v1 API assumes one active
 publisher for a given signing pubkey and repository name. Deployments sharing
 that identity must serialize publication outside ngit.
+
+No finite query proves global latest state. A container event stored only
+outside the current repository relay set is not visible. When moving a
+repository between relays, retain an old relay in the repository announcement
+or pass it with `--relay` until the current container event has been
+republished to the new set.
+
+Requiring one successful query is an availability tradeoff, not proof that the
+response is complete. If the only relay holding the current event is offline
+while another repository relay successfully returns no event, both preflights
+can agree on an empty base. A subsequent publication can then omit old tags.
+Replicate each container event to multiple repository relays and keep at least
+one state-bearing relay reachable during CI publication.
 
 ## JSON result
 
@@ -179,6 +222,7 @@ upload progress remain on stderr. A successful publication has this shape:
     "name": "npub1.../myimage",
     "naddr": "naddr1...",
     "event_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "git_repository": "30617:abcdef...:source-repository",
     "tags": [{ "name": "latest", "digest": "..." }],
     "updated_tags": [{ "name": "latest", "digest": "..." }],
     "blobs": [
@@ -211,7 +255,8 @@ upload progress remain on stderr. A successful publication has this shape:
 `tags` is the final published tag map; `updated_tags` contains only tags read
 from this layout. Each server outcome has operation `upload` or `mirror` and,
 on successful command completion, status `stored` or `already_present`.
-`event_id` is raw hexadecimal; `naddr` is the portable repository address.
+`event_id` is raw hexadecimal; `naddr` is the portable container repository
+address; `git_repository` is the exact coordinate emitted in the `a` tag.
 
 Before a success document is installed, failures use ngit's generic nonzero
 JSON error shape:

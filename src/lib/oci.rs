@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use bitcoin_hashes::{HashEngine as _, sha256};
-use nostr::prelude::{Event, EventBuilder, Kind, Tag, Url};
+use nostr::prelude::{Coordinate, Event, EventBuilder, Kind, Tag, Url};
 use serde::{Deserialize, Serialize};
 
 pub const CONTAINER_REPOSITORY_KIND: Kind = Kind::Custom(30_624);
@@ -397,6 +397,8 @@ fn is_manifest_media_type(media_type: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContainerRepository {
     pub name: String,
+    /// NIP-34 Git repository this container repository belongs to.
+    pub repository: Coordinate,
     pub tags: Vec<ContainerTag>,
     pub servers: Vec<Url>,
     pub title: Option<String>,
@@ -412,20 +414,31 @@ impl ContainerRepository {
             event.kind == CONTAINER_REPOSITORY_KIND,
             "event is not a container repository"
         );
-        let name = event
-            .tags
-            .iter()
-            .find_map(|tag| match tag.as_slice() {
-                [name, value, ..] if name == "d" => Some(value.clone()),
-                _ => None,
-            })
-            .context("container repository event has no d tag")?;
+        let mut name = None;
+        for tag in event.tags.iter().filter(|tag| {
+            tag.as_slice()
+                .first()
+                .is_some_and(|tag_name| tag_name == "d")
+        }) {
+            ensure!(
+                name.is_none(),
+                "container repository event has more than one d tag"
+            );
+            let value = tag
+                .as_slice()
+                .get(1)
+                .context("container repository event has an invalid d tag")?;
+            name = Some(value.clone());
+        }
+        let name = name.context("container repository event has no d tag")?;
         ensure!(
             is_valid_repository_name(&name),
             "container repository event has an invalid name {name:?}"
         );
 
         let mut tag_map = BTreeMap::new();
+        let mut repository = None;
+        let mut repository_tag_seen = false;
         let mut servers = Vec::new();
         let mut server_keys = HashSet::new();
         let mut title = None;
@@ -434,6 +447,21 @@ impl ContainerRepository {
         let mut extra_tags = Vec::new();
         for tag in event.tags.iter() {
             match tag.as_slice() {
+                [tag_name, ..] if tag_name == "a" => {
+                    ensure!(
+                        !repository_tag_seen,
+                        "container repository event has more than one a tag"
+                    );
+                    repository_tag_seen = true;
+                    let value = tag
+                        .as_slice()
+                        .get(1)
+                        .context("container repository event has an invalid a tag")?;
+                    let coordinate = Coordinate::parse(value).with_context(|| {
+                        format!("container repository event has an invalid a tag {value:?}")
+                    })?;
+                    repository = Some(coordinate);
+                }
                 [tag_name, value, digest, ..]
                     if tag_name == "tag"
                         && is_valid_container_tag(value)
@@ -477,9 +505,15 @@ impl ContainerRepository {
                 _ => extra_tags.push(tag.clone()),
             }
         }
+        let repository = repository.context("container repository event has no a tag")?;
+        ensure!(
+            repository.kind == Kind::GitRepoAnnouncement,
+            "container repository a tag is not a Nostr Git repository coordinate"
+        );
 
         Ok(Self {
             name,
+            repository,
             tags: tag_map
                 .into_iter()
                 .map(|(name, digest)| ContainerTag { name, digest })
@@ -503,8 +537,15 @@ impl ContainerRepository {
             !self.servers.is_empty(),
             "container repository has no Blossom servers"
         );
+        ensure!(
+            self.repository.kind == Kind::GitRepoAnnouncement,
+            "container repository must reference a Nostr Git repository"
+        );
 
-        let mut tags = vec![Tag::identifier(&self.name)];
+        let mut tags = vec![
+            Tag::identifier(&self.name),
+            Tag::coordinate(self.repository.clone(), None),
+        ];
         let mut names = HashSet::new();
         for entry in &self.tags {
             ensure!(
@@ -580,7 +621,7 @@ impl ContainerRepository {
 fn is_known_repository_tag(name: &str) -> bool {
     matches!(
         name,
-        "d" | "tag" | "server" | "title" | "description" | "source"
+        "d" | "a" | "tag" | "server" | "title" | "description" | "source"
     )
 }
 
@@ -741,8 +782,12 @@ mod tests {
 
     #[test]
     fn builds_the_minimal_container_repository_event() -> Result<()> {
+        let keys = Keys::generate();
+        let git_repository = Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+            .identifier("source-repository");
         let repository = ContainerRepository {
             name: "my-app".to_owned(),
+            repository: git_repository.clone(),
             tags: vec![ContainerTag {
                 name: "latest".to_owned(),
                 digest: "a".repeat(64),
@@ -753,7 +798,6 @@ mod tests {
             source: Some(Url::parse("https://example.com/source")?),
             extra_tags: vec![],
         };
-        let keys = Keys::generate();
         let event = keys.sign_event(
             repository
                 .event_builder()?
@@ -768,6 +812,10 @@ mod tests {
             .map(|tag| tag.as_slice())
             .collect::<Vec<_>>();
         assert!(tags.iter().any(|tag| tag == &["d", "my-app"]));
+        assert!(
+            tags.iter()
+                .any(|tag| tag == &["a", &git_repository.to_string()])
+        );
         assert!(
             tags.iter()
                 .any(|tag| tag == &["tag", "latest", &"a".repeat(64)])
@@ -786,6 +834,11 @@ mod tests {
             EventBuilder::new(CONTAINER_REPOSITORY_KIND, "")
                 .tags([
                     Tag::identifier("app"),
+                    Tag::coordinate(
+                        Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+                            .identifier("source-repository"),
+                        None,
+                    ),
                     Tag::parse(["tag", "latest", &"a".repeat(64)])?,
                     Tag::parse(["tag", "latest", &"b".repeat(64)])?,
                     Tag::parse(["server", "https://blossom.example/"])?,
@@ -801,6 +854,116 @@ mod tests {
             ["future", "kept", "verbatim"]
         );
         assert!(repository.event_builder().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn requires_exactly_one_git_repository_coordinate() -> Result<()> {
+        let keys = Keys::generate();
+        let required_tags = || -> Result<Vec<Tag>> {
+            Ok(vec![
+                Tag::identifier("app"),
+                Tag::parse(["tag", "latest", &"a".repeat(64)])?,
+                Tag::parse(["server", "https://blossom.example/"])?,
+            ])
+        };
+        let signed_event = |tags: Vec<Tag>| {
+            keys.sign_event(
+                EventBuilder::new(CONTAINER_REPOSITORY_KIND, "")
+                    .tags(tags)
+                    .finalize_unsigned(keys.public_key()),
+            )
+        };
+
+        let missing = signed_event(required_tags()?)?;
+        assert!(
+            ContainerRepository::from_event(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("no a tag")
+        );
+
+        let mut malformed_tags = required_tags()?;
+        malformed_tags.push(Tag::parse(["a"])?);
+        let malformed = signed_event(malformed_tags)?;
+        assert!(
+            ContainerRepository::from_event(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid a tag")
+        );
+
+        let mut wrong_kind_tags = required_tags()?;
+        wrong_kind_tags.push(Tag::coordinate(
+            Coordinate::new(Kind::TextNote, keys.public_key()).identifier("source-repository"),
+            None,
+        ));
+        let wrong_kind = signed_event(wrong_kind_tags)?;
+        assert!(
+            ContainerRepository::from_event(&wrong_kind)
+                .unwrap_err()
+                .to_string()
+                .contains("not a Nostr Git repository coordinate")
+        );
+
+        let git_repository = Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+            .identifier("source-repository");
+        let mut duplicate_tags = required_tags()?;
+        duplicate_tags.extend([
+            Tag::coordinate(git_repository.clone(), None),
+            Tag::coordinate(git_repository, None),
+        ]);
+        let duplicate = signed_event(duplicate_tags)?;
+        assert!(
+            ContainerRepository::from_event(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("more than one a tag")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn requires_exactly_one_container_repository_name() -> Result<()> {
+        let keys = Keys::generate();
+        let common_tags = || -> Result<Vec<Tag>> {
+            Ok(vec![
+                Tag::coordinate(
+                    Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+                        .identifier("source-repository"),
+                    None,
+                ),
+                Tag::parse(["tag", "latest", &"a".repeat(64)])?,
+                Tag::parse(["server", "https://blossom.example/"])?,
+            ])
+        };
+        let signed_event = |tags: Vec<Tag>| {
+            keys.sign_event(
+                EventBuilder::new(CONTAINER_REPOSITORY_KIND, "")
+                    .tags(tags)
+                    .finalize_unsigned(keys.public_key()),
+            )
+        };
+
+        let mut malformed_tags = common_tags()?;
+        malformed_tags.push(Tag::parse(["d"])?);
+        let malformed = signed_event(malformed_tags)?;
+        assert!(
+            ContainerRepository::from_event(&malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid d tag")
+        );
+
+        let mut duplicate_tags = common_tags()?;
+        duplicate_tags.extend([Tag::identifier("app"), Tag::identifier("other-app")]);
+        let duplicate = signed_event(duplicate_tags)?;
+        assert!(
+            ContainerRepository::from_event(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("more than one d tag")
+        );
         Ok(())
     }
 }

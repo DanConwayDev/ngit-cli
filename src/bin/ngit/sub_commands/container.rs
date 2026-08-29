@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use futures::future::join_all;
 use ngit::{
     NgitSigner,
@@ -9,14 +9,18 @@ use ngit::{
         blossom_server_list_from_events, canonicalize_blossom_server_root, snapshot_local_file,
         upload_snapshot_to_servers,
     },
-    client::{Connect, Params, RelayProgressReporter, send_events, sign_draft_event},
+    client::{
+        Connect, Params, RelayProgressReporter, fetching_with_report, get_repo_ref_from_cache,
+        send_events, sign_draft_event,
+    },
     event_ordering::{finalize_ordered_unsigned, latest_event},
-    git::Repo,
+    git::{Repo, RepoActions},
     login,
     oci::{
         CONTAINER_REPOSITORY_KIND, ContainerRepository, OciBlob, OciLayout,
         is_valid_repository_name,
     },
+    repo_ref::get_resolved_repo_coordinate_when_remote_unknown,
 };
 use nostr::prelude::{
     Coordinate, Event, Filter, PublicKey, RelayUrl, ToBech32, Url, nip19::Nip19Coordinate,
@@ -43,8 +47,9 @@ pub async fn publish(
         )
     })?;
 
-    let git_repo = Repo::discover().ok();
-    let git_repo_ref = git_repo.as_ref();
+    let git_repo =
+        Repo::discover().context("container publication must run inside a Nostr Git repository")?;
+    let git_repo_ref = Some(&git_repo);
     let mut client = Client::new(Params::with_git_config_relay_defaults(&git_repo_ref));
     let (signer, user, _) = login::login_or_signup(
         &git_repo_ref,
@@ -64,17 +69,24 @@ pub async fn publish(
         public_key == user.public_key,
         "active signer does not match the loaded Nostr account"
     );
-    let publication_relays = publication_relays(&client, user.relays.write(), &args.relays)?;
-    client.nip42_register_publish_relays(publication_relays.clone());
+    let (repository_coordinate, repository_relays) =
+        resolve_repository_context(&git_repo, &mut client, public_key, &args.relays).await?;
+    client.nip42_register_publish_relays(repository_relays.clone());
     let servers = if explicit_servers.is_empty() {
-        discover_blossom_servers(&client, &publication_relays, public_key).await?
+        discover_blossom_servers(&client, &repository_relays, public_key).await?
     } else {
         explicit_servers
     };
     let existing =
-        fetch_current_repository(&client, &publication_relays, public_key, &args.repository)
-            .await?;
-    let repository = merged_repository(args, &layout, &servers, source, existing.as_ref())?;
+        fetch_current_repository(&client, &repository_relays, public_key, &args.repository).await?;
+    let repository = merged_repository(
+        args,
+        &repository_coordinate,
+        &layout,
+        &servers,
+        source,
+        existing.as_ref(),
+    )?;
     let event_builder = repository
         .event_builder()
         .context("failed to construct the container repository event")?;
@@ -82,7 +94,7 @@ pub async fn publish(
     let uploads = upload_layout(&layout, &servers, &signer, json_output).await?;
 
     let rechecked =
-        fetch_current_repository(&client, &publication_relays, public_key, &args.repository)
+        fetch_current_repository(&client, &repository_relays, public_key, &args.repository)
             .await
             .context("failed to re-check the container repository after uploading blobs")?;
     ensure_unchanged(existing.as_ref(), rechecked.as_ref())?;
@@ -96,7 +108,7 @@ pub async fn publish(
         &client,
         None,
         vec![event.clone()],
-        publication_relays.iter().map(ToString::to_string).collect(),
+        repository_relays.iter().map(ToString::to_string).collect(),
         vec![],
         !json_output,
         json_output,
@@ -112,7 +124,7 @@ pub async fn publish(
         &PublishSuccess {
             args,
             public_key,
-            publication_relays: &publication_relays,
+            repository_relays: &repository_relays,
             event: &event,
             repository: &repository,
             layout: &layout,
@@ -126,10 +138,30 @@ pub async fn publish(
     Ok(())
 }
 
+async fn resolve_repository_context(
+    git_repo: &Repo,
+    client: &mut Client,
+    public_key: PublicKey,
+    explicit_relays: &[String],
+) -> Result<(Coordinate, Vec<RelayUrl>)> {
+    let selected = get_resolved_repo_coordinate_when_remote_unknown(git_repo, client).await?;
+    let git_repo_path = git_repo.get_path()?;
+    fetching_with_report(git_repo_path, client, &selected.coordinate).await?;
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
+    ensure!(
+        repo_ref.confirmed_maintainers().contains(&public_key),
+        "only a confirmed repository maintainer can publish related containers"
+    );
+    Ok((
+        selected.coordinate.coordinate,
+        repository_relays(repo_ref.relays, explicit_relays)?,
+    ))
+}
+
 struct PublishSuccess<'a> {
     args: &'a ContainerPublishArgs,
     public_key: PublicKey,
-    publication_relays: &'a [RelayUrl],
+    repository_relays: &'a [RelayUrl],
     event: &'a Event,
     repository: &'a ContainerRepository,
     layout: &'a OciLayout,
@@ -141,7 +173,7 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
     let naddr = Nip19Coordinate {
         coordinate: Coordinate::new(CONTAINER_REPOSITORY_KIND, success.public_key)
             .identifier(success.args.repository.clone()),
-        relays: success.publication_relays.to_vec(),
+        relays: success.repository_relays.to_vec(),
     }
     .to_bech32()?;
     let npub = success.public_key.to_bech32()?;
@@ -157,6 +189,7 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
                 "name": format!("{npub}/{}", success.args.repository),
                 "naddr": naddr,
                 "event_id": success.event.id.to_hex(),
+                "git_repository": success.repository.repository.to_string(),
                 "tags": success.repository.tags,
                 "updated_tags": success.layout.tags,
                 "blobs": success.uploads.iter().map(upload_json).collect::<Vec<_>>(),
@@ -172,6 +205,7 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
             "published container repository {npub}/{}",
             success.args.repository
         );
+        println!("  git repository: {}", success.repository.repository);
         for tag in &success.layout.tags {
             println!("  {} -> sha256:{}", tag.name, tag.digest);
         }
@@ -197,6 +231,7 @@ fn validate_metadata_args(args: &ContainerPublishArgs) -> Result<()> {
 
 fn merged_repository(
     args: &ContainerPublishArgs,
+    git_repository: &Coordinate,
     layout: &OciLayout,
     uploaded_servers: &[Url],
     source: Option<Url>,
@@ -206,11 +241,37 @@ fn merged_repository(
         .map(ContainerRepository::from_event)
         .transpose()
         .context("failed to parse the current container repository event")?;
+    if let Some(previous) = previous.as_ref() {
+        ensure!(
+            previous.name == args.repository,
+            "current container repository event names {:?} instead of {:?}",
+            previous.name,
+            args.repository
+        );
+        ensure!(
+            previous.repository == *git_repository,
+            "current container repository belongs to {} instead of the selected Git repository {}",
+            previous.repository,
+            git_repository
+        );
+    }
     if args.replace {
-        return Ok(new_repository(args, layout, uploaded_servers, source));
+        return Ok(new_repository(
+            args,
+            git_repository,
+            layout,
+            uploaded_servers,
+            source,
+        ));
     }
     let Some(previous) = previous else {
-        return Ok(new_repository(args, layout, uploaded_servers, source));
+        return Ok(new_repository(
+            args,
+            git_repository,
+            layout,
+            uploaded_servers,
+            source,
+        ));
     };
     let mut tags = previous.tags;
     for new_tag in &layout.tags {
@@ -232,6 +293,7 @@ fn merged_repository(
     }
     Ok(ContainerRepository {
         name: args.repository.clone(),
+        repository: git_repository.clone(),
         tags,
         servers,
         title: args
@@ -247,12 +309,14 @@ fn merged_repository(
 
 fn new_repository(
     args: &ContainerPublishArgs,
+    git_repository: &Coordinate,
     layout: &OciLayout,
     servers: &[Url],
     source: Option<Url>,
 ) -> ContainerRepository {
     ContainerRepository {
         name: args.repository.clone(),
+        repository: git_repository.clone(),
         tags: layout.tags.clone(),
         servers: servers.to_vec(),
         title: Some(
@@ -354,21 +418,17 @@ fn parse_source_url(value: &str) -> Result<Url> {
     Ok(source)
 }
 
-fn publication_relays(
-    client: &Client,
-    user_write_relays: Vec<String>,
-    explicit: &[String],
-) -> Result<Vec<RelayUrl>> {
-    let candidates = if user_write_relays.is_empty() && explicit.is_empty() {
-        client.get_relay_default_set().clone()
-    } else {
-        [user_write_relays, explicit.to_vec()].concat()
-    };
+fn repository_relays(announced: Vec<RelayUrl>, explicit: &[String]) -> Result<Vec<RelayUrl>> {
     let mut seen = HashSet::new();
     let mut relays = Vec::new();
-    for value in candidates {
-        let relay = RelayUrl::parse(&value)
-            .with_context(|| format!("invalid container publication relay {value:?}"))?;
+    for relay in announced {
+        if seen.insert(relay.to_string().trim_end_matches('/').to_owned()) {
+            relays.push(relay);
+        }
+    }
+    for value in explicit {
+        let relay = RelayUrl::parse(value)
+            .with_context(|| format!("invalid container repository relay {value:?}"))?;
         let key = relay.to_string().trim_end_matches('/').to_owned();
         if seen.insert(key) {
             relays.push(relay);
@@ -376,7 +436,7 @@ fn publication_relays(
     }
     ensure!(
         !relays.is_empty(),
-        "container publication requires at least one relay"
+        "container publication requires at least one repository relay"
     );
     Ok(relays)
 }
@@ -427,15 +487,24 @@ async fn fetch_current_repository(
 
     let mut events = Vec::new();
     let mut failed = Vec::new();
+    let mut completed = 0_usize;
     for (relay, result) in results {
         match result {
-            Ok(mut relay_events) => events.append(&mut relay_events),
+            Ok(mut relay_events) => {
+                completed += 1;
+                events.append(&mut relay_events);
+            }
             Err(error) => failed.push(format!("{relay}: {error:#}")),
         }
     }
+    ensure!(
+        completed > 0,
+        "container publication preflight did not complete on any repository relay: {}",
+        failed.join("; ")
+    );
     if !failed.is_empty() {
-        bail!(
-            "container publication preflight did not complete on every relay: {}",
+        eprintln!(
+            "warning: container repository preflight was incomplete on: {}",
             failed.join("; ")
         );
     }
@@ -511,11 +580,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_relays_extend_and_deduplicate_user_write_relays() -> Result<()> {
-        let client = Client::new(Params::default());
-        let relays = publication_relays(
-            &client,
-            vec!["wss://relay.one".to_owned()],
+    fn explicit_relays_extend_and_deduplicate_repository_relays() -> Result<()> {
+        let relays = repository_relays(
+            vec![RelayUrl::parse("wss://relay.one")?],
             &["wss://relay.one/".to_owned(), "wss://relay.two".to_owned()],
         )?;
         assert_eq!(
@@ -544,8 +611,11 @@ mod tests {
     #[test]
     fn ordinary_publish_merges_tags_metadata_servers_and_unknown_fields() -> Result<()> {
         let keys = Keys::generate();
+        let git_repository = Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+            .identifier("source-repository");
         let previous = ContainerRepository {
             name: "app".to_owned(),
+            repository: git_repository.clone(),
             tags: vec![
                 ContainerTag {
                     name: "latest".to_owned(),
@@ -587,6 +657,7 @@ mod tests {
 
         let merged = merged_repository(
             &args,
+            &git_repository,
             &layout,
             &[Url::parse("https://new.example/")?],
             None,
@@ -599,6 +670,41 @@ mod tests {
         assert_eq!(merged.title.as_deref(), Some("Existing title"));
         assert_eq!(merged.description.as_deref(), Some("Existing description"));
         assert_eq!(merged.extra_tags[0].as_slice(), ["future", "preserved"]);
+
+        let other_git_repository = Coordinate::new(Kind::GitRepoAnnouncement, keys.public_key())
+            .identifier("other-source-repository");
+        let error = merged_repository(
+            &args,
+            &other_git_repository,
+            &layout,
+            &[Url::parse("https://new.example/")?],
+            None,
+            Some(&previous),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("instead of the selected Git repository")
+        );
+
+        let mut wrong_name = merged;
+        wrong_name.name = "other-app".to_owned();
+        let wrong_name = keys.sign_event(
+            wrong_name
+                .event_builder()?
+                .finalize_unsigned(keys.public_key()),
+        )?;
+        let error = merged_repository(
+            &args,
+            &git_repository,
+            &layout,
+            &[Url::parse("https://new.example/")?],
+            None,
+            Some(&wrong_name),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("instead of \"app\""));
         Ok(())
     }
 }

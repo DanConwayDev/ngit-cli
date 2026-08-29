@@ -12,7 +12,9 @@ artifacts, see [Publishing releases](releases.md).
 
 Pullable OCI repositories use the separate
 [container publishing API](container-api.md): `ngit container publish` stores
-the content-addressed graph on Blossom and publishes a kind-30624 tag map.
+the content-addressed graph on Blossom and publishes a kind-30624 tag map bound
+to the current kind-30617 repository by an `a` tag. It discovers and publishes
+that state through the current repository's relays.
 For example, its result can be pulled through the read-only
 [ncontainer.io](https://ncontainer.io) gateway as
 `ncontainer.io/<npub>/<repository>:<tag>`. A container archive may still be

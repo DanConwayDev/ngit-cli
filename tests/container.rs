@@ -4,11 +4,11 @@ use std::{collections::BTreeMap, fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
-use ngit::oci::{CONTAINER_REPOSITORY_KIND, OCI_IMAGE_MANIFEST};
+use ngit::oci::{CONTAINER_REPOSITORY_KIND, ContainerRepository, ContainerTag, OCI_IMAGE_MANIFEST};
 use nostr::event::FinalizeEvent;
-use nostr_sdk::prelude::{Client, Event, EventBuilder, Filter, Keys, Kind, Tag, ToBech32};
+use nostr_sdk::prelude::{Client, Coordinate, Event, EventBuilder, Filter, Kind, Tag, Url};
 use serde_json::{Value, json};
-use test_harness::{Harness, LocalRelayBuilderNip42};
+use test_harness::{Harness, LocalRelayBuilderNip42, PublishRepoOpts};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -22,15 +22,26 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
     .with_relay("default")
+    .with_grasp_server("repo")
     .build()
     .await?;
-    let repo = harness.fresh_repo()?;
+    let relay = harness.relay("default").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("container-source-repository".to_owned()),
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
     let (tag_digest, expected_blobs) = write_layout(repo.dir())?;
     let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
     let blossom_root = format!("{}/", blossom.base_url());
-    let relay = harness.relay("default").url().to_string();
-    let keys = Keys::generate();
-    let nsec = keys.secret_key().to_bech32()?;
+    let repository_coordinate = Coordinate::new(
+        Kind::GitRepoAnnouncement,
+        published.maintainer_keys.public_key(),
+    )
+    .identifier(published.identifier.clone())
+    .to_string();
 
     let output = repo
         .ngit([
@@ -41,12 +52,8 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
             repo.dir().to_str().context("test path was not UTF-8")?,
             "--blossom-server",
             blossom.base_url(),
-            "--relay",
-            &relay,
             "--source",
             "https://example.com/my-app",
-            "--nsec",
-            &nsec,
             "--json",
         ])
         .output()
@@ -61,6 +68,7 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
         serde_json::from_slice(&output.stdout).context("container output was not JSON")?;
     ensure!(result["command"] == "container.publish");
     ensure!(result["result"]["repository"] == "my-app");
+    ensure!(result["result"]["git_repository"] == repository_coordinate);
     ensure!(result["result"]["tags"][0]["name"] == "latest");
     ensure!(result["result"]["tags"][0]["digest"] == tag_digest);
     ensure!(
@@ -89,7 +97,7 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
         .events(
             Filter::new()
                 .kind(CONTAINER_REPOSITORY_KIND)
-                .author(keys.public_key())
+                .author(published.maintainer_keys.public_key())
                 .identifier("my-app"),
         )
         .await?;
@@ -101,6 +109,7 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
     };
     event.verify()?;
     ensure!(tag_value(event, "d") == Some("my-app"));
+    ensure!(tag_value(event, "a") == Some(repository_coordinate.as_str()));
     ensure!(tag_value(event, "title") == Some("my-app"));
     ensure!(tag_value(event, "source") == Some("https://example.com/my-app"));
     ensure!(
@@ -115,21 +124,26 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
 }
 
 #[tokio::test]
-async fn authenticates_container_preflight_reads_on_publication_relays() -> Result<()> {
+async fn authenticates_container_preflight_reads_on_repository_relays() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
     .with_relay("default")
     .with_relay_nip42("auth-read", LocalRelayBuilderNip42::read())
+    .with_grasp_server("repo")
     .build()
     .await?;
-    let repo = harness.fresh_repo()?;
+    let relay = harness.relay("auth-read").url().to_string();
+    let (repo, _) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("authenticated-container-repository".to_owned()),
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
     let (_, expected_blobs) = write_layout(repo.dir())?;
     let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
-    let relay = harness.relay("auth-read").url().to_string();
-    let keys = Keys::generate();
-    let nsec = keys.secret_key().to_bech32()?;
 
     let output = repo
         .ngit([
@@ -140,10 +154,6 @@ async fn authenticates_container_preflight_reads_on_publication_relays() -> Resu
             repo.dir().to_str().context("test path was not UTF-8")?,
             "--blossom-server",
             blossom.base_url(),
-            "--relay",
-            &relay,
-            "--nsec",
-            &nsec,
             "--json",
         ])
         .output()
@@ -156,8 +166,13 @@ async fn authenticates_container_preflight_reads_on_publication_relays() -> Resu
     );
     let result: Value =
         serde_json::from_slice(&output.stdout).context("container output was not JSON")?;
-    ensure!(result["result"]["relays"][0]["url"] == relay);
-    ensure!(result["result"]["relays"][0]["accepted"] == true);
+    ensure!(
+        result["result"]["relays"]
+            .as_array()
+            .context("relay result was not an array")?
+            .iter()
+            .any(|result| result["url"] == relay && result["accepted"] == true)
+    );
 
     let requests = blossom.finish().await?;
     ensure!(requests.len() == expected_blobs.len());
@@ -171,18 +186,23 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
     .with_relay("default")
+    .with_grasp_server("repo")
     .build()
     .await?;
-    let repo = harness.fresh_repo()?;
+    let relay = harness.relay("default").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("blossom-discovery-repository".to_owned()),
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
     let (_, expected_blobs) = write_layout(repo.dir())?;
     let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
     let blossom_root = format!("{}/", blossom.base_url());
-    let relay = harness.relay("default").url().to_string();
-    let keys = Keys::generate();
-    let nsec = keys.secret_key().to_bech32()?;
     let server_list = EventBuilder::new(Kind::Custom(10_063), "")
         .tags([Tag::parse(["server", blossom.base_url()])?])
-        .finalize(&keys)?;
+        .finalize(&published.maintainer_keys)?;
     publish_fixture_event(&relay, &server_list).await?;
 
     let output = repo
@@ -192,10 +212,6 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
             "discovered-app",
             "--layout",
             repo.dir().to_str().context("test path was not UTF-8")?,
-            "--relay",
-            &relay,
-            "--nsec",
-            &nsec,
             "--json",
         ])
         .output()
@@ -214,7 +230,7 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
         .events(
             Filter::new()
                 .kind(CONTAINER_REPOSITORY_KIND)
-                .author(keys.public_key())
+                .author(published.maintainer_keys.public_key())
                 .identifier("discovered-app"),
         )
         .await?;
@@ -226,6 +242,97 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
     };
     ensure!(event.tags.iter().any(|tag| {
         matches!(tag.as_slice(), [name, server] if name == "server" && server == &blossom_root)
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn merges_state_when_one_repository_relay_is_unavailable() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("history")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let publication_relay = harness.relay("default").url().to_string();
+    let history_relay = harness.relay("history").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("container-history-repository".to_owned()),
+            extra_repo_relays: vec![publication_relay.clone(), history_relay.clone()],
+            ..Default::default()
+        })
+        .await?;
+    let (_, expected_blobs) = write_layout(repo.dir())?;
+    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let server_list = EventBuilder::new(Kind::Custom(10_063), "")
+        .tags([Tag::parse(["server", blossom.base_url()])?])
+        .finalize(&published.maintainer_keys)?;
+    publish_fixture_event(&publication_relay, &server_list).await?;
+    let repository_coordinate = Coordinate::new(
+        Kind::GitRepoAnnouncement,
+        published.maintainer_keys.public_key(),
+    )
+    .identifier(published.identifier.clone());
+    let previous = ContainerRepository {
+        name: "repository-relay-app".to_owned(),
+        repository: repository_coordinate,
+        tags: vec![ContainerTag {
+            name: "stable".to_owned(),
+            digest: "f".repeat(64),
+        }],
+        servers: vec![Url::parse("https://old-blossom.example/")?],
+        title: Some("Existing title".to_owned()),
+        description: None,
+        source: None,
+        extra_tags: vec![],
+    }
+    .event_builder()?
+    .finalize(&published.maintainer_keys)?;
+    publish_fixture_event(&history_relay, &previous).await?;
+
+    let output = repo
+        .ngit([
+            "container",
+            "publish",
+            "repository-relay-app",
+            "--layout",
+            repo.dir().to_str().context("test path was not UTF-8")?,
+            "--relay",
+            "ws://127.0.0.1:1",
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to publish with one unavailable repository relay")?;
+    ensure!(
+        output.status.success(),
+        "container publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    blossom.finish().await?;
+
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(CONTAINER_REPOSITORY_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier("repository-relay-app"),
+        )
+        .await?;
+    let latest = events
+        .iter()
+        .max_by_key(|event| (event.created_at, std::cmp::Reverse(event.id)))
+        .context("updated container event was not published")?;
+    ensure!(latest.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, tag, digest] if name == "tag" && tag == "stable" && digest == &"f".repeat(64))
+    }));
+    ensure!(latest.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, tag, ..] if name == "tag" && tag == "latest")
     }));
     Ok(())
 }
