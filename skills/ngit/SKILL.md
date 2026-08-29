@@ -1,14 +1,16 @@
 ---
 name: ngit
-description: Provides commands and workflows for nostr:// git repositories using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, NIP-5A nsites, Blossom static-site publication, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
+description: Provides commands and workflows for nostr:// git repositories, OCI container publication, and NIP-5A nsites using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, publishing OCI images through Nostr and Blossom, NIP-5A nsites, Blossom static-site publication, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.11"
+  version: "1.12"
 ---
 
 # ngit — Nostr Plugin for Git
 
-ngit makes `clone`, `fetch`, `push` work with `nostr://` URLs and adds a CLI for PRs, issues, and repo management over the decentralised Nostr protocol.
+ngit makes `clone`, `fetch`, `push` work with `nostr://` URLs and adds a CLI
+for PRs, issues, repo management, OCI containers, and NIP-5A static sites over
+the decentralised Nostr protocol.
 
 - Install: `curl -Ls https://ngit.dev/install.sh | bash` (installs `ngit` and `git-remote-nostr`)
 - Web UI: https://gitworkshop.dev
@@ -33,7 +35,7 @@ When you `git fetch`, `git-remote-nostr` reads the current ref state from Nostr 
 - **Use `--offline`** on all but the first `ngit` command in a session — reads from local cache instantly. `git fetch origin` also refreshes the cache.
 - **Never construct NIP-05 addresses** (`user@domain`). Use the `npub1...` form unless a NIP-05 address was explicitly provided.
 - **`<ID|nevent>`** accepts a `nevent1...` bech32 string, a 64-char hex event ID, or a unique hex prefix with an optional leading `#` (e.g. `#deadbeef`). Ambiguous prefixes fail and list the matches. Get IDs from `ngit pr list --json` or `ngit issue list --json`.
-- **`--json` output uses `nevent1…` bech32** for all `id` and `reply_to` fields (not raw hex). Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references.
+- **`--json` collaboration output uses `nevent1…` bech32** for `id` and `reply_to` fields. Use these values directly as `<ID|nevent>` arguments and in `nostr:` URI references. Container publication instead returns a raw-hex `event_id` plus the repository's canonical `naddr`.
 - **Reference other issues/PRs/comments in `--body` using `nostr:` URIs** — e.g. `nostr:nevent1abc…` or `nostr:naddr1abc…`. Never paste raw hex IDs into body text. The `id` field from `--json` output is already a valid `nevent1…` string; prefix it with `nostr:` to form the URI. Example: `--body "Relates to nostr:nevent1abc…"`. ngit automatically converts these into the correct event tags.
 - **Multiline files are safe with normal `ngit` text options, but not with `git push -o`.** For `ngit ... --body` or `ngit ... --description`, pass the file as one quoted argument: `--body "$(cat note.md)"`. For a Git push option, real newlines are forbidden; use literal `\n` only for a short inline value. Never convert a file into `-o description=...`.
 - **Use `--signer <alias|npub|nostr-display-name>` to select a non-default stored identity for one `ngit` command.** For one Git command, use `git -c nostr.signer=<alias|npub|nostr-display-name> push ...`; this does not change the configured login. Do not export or pass an nsec merely to switch between configured accounts.
@@ -80,5 +82,6 @@ Detailed command references live in `reference/*.md` in this skill's directory. 
 | Open, stack, review, merge PRs | `reference/prs.md` |
 | Create/view/comment/close issues | `reference/issues.md` |
 | Inspect CI workflows, runs, trust, failures | `reference/ci.md` |
+| Publish OCI containers through Blossom and Nostr | `reference/containers.md` |
 | Accounts, login, secrets | `reference/accounts.md` |
 | Sync, flags, git config | `reference/sync-config.md` |

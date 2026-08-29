@@ -80,6 +80,10 @@ multi-platform assets, and ngit-ci artifact workflows.
 See [publishing static sites](docs/nsites.md) for deploying an already-built
 directory with `ngit nsite publish` through Blossom and NIP-5A.
 
+See [publishing containers](docs/containers.md) to upload an OCI image layout
+to Blossom and publish its signed kind-30624 tag map with `ngit container`
+(`ngit oci`).
+
 ## contributions welcome!
 
 [gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs

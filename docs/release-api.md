@@ -10,6 +10,17 @@ interface.
 For task-oriented examples, including `.ngit/release.yaml` and ngit-ci
 artifacts, see [Publishing releases](releases.md).
 
+Pullable OCI repositories use the separate
+[container publishing API](container-api.md): `ngit container publish` stores
+the content-addressed graph on Blossom and publishes a kind-30624 tag map bound
+to the current kind-30617 repository by an `a` tag. It discovers and publishes
+that state through the current repository's relays.
+For example, its result can be pulled through the read-only
+[ncontainer.io](https://ncontainer.io) gateway as
+`ncontainer.io/<npub>/<repository>:<tag>`. A container archive may still be
+published as an opaque release asset, but NIP-82 release events do not create
+or update an OCI repository.
+
 The canonical command group is `ngit release`, matching ngit's singular
 `ngit pr` and `ngit issue` groups. `ngit releases` should be accepted as an
 alias.
@@ -67,6 +78,9 @@ alias.
 - Blossom payment negotiation, media optimization, deletion, and blob listing.
 - Publishing mirror URLs in NIP-82 extension tags. v1 publishes the primary
   Blossom URL and reports mirrors through command output.
+- Publishing a pullable OCI repository or mutable container tag map. Use
+  `ngit container publish`; this is a separate kind-30624 API even when the
+  same software version also has NIP-82 release assets.
 
 ## Protocol model
 

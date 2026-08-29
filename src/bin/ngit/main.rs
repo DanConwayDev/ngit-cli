@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 
 use clap::Parser;
 use cli::{
-    AccountCommands, CiCommands, Cli, Commands, IssueCommands, PrCommands, SignerParams,
-    customise_template, extract_signer_cli_arguments,
+    AccountCommands, CiCommands, Cli, Commands, ContainerCommands, IssueCommands, PrCommands,
+    SignerParams, customise_template, extract_signer_cli_arguments,
 };
 
 mod cli;
@@ -512,6 +512,11 @@ async fn main() {
             Commands::Nsite(args) => {
                 sub_commands::nsite::launch(args, signer_params, cli.json).await
             }
+            Commands::Container(args) => match &args.container_command {
+                ContainerCommands::Publish(args) => {
+                    sub_commands::container::publish(args, signer_params, cli.json).await
+                }
+            },
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,
             Commands::Skill(args) => {
                 sub_commands::skill::launch(&args.skill_command, cli.force, cli.json, signer_params)
