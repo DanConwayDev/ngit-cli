@@ -525,7 +525,7 @@ mod tests {
         );
         let publish = command_at_path(&export["command"], &["container", "publish"]);
         assert!(publish["args"].as_array().unwrap().iter().any(|argument| {
-            argument["long"] == "blossom-server" && argument["required"] == true
+            argument["long"] == "blossom-server" && argument["required"] == false
         }));
 
         let root_args = export["command"]["args"].as_array().unwrap();

@@ -5,7 +5,8 @@ use futures::future::join_all;
 use ngit::{
     NgitSigner,
     blossom::{
-        LocalFileRequest, MultiServerUpload, canonicalize_blossom_server_root, snapshot_local_file,
+        LocalFileRequest, MultiServerUpload, blossom_server_list_filter,
+        blossom_server_list_from_events, canonicalize_blossom_server_root, snapshot_local_file,
         upload_snapshot_to_servers,
     },
     client::{Connect, Params, RelayProgressReporter, send_events, sign_draft_event},
@@ -33,7 +34,7 @@ pub async fn publish(
     json_output: bool,
 ) -> Result<()> {
     validate_metadata_args(args)?;
-    let servers = parse_blossom_servers(&args.blossom_servers)?;
+    let explicit_servers = parse_blossom_servers(&args.blossom_servers)?;
     let source = args.source.as_deref().map(parse_source_url).transpose()?;
     let layout = OciLayout::load(&args.layout).with_context(|| {
         format!(
@@ -65,6 +66,11 @@ pub async fn publish(
     );
     let publication_relays = publication_relays(&client, user.relays.write(), &args.relays)?;
     client.nip42_register_publish_relays(publication_relays.clone());
+    let servers = if explicit_servers.is_empty() {
+        discover_blossom_servers(&client, &publication_relays, public_key).await?
+    } else {
+        explicit_servers
+    };
     let existing =
         fetch_current_repository(&client, &publication_relays, public_key, &args.repository)
             .await?;
@@ -270,11 +276,69 @@ fn parse_blossom_servers(values: &[String]) -> Result<Vec<Url>> {
             servers.push(server);
         }
     }
-    ensure!(
-        !servers.is_empty(),
-        "at least one Blossom server is required"
-    );
     Ok(servers)
+}
+
+async fn discover_blossom_servers(
+    client: &Client,
+    relays: &[RelayUrl],
+    author: PublicKey,
+) -> Result<Vec<Url>> {
+    let progress = RelayProgressReporter::hidden();
+    let filters = vec![blossom_server_list_filter(author)];
+    let progress_handle = progress.handle();
+    let results = join_all(relays.iter().cloned().map(|relay| {
+        let filters = filters.clone();
+        let progress = progress_handle.clone();
+        async move {
+            let result = async {
+                let mut relay_results = client
+                    .get_events_per_relay(vec![relay.clone()], filters, progress)
+                    .await
+                    .with_context(|| format!("failed to query Blossom relay {relay}"))?;
+                ensure!(
+                    relay_results.len() == 1,
+                    "relay {relay} did not produce exactly one Blossom query result (got {})",
+                    relay_results.len()
+                );
+                relay_results
+                    .pop()
+                    .context("Blossom relay result disappeared after its length was checked")?
+                    .with_context(|| format!("failed to fetch Blossom events from {relay}"))
+            }
+            .await;
+            (relay, result)
+        }
+    }))
+    .await;
+    progress.finish(
+        results.iter().any(|(_, result)| result.is_err()),
+        results.iter().all(|(_, result)| result.is_err()),
+        None,
+    )?;
+
+    let mut events = Vec::new();
+    let mut failed = Vec::new();
+    for (relay, result) in results {
+        match result {
+            Ok(mut relay_events) => events.append(&mut relay_events),
+            Err(error) => failed.push(format!("{relay}: {error:#}")),
+        }
+    }
+    ensure!(
+        failed.len() < relays.len(),
+        "Blossom server discovery did not complete on any relay: {}; provide --blossom-server or retry",
+        failed.join("; ")
+    );
+    if !failed.is_empty() {
+        eprintln!(
+            "warning: Blossom server discovery was incomplete on: {}",
+            failed.join("; ")
+        );
+    }
+    blossom_server_list_from_events(author, &events)
+        .map(|list| list.servers)
+        .context("failed to discover the publisher's Blossom servers; provide --blossom-server to override discovery")
 }
 
 fn parse_source_url(value: &str) -> Result<Url> {

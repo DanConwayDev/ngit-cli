@@ -64,7 +64,7 @@ may also use the publisher's Blossom server list.
 ```text
 ngit container publish NAME \
   --layout PATH \
-  --blossom-server URL [--blossom-server URL ...] \
+  [--blossom-server URL ...] \
   [--relay URL ...] \
   [--title TEXT] [--description TEXT] [--source URL] [--replace]
 ```
@@ -75,7 +75,7 @@ Global account selectors and `--json` apply normally.
 | --- | --- |
 | `NAME` | required lowercase repository-name component |
 | `--layout PATH` | required OCI image-layout directory |
-| `--blossom-server URL` | required and repeatable; HTTP(S) roots are deduplicated in order |
+| `--blossom-server URL` | optional repeatable override; HTTP(S) roots are deduplicated in order |
 | `--relay URL` | repeatable addition to the active account's write relays |
 | `--title TEXT` | optional non-empty display title |
 | `--description TEXT` | optional non-empty description |
@@ -85,6 +85,12 @@ Global account selectors and `--json` apply normally.
 If neither account write relays nor explicit relays exist, ngit uses its
 configured default relay set. An explicit relay extends rather than replaces
 account write relays.
+
+When no Blossom override is supplied, ngit queries the publication relays for
+the latest kind-10063 server-list event authored by the active publisher and
+uses its ordered `server` tags. At least one relay must complete discovery. A
+missing or invalid latest list fails before upload rather than falling back to
+an older event. An explicit list bypasses this discovery.
 
 ## OCI layout contract
 

@@ -98,11 +98,17 @@ share the same signing identity and repository name.
 
 ## Choosing servers
 
-At least one explicit `--blossom-server` is required. Multiple servers are
-strongly recommended: a missing layer prevents the entire image from running.
-The server must accept `application/octet-stream` uploads as large as the
-image's largest layer. Paid upload negotiation and layer chunking are not
-currently supported.
+An explicit `--blossom-server` list overrides discovery. When it is omitted,
+ngit uses the ordered `server` tags from the latest kind-10063 Blossom server
+list authored by the active publisher. Discovery must complete on at least one
+publication relay and fails before upload when no valid list is found.
+
+Multiple servers are strongly recommended: a missing layer prevents the
+entire image from running. The first server receives each upload and the
+remaining servers mirror it in order. Every selected server is required. A
+server must accept `application/octet-stream` uploads as large as the image's
+largest layer. Paid upload negotiation and layer chunking are not currently
+supported.
 
 `--relay` extends the active account's write relays. When the account has no
 write relays and none are supplied, ngit's configured default relay set is

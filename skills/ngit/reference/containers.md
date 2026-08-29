@@ -47,9 +47,10 @@ Important behavior:
 - `NAME` must be one lowercase OCI repository-name component.
 - Image tags come from `org.opencontainers.image.ref.name` annotations in
   `index.json`; filenames and Git tags are irrelevant.
-- At least one explicit `--blossom-server` is required; two or more are
-  strongly recommended. Every requested upload and mirror must succeed before
-  ngit signs the repository event.
+- Without `--blossom-server`, ngit uses the active publisher's latest
+  kind-10063 Blossom server list. An explicit ordered list overrides discovery.
+  Two or more servers are strongly recommended. Every requested upload and
+  mirror must succeed before ngit signs the repository event.
 - `--relay` extends the account's write relays. Defaults are used only when the
   account has no write relays and no explicit relay is supplied.
 - ngit reads every publication relay before and after uploading. Treat a relay
@@ -62,7 +63,7 @@ Ordinary publication updates tag names found in the new layout while retaining
 older tag names, previous server hints, omitted metadata, and unknown future
 event tags.
 
-`--replace` publishes only the new layout's tags and supplied Blossom servers,
+`--replace` publishes only the new layout's tags and selected Blossom servers,
 drops old description/source and unknown tags when omitted, and sets the title
 to `--title` or `NAME`. Because it can remove published tags and metadata, use
 `--replace` only when the user explicitly wants complete replacement.

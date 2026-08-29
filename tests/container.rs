@@ -5,7 +5,8 @@ use std::{collections::BTreeMap, fs, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
 use ngit::oci::{CONTAINER_REPOSITORY_KIND, OCI_IMAGE_MANIFEST};
-use nostr_sdk::prelude::{Filter, Keys, ToBech32};
+use nostr::event::FinalizeEvent;
+use nostr_sdk::prelude::{Client, Event, EventBuilder, Filter, Keys, Kind, Tag, ToBech32};
 use serde_json::{Value, json};
 use test_harness::{Harness, LocalRelayBuilderNip42};
 use tokio::{
@@ -160,6 +161,72 @@ async fn authenticates_container_preflight_reads_on_publication_relays() -> Resu
 
     let requests = blossom.finish().await?;
     ensure!(requests.len() == expected_blobs.len());
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let (_, expected_blobs) = write_layout(repo.dir())?;
+    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom_root = format!("{}/", blossom.base_url());
+    let relay = harness.relay("default").url().to_string();
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+    let server_list = EventBuilder::new(Kind::Custom(10_063), "")
+        .tags([Tag::parse(["server", blossom.base_url()])?])
+        .finalize(&keys)?;
+    publish_fixture_event(&relay, &server_list).await?;
+
+    let output = repo
+        .ngit([
+            "container",
+            "publish",
+            "discovered-app",
+            "--layout",
+            repo.dir().to_str().context("test path was not UTF-8")?,
+            "--relay",
+            &relay,
+            "--nsec",
+            &nsec,
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to run container publish with Blossom discovery")?;
+    ensure!(
+        output.status.success(),
+        "container publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = blossom.finish().await?;
+    ensure!(requests.len() == expected_blobs.len());
+
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(CONTAINER_REPOSITORY_KIND)
+                .author(keys.public_key())
+                .identifier("discovered-app"),
+        )
+        .await?;
+    let [event] = events.as_slice() else {
+        bail!(
+            "expected one discovered container repository event, found {}",
+            events.len()
+        );
+    };
+    ensure!(event.tags.iter().any(|tag| {
+        matches!(tag.as_slice(), [name, server] if name == "server" && server == &blossom_root)
+    }));
     Ok(())
 }
 
@@ -344,4 +411,20 @@ fn tag_value<'a>(event: &'a nostr_sdk::prelude::Event, name: &str) -> Option<&'a
         [tag_name, value, ..] if tag_name == name => Some(value.as_str()),
         _ => None,
     })
+}
+
+async fn publish_fixture_event(relay: &str, event: &Event) -> Result<()> {
+    let client = Client::default();
+    client.add_relay(relay).await?;
+    client.connect().await;
+    let output = client.send_event(event).to([relay]).await?;
+    client.disconnect().await;
+    ensure!(
+        output.failed.is_empty() && !output.success.is_empty(),
+        "fixture event {} publication had success={:?}, failed={:?}",
+        event.id,
+        output.success,
+        output.failed
+    );
+    Ok(())
 }

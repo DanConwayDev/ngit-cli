@@ -608,8 +608,8 @@ pub struct ContainerPublishArgs {
     /// OCI image-layout directory containing index.json and blobs/sha256
     #[arg(long, value_name = "PATH")]
     pub layout: PathBuf,
-    /// Blossom server which must store every reachable blob (repeatable)
-    #[arg(long = "blossom-server", value_name = "URL", required = true)]
+    /// Override kind-10063 discovery with a Blossom server (repeatable)
+    #[arg(long = "blossom-server", value_name = "URL")]
     pub blossom_servers: Vec<String>,
     /// Extend publication with a relay (repeatable)
     #[arg(long = "relay", value_name = "URL")]
