@@ -13,7 +13,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use bitcoin_hashes::{HashEngine as _, sha256};
 use futures::{StreamExt as _, stream};
 use nostr::prelude::{Event, EventBuilder, EventId, Filter, Kind, PublicKey, Tag, Timestamp};
@@ -215,6 +218,7 @@ struct BlobRequestError {
     kind: RequestFailureKind,
     message: String,
     possible_orphan: bool,
+    status: Option<StatusCode>,
 }
 
 impl BlobRequestError {
@@ -223,6 +227,7 @@ impl BlobRequestError {
             kind: RequestFailureKind::Definite,
             message: format!("{error:#}"),
             possible_orphan,
+            status: None,
         }
     }
 
@@ -231,6 +236,21 @@ impl BlobRequestError {
             kind: RequestFailureKind::Unknown,
             message: format!("{error:#}"),
             possible_orphan,
+            status: None,
+        }
+    }
+
+    fn http(
+        error: anyhow::Error,
+        status: StatusCode,
+        kind: RequestFailureKind,
+        possible_orphan: bool,
+    ) -> Self {
+        Self {
+            kind,
+            message: format!("{error:#}"),
+            possible_orphan,
+            status: Some(status),
         }
     }
 }
@@ -308,6 +328,37 @@ async fn upload_snapshot_with_authorization_inner(
         .map_err(|error| classify_send_error(error, "upload"))?;
 
     read_store_response(response, snapshot, deadline, "upload").await
+}
+
+async fn upload_snapshot_with_compatible_authorization(
+    client: &reqwest::Client,
+    server_url: &str,
+    snapshot: &FileSnapshot,
+    authorization: &CompatibleAuthorization,
+    deadline: tokio::time::Instant,
+) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let primary = upload_snapshot_with_authorization_inner(
+        client,
+        server_url,
+        snapshot,
+        authorization.bud11.clone(),
+        deadline,
+    )
+    .await;
+    if primary
+        .as_ref()
+        .is_err_and(|error| error.status == Some(StatusCode::UNAUTHORIZED))
+    {
+        return upload_snapshot_with_authorization_inner(
+            client,
+            server_url,
+            snapshot,
+            authorization.legacy.clone(),
+            deadline,
+        )
+        .await;
+    }
+    primary
 }
 
 /// Confirm every unique snapshot on every server, uploading only missing
@@ -482,7 +533,7 @@ pub async fn upload_snapshot_batch_to_servers(
                 &blobs,
             ));
         }
-        let authorization = authorization_header(&event).map_err(|error| {
+        let authorization = compatible_authorization_headers(&event).map_err(|error| {
             batch_progress_error(
                 format!("failed to encode Blossom batch authorization: {error:#}"),
                 &blobs,
@@ -499,11 +550,11 @@ pub async fn upload_snapshot_batch_to_servers(
                     (
                         blob_index,
                         server_index,
-                        upload_snapshot_with_authorization_inner(
+                        upload_snapshot_with_compatible_authorization(
                             &client,
                             server.as_str(),
                             snapshot,
-                            authorization,
+                            &authorization,
                             deadline,
                         )
                         .await,
@@ -928,9 +979,9 @@ async fn read_store_response(
         };
         let error = anyhow!("Blossom {operation} returned HTTP {status}: {guidance}{body}");
         return Err(if status.is_server_error() {
-            BlobRequestError::unknown(error, true)
+            BlobRequestError::http(error, status, RequestFailureKind::Unknown, true)
         } else {
-            BlobRequestError::definite(error, false)
+            BlobRequestError::http(error, status, RequestFailureKind::Definite, false)
         });
     }
     let possible_orphan = status == StatusCode::CREATED;
@@ -1119,6 +1170,24 @@ fn authorization_header(event: &Event) -> Result<HeaderValue> {
     // newer Base64url wording (notably blossom.primal.net).
     HeaderValue::from_str(&format!("Nostr {}", STANDARD.encode(event)))
         .context("failed to construct the Blossom Authorization header")
+}
+
+#[derive(Clone, Debug)]
+struct CompatibleAuthorization {
+    bud11: HeaderValue,
+    legacy: HeaderValue,
+}
+
+fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthorization> {
+    let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
+    let header = |encoded: String| {
+        HeaderValue::from_str(&format!("Nostr {encoded}"))
+            .context("failed to construct the Blossom Authorization header")
+    };
+    Ok(CompatibleAuthorization {
+        bud11: header(URL_SAFE_NO_PAD.encode(&event))?,
+        legacy: header(STANDARD.encode(event))?,
+    })
 }
 
 fn blossom_endpoint_url(server_url: &str, endpoint: &str) -> Result<Url> {
@@ -1386,7 +1455,7 @@ mod tests {
     };
 
     use anyhow::{Result, anyhow, bail};
-    use base64::engine::general_purpose::STANDARD;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
     use nostr::prelude::{
         Event, EventBuilder, Keys, Tag,
         event::{FinalizeUnsignedEvent, SignEvent},
@@ -1534,6 +1603,53 @@ mod tests {
         Ok((base_url, task))
     }
 
+    async fn spawn_authorization_fallback_server(
+        sha256: String,
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response_base = base_url.clone();
+        let task = tokio::spawn(async move {
+            let (mut head_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for Blossom presence check")??;
+            let head = read_header_only_request(&mut head_stream).await?;
+            head_stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut primary_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for BUD-11 Blossom upload")??;
+            let primary = read_request(&mut primary_stream).await?;
+            primary_stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut legacy_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for legacy Blossom upload")??;
+            let legacy = read_request(&mut legacy_stream).await?;
+            let body = descriptor_json(&response_base, &sha256, size, &mime_type);
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            legacy_stream.write_all(response.as_bytes()).await?;
+            Ok((head, primary, legacy))
+        });
+        Ok((base_url, task))
+    }
+
     async fn read_request(stream: &mut TcpStream) -> Result<CapturedRequest> {
         let mut bytes = Vec::new();
         let header_end = loop {
@@ -1640,19 +1756,31 @@ mod tests {
     }
 
     #[test]
-    fn authorization_header_uses_padded_standard_base64() -> Result<()> {
+    fn authorization_headers_cover_bud11_and_legacy_base64() -> Result<()> {
         let keys = Keys::generate();
         let event = server_list_event(&keys, 1, "compatibility", []);
         let event_json = serde_json::to_vec(&event)?;
-        let expected = STANDARD.encode(&event_json);
-        let header = authorization_header(&event)?;
-        let encoded = header
+        let headers = compatible_authorization_headers(&event)?;
+        let bud11 = headers
+            .bud11
+            .to_str()?
+            .strip_prefix("Nostr ")
+            .context("authorization header omitted the Nostr scheme")?;
+        let legacy = headers
+            .legacy
             .to_str()?
             .strip_prefix("Nostr ")
             .context("authorization header omitted the Nostr scheme")?;
 
-        assert_eq!(encoded, expected);
-        assert_eq!(STANDARD.decode(encoded)?, event_json);
+        assert_eq!(bud11, URL_SAFE_NO_PAD.encode(&event_json));
+        assert_eq!(legacy, STANDARD.encode(&event_json));
+        assert_eq!(URL_SAFE_NO_PAD.decode(bud11)?, event_json);
+        assert_eq!(STANDARD.decode(legacy)?, event_json);
+        assert_eq!(
+            authorization_header(&event)?,
+            headers.legacy,
+            "release uploads retain their established legacy encoding"
+        );
         Ok(())
     }
 
@@ -1712,6 +1840,48 @@ mod tests {
         assert_eq!(upload.body, b"static site");
         assert!(request_header(&upload.head, "authorization").is_some());
         assert_eq!(result.blobs.len(), 1);
+        assert_eq!(
+            result.blobs[0].servers[0].status,
+            BlossomServerStatus::Stored
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_upload_reuses_one_event_for_legacy_authorization_fallback() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_authorization_fallback_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let result = upload_snapshot_batch_to_servers(
+            std::slice::from_ref(&server_url),
+            &[&snapshot],
+            &signer,
+            1,
+        )
+        .await?;
+        let (_, primary, legacy) = tokio::time::timeout(SERVER_TIMEOUT, server)
+            .await
+            .context("timed out waiting for authorization fallback server")???;
+        let encoded = |request: &CapturedRequest| -> Result<String> {
+            Ok(request_header(&request.head, "authorization")
+                .context("upload omitted authorization")?
+                .strip_prefix("Nostr ")
+                .context("authorization header omitted the Nostr scheme")?
+                .to_owned())
+        };
+        let primary_json = URL_SAFE_NO_PAD.decode(encoded(&primary)?)?;
+        let legacy_json = STANDARD.decode(encoded(&legacy)?)?;
+
+        assert_eq!(primary_json, legacy_json);
         assert_eq!(
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
