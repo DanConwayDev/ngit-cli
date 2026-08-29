@@ -434,6 +434,7 @@ fn blossom_summary(result: &BatchUploadResult) -> Value {
         "stored": stored,
         "already_present": already_present,
         "confirmed_operations": stored + already_present,
+        "blobs": result.blobs,
     })
 }
 
@@ -507,6 +508,10 @@ mod tests {
         };
 
         assert_eq!(blossom_summary(&result)["confirmed_operations"], 1);
+        assert_eq!(
+            blossom_summary(&result)["blobs"][0]["servers"][0]["status"],
+            "already_present"
+        );
     }
 
     #[test]
