@@ -111,6 +111,11 @@ branches, and a skill installer/upgrader.
 - Fix silent mis-targeting of repo-scoped events (`ngit send`, `ngit issue create`, `ngit pr *`, `ngit repo`, etc.) when a repository had multiple `nostr://` remotes with disagreeing coordinates. Previously the resolver iterated a `HashMap` and picked the first key it saw, ignored `nostr.repo`, and printed no diagnostic; the effect was that PRs and issues could be published against the wrong repository coordinate without warning. See the documented priority under "Changed".
 - `ngit merge` run with no argument on a bare `pr/<name>` branch now falls back to matching the branch's tip commit against the published tips of open and draft PRs when the logged-in-author mapping finds zero or several candidates. A maintainer merging a contributor's PR from a hand-made bare branch, and a logged-out user merging their own, now resolve the PR instead of erroring; when several open PRs share both the branch name and the tip commit, merge still asks for an explicit event-id.
 
+## [3.0.0-rc.2] - 2026-08-29
+
+- Second v3 release candidate, fixing the TLS initialization regression in
+  rc.1.
+
 ## [3.0.0-rc.1] - 2026-08-29
 
 - First v3 release candidate for upgrade, compatibility, and cross-platform
