@@ -7,7 +7,7 @@ use bitcoin_hashes::sha256;
 use ngit::oci::{CONTAINER_REPOSITORY_KIND, OCI_IMAGE_MANIFEST};
 use nostr_sdk::prelude::{Filter, Keys, ToBech32};
 use serde_json::{Value, json};
-use test_harness::Harness;
+use test_harness::{Harness, LocalRelayBuilderNip42};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -110,6 +110,56 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
     ensure!(event.tags.iter().any(|tag| {
         matches!(tag.as_slice(), [name, server] if name == "server" && server == &blossom_root)
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn authenticates_container_preflight_reads_on_publication_relays() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay_nip42("auth-read", LocalRelayBuilderNip42::read())
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let (_, expected_blobs) = write_layout(repo.dir())?;
+    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let relay = harness.relay("auth-read").url().to_string();
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32()?;
+
+    let output = repo
+        .ngit([
+            "container",
+            "publish",
+            "auth-app",
+            "--layout",
+            repo.dir().to_str().context("test path was not UTF-8")?,
+            "--blossom-server",
+            blossom.base_url(),
+            "--relay",
+            &relay,
+            "--nsec",
+            &nsec,
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to run container publish against an authenticated relay")?;
+    ensure!(
+        output.status.success(),
+        "container publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value =
+        serde_json::from_slice(&output.stdout).context("container output was not JSON")?;
+    ensure!(result["result"]["relays"][0]["url"] == relay);
+    ensure!(result["result"]["relays"][0]["accepted"] == true);
+
+    let requests = blossom.finish().await?;
+    ensure!(requests.len() == expected_blobs.len());
     Ok(())
 }
 

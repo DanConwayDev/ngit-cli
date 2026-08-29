@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
+use futures::future::join_all;
 use ngit::{
     NgitSigner,
     blossom::{
@@ -63,6 +64,7 @@ pub async fn publish(
         "active signer does not match the loaded Nostr account"
     );
     let publication_relays = publication_relays(&client, user.relays.write(), &args.relays)?;
+    client.nip42_register_publish_relays(publication_relays.clone());
     let existing =
         fetch_current_repository(&client, &publication_relays, public_key, &args.repository)
             .await?;
@@ -322,27 +324,46 @@ async fn fetch_current_repository(
     repository: &str,
 ) -> Result<Option<Event>> {
     let progress = RelayProgressReporter::hidden();
-    let results = client
-        .get_events_per_relay(
-            relays.to_vec(),
-            vec![
-                Filter::new()
-                    .author(author)
-                    .kind(CONTAINER_REPOSITORY_KIND)
-                    .identifier(repository),
-            ],
-            progress.handle(),
-        )
-        .await?;
+    let filters = vec![
+        Filter::new()
+            .author(author)
+            .kind(CONTAINER_REPOSITORY_KIND)
+            .identifier(repository),
+    ];
+    let progress_handle = progress.handle();
+    let results = join_all(relays.iter().cloned().map(|relay| {
+        let filters = filters.clone();
+        let progress = progress_handle.clone();
+        async move {
+            let result = async {
+                let mut relay_results = client
+                    .get_events_per_relay(vec![relay.clone()], filters, progress)
+                    .await
+                    .with_context(|| format!("failed to query container relay {relay}"))?;
+                ensure!(
+                    relay_results.len() == 1,
+                    "relay {relay} did not produce exactly one container query result (got {})",
+                    relay_results.len()
+                );
+                relay_results
+                    .pop()
+                    .context("container relay result disappeared after its length was checked")?
+                    .with_context(|| format!("failed to fetch container events from {relay}"))
+            }
+            .await;
+            (relay, result)
+        }
+    }))
+    .await;
     progress.finish(
-        results.iter().any(Result::is_err),
-        results.iter().all(Result::is_err),
+        results.iter().any(|(_, result)| result.is_err()),
+        results.iter().all(|(_, result)| result.is_err()),
         None,
     )?;
 
     let mut events = Vec::new();
     let mut failed = Vec::new();
-    for (relay, result) in relays.iter().zip(results) {
+    for (relay, result) in results {
         match result {
             Ok(mut relay_events) => events.append(&mut relay_events),
             Err(error) => failed.push(format!("{relay}: {error:#}")),
