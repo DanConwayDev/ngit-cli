@@ -259,6 +259,15 @@ Alice can keep Carol or remove her with a separate ordinary command. The tool
 does not disguise this sequence as a successful removal or generic force
 override.
 
+If Bob authored the kind `30618` event that currently supplies the repository's
+resolved state, the client hands that state to a remaining maintainer before
+removing him. It publishes and verifies a semantically equivalent state event
+signed by the maintainer running the removal, ordered after every state
+candidate used by the preview, and only then closes Bob's assignment. If it
+cannot reproduce, order, or verify the same complete state, removal fails. This
+keeps present-role resolution stable without requiring clients to authorize a
+former maintainer's event after removal.
+
 Once the removal is observed, other co-maintainers are shown `ngit repo
 follow-lead` to record Bob's end time. Their deferred history copies never delay
 the current removal. Bob sees a repository-health error explaining that the lead
@@ -1051,6 +1060,31 @@ one tag action rather than as two changes the user must decipher.
 Ordinary success requires that graph effects match the command's name and no
 conflicting state is selected. Human errors and JSON output expose exact npubs,
 refs, and coordinates.
+
+### Removal hands resolved state to a remaining maintainer
+
+Repository state is resolved through the current confirmed component; an event
+does not remain eligible merely because its author was a maintainer when it was
+published. A removal must nevertheless preserve state that was valid before
+the membership change. If the removed maintainer authored the event supplying
+the pre-removal resolved state, the command runner publishes a semantically
+equivalent kind `30618` event before publishing the membership replacement.
+
+The handoff event contains the same default branch and complete ref/OID map,
+orders after every candidate state event used by the preview, and is signed by
+a maintainer who remains confirmed after the removal. The client uploads or
+verifies every referenced object, publishes the event to the repository
+relays, observes successful relay acceptance, then rechecks the membership and
+state frontier before closing the assignment. Failure at any stage leaves the
+membership unchanged. Publishing an equivalent handoff is not a `--force`
+state choice and cannot conceal a ref, default-branch, identity, or object
+availability difference.
+
+After the removal, present-role clients and clients rebuilding from cache can
+ignore the former maintainer's state while resolving the same repository
+snapshot through the remaining signer. If a remaining maintainer already
+authored the event supplying the post-removal resolved state, no handoff event
+is needed.
 
 ### Confirmation can activate pre-existing state
 
@@ -1869,7 +1903,11 @@ The implementation and tests must make these statements true:
     other confirmed maintainer actively assigns them, even while their old
     self-`m` and lead `M` remain active. Their commands report the removal and
     direct `repo follow-lead` to end the self-role while preserving the
-    redirect. A later invitation requires a new self-role start.
+    redirect. Until they do, that active acceptance makes a later add
+    immediately confirming; after they end the self-role, a later invitation
+    requires a new active start. If their kind `30618` event supplies resolved
+    state, the removing maintainer first publishes and verifies an equivalent,
+    later state event so removal does not change the repository snapshot.
 14. Removing one maintainer fails if that person remains confirmed through a
     different real relationship or the graph loses anyone else. An active
     third-party `m` names its author and directs the lead to cover its subject,
