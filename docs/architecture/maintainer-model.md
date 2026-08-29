@@ -763,10 +763,13 @@ For the normal lead-shaped topology:
 5. A candidate whom a confirmed maintainer lists without that signed
    reciprocal listing remains invited. A numeric self-role end is an explicit
    departure and takes precedence over every assignment.
-6. When an assigning maintainer closes and later restarts a candidate's
-   assignment, the new interval is a new invitation. An acknowledgement of the
-   earlier interval cannot accept it; the candidate must append the new start
-   to their active self-`m`.
+6. Closing an assignment removes the candidate as soon as no confirmed
+   maintainer actively lists them. The candidate is expected to acknowledge
+   that removal by ending their active self-role. Until they do, their valid,
+   active reciprocal listing remains standing pre-acceptance: restarting the
+   assignment confirms them immediately without a new candidate event. If the
+   candidate has ended their self-role, the restarted assignment is instead a
+   new invitation and they must append a new active start to accept it.
 
 This remains reciprocal: a confirmed maintainer assigns the role and the
 candidate signs an active acknowledgement bound to that repository. A
@@ -1584,9 +1587,15 @@ Bob is prompted to run `ngit repo follow-lead`, producing:
 
 Every repository command Carol runs reports that Alice no longer assigns her
 and directs her to `ngit repo follow-lead`. Pushes and other maintainer-only
-operations fail. Following ends Carol's self-role, replaces a copied `defer`
-with a numeric end when the lead supplies one, retains other still-current
-third-party records as `defer`, and keeps Alice as an active redirect:
+operations fail. Until Carol follows that guidance, her active self-role does
+not preserve authority without Alice's assignment, but it remains standing
+pre-acceptance. If Alice re-adds Carol during that interval, the two active
+edges become reciprocal again and Carol is confirmed immediately without
+publishing another event.
+
+Following ends Carol's self-role, replaces a copied `defer` with a numeric end
+when the lead supplies one, retains other still-current third-party records as
+`defer`, and keeps Alice as an active redirect:
 
 ```text
 ["M", "<alice-pubkey>", "T2"]
@@ -1596,9 +1605,10 @@ third-party records as `defer`, and keeps Alice as an active redirect:
 ```
 
 The active `M` lets `nostr://<carol>/<identifier>` continue forwarding to
-Alice, but the ended self-`m` means Carol is not a maintainer. If Alice later
-invites Carol again, the old acceptance cannot confirm the new assignment.
-Carol must accept again by appending the new start, here `T5`:
+Alice, but the ended self-`m` means Carol is not a maintainer. Because Carol
+acknowledged the removal by ending that self-role, if Alice later invites Carol
+again the ended acceptance cannot confirm the new assignment. Carol must
+accept again by appending the new start, here `T5`:
 
 ```text
 ["M", "<alice-pubkey>", "T2"]
@@ -1607,8 +1617,9 @@ Carol must accept again by appending the new start, here `T5`:
 ["maintainers", "<alice-pubkey>", "<carol-pubkey>"]
 ```
 
-This binds consent to a specific assignment interval rather than letting an
-old acknowledgement immediately reinstate somebody.
+Acknowledging removal therefore withdraws standing consent for a later
+assignment. Conversely, a candidate who does not acknowledge removal retains
+their active acceptance and is immediately confirmed if assigned again.
 
 #### A removed maintainer abandons or forks the redirect
 
@@ -1880,7 +1891,9 @@ The implementation and tests must make these statements true:
 18. Add resolves the named pubkey's complete reachable component, history, and
     state before publishing an edge. A pre-existing reciprocal acknowledgement
     makes the add an immediate confirmation and receives the same preflight as
-    explicit acceptance.
+    explicit acceptance. This includes a removed maintainer who has not yet
+    ended their active self-role; after they acknowledge removal by ending it,
+    a later add remains an invitation until they accept again.
 19. Accept compares the invitee's existing announcement, earliest unique
     commit, `u` relationships, history, component, refs, and every state event
     reachable through active third-party relationships, as well as the
