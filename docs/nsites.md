@@ -39,9 +39,11 @@ Available metadata is:
 - `--source URL`, accepting `https://` archives/repositories and `nostr://`
   repositories.
 
-When `--source` is absent, ngit records the selected repository's canonical
-`nostr://` URL. Metadata, server hints, every path mapping, and the recommended
-aggregate `x` tag are included in the manifest.
+When `--source` is absent, ngit records a public selected repository's
+canonical `nostr://` URL. It omits the inferred source for a private repository
+so the public manifest cannot disclose that repository. An explicit HTTPS
+source cannot contain embedded credentials. Metadata, server hints, every path
+mapping, and the recommended aggregate `x` tag are included in the manifest.
 
 NIP-5A does not define a logo metadata tag. Include a conventional asset such
 as `/favicon.ico` or `/favicon.svg` in the build directory; it is published in
@@ -57,30 +59,44 @@ The positional directory is resolved from the process's current working
 directory. Pass the build output itself: `ngit nsite` does not run a framework
 build, interpret ignore files, or scan a repository for publishable files.
 
-Every regular file beneath the directory is included. Paths must be UTF-8.
+Every regular file beneath the directory is included. Paths must be UTF-8 and
+end in a filename extension as required by NIP-5A. Control characters and URL
+delimiters which would make path or aggregate parsing ambiguous are rejected.
 Symlinks and other non-regular entries are rejected rather than followed, so a
 site cannot accidentally depend on files outside the declared build output.
 Each file is copied into an immutable temporary snapshot before network work;
 the manifest hash and uploaded bytes therefore cannot diverge if the original
-build directory changes during publication.
+build directory changes during publication. Common web extensions such as
+HTML, CSS, JavaScript, images, WebAssembly, and fonts determine the Blossom
+MIME metadata.
 
 ## Upload and signing behavior
 
 Before uploading, ngit sends bounded parallel `HEAD /<sha256>` checks to every
-selected Blossom server. Only missing blobs are uploaded, but every unique blob
-must be confirmed on every server before the manifest is signed.
+selected Blossom server. A present response must report the snapshot's exact
+content length and MIME type. BUD-01 `307` and `308` redirects are followed
+only when each target retains the requested hash. Only missing blobs are
+uploaded, but every unique blob must be confirmed on every server before the
+manifest is signed.
 
 Missing hashes are grouped into BUD-11 kind-24242 authorization events of up
 to twenty hashes each. Each authorization is scoped to the selected server
-domains and reused across those servers. A deployment with hundreds of files
-therefore does not require one remote-signer approval per file. Duplicate file
-contents are uploaded once while retaining every path in the manifest.
+domains and reused across those servers. A batch is authorized only when its
+bounded upload work is ready to begin, and its expiration covers both remote
+signer latency and the maximum queued request window. A deployment with
+hundreds of files therefore does not require one remote-signer approval per
+file. Duplicate file contents are uploaded once while retaining every path in
+the manifest; identical bytes inferred as different MIME types are rejected
+because Blossom stores one MIME type per hash.
 
 Ngit queries the exact current manifest before uploads and checks it again
 afterwards. If another publisher changed the site, ngit leaves the
 content-addressed blobs in place and refuses to sign over the concurrent
 manifest. Relay publication succeeds when at least one selected relay
 acknowledges the signed event; per-relay outcomes are returned in JSON.
+Nsite manifests are account-scoped public events: private-repository and
+repository-only routing never suppresses account write relays, and private
+repository relays are excluded unless repeated explicitly with `--relay`.
 
 NIP-5A manifests can exceed the historical 65 KiB NIP-44 boundary. Ngit uses
 rust-nostr's extended NIP-44 length-prefix implementation so large manifests

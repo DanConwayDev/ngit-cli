@@ -4145,6 +4145,7 @@ pub async fn send_events(
         client,
         git_repo_path,
         git_repo_path,
+        true,
         events,
         my_write_relays,
         repo_read_relays,
@@ -4175,9 +4176,40 @@ pub async fn send_events_without_caching(
         client,
         None,
         git_repo_path,
+        true,
         events,
         my_write_relays,
         repo_read_relays,
+        animate,
+        silent,
+    )
+    .await
+}
+
+/// Publish account-scoped public events without applying private-repository or
+/// `nostr.repo-relay-only` routing from the current Git repository.
+///
+/// Successful events may still be cached in that repository when
+/// `git_repo_path` is present; the path has no effect on relay selection.
+#[allow(clippy::module_name_repetitions)]
+pub async fn send_public_events(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<nostr::prelude::Event>,
+    my_write_relays: Vec<String>,
+    additional_relays: Vec<RelayUrl>,
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
+    send_events_with_cache_path(
+        client,
+        git_repo_path,
+        None,
+        false,
+        events,
+        my_write_relays,
+        additional_relays,
         animate,
         silent,
     )
@@ -4196,23 +4228,27 @@ async fn send_events_with_cache_path(
     #[cfg(not(test))] client: &Client,
     cache_path: Option<&Path>,
     config_repo_path: Option<&Path>,
+    repository_scoped: bool,
     events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
-    let locally_private = config_repo_path.is_some_and(|path| {
-        git2::Repository::open(path)
-            .ok()
-            .and_then(|repo| repo.config().ok())
-            .and_then(|config| config.get_bool("nostr.private").ok())
-            .unwrap_or(false)
-    });
-    let private_repository =
-        private_for_publication(config_repo_path, &events, locally_private).await;
-    let repo_relay_only = private_repository
-        || std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
+    let locally_private = repository_scoped
+        && config_repo_path.is_some_and(|path| {
+            git2::Repository::open(path)
+                .ok()
+                .and_then(|repo| repo.config().ok())
+                .and_then(|config| config.get_bool("nostr.private").ok())
+                .unwrap_or(false)
+        });
+    let private_repository = if repository_scoped {
+        private_for_publication(config_repo_path, &events, locally_private).await
+    } else {
+        false
+    };
+    let repository_only_requested = std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
         || config_repo_path.is_some_and(|path| {
             git2::Repository::open(path)
                 .ok()
@@ -4220,6 +4256,11 @@ async fn send_events_with_cache_path(
                 .and_then(|config| config.get_bool("nostr.repo-relay-only").ok())
                 .unwrap_or(false)
         });
+    let repo_relay_only = repository_only_routing(
+        repository_scoped,
+        private_repository,
+        repository_only_requested,
+    );
 
     if repo_relay_only && repo_read_relays.is_empty() {
         bail!("repository-only publication requires at least one repository relay")
@@ -4441,6 +4482,14 @@ async fn send_events_with_cache_path(
     )?;
 
     Ok(relay_results)
+}
+
+fn repository_only_routing(
+    repository_scoped: bool,
+    private_repository: bool,
+    repository_only_requested: bool,
+) -> bool {
+    repository_scoped && (private_repository || repository_only_requested)
 }
 
 /// Builds a human-readable description of what is being published, e.g.
@@ -5098,6 +5147,14 @@ mod private_repository_tests {
     fn signed(keys: &Keys, builder: EventBuilder) -> Event {
         keys.sign_event(builder.finalize_unsigned(keys.public_key()))
             .unwrap()
+    }
+
+    #[test]
+    fn account_scoped_publication_ignores_repository_only_routing() {
+        assert!(!repository_only_routing(false, true, true));
+        assert!(repository_only_routing(true, true, false));
+        assert!(repository_only_routing(true, false, true));
+        assert!(!repository_only_routing(true, false, false));
     }
 
     #[tokio::test]

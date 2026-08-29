@@ -7,14 +7,14 @@ use ngit::{
         blossom_server_list_from_events, canonicalize_blossom_server_root,
         upload_snapshot_batch_to_servers,
     },
-    client::{send_events, sign_event},
+    client::{send_public_events, sign_event},
     event_ordering::latest_event,
     nsite::{
         NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, manifest_event_builder,
         snapshot_nsite_directory, unique_blob_snapshots, validate_named_site_identifier,
     },
 };
-use nostr::prelude::{Event, Filter, PublicKey, ToBech32 as _, Url};
+use nostr::prelude::{Event, Filter, PublicKey, ToBech32 as _, Url, nip19::Nip19Event};
 use serde_json::{Value, json};
 
 use super::release::support::{
@@ -115,14 +115,14 @@ async fn publish(
     let previous = load_current_manifest(&mut context, author, args.identifier.as_deref()).await?;
 
     let files = snapshot_nsite_directory(&args.directory).await?;
-    let blobs = unique_blob_snapshots(&files);
+    let blobs = unique_blob_snapshots(&files)?;
     let source = args.source.clone().or_else(|| {
-        Some(
+        (!context.repo_ref.private).then(|| {
             context
                 .repo_ref
                 .to_nostr_git_url(&Some(&context.git_repo))
-                .to_string(),
-        )
+                .to_string()
+        })
     });
     let manifest_input = NsiteManifestInput {
         identifier: args.identifier.clone(),
@@ -176,7 +176,7 @@ async fn publish(
         "coordinate": coordinate,
         "kind": event.kind.as_u16(),
         "event_id": event.id.to_hex(),
-        "event_id_bech32": event.id.to_bech32().ok(),
+        "event_id_bech32": event_id_bech32(&event),
         "author": author.to_hex(),
         "author_npub": npub,
         "identifier": args.identifier,
@@ -313,13 +313,18 @@ async fn publish_manifest(
     event: &Event,
     json_output: bool,
 ) -> Result<Value> {
-    let (user_write, repo_relays) = context.publication_relays();
-    let results = send_events(
+    let (user_write, repository_relays) = context.publication_relays();
+    let additional_relays = manifest_additional_relays(
+        context.repo_ref.private,
+        repository_relays,
+        &context.explicit_relays,
+    );
+    let results = send_public_events(
         &context.client,
         Some(context.git_repo_path()?),
         vec![event.clone()],
         user_write,
-        repo_relays,
+        additional_relays,
         !json_output,
         json_output,
     )
@@ -344,6 +349,26 @@ async fn publish_manifest(
         ));
     }
     Ok(json!({ "relays": values }))
+}
+
+fn manifest_additional_relays(
+    private_repository: bool,
+    repository_relays: Vec<nostr::prelude::RelayUrl>,
+    explicit_relays: &[nostr::prelude::RelayUrl],
+) -> Vec<nostr::prelude::RelayUrl> {
+    if private_repository {
+        explicit_relays.to_vec()
+    } else {
+        repository_relays
+    }
+}
+
+fn event_id_bech32(event: &Event) -> Option<String> {
+    Nip19Event::new(event.id)
+        .author(event.pubkey)
+        .kind(event.kind)
+        .to_bech32()
+        .ok()
 }
 
 fn manifest_coordinate(author: PublicKey, identifier: Option<&str>) -> String {
@@ -379,6 +404,10 @@ fn blossom_summary(result: &BatchUploadResult) -> Value {
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
+    use nostr::prelude::{
+        EventBuilder, Keys, RelayUrl,
+        event::{FinalizeUnsignedEvent as _, SignEvent as _},
+    };
 
     use super::*;
     use crate::cli::{Cli, Commands};
@@ -425,5 +454,34 @@ mod tests {
         };
 
         assert_eq!(blossom_summary(&result)["confirmed_operations"], 1);
+    }
+
+    #[test]
+    fn private_repositories_do_not_route_public_manifests_to_repo_relays() {
+        let private = RelayUrl::parse("wss://private.example").unwrap();
+        let explicit = RelayUrl::parse("wss://public.example").unwrap();
+
+        assert_eq!(
+            manifest_additional_relays(
+                true,
+                vec![private.clone()],
+                std::slice::from_ref(&explicit),
+            ),
+            vec![explicit.clone()]
+        );
+        assert_eq!(
+            manifest_additional_relays(false, vec![private.clone()], &[explicit]),
+            vec![private]
+        );
+    }
+
+    #[test]
+    fn json_event_identifier_is_contextual_nevent() {
+        let keys = Keys::generate();
+        let event = keys
+            .sign_event(EventBuilder::new(NSITE_ROOT_KIND, "").finalize_unsigned(keys.public_key()))
+            .unwrap();
+
+        assert!(event_id_bech32(&event).unwrap().starts_with("nevent1"));
     }
 }

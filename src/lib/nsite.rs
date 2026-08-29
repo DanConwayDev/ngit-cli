@@ -1,7 +1,7 @@
 //! NIP-5A static-site manifests and immutable directory snapshots.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -55,15 +55,30 @@ pub async fn snapshot_nsite_directory(root: &Path) -> Result<Vec<NsiteFileSnapsh
 }
 
 /// Return one representative snapshot for each content hash.
-pub fn unique_blob_snapshots(files: &[NsiteFileSnapshot]) -> Vec<&FileSnapshot> {
-    let mut seen = HashSet::new();
-    files
-        .iter()
-        .filter_map(|file| {
-            seen.insert(file.snapshot.sha256.clone())
-                .then_some(&file.snapshot)
-        })
-        .collect()
+///
+/// Blossom stores MIME metadata against the content hash, so the same bytes
+/// cannot safely back paths which require different MIME types.
+pub fn unique_blob_snapshots(files: &[NsiteFileSnapshot]) -> Result<Vec<&FileSnapshot>> {
+    let mut seen = HashMap::new();
+    let mut unique = Vec::new();
+    for file in files {
+        if let Some((existing_path, existing_mime)) = seen.get(file.snapshot.sha256.as_str()) {
+            if *existing_mime != file.snapshot.mime_type {
+                bail!(
+                    "nsite paths {existing_path} and {} contain identical bytes but require different MIME types ({existing_mime} and {})",
+                    file.path,
+                    file.snapshot.mime_type
+                );
+            }
+        } else {
+            seen.insert(
+                file.snapshot.sha256.as_str(),
+                (file.path.as_str(), file.snapshot.mime_type.as_str()),
+            );
+            unique.push(&file.snapshot);
+        }
+    }
+    Ok(unique)
 }
 
 /// Compute the order-independent aggregate hash required by NIP-5A.
@@ -190,16 +205,30 @@ fn public_site_path(relative: &Path) -> Result<String> {
                 let value = value
                     .to_str()
                     .ok_or_else(|| anyhow!("nsite paths must be valid UTF-8"))?;
-                if value.is_empty() || value.contains(['/', '\\', '\0']) {
+                if value.is_empty()
+                    || value.contains(['/', '\\', '?', '#', '%'])
+                    || value.chars().any(char::is_control)
+                {
                     bail!("nsite path contains an unsafe component");
                 }
-                parts.push(value);
+                parts.push(value.to_owned());
             }
             _ => bail!("nsite path contains a non-normal component"),
         }
     }
     if parts.is_empty() {
         bail!("nsite file path must not be empty");
+    }
+    let filename = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("nsite file path must end with a valid UTF-8 filename")?;
+    if Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_none_or(str::is_empty)
+    {
+        bail!("nsite file paths must end with a filename extension");
     }
     Ok(format!("/{}", parts.join("/")))
 }
@@ -215,6 +244,11 @@ fn validate_manifest_input(input: &NsiteManifestInput) -> Result<()> {
         let source_url = Url::parse(source).context("nsite source must be an absolute URL")?;
         if !matches!(source_url.scheme(), "https" | "nostr") {
             bail!("nsite source must use the https or nostr scheme");
+        }
+        if source_url.scheme() == "https"
+            && (!source_url.username().is_empty() || source_url.password().is_some())
+        {
+            bail!("nsite HTTPS source must not contain embedded credentials");
         }
     }
     Ok(())
@@ -298,6 +332,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_one_hash_with_conflicting_mime_types() -> Result<()> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("app.js"), b"")?;
+        fs::write(directory.path().join("style.css"), b"")?;
+        let files = snapshot_nsite_directory(directory.path()).await?;
+
+        let error = unique_blob_snapshots(&files).unwrap_err().to_string();
+
+        assert!(error.contains("identical bytes"));
+        assert!(error.contains("different MIME types"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deduplicates_one_hash_with_the_same_mime_type() -> Result<()> {
+        let directory = tempdir()?;
+        fs::write(directory.path().join("app.js"), b"")?;
+        fs::write(directory.path().join("vendor.js"), b"")?;
+        let files = snapshot_nsite_directory(directory.path()).await?;
+
+        assert_eq!(unique_blob_snapshots(&files)?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_paths_and_requires_extensions() -> Result<()> {
+        let unsafe_directory = tempdir()?;
+        fs::write(unsafe_directory.path().join("bad\nname.html"), b"hello")?;
+        let error = snapshot_nsite_directory(unsafe_directory.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsafe component"));
+
+        let extensionless_directory = tempdir()?;
+        fs::write(extensionless_directory.path().join("CNAME"), b"example.com")?;
+        let error = snapshot_nsite_directory(extensionless_directory.path())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("filename extension"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builder_emits_named_manifest_metadata_and_aggregate() -> Result<()> {
         let directory = tempdir()?;
         let mut index = fs::File::create(directory.path().join("index.html"))?;
@@ -360,5 +439,20 @@ mod tests {
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_https_source_credentials_without_rejecting_nostr_names() {
+        let with_credentials = NsiteManifestInput {
+            source: Some("https://user:secret@example.com/repo".to_owned()),
+            ..NsiteManifestInput::default()
+        };
+        assert!(validate_manifest_input(&with_credentials).is_err());
+
+        let nip05_source = NsiteManifestInput {
+            source: Some("nostr://dan@example.com/repo".to_owned()),
+            ..NsiteManifestInput::default()
+        };
+        validate_manifest_input(&nip05_source).unwrap();
     }
 }
