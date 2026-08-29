@@ -77,6 +77,9 @@ model, plaintext migration, and how to opt out.
 See [publishing releases](docs/releases.md) for local files, release manifests,
 multi-platform assets, and ngit-ci artifact workflows.
 
+See [publishing static sites](docs/nsites.md) for deploying an already-built
+directory with `ngit nsite publish` through Blossom and NIP-5A.
+
 ## contributions welcome!
 
 [gitworkshop.dev/danconwaydev.com/ngit](https://gitworkshop.dev/danconwaydev.com/ngit) to report issues and see PRs

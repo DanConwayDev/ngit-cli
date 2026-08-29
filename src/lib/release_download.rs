@@ -734,21 +734,46 @@ pub fn mime_type_from_filename(filename: &str) -> Option<&'static str> {
     match extension {
         "apk" => Some("application/vnd.android.package-archive"),
         "appimage" => Some("application/vnd.appimage"),
+        "avif" => Some("image/avif"),
         "bz2" => Some("application/x-bzip2"),
+        "css" => Some("text/css"),
+        "csv" => Some("text/csv"),
         "deb" => Some("application/vnd.debian.binary-package"),
         "dmg" => Some("application/x-apple-diskimage"),
+        "eot" => Some("application/vnd.ms-fontobject"),
         "exe" => Some("application/vnd.microsoft.portable-executable"),
         "flatpak" => Some("application/vnd.flatpak"),
+        "gif" => Some("image/gif"),
         "gz" | "tgz" => Some("application/gzip"),
+        "htm" | "html" => Some("text/html"),
+        "ico" => Some("image/vnd.microsoft.icon"),
         "jar" => Some("application/java-archive"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "js" | "mjs" => Some("text/javascript"),
         "json" => Some("application/json"),
+        "map" => Some("application/json"),
+        "mp3" => Some("audio/mpeg"),
+        "mp4" => Some("video/mp4"),
         "msi" => Some("application/x-msi"),
+        "ogg" => Some("audio/ogg"),
+        "ogv" => Some("video/ogg"),
+        "otf" => Some("font/otf"),
+        "pdf" => Some("application/pdf"),
         "pkg" => Some("application/vnd.apple.installer+xml"),
+        "png" => Some("image/png"),
         "rpm" => Some("application/x-rpm"),
         "snap" => Some("application/vnd.snap"),
+        "svg" => Some("image/svg+xml"),
         "tar" => Some("application/x-tar"),
         "txt" => Some("text/plain"),
+        "ttf" => Some("font/ttf"),
         "wasm" => Some("application/wasm"),
+        "webm" => Some("video/webm"),
+        "webmanifest" => Some("application/manifest+json"),
+        "webp" => Some("image/webp"),
+        "woff" => Some("font/woff"),
+        "woff2" => Some("font/woff2"),
+        "xml" => Some("application/xml"),
         "xz" => Some("application/x-xz"),
         "zip" => Some("application/zip"),
         "zst" => Some("application/zstd"),
@@ -932,6 +957,20 @@ mod tests {
         assert!(infer_mime_type(Some("not a mime"), None, "asset.bin").is_err());
         assert!(infer_mime_type(Some("a/b/c"), None, "asset.bin").is_err());
         assert!(infer_mime_type(Some("*/*"), None, "asset.bin").is_err());
+    }
+
+    #[test]
+    fn infers_common_static_site_mime_types() {
+        for (filename, expected) in [
+            ("index.html", "text/html"),
+            ("app.js", "text/javascript"),
+            ("style.css", "text/css"),
+            ("logo.svg", "image/svg+xml"),
+            ("font.woff2", "font/woff2"),
+            ("site.webmanifest", "application/manifest+json"),
+        ] {
+            assert_eq!(mime_type_from_filename(filename), Some(expected));
+        }
     }
 
     #[tokio::test]
