@@ -1,4 +1,4 @@
-//! Blossom transport support for software release assets.
+//! Blossom transport support shared by releases, containers, and nsites.
 //!
 //! Local files are copied into a private temporary file before an upload is
 //! attempted. The snapshot makes the hash, size, and bytes sent to a Blossom
@@ -44,9 +44,9 @@ const AUTHORIZATION_SIGNING_ALLOWANCE: Duration = Duration::from_secs(2 * 60 * 6
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const NSITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-const NSITE_MAX_ATTEMPTS: usize = 3;
-const NSITE_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const PLACEMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const PLACEMENT_MAX_ATTEMPTS: usize = 3;
+const PLACEMENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_PRESENCE_REDIRECTS: usize = 5;
@@ -148,7 +148,7 @@ pub struct BlossomServerOutcome {
     pub message: Option<String>,
 }
 
-/// A blob which a failed workflow may have stored without publishing a release.
+/// A blob which a failed workflow may have stored without publishing its event.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PossibleOrphanBlob {
     pub server: Url,
@@ -156,11 +156,13 @@ pub struct PossibleOrphanBlob {
     pub url: Option<Url>,
 }
 
-/// Successful result of uploading once and mirroring to every remaining server.
+/// Successful result of confirming one blob on every selected server.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MultiServerUpload {
-    /// The first server's descriptor; this URL is suitable for a NIP-82 `url`
-    /// tag.
+    /// A descriptor for the first server, whose URL is suitable for a NIP-82
+    /// `url` tag. When a strict HEAD proves the blob was already present, ngit
+    /// synthesizes this descriptor from the verified metadata and uses
+    /// `uploaded: 0` because HEAD does not expose the original upload time.
     pub primary: BlobDescriptor,
     pub servers: Vec<BlossomServerOutcome>,
 }
@@ -387,15 +389,15 @@ enum BatchStoreConfirmation {
     Presence,
 }
 
-async fn upload_snapshot_for_nsite(
+async fn upload_snapshot_with_confirmation(
     client: &reqwest::Client,
     server: &Url,
     snapshot: &FileSnapshot,
     authorization: &CompatibleAuthorization,
 ) -> std::result::Result<BatchStoreConfirmation, BlobRequestError> {
     let mut last_error = None;
-    for attempt in 0..NSITE_MAX_ATTEMPTS {
-        let deadline = tokio::time::Instant::now() + NSITE_REQUEST_TIMEOUT;
+    for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
+        let deadline = tokio::time::Instant::now() + PLACEMENT_REQUEST_TIMEOUT;
         match upload_snapshot_with_compatible_authorization(
             client,
             server.as_str(),
@@ -442,8 +444,8 @@ async fn upload_snapshot_for_nsite(
             }
         }
 
-        if attempt + 1 < NSITE_MAX_ATTEMPTS {
-            tokio::time::sleep(nsite_retry_delay(attempt)).await;
+        if attempt + 1 < PLACEMENT_MAX_ATTEMPTS {
+            tokio::time::sleep(placement_retry_delay(attempt)).await;
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -641,7 +643,13 @@ pub async fn upload_snapshot_batch_to_servers(
                     (
                         blob_index,
                         server_index,
-                        upload_snapshot_for_nsite(&client, server, snapshot, &authorization).await,
+                        upload_snapshot_with_confirmation(
+                            &client,
+                            server,
+                            snapshot,
+                            &authorization,
+                        )
+                        .await,
                     )
                 }
             })
@@ -686,7 +694,7 @@ pub async fn upload_snapshot_batch_to_servers(
         let mut possible_orphan_blobs = stored_batch_blobs(&blobs);
         possible_orphan_blobs.extend(uncertain);
         return Err(BatchUploadError {
-            message: "one or more Blossom uploads failed; the nsite manifest was not signed"
+            message: "one or more Blossom uploads failed; no publication event was signed"
                 .to_owned(),
             blobs,
             possible_orphan_blobs,
@@ -711,14 +719,14 @@ fn batch_upload_window(operation_count: usize, concurrency: usize) -> Result<Dur
     let waves = operation_count.div_ceil(concurrency);
     let waves = u64::try_from(waves).context("Blossom upload wave count does not fit in u64")?;
     let attempts =
-        u32::try_from(NSITE_MAX_ATTEMPTS).context("Blossom retry count does not fit in u32")?;
+        u32::try_from(PLACEMENT_MAX_ATTEMPTS).context("Blossom retry count does not fit in u32")?;
     // Each upload attempt has one PUT window followed by up to `attempts`
     // verification HEAD windows. Keep the authorization valid for every
     // bounded operation even though normal successful uploads use only two.
     let request_windows = attempts
         .checked_mul(attempts.saturating_add(1))
         .context("Blossom upload request window count overflowed")?;
-    let operation_window = NSITE_REQUEST_TIMEOUT
+    let operation_window = PLACEMENT_REQUEST_TIMEOUT
         .checked_mul(request_windows)
         .context("Blossom upload operation window overflowed")?;
     operation_window
@@ -726,11 +734,11 @@ fn batch_upload_window(operation_count: usize, concurrency: usize) -> Result<Dur
         .context("Blossom upload window overflowed")
 }
 
-fn nsite_retry_delay(attempt: usize) -> Duration {
+fn placement_retry_delay(attempt: usize) -> Duration {
     let multiplier = 1_u32.checked_shl(attempt.try_into().unwrap_or(u32::MAX));
     multiplier
-        .and_then(|multiplier| NSITE_RETRY_BASE_DELAY.checked_mul(multiplier))
-        .unwrap_or(NSITE_RETRY_BASE_DELAY)
+        .and_then(|multiplier| PLACEMENT_RETRY_BASE_DELAY.checked_mul(multiplier))
+        .unwrap_or(PLACEMENT_RETRY_BASE_DELAY)
 }
 
 fn stored_batch_blobs(blobs: &[BatchBlobUploadOutcome]) -> Vec<PossibleOrphanBlob> {
@@ -765,7 +773,7 @@ async fn snapshot_is_present(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
-    snapshot_is_present_once(client, server, snapshot, NSITE_REQUEST_TIMEOUT).await
+    snapshot_is_present_once(client, server, snapshot, PLACEMENT_REQUEST_TIMEOUT).await
 }
 
 async fn snapshot_is_present_with_retry(
@@ -774,14 +782,14 @@ async fn snapshot_is_present_with_retry(
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
     let mut last_error = None;
-    for attempt in 0..NSITE_MAX_ATTEMPTS {
+    for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
         match snapshot_is_present(client, server, snapshot).await {
             Ok(present) => return Ok(present),
             Err(error) if error.retryable => last_error = Some(error),
             Err(error) => return Err(error),
         }
-        if attempt + 1 < NSITE_MAX_ATTEMPTS {
-            tokio::time::sleep(nsite_retry_delay(attempt)).await;
+        if attempt + 1 < PLACEMENT_MAX_ATTEMPTS {
+            tokio::time::sleep(placement_retry_delay(attempt)).await;
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -900,7 +908,80 @@ fn presence_redirect_url(response: &reqwest::Response, sha256: &str) -> Result<U
     Ok(redirect)
 }
 
+/// Confirm one snapshot on every selected server using the shared placement
+/// engine.
+///
+/// All servers are checked with strict BUD-01 metadata before the signer is
+/// invoked. Missing copies use batched BUD-11-compatible authorization,
+/// bounded concurrency and retries, and post-upload HEAD verification. The
+/// result retains one outcome per selected server in caller-provided order.
+pub async fn confirm_snapshot_on_servers(
+    servers: &[Url],
+    snapshot: &FileSnapshot,
+    signer: &NgitSigner,
+) -> std::result::Result<MultiServerUpload, MultiServerUploadError> {
+    let batch =
+        upload_snapshot_batch_to_servers(servers, &[snapshot], signer, DEFAULT_UPLOAD_CONCURRENCY)
+            .await
+            .map_err(multi_server_error_from_batch)?;
+    let Some(blob) = batch.blobs.into_iter().next() else {
+        return Err(MultiServerUploadError {
+            message: "Blossom placement returned no outcome for the requested snapshot".to_owned(),
+            servers: Vec::new(),
+            possible_orphan_blobs: Vec::new(),
+        });
+    };
+    let Some(first) = blob.servers.first() else {
+        return Err(MultiServerUploadError {
+            message: "Blossom placement returned no server outcome".to_owned(),
+            servers: blob.servers,
+            possible_orphan_blobs: Vec::new(),
+        });
+    };
+    let primary = if let Some(descriptor) = first.descriptor.clone() {
+        descriptor
+    } else {
+        let url =
+            blossom_endpoint_url(first.server.as_str(), &snapshot.sha256).map_err(|error| {
+                MultiServerUploadError {
+                    message: format!("failed to construct verified Blossom blob URL: {error:#}"),
+                    servers: blob.servers.clone(),
+                    possible_orphan_blobs: stored_batch_blobs(std::slice::from_ref(&blob)),
+                }
+            })?;
+        BlobDescriptor {
+            url,
+            sha256: snapshot.sha256.clone(),
+            size: snapshot.size,
+            mime_type: snapshot.mime_type.clone(),
+            uploaded: 0,
+        }
+    };
+    Ok(MultiServerUpload {
+        primary,
+        servers: blob.servers,
+    })
+}
+
+fn multi_server_error_from_batch(error: BatchUploadError) -> MultiServerUploadError {
+    MultiServerUploadError {
+        message: error.message,
+        servers: error
+            .blobs
+            .into_iter()
+            .next()
+            .map(|blob| blob.servers)
+            .unwrap_or_default(),
+        possible_orphan_blobs: error.possible_orphan_blobs,
+    }
+}
+
 /// Upload to the first server, then mirror sequentially to every other server.
+///
+/// This low-level BUD-04 primitive remains available for callers that
+/// explicitly want remote mirroring. ngit's publication workflows use
+/// [`confirm_snapshot_on_servers`] so every selected server is independently
+/// verified before an event is signed.
 ///
 /// The first failure stops network activity. The returned error still contains
 /// every planned server in caller-provided order and marks untouched suffixes
@@ -1115,7 +1196,7 @@ async fn read_store_response(
         let body = read_error_response_snippet(&mut response, deadline).await;
         let guidance = match status {
             StatusCode::UNAUTHORIZED => {
-                "authentication challenge flows are not supported for release uploads"
+                "authentication challenge flows are not supported beyond the BUD-11 compatibility fallback"
             }
             StatusCode::PAYMENT_REQUIRED => {
                 "paid Blossom uploads are not supported; choose a server which accepts this blob"
@@ -2054,7 +2135,7 @@ mod tests {
         assert_eq!(
             authorization_header(&event)?,
             headers.legacy,
-            "release uploads retain their established legacy encoding"
+            "the low-level upload primitive retains its legacy encoding"
         );
         Ok(())
     }
@@ -2124,6 +2205,79 @@ mod tests {
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_snapshot_placement_uses_the_shared_verified_path() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"release or container")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (server_url, server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+
+        let result = confirm_snapshot_on_servers(
+            std::slice::from_ref(&server_url),
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+        )
+        .await?;
+        let (head, upload, verify) = tokio::time::timeout(SERVER_TIMEOUT, server)
+            .await
+            .context("timed out waiting for single-snapshot placement server")???;
+
+        assert!(head.head.starts_with("HEAD /"));
+        assert!(upload.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+        assert!(verify.head.starts_with("HEAD /"));
+        assert_eq!(result.primary.sha256, snapshot.sha256);
+        assert_eq!(result.primary.size, snapshot.size);
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].operation, BlossomServerOperation::Upload);
+        assert_eq!(result.servers[0].status, BlossomServerStatus::Stored);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_snapshot_placement_synthesizes_a_url_for_existing_content() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"already stored")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let expected_size = snapshot.size.to_string();
+        let expected_mime = snapshot.mime_type.clone();
+        let (server_url, server) = spawn_head_server(move |_| TestResponse {
+            status: "200 OK",
+            headers: vec![
+                ("Content-Length".to_owned(), expected_size),
+                ("Content-Type".to_owned(), expected_mime),
+            ],
+            body: String::new(),
+        })
+        .await?;
+        let server_url = Url::parse(&server_url)?;
+
+        let result = confirm_snapshot_on_servers(
+            std::slice::from_ref(&server_url),
+            &snapshot,
+            &NgitSigner::Keys(Keys::generate()),
+        )
+        .await?;
+        completed_request(server).await?;
+
+        assert_eq!(
+            result.primary.url,
+            server_url.join(snapshot.sha256.as_str())?
+        );
+        assert_eq!(result.primary.uploaded, 0);
+        assert_eq!(
+            result.servers[0].status,
+            BlossomServerStatus::AlreadyPresent
+        );
+        assert!(result.servers[0].descriptor.is_none());
         Ok(())
     }
 
@@ -2360,8 +2514,8 @@ mod tests {
 
     #[test]
     fn batch_authorization_window_covers_every_bounded_upload_wave() -> Result<()> {
-        let attempts = NSITE_MAX_ATTEMPTS as u32;
-        let operation_window = NSITE_REQUEST_TIMEOUT * (attempts * (attempts + 1));
+        let attempts = PLACEMENT_MAX_ATTEMPTS as u32;
+        let operation_window = PLACEMENT_REQUEST_TIMEOUT * (attempts * (attempts + 1));
         assert_eq!(batch_upload_window(1, 4)?, operation_window);
         assert_eq!(batch_upload_window(8, 4)?, operation_window * 2);
         assert_eq!(batch_upload_window(9, 4)?, operation_window * 3);

@@ -80,8 +80,11 @@ Important behavior:
   is a different content-addressed blob and is uploaded.
 - Without `--blossom-server`, ngit uses the active publisher's latest
   kind-10063 Blossom server list. An explicit ordered list overrides discovery.
-  Two or more servers are strongly recommended. Every requested upload and
-  mirror must succeed before ngit signs the repository event.
+  Two or more servers are strongly recommended. Ngit checks every blob on
+  every server, skips exact matches, uploads missing copies directly with
+  BUD-11-compatible authorization and bounded retries, then verifies them
+  again. Every placement must be confirmed before it signs the repository
+  event.
 - `--relay` extends the current Git repository's relays. Account read/write and
   configured default relays are not added.
 - ngit reads the repository relays before and after uploading. Each preflight
@@ -115,7 +118,7 @@ and includes:
 - resolved `manifest_path`, or `null` when no manifest was loaded;
 - raw-hex `event_id` (unlike collaboration commands' `id` fields);
 - `tags` for the final repository and `updated_tags` from this layout;
-- each blob's SHA-256, size, and per-server upload/mirror outcomes;
+- each blob's SHA-256, size, and per-server placement outcomes;
 - final `blossom_servers` and per-relay `accepted` acknowledgements.
 
 Do not infer complete relay replication from command success: publication

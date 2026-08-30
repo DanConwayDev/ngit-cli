@@ -11,7 +11,7 @@ use ngit::{
         BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
         FileSnapshot, LocalFileRequest, MultiServerUpload, MultiServerUploadError,
         PossibleOrphanBlob, blossom_server_list_filter, blossom_server_list_from_events,
-        canonicalize_blossom_server_root, snapshot_local_file, upload_snapshot_to_servers,
+        canonicalize_blossom_server_root, confirm_snapshot_on_servers, snapshot_local_file,
     },
     client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
@@ -2122,36 +2122,41 @@ async fn upload_prepared_file_assets(
         let PreparedAsset::File(pending) = prepared else {
             continue;
         };
-        let upload =
-            match upload_snapshot_to_servers(&selection.servers, &pending.snapshot, signer).await {
-                Ok(upload) => upload,
-                Err(error) => {
-                    let (stage, server) = failed_blossom_operation(&error);
-                    possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
-                    uploads.push(failed_blossom_upload_json(pending, &error));
-                    outcomes.push(error.servers.clone());
-                    let message = blossom_failure_message(
-                        &error.message,
-                        &outcomes,
-                        &possible_orphan_blobs,
-                        Nip82Progress::none(),
-                        BLOSSOM_RETRY_RECOVERY,
-                    );
-                    return Err(coded_error_with_details(
-                        "blossom_publication_failed",
-                        message,
-                        json!({
-                            "stage": stage,
-                            "server": server,
-                            "blossom": blossom_json(selection, &uploads),
-                            "possible_orphan_blobs": possible_orphan_blobs,
-                            "release_events_signed": false,
-                            "release_events_published": false,
-                            "recovery": BLOSSOM_RETRY_RECOVERY,
-                        }),
-                    ));
-                }
-            };
+        let upload = match confirm_snapshot_on_servers(
+            &selection.servers,
+            &pending.snapshot,
+            signer,
+        )
+        .await
+        {
+            Ok(upload) => upload,
+            Err(error) => {
+                let (stage, server) = failed_blossom_operation(&error);
+                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
+                uploads.push(failed_blossom_upload_json(pending, &error));
+                outcomes.push(error.servers.clone());
+                let message = blossom_failure_message(
+                    &error.message,
+                    &outcomes,
+                    &possible_orphan_blobs,
+                    Nip82Progress::none(),
+                    BLOSSOM_RETRY_RECOVERY,
+                );
+                return Err(coded_error_with_details(
+                    "blossom_publication_failed",
+                    message,
+                    json!({
+                        "stage": stage,
+                        "server": server,
+                        "blossom": blossom_json(selection, &uploads),
+                        "possible_orphan_blobs": possible_orphan_blobs,
+                        "release_events_signed": false,
+                        "release_events_published": false,
+                        "recovery": BLOSSOM_RETRY_RECOVERY,
+                    }),
+                ));
+            }
+        };
         pending.input.url = Some(upload.primary.url.to_string());
         uploads.push(blossom_upload_json(pending, &upload));
         outcomes.push(upload.servers.clone());

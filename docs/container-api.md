@@ -213,9 +213,20 @@ fails closed rather than being merged or overwritten.
 
 ## Upload and publication ordering
 
-The first Blossom server receives a BUD-02 upload for each snapshot. Remaining
-servers receive mirror requests in supplied order. Every upload or mirror must
-return a valid descriptor and succeed before ngit signs a repository event.
+For each stable snapshot, ngit first checks every selected server with bounded
+parallel `HEAD /<sha256>` requests. A present response must report the exact
+snapshot length and MIME type. Hash-preserving BUD-01 redirects are accepted;
+other redirects or ambiguous metadata fail closed before upload authorization
+is signed.
+
+Missing copies receive direct streaming `PUT /upload` requests. The kind-24242
+authorization follows BUD-11, scopes the hash to every selected server domain,
+and is reused across those servers. Ngit sends URL-safe unpadded encoding
+first, retrying a `401` once with legacy padded encoding of the same signed
+event. Transient checks and uploads use bounded retries. Every accepted or
+uncertain upload must pass another exact `HEAD` before ngit signs a repository
+event. Container snapshots remain one-at-a-time, bounding temporary disk use
+to approximately the largest reachable blob.
 
 Before uploading, ngit queries each current repository relay independently for
 the exact author, kind, and `d` identifier. At least one repository-relay query
@@ -301,8 +312,8 @@ upload progress remain on stderr. A successful publication has this shape:
 ```
 
 `tags` is the final published tag map; `updated_tags` contains only tags read
-from this layout. Each server outcome has operation `upload` or `mirror` and,
-on successful command completion, status `stored` or `already_present`.
+from this layout. Each selected server has operation `upload` and, on
+successful command completion, status `stored` or `already_present`.
 `event_id` is raw hexadecimal; `naddr` is the portable container repository
 address; `git_repository` is the exact coordinate emitted in the `a` tag.
 `manifest_path` is the resolved path of the loaded configuration, or `null`
@@ -316,7 +327,7 @@ JSON error shape:
 ```
 
 Uploaded blobs may exist after a failure. Failures after all uploads explicitly
-identify them as reusable; an upload or mirror failure can leave only a partial
+identify them as reusable; an upload failure can leave only a partial
 set and the generic JSON error does not enumerate it. Content addressing makes
 a retry safe after resolving the reported relay, signer, layout, or Blossom
 condition.

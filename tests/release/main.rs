@@ -390,7 +390,7 @@ assets:
 }
 
 #[tokio::test]
-async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Result<()> {
+async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
     const ASSET_BYTES: &[u8] = b"local Blossom release archive\n";
 
     let (harness, publisher, published) = setup(0).await?;
@@ -448,17 +448,16 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
         .to_owned();
     let primary_root = primary.base_url_with_slash();
     let mirror_root = mirror.base_url_with_slash();
-    let primary_request = primary.finish().await?;
-    let mirror_request = mirror.finish().await?;
+    let primary_requests = primary.finish().await?;
+    let mirror_requests = mirror.finish().await?;
+    let primary_request = blossom_upload_request(&primary_requests)?;
+    let mirror_request = blossom_upload_request(&mirror_requests)?;
 
     ensure!(primary_request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
     ensure!(primary_request.body == ASSET_BYTES);
     ensure!(request_header(&primary_request.head, "authorization").is_some());
-    ensure!(mirror_request.head.starts_with("PUT /mirror HTTP/1.1\r\n"));
-    ensure!(
-        serde_json::from_slice::<Value>(&mirror_request.body)?
-            == serde_json::json!({ "url": primary_url })
-    );
+    ensure!(mirror_request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+    ensure!(mirror_request.body == ASSET_BYTES);
 
     let blossom = &output["result"]["blossom"];
     ensure!(blossom["server_selection"]["source"] == "kind_10063");
@@ -470,7 +469,7 @@ async fn local_file_publish_uses_discovered_primary_and_mirror_servers() -> Resu
     ensure!(blossom["uploads"][0]["primary_url"] == primary_url);
     ensure!(blossom["uploads"][0]["servers"][0]["operation"] == "upload");
     ensure!(blossom["uploads"][0]["servers"][0]["status"] == "stored");
-    ensure!(blossom["uploads"][0]["servers"][1]["operation"] == "mirror");
+    ensure!(blossom["uploads"][0]["servers"][1]["operation"] == "upload");
     ensure!(blossom["uploads"][0]["servers"][1]["status"] == "stored");
 
     let asset_event = single_event(
@@ -569,7 +568,8 @@ assets:
         .blob_url()
         .context("Blossom descriptor URL missing")?
         .to_owned();
-    let request = blossom.finish().await?;
+    let requests = blossom.finish().await?;
+    let request = blossom_upload_request(&requests)?;
 
     ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
     ensure!(request.body == apk_bytes);
@@ -748,8 +748,8 @@ async fn url_apks_cannot_claim_to_be_platform_agnostic() -> Result<()> {
 }
 
 #[tokio::test]
-async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> Result<()> {
-    const ASSET_BYTES: &[u8] = b"orphaned Blossom release archive\n";
+async fn presence_failure_stops_before_upload_and_release_signing() -> Result<()> {
+    const ASSET_BYTES: &[u8] = b"unplaced Blossom release archive\n";
 
     let (harness, publisher, published) = setup(0).await?;
     create_application(&publisher).await?;
@@ -764,7 +764,8 @@ async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> 
         "application/zip",
     )
     .await?;
-    let mirror = BlossomHttpServer::error("500 Internal Server Error", "mirror rejected").await?;
+    let mirror =
+        BlossomHttpServer::error("500 Internal Server Error", "presence check failed").await?;
     let failure = run_json_expecting_failure(
         &publisher,
         &[
@@ -787,33 +788,24 @@ async fn mirror_failure_reports_the_orphan_and_publishes_no_release_events() -> 
     .await?;
     let primary_root = primary.base_url_with_slash();
     let mirror_root = mirror.base_url_with_slash();
-    let primary_url = primary
-        .blob_url()
-        .context("primary descriptor URL missing")?
-        .to_owned();
-    primary.finish().await?;
     mirror.finish().await?;
 
     ensure!(failure["error"]["code"] == "blossom_publication_failed");
     let details = &failure["error"]["details"];
-    ensure!(details["stage"] == "mirror");
+    ensure!(details["stage"] == "upload");
+    ensure!(details["server"] == mirror_root);
     ensure!(details["release_events_signed"] == false);
     ensure!(details["release_events_published"] == false);
-    ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "stored");
-    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "unknown");
-    ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(2));
-    ensure!(details["possible_orphan_blobs"][0]["server"] == primary_root);
-    ensure!(details["possible_orphan_blobs"][0]["sha256"] == hash);
-    ensure!(details["possible_orphan_blobs"][0]["url"] == primary_url);
-    ensure!(details["possible_orphan_blobs"][1]["server"] == mirror_root);
-    ensure!(details["possible_orphan_blobs"][1]["sha256"] == hash);
-    ensure!(details["possible_orphan_blobs"][1]["url"].is_null());
+    ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "not_attempted");
+    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "failed");
+    ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(0));
     let message = failure["error"]["message"]
         .as_str()
         .context("Blossom failure message missing")?;
-    ensure!(message.contains(&primary_url));
-    ensure!(message.contains("stored"));
-    ensure!(message.contains("unknown"));
+    ensure!(message.contains(&primary_root));
+    ensure!(message.contains(&mirror_root));
+    ensure!(message.contains("not_attempted"));
+    ensure!(message.contains("failed"));
     ensure!(message.contains("recovery:"));
 
     let release_events = harness
@@ -1080,7 +1072,8 @@ async fn local_file_asset_add_preserves_the_existing_release() -> Result<()> {
         .blob_url()
         .context("primary descriptor URL missing")?
         .to_owned();
-    let request = primary.finish().await?;
+    let requests = primary.finish().await?;
+    let request = blossom_upload_request(&requests)?;
 
     ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
     ensure!(request.body == ADDED_BYTES);
@@ -1843,7 +1836,7 @@ struct CapturedBlossomRequest {
 struct BlossomHttpServer {
     base_url: String,
     blob_url: Option<String>,
-    task: Option<JoinHandle<Result<CapturedBlossomRequest>>>,
+    task: Option<JoinHandle<Result<Vec<CapturedBlossomRequest>>>>,
 }
 
 impl BlossomHttpServer {
@@ -1864,7 +1857,13 @@ impl BlossomHttpServer {
             "uploaded": 1,
         })
         .to_string();
-        let task = tokio::spawn(serve_blossom_request(listener, status, body));
+        let task = tokio::spawn(serve_blossom_placement(
+            listener,
+            status,
+            body,
+            size,
+            mime.to_owned(),
+        ));
         Ok(Self {
             base_url,
             blob_url: Some(blob_url),
@@ -1880,7 +1879,7 @@ impl BlossomHttpServer {
             .local_addr()
             .context("failed to inspect Blossom fixture address")?;
         let base_url = format!("http://{address}");
-        let task = tokio::spawn(serve_blossom_request(listener, status, body.to_owned()));
+        let task = tokio::spawn(serve_blossom_errors(listener, status, body.to_owned()));
         Ok(Self {
             base_url,
             blob_url: None,
@@ -1900,7 +1899,7 @@ impl BlossomHttpServer {
         self.blob_url.as_deref()
     }
 
-    async fn finish(mut self) -> Result<CapturedBlossomRequest> {
+    async fn finish(mut self) -> Result<Vec<CapturedBlossomRequest>> {
         let task = self.task.take().context("Blossom server task missing")?;
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -1917,20 +1916,55 @@ impl Drop for BlossomHttpServer {
     }
 }
 
-async fn serve_blossom_request(
+async fn serve_blossom_placement(
+    listener: TcpListener,
+    upload_status: &'static str,
+    descriptor: String,
+    size: u64,
+    mime: String,
+) -> Result<Vec<CapturedBlossomRequest>> {
+    let responses = [
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+        format!(
+            "HTTP/1.1 {upload_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{descriptor}",
+            descriptor.len(),
+        ),
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+        ),
+    ];
+    let mut requests = Vec::with_capacity(responses.len());
+    for response in responses {
+        requests.push(serve_one_blossom_request(&listener, &response).await?);
+    }
+    Ok(requests)
+}
+
+async fn serve_blossom_errors(
     listener: TcpListener,
     status: &'static str,
     response_body: String,
+) -> Result<Vec<CapturedBlossomRequest>> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        response_body.len(),
+    );
+    let mut requests = Vec::with_capacity(3);
+    for _ in 0..3 {
+        requests.push(serve_one_blossom_request(&listener, &response).await?);
+    }
+    Ok(requests)
+}
+
+async fn serve_one_blossom_request(
+    listener: &TcpListener,
+    response: &str,
 ) -> Result<CapturedBlossomRequest> {
     let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
         .await
         .context("timed out waiting for a Blossom request")?
         .context("failed to accept a Blossom request")?;
     let request = read_blossom_request(&mut stream).await?;
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-        response_body.len(),
-    );
     stream
         .write_all(response.as_bytes())
         .await
@@ -1967,9 +2001,10 @@ async fn read_blossom_request(
     let head = String::from_utf8(bytes[..header_end].to_vec())
         .context("Blossom request headers were not UTF-8")?;
     let content_length = request_header(&head, "content-length")
-        .context("Blossom request omitted Content-Length")?
-        .parse::<usize>()
-        .context("Blossom request used an invalid Content-Length")?;
+        .map(str::parse::<usize>)
+        .transpose()
+        .context("Blossom request used an invalid Content-Length")?
+        .unwrap_or(0);
     let request_length = header_end
         .checked_add(content_length)
         .context("Blossom request length overflowed")?;
@@ -1997,6 +2032,13 @@ fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
         let (name, value) = line.split_once(':')?;
         name.eq_ignore_ascii_case(wanted).then(|| value.trim())
     })
+}
+
+fn blossom_upload_request(requests: &[CapturedBlossomRequest]) -> Result<&CapturedBlossomRequest> {
+    requests
+        .iter()
+        .find(|request| request.head.starts_with("PUT /upload HTTP/1.1\r\n"))
+        .context("Blossom placement did not issue an upload")
 }
 
 #[derive(Clone, Copy)]

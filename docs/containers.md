@@ -82,10 +82,12 @@ layout's tag mappings into its complete tag map, and republishes the complete
 event. A multi-platform OCI image index inside `blobs/sha256` is a different,
 content-addressed blob and is uploaded normally.
 
-The active ngit account signs both the BUD-02 Blossom authorizations and the
-kind-30624 event. The first Blossom server receives each reachable blob and
-the remaining servers mirror it. Every required upload and mirror must succeed
-before ngit signs the repository event.
+Before asking the active account to sign, ngit checks every reachable blob on
+every selected server with exact size-and-MIME `HEAD` requests. It skips
+confirmed copies. Missing copies use BUD-11-compatible authorizations and
+direct streaming uploads with bounded concurrency and retries, followed by
+another strict `HEAD`. Every placement must be confirmed before ngit signs the
+kind-30624 repository event.
 
 By default, publishing behaves like adding tags to a registry:
 
@@ -168,11 +170,11 @@ repository relays. Discovery must complete on at least one repository relay
 and fails before upload when no valid list is found.
 
 Multiple servers are strongly recommended: a missing layer prevents the
-entire image from running. The first server receives each upload and the
-remaining servers mirror it in order. Every selected server is required. A
-server must accept `application/octet-stream` uploads as large as the image's
-largest layer. Paid upload negotiation and layer chunking are not currently
-supported.
+entire image from running. Every selected server is required, and every
+missing blob is uploaded directly to each server rather than relying on that
+server's remote-mirroring support. A server must accept
+`application/octet-stream` uploads as large as the image's largest layer.
+Paid upload negotiation and layer chunking are not currently supported.
 
 `--relay` extends the relays from the current repository announcement. Account
 read/write and configured default relays are not added. Both preflights require
