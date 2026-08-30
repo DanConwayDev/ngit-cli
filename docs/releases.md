@@ -17,10 +17,12 @@ ngit release publish "$VERSION" \
   --json
 ```
 
-The file is snapshotted once, uploaded once to the primary Blossom server, and
-represented by one asset event with two `f` platform tags. On a repository with
-no existing NIP-82 events, the same command creates and publishes the linked
-application, asset, and release in dependency order.
+The file is snapshotted once, confirmed on every selected Blossom server, and
+represented by one asset event with two `f` platform tags. Ngit skips exact
+copies and directly uploads missing ones with bounded retries and post-upload
+verification before it signs the event. On a repository with no existing
+NIP-82 events, the same command creates and publishes the linked application,
+asset, and release in dependency order.
 
 For an existing application, a `main` release must cover every application
 platform. If the release intentionally introduces a new main-channel platform,
@@ -124,8 +126,8 @@ Top-level fields are:
 
 The optional `publication` block supports:
 
-- `blossom_servers`: ordered servers; the first receives the upload and the
-  remainder receive mirrors;
+- `blossom_servers`: ordered required placements; the first supplies the asset
+  event URL and every missing copy is uploaded directly;
 - `relays`: additional discovery and publication relays;
 - `zapstore_relay`: add `wss://relay.zapstore.dev` as a publication-only
   target;

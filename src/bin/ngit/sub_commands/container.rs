@@ -10,8 +10,8 @@ use ngit::{
     NgitSigner,
     blossom::{
         LocalFileRequest, MultiServerUpload, blossom_server_list_filter,
-        blossom_server_list_from_events, canonicalize_blossom_server_root, snapshot_local_file,
-        upload_snapshot_to_servers,
+        blossom_server_list_from_events, canonicalize_blossom_server_root,
+        confirm_snapshot_on_servers, snapshot_local_file,
     },
     client::{
         Connect, Params, RelayProgressReporter, fetching_with_report, get_repo_ref_from_cache,
@@ -685,7 +685,7 @@ async fn upload_layout(
             "OCI blob {} changed after layout validation; no container event was published",
             blob.digest
         );
-        let upload = upload_snapshot_to_servers(servers, &snapshot, signer)
+        let upload = confirm_snapshot_on_servers(servers, &snapshot, signer)
             .await
             .map_err(anyhow::Error::new)
             .with_context(|| format!("failed to store OCI blob {} on Blossom", blob.digest))?;

@@ -80,8 +80,16 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
     );
 
     let requests = blossom.finish().await?;
-    ensure!(requests.len() == expected_blobs.len());
-    for request in requests {
+    ensure!(
+        requests
+            .iter()
+            .filter(|request| request.head.starts_with("HEAD /"))
+            .count()
+            == expected_blobs.len() * 2
+    );
+    let uploads = upload_requests(&requests);
+    ensure!(uploads.len() == expected_blobs.len());
+    for request in uploads {
         ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
         ensure!(
             request_header(&request.head, "authorization")
@@ -255,7 +263,7 @@ async fn authenticates_container_preflight_reads_on_repository_relays() -> Resul
     );
 
     let requests = blossom.finish().await?;
-    ensure!(requests.len() == expected_blobs.len());
+    ensure!(upload_requests(&requests).len() == expected_blobs.len());
     Ok(())
 }
 
@@ -303,7 +311,7 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = blossom.finish().await?;
-    ensure!(requests.len() == expected_blobs.len());
+    ensure!(upload_requests(&requests).len() == expected_blobs.len());
 
     let events = harness
         .relay("default")
@@ -490,27 +498,53 @@ impl BlossomServer {
         let base_url = format!("http://{address}");
         let response_root = base_url.clone();
         let task = tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(expected_requests);
-            for _ in 0..expected_requests {
+            let mut requests = Vec::with_capacity(expected_requests * 3);
+            let mut stored = BTreeMap::<String, (usize, String)>::new();
+            for _ in 0..expected_requests * 3 {
                 let (mut stream, _) =
                     tokio::time::timeout(Duration::from_secs(10), listener.accept())
                         .await
                         .context("timed out waiting for a Blossom upload")??;
                 let request = read_request(&mut stream).await?;
-                let digest = request_header(&request.head, "x-sha-256")
-                    .context("upload omitted X-SHA-256")?;
-                let response_body = json!({
-                    "url": format!("{response_root}/{digest}"),
-                    "sha256": digest,
-                    "size": request.body.len(),
-                    "type": "application/octet-stream",
-                    "uploaded": 1,
-                })
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                    response_body.len()
-                );
+                let response = if request.head.starts_with("HEAD /") {
+                    let digest = request
+                        .head
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .and_then(|path| path.strip_prefix('/'))
+                        .context("presence request omitted a blob digest")?;
+                    stored.get(digest).map_or_else(
+                        || {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                .to_owned()
+                        },
+                        |(size, mime)| {
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+                            )
+                        },
+                    )
+                } else {
+                    let digest = request_header(&request.head, "x-sha-256")
+                        .context("upload omitted X-SHA-256")?;
+                    let mime = request_header(&request.head, "content-type")
+                        .context("upload omitted Content-Type")?
+                        .to_owned();
+                    let response_body = json!({
+                        "url": format!("{response_root}/{digest}"),
+                        "sha256": digest,
+                        "size": request.body.len(),
+                        "type": mime,
+                        "uploaded": 1,
+                    })
+                    .to_string();
+                    stored.insert(digest.to_owned(), (request.body.len(), mime));
+                    format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                        response_body.len()
+                    )
+                };
                 stream.write_all(response.as_bytes()).await?;
                 stream.shutdown().await?;
                 requests.push(request);
@@ -563,8 +597,9 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<CapturedRequ
     };
     let head = String::from_utf8(bytes[..header_end].to_vec())?;
     let content_length = request_header(&head, "content-length")
-        .context("request omitted Content-Length")?
-        .parse::<usize>()?;
+        .map(str::parse::<usize>)
+        .transpose()?
+        .unwrap_or(0);
     let request_length = header_end
         .checked_add(content_length)
         .context("request length overflowed")?;
@@ -591,6 +626,13 @@ fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
         let (name, value) = line.split_once(':')?;
         name.eq_ignore_ascii_case(wanted).then(|| value.trim())
     })
+}
+
+fn upload_requests(requests: &[CapturedRequest]) -> Vec<&CapturedRequest> {
+    requests
+        .iter()
+        .filter(|request| request.head.starts_with("PUT /upload HTTP/1.1\r\n"))
+        .collect()
 }
 
 fn tag_value<'a>(event: &'a nostr_sdk::prelude::Event, name: &str) -> Option<&'a str> {

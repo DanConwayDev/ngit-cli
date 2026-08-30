@@ -76,8 +76,9 @@ alias.
   event and an explicit edit of the release which references it.
 - Silently adopting applications published by non-maintainers.
 - Blossom payment negotiation, media optimization, deletion, and blob listing.
-- Publishing mirror URLs in NIP-82 extension tags. v1 publishes the primary
-  Blossom URL and reports mirrors through command output.
+- Publishing alternate Blossom URLs in NIP-82 extension tags. v1 publishes a
+  URL on the first selected server and reports every confirmed placement in
+  command output.
 - Publishing a pullable OCI repository or mutable container tag map. Use
   `ngit container publish`; this is a separate kind-30624 API even when the
   same software version also has NIP-82 release assets.
@@ -741,16 +742,18 @@ a silent no-op.
 
 When local files are present, explicit `--blossom-server` values take first
 precedence, followed by `publication.blossom_servers` from the loaded manifest.
-Either ordered list replaces discovery. The first server receives `PUT
-/upload`; every remaining server receives `PUT /mirror` in argument order.
+Either ordered list replaces discovery. Every missing selected server receives
+the same direct streaming `PUT /upload`; list order determines the published
+primary URL and result ordering.
 Without an override, ngit uses the ordered `server` tags from the latest kind
 `10063` event authored by the application author, and fails rather than falling
 back when that latest event is invalid. It fails before signing when no source
-yields a server. Every selected server is required in v1: a failed mirror
-aborts NIP-82 publication rather than silently reducing the requested
-durability. Discovery requires at least one completed author-relay route and
-reports other failed routes as `relay_discovery_incomplete`; an explicit
-override is the deterministic recovery when stale discovery is unacceptable.
+yields a server. Every selected server is required in v1: any unconfirmed
+placement aborts NIP-82 publication rather than silently reducing the
+requested durability. Discovery requires at least one completed author-relay
+route and reports other failed routes as `relay_discovery_incomplete`; an
+explicit override is the deterministic recovery when stale discovery is
+unacceptable.
 
 Before publishing, ngit MUST:
 
@@ -764,8 +767,8 @@ Before publishing, ngit MUST:
 5. resolve the ordered Blossom server set when local files are present;
 6. construct the canonical union of asset platforms, apply the channel policy,
    and show or emit metadata warnings before the first signature;
-7. upload each local snapshot to the first server and mirror it to every
-   remaining server, validating every returned descriptor;
+7. confirm each local snapshot on every selected server, directly uploading
+   missing copies and verifying their final size and MIME metadata;
 8. re-check application and release state;
 9. sign the initial or additive application replacement when required, then
    new assets and the release;
@@ -1119,38 +1122,45 @@ snapshot so a build process cannot change the described bytes between passes;
 the complete file is never buffered in memory. The original path and any
 credential-bearing URL are not printed in authorization events.
 
-For each request, ngit signs a short-lived kind `24242` authorization containing
-`t=upload`, `x=<lowercase sha256>`, and an expiration tag. The HTTP
-`Authorization` value is `Nostr ` followed by padded standard base64 of the
-signed event JSON. This remains readable by Base64url-capable reference
-servers while retaining compatibility with deployed servers which only accept
-the standard alphabet and padding. Authenticated PUT requests never follow
-redirects.
+Before signing an upload authorization, ngit issues bounded parallel
+`HEAD /<sha256>` requests to every selected server. A present response must
+report the snapshot's exact `Content-Length` and MIME type. BUD-01 `307` and
+`308` redirects are followed only while every target retains the requested
+hash. A failed or ambiguous presence check prevents uploads for that snapshot;
+an exact match is recorded as `already_present` and skipped.
 
-The primary request is `PUT /upload` with `Content-Length`, `Content-Type`, and
-`X-SHA-256` headers and the snapshot as its streaming body. A mirror request is
-`PUT /mirror` with JSON `{ "url": PRIMARY_URL }`, `X-SHA-256`,
-`X-Content-Length`, and `X-Content-Type`. Both endpoints may return `200` or
-`201`. ngit requires a valid descriptor whose hash, size, MIME type, and
-HTTP(S) URL agree with the local snapshot. A mismatched or malformed response
-is a failure even when its status code is successful.
+When copies are missing, ngit signs a short-lived BUD-11 kind `24242`
+authorization containing `t=upload`, `x=<lowercase sha256>`, every selected
+server domain, and an expiration tag. It reuses that event across the missing
+servers. The HTTP `Authorization` value first uses URL-safe unpadded encoding;
+a server which returns `401` is retried once with legacy padded standard
+base64 of the same event. Authenticated PUT requests never follow redirects.
 
-Upload and mirror operations are sequential and ordered. The primary upload
-must succeed before any mirror is attempted, and every selected mirror must
-succeed before ngit signs a kind `3063` asset or kind `30063` release. A later
-failure reports every observed server result plus the hash and primary URL as a
-possible orphan blob; it does not claim that a Nostr asset exists and does not
-recommend a blind rerun. Payment-required and authentication-challenge
-responses are reported as unsupported, actionable failures in v1.
+Each missing server receives `PUT /upload` with `Content-Length`,
+`Content-Type`, and `X-SHA-256` headers and the snapshot as its streaming body.
+The endpoint may return `200` or `201`. ngit requires a valid descriptor whose
+hash, size, MIME type, and HTTP(S) URL agree with the local snapshot. A
+mismatched or malformed response is a failure even when its status is
+successful. Transient presence and upload failures use three bounded attempts.
+Every accepted or uncertain upload must then pass another exact length-and-MIME
+`HEAD` check.
+
+Every selected server must be confirmed before ngit signs a kind `3063` asset
+or kind `30063` release. A failure reports every observed server result and any
+copy which may have been stored as a possible orphan blob; it does not claim
+that a Nostr asset exists. Payment-required and unresolved authentication
+responses are reported as actionable failures in v1. Rerunning is safe:
+content-addressed copies which are now queryable are confirmed and skipped.
 
 A Blossom failure uses code `blossom_publication_failed`. Its details include
 the failed stage and server, the complete ordered server plan, and
 `release_events_signed: false` plus `release_events_published: false`.
 `possible_orphan_blobs` contains HTTP-201 locations created by this invocation
-and ambiguous requests whose storage result is unknown; it excludes HTTP-200
-blobs which were already present. HTTP 5xx responses are ambiguous because a
-server may fail after storing the bytes, so they use status `unknown` and add a
-hash-only possible orphan; 3xx/4xx responses remain definite rejections.
+and ambiguous upload requests whose storage result is unknown; it excludes
+copies proven present by the initial HEAD. HTTP 5xx upload responses are
+ambiguous because a server may fail after storing the bytes, so they use
+status `unknown` and add a hash-only possible orphan. Failed presence checks
+cannot have stored bytes and report `failed` after retries.
 Recovery explains that blob publication is
 content-addressed and may be retried after fixing the server set. No automatic
 orphan deletion is attempted. If a later state check, signing operation, or
@@ -1477,25 +1487,27 @@ fail closed with an actionable error.
 - Clock skew affects new release dates and replacement ordering. Use a stable
   captured timestamp for the plan and show it before signing.
 
-### Blossom uploads and mirroring
+### Blossom placement
 
 - Blossom servers can return `200` or `201`, a body which does not match the
   uploaded hash, authentication challenges, payment requirements, or a URL on a
   different host. Validate the upload descriptor against local bytes.
-- BUD-03 discovery ordering matters. Preserve user/server order and do not turn
-  a fallback list into nondeterministic parallel preference.
-- BUD-04 mirroring can partially succeed. v1 requires every selected server,
-  reports each result, and signs no NIP-82 event after a partial upload.
+- BUD-03 discovery ordering matters. Preserve user/server order for the
+  published primary URL and result matrix even though presence and upload work
+  is concurrent.
+- Direct uploads can partially succeed. v1 requires every selected server,
+  reports each result, and signs no NIP-82 event after partial placement.
 - BUD-10 Blossom URIs are not accepted as returned primary URLs in v1. Require
   an ordinary HTTP(S) URL that existing NIP-82 clients can retrieve.
 - Upload authorization events have narrow lifetimes and scopes. Never cache or
-  print secrets, create one close to each request, and account for remote-signer
-  latency and clock skew.
+  print them, create one only after preflight, scope it to the hash and selected
+  domains, and account for remote-signer latency and clock skew.
 - Servers may deduplicate by hash while serving different headers or filenames.
   NIP-82 integrity is byte-based; display metadata still needs deterministic
   selection.
-- NIP-82 currently exposes a primary URL. Keep mirror URLs in command results
-  and do not invent extension tags without protocol agreement.
+- NIP-82 currently exposes one URL. Use the first selected server and keep all
+  placement outcomes in command results; do not invent extension tags without
+  protocol agreement.
 - A local file can be replaced, truncated, grow, or be a symlink into mutable
   build output while ngit is running. Upload only a completed private snapshot
   and fail on read errors or the configured size bound.
@@ -1537,9 +1549,10 @@ fail closed with an actionable error.
   bytes, MIME conflicts, hostile filenames, and Blossom hash mismatch with a
   bounded local server.
 - Test stable local snapshots, kind-24242 scope/expiration, `200` and `201`
-  descriptors, redirect refusal, ordered kind-10063 discovery, explicit
-  override precedence, primary upload followed by mirrors, and a mirror failure
-  which publishes no NIP-82 events.
+  descriptors, strict presence metadata, BUD-11/legacy authorization fallback,
+  bounded retries and post-upload verification, ordered kind-10063 discovery,
+  explicit override precedence, and a placement failure which publishes no
+  NIP-82 events.
 - Test manifest duplicate keys, unknown keys, precedence, exact placeholder
   expansion, and credential redaction.
 - Parse JSON structurally in integration tests; do not assert exact human
@@ -1562,8 +1575,8 @@ The first implementation is complete when:
    fields or assets;
 7. URL-backed assets are streamed, hashed, described, published before the
    release, and optionally verified on read;
-8. local files are snapshotted, uploaded and mirrored in order, and no NIP-82
-   event is signed until every required Blossom operation succeeds;
+8. local files are snapshotted and confirmed on every selected server, and no
+   NIP-82 event is signed until every required Blossom placement succeeds;
 9. platform metadata is supplied or its omission is explicitly acknowledged;
 10. edits preserve unknown tags and use safe addressable-event ordering;
 11. JSON remains parseable and useful on success, validation failure,
