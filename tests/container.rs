@@ -124,6 +124,86 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
 }
 
 #[tokio::test]
+async fn publishes_from_the_default_container_manifest() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("default").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("manifest-container-source".to_owned()),
+            extra_repo_relays: vec![relay],
+            ..Default::default()
+        })
+        .await?;
+    let layout = repo.dir().join("artifacts/my-app");
+    let (tag_digest, expected_blobs) = write_layout(&layout)?;
+    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    fs::create_dir_all(repo.dir().join(".ngit"))?;
+    fs::write(
+        repo.dir().join(".ngit/containers.yaml"),
+        format!(
+            r#"schema: 1
+publication:
+  blossom_servers:
+    - {}
+containers:
+  my-app:
+    layout: artifacts/my-app
+    title: Manifest image
+    description: Published from checked-in CI settings
+    source: https://example.com/manifest-image
+"#,
+            blossom.base_url()
+        ),
+    )?;
+
+    let output = repo
+        .ngit(["container", "publish", "my-app", "--json"])
+        .output()
+        .await
+        .context("failed to publish from .ngit/containers.yaml")?;
+    ensure!(
+        output.status.success(),
+        "manifest-backed container publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(result["result"]["tags"][0]["digest"] == tag_digest);
+    ensure!(
+        result["result"]["manifest_path"]
+            == repo
+                .dir()
+                .join(".ngit/containers.yaml")
+                .to_string_lossy()
+                .as_ref()
+    );
+    blossom.finish().await?;
+
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(CONTAINER_REPOSITORY_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier("my-app"),
+        )
+        .await?;
+    let [event] = events.as_slice() else {
+        bail!("expected one manifest-backed container event")
+    };
+    ensure!(tag_value(event, "title") == Some("Manifest image"));
+    ensure!(tag_value(event, "description") == Some("Published from checked-in CI settings"));
+    ensure!(tag_value(event, "source") == Some("https://example.com/manifest-image"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn authenticates_container_preflight_reads_on_repository_relays() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),

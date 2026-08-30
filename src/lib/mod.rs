@@ -5,6 +5,7 @@ pub mod blossom;
 pub mod ci;
 pub mod cli_interactor;
 pub mod client;
+pub mod container_manifest;
 pub mod content_tags;
 pub mod event_ordering;
 pub mod fetch;

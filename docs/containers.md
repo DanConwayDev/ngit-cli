@@ -34,6 +34,40 @@ ngit container publish myimage \
   --source https://example.com/myimage
 ```
 
+For repeatable CI publication, check in `.ngit/containers.yaml` and keep the
+command line down to the repository name:
+
+```yaml
+schema: 1
+publication:
+  blossom_servers:
+    - https://blossom-one.example
+    - https://blossom-two.example
+  relays:
+    - wss://relay.example
+containers:
+  myimage:
+    layout: artifacts/myimage
+    title: Example service
+    description: Published from CI
+    source: https://example.com/myimage
+```
+
+```sh
+ngit container publish myimage
+```
+
+The top-level `containers` map lets one repository publish several images.
+Relative layout paths in the manifest are resolved from the Git repository
+root. Use `--manifest PATH` for another repository-relative or absolute YAML
+file, or `--no-manifest` to ignore the default. A loaded manifest must contain
+the requested name; either its entry or `--layout` must select a layout.
+
+CLI layout and metadata values override the selected entry. A non-empty CLI
+Blossom list replaces `publication.blossom_servers`; CLI relays extend
+`publication.relays`. Signer selection, `--replace`, and output mode remain
+explicit runtime choices and cannot be stored in this project file.
+
 Run this command inside the Nostr Git repository the image belongs to. The
 active signer must be one of that repository's confirmed maintainers. ngit
 places the selected repository coordinate in the container event's `a` tag.
@@ -72,7 +106,8 @@ docker pull ncontainer.io/<your-npub>/myimage:latest
 ```
 
 Use `--json` for a stable result containing the event ID, `naddr`, final tag
-map, uploaded blob outcomes, Blossom servers, and per-relay acknowledgements.
+map, loaded manifest path, uploaded blob outcomes, Blossom servers, and
+per-relay acknowledgements.
 
 ## Validation and update safety
 

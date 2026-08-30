@@ -872,6 +872,11 @@ and no direct asset flags are given. Edits load a manifest only when
 re-append the creation assets. A missing default manifest is not an error when
 direct assets are provided.
 
+OCI publication uses the sibling `.ngit/containers.yaml` project file
+documented in the [container publishing API](container-api.md). The schemas are
+separate because release assets and OCI layouts have different lifecycle and
+integrity rules.
+
 ```yaml
 schema: 1
 application: ngit

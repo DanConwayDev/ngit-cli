@@ -73,7 +73,8 @@ may also use the publisher's Blossom server list.
 
 ```text
 ngit container publish NAME \
-  --layout PATH \
+  [--layout PATH] \
+  [--manifest PATH | --no-manifest] \
   [--blossom-server URL ...] \
   [--relay URL ...] \
   [--title TEXT] [--description TEXT] [--source URL] [--replace]
@@ -87,7 +88,9 @@ a confirmed maintainer of the selected repository.
 | Input | Contract |
 | --- | --- |
 | `NAME` | required lowercase repository-name component |
-| `--layout PATH` | required OCI image-layout directory |
+| `--layout PATH` | OCI image-layout directory; required unless supplied by the selected manifest entry |
+| `--manifest PATH` | load an explicit repository-relative or absolute container manifest |
+| `--no-manifest` | ignore the default `.ngit/containers.yaml`; conflicts with `--manifest` |
 | `--blossom-server URL` | optional repeatable override; HTTP(S) roots are deduplicated in order |
 | `--relay URL` | repeatable addition to the current repository's relays |
 | `--title TEXT` | optional non-empty display title |
@@ -106,6 +109,50 @@ the latest kind-10063 server-list event authored by the active publisher and
 uses its ordered `server` tags. At least one repository relay must complete
 discovery. A missing or invalid latest list fails before upload rather than
 falling back to an older event. An explicit list bypasses this discovery.
+
+## Container manifest
+
+The default project configuration is `.ngit/containers.yaml`. If it exists,
+ngit loads it for every container publication. An explicit `--manifest PATH`
+loads that file instead; a missing explicit file is an error. A checked-in
+manifest that does not define `NAME` also fails closed. `--no-manifest` opts
+out, in which case `--layout` is required.
+
+```yaml
+schema: 1
+publication:
+  blossom_servers:
+    - https://blossom.example.org
+    - https://mirror.example.org
+  relays:
+    - wss://relay.example.org
+containers:
+  api:
+    layout: artifacts/api
+    title: Example API
+    description: Published from CI
+    source: https://example.org/api
+  worker:
+    layout: artifacts/worker
+```
+
+The schema accepts only `schema`, `publication`, and `containers` at the top
+level. `schema` must be `1`; `containers` must contain at least one valid
+repository name. `publication` accepts ordered `blossom_servers` and `relays`.
+Each container entry accepts `layout`, `title`, `description`, and `source`.
+Unknown and duplicate YAML fields are rejected. Server and relay URLs are
+validated and deduplicated while preserving order.
+
+Relative manifest paths and manifest `layout` values resolve from the Git
+repository root, not the process's launch directory. An absolute layout is
+retained. A container entry may omit `layout` when CI passes `--layout`.
+
+CLI `--layout`, `--title`, `--description`, and `--source` values take
+precedence over the entry. A non-empty CLI Blossom list replaces the manifest
+list; CLI relays extend the manifest relays. `--replace`, signer selection, and
+output mode cannot be stored in the manifest. Thus stable project inputs can
+be reviewed in Git while destructive or identity-bearing choices stay visible
+at execution time.
 
 ## OCI layout contract
 
@@ -218,6 +265,7 @@ upload progress remain on stderr. A successful publication has this shape:
   "command": "container.publish",
   "result": {
     "repository": "myimage",
+    "manifest_path": "/workspace/project/.ngit/containers.yaml",
     "npub": "npub1...",
     "name": "npub1.../myimage",
     "naddr": "naddr1...",
@@ -257,6 +305,8 @@ from this layout. Each server outcome has operation `upload` or `mirror` and,
 on successful command completion, status `stored` or `already_present`.
 `event_id` is raw hexadecimal; `naddr` is the portable container repository
 address; `git_repository` is the exact coordinate emitted in the `a` tag.
+`manifest_path` is the resolved path of the loaded configuration, or `null`
+when no manifest was loaded.
 
 Before a success document is installed, failures use ngit's generic nonzero
 JSON error shape:
