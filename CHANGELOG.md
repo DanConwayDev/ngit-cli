@@ -14,6 +14,9 @@ publication.
 
 ### Added
 
+- Release manifests can set `release_notes: CHANGELOG.md` to publish the
+  matching Keep a Changelog version section. Missing, duplicate, and empty
+  sections fail rather than falling back to the complete changelog.
 - Add `ngit nsite publish <DIRECTORY>` for publishing an already-built static
   site as a root or named NIP-5A manifest. The command snapshots files
   deterministically, confirms every unique blob on every selected Blossom

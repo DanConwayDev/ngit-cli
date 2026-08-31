@@ -89,7 +89,7 @@ bytes in that asset's `platforms` list; do not repeat the file entry:
 schema: 1
 application: com.example.my-app
 channel: main
-notes: Maintenance and compatibility improvements.
+release_notes: CHANGELOG.md
 publication:
   blossom_servers:
     - https://blossom.example.com
@@ -120,9 +120,22 @@ Top-level fields are:
 - `application`: application identifier, optional when repository discovery is
   unambiguous;
 - `channel`: defaults to `main` on creation;
-- `notes`: release notes;
+- `notes`: literal inline release notes;
+- `release_notes`: repository-relative or absolute Keep a Changelog file;
 - `publication`: stable transport and release-policy defaults for CI;
 - `assets`: one or more asset objects.
+
+`notes` and `release_notes` are mutually exclusive. For `release_notes`, ngit
+selects the level-two section matching the exact positional VERSION, allowing
+the conventional optional leading `v` in either the VERSION or heading. It
+accepts standard headings such as `## [1.2.3] - 2026-08-31` as well as
+unbracketed `## 1.2.3`, preserves the section's Markdown, and stops at the next
+level-two heading. A missing, duplicate, or empty matching section fails before
+publication instead of publishing the entire changelog. Relative paths resolve
+from the repository root.
+
+CLI `--notes` and `--notes-file` take precedence over either manifest field.
+`--notes-file` remains literal and does not perform changelog extraction.
 
 The optional `publication` block supports:
 

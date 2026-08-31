@@ -253,11 +253,29 @@ async fn manifest_publish_downloads_assets_and_preserves_metadata() -> Result<()
 
     let manifest_dir = publisher.dir().join(".ngit");
     fs::create_dir_all(&manifest_dir).context("failed to create release manifest directory")?;
+    fs::write(
+        publisher.dir().join("CHANGELOG.md"),
+        r#"# Changelog
+
+## [Unreleased]
+
+- Work in progress.
+
+## [1.2.3] - 2026-08-31
+
+Published from the release manifest
+
+## [1.2.2] - 2026-08-01
+
+Previous release notes.
+"#,
+    )
+    .context("failed to write changelog")?;
     let manifest = format!(
         r#"schema: 1
 application: {APP_ID}
 channel: beta
-notes: "Published from the release manifest"
+release_notes: CHANGELOG.md
 assets:
   - source: "{base_url}/manifest-linux-{{version}}.tar.gz"
     filename: "ngit-{{version}}-linux-x86_64.tar.gz"

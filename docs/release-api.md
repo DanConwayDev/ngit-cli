@@ -884,6 +884,7 @@ integrity rules.
 schema: 1
 application: ngit
 channel: main
+release_notes: CHANGELOG.md
 commit: main
 publication:
   blossom_servers:
@@ -915,8 +916,9 @@ assets:
         - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
-Supported top-level fields are `schema`, `application`, `channel`, `notes`,
-release-wide `commit`, `publication`, and `assets`. `publication` supports:
+Supported top-level fields are `schema`, `application`, `channel`, literal
+inline `notes`, Keep a Changelog path `release_notes`, release-wide `commit`,
+`publication`, and `assets`. `publication` supports:
 
 - ordered `blossom_servers`;
 - additional discovery and publication `relays`;
@@ -930,6 +932,13 @@ manifest relays. Boolean manifest values and their CLI flags are combined with
 logical OR. The manifest deliberately cannot select a signer, provide secrets,
 set the release version or output mode, enable `--edit`, or set dynamic
 `released_at`/`tag` inputs.
+
+`notes` and `release_notes` are mutually exclusive. A `release_notes` path is
+absolute or relative to the repository root. Ngit extracts the matching
+level-two Keep a Changelog section for the exact VERSION, treating one leading
+`v` as equivalent, and preserves its inner Markdown. Missing, duplicate, and
+empty matching sections are errors; ngit never falls back to the complete
+changelog. CLI `--notes` and literal `--notes-file` values take precedence.
 
 An asset supports:
 
