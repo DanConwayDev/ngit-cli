@@ -30,7 +30,7 @@ pub const CONTEXT_INCOMPLETE_LABEL: &str = "Context incomplete";
 pub enum TrustClassification {
     MaintainerDirected,
     OperationallyAssociated,
-    SociallyCorroborated,
+    SeenInYourNetwork,
     /// Absence of evidence, not a statement that the signer is unsafe.
     NoKnownContext,
 }
@@ -41,7 +41,7 @@ impl TrustClassification {
         match self {
             Self::MaintainerDirected => 0,
             Self::OperationallyAssociated => 1,
-            Self::SociallyCorroborated => 2,
+            Self::SeenInYourNetwork => 2,
             Self::NoKnownContext => 3,
         }
     }
@@ -53,7 +53,7 @@ impl TrustClassification {
         match self {
             Self::MaintainerDirected => "maintainer-directed",
             Self::OperationallyAssociated => "operationally-associated",
-            Self::SociallyCorroborated => "socially-corroborated",
+            Self::SeenInYourNetwork => "seen-in-your-network",
             Self::NoKnownContext => "no-known-context",
         }
     }
@@ -64,7 +64,7 @@ impl TrustClassification {
         match self {
             Self::MaintainerDirected => "Maintainer-directed",
             Self::OperationallyAssociated => "Operationally associated",
-            Self::SociallyCorroborated => "Socially corroborated",
+            Self::SeenInYourNetwork => "Seen in your network",
             Self::NoKnownContext => "No known context",
         }
     }
@@ -79,11 +79,11 @@ impl TrustClassification {
             Self::OperationallyAssociated => {
                 "Signed or independently verified evidence connects this identity to repository-listed infrastructure or a recognized coordinator."
             }
-            Self::SociallyCorroborated => {
-                "A confirmed maintainer you follow currently requests this CI identity, or it has CI activity on a repository they maintain."
+            Self::SeenInYourNetwork => {
+                "Someone you follow requested this CI identity for a repository they maintain, or CI activity was observed there. They are not necessarily a maintainer of this repository, and this is not an endorsement."
             }
             Self::NoKnownContext => {
-                "No maintainer, repository-infrastructure, coordinator, or viewer-relative social evidence was found."
+                "No maintainer, repository-infrastructure, coordinator, or viewer-relative network evidence was found."
             }
         }
     }
@@ -97,7 +97,7 @@ impl TrustClassification {
 pub enum EvidenceClassification {
     MaintainerDirected,
     OperationallyAssociated,
-    SociallyCorroborated,
+    SeenInYourNetwork,
 }
 
 impl From<EvidenceClassification> for TrustClassification {
@@ -105,7 +105,7 @@ impl From<EvidenceClassification> for TrustClassification {
         match value {
             EvidenceClassification::MaintainerDirected => Self::MaintainerDirected,
             EvidenceClassification::OperationallyAssociated => Self::OperationallyAssociated,
-            EvidenceClassification::SociallyCorroborated => Self::SociallyCorroborated,
+            EvidenceClassification::SeenInYourNetwork => Self::SeenInYourNetwork,
         }
     }
 }
@@ -119,7 +119,7 @@ pub enum TrustEvidenceKind {
     RepositorySubdomain,
     CoordinatorDelegation,
     ContactRequest,
-    SocialActivity,
+    NetworkActivity,
 }
 
 impl TrustEvidenceKind {
@@ -132,7 +132,7 @@ impl TrustEvidenceKind {
             Self::RepositorySubdomain => "repository-subdomain",
             Self::CoordinatorDelegation => "coordinator-delegation",
             Self::ContactRequest => "contact-request",
-            Self::SocialActivity => "social-activity",
+            Self::NetworkActivity => "network-activity",
         }
     }
 }
@@ -384,8 +384,8 @@ pub fn run_trust_resolution(
 /// When the provider signed with a different key than the coordinator,
 /// coordinator trust reaches the provider only through the Workflow Result
 /// that accepts that job, only for that job, and downgraded: never above
-/// operationally associated, except that socially corroborated stays socially
-/// corroborated. Provider evidence never flows back to the coordinator.
+/// operationally associated, except that seen-in-your-network evidence stays
+/// seen in your network. Provider evidence never flows back to the coordinator.
 #[must_use]
 pub fn job_trust_resolution(
     state: Option<&TrustContextState>,
@@ -417,23 +417,22 @@ pub fn job_trust_resolution(
         return settled_trust_resolution(provider_evidence, provider_coverage);
     }
 
-    let socially_corroborated =
-        coordinator_classification == TrustClassification::SociallyCorroborated;
+    let seen_in_your_network = coordinator_classification == TrustClassification::SeenInYourNetwork;
     let mut evidence = provider_evidence;
     evidence.push(TrustEvidence {
         kind: TrustEvidenceKind::CoordinatorDelegation,
-        classification: if socially_corroborated {
-            EvidenceClassification::SociallyCorroborated
+        classification: if seen_in_your_network {
+            EvidenceClassification::SeenInYourNetwork
         } else {
             EvidenceClassification::OperationallyAssociated
         },
-        summary: if socially_corroborated {
-            "Accepted by a socially corroborated coordinator".to_owned()
+        summary: if seen_in_your_network {
+            "Accepted by a coordinator seen in your network".to_owned()
         } else {
             "Accepted by the coordinator".to_owned()
         },
-        detail: if socially_corroborated {
-            "The coordinator signed a Workflow Result accepting this provider's Job Result, and that coordinator has CI history near your follow graph. This association is scoped to this job.".to_owned()
+        detail: if seen_in_your_network {
+            "The coordinator signed a Workflow Result accepting this provider's Job Result, and separate activity connects that coordinator to repositories maintained by people you follow. This is not an endorsement for this repository, and the association is scoped to this job.".to_owned()
         } else {
             "The independently contextual coordinator signed a Workflow Result accepting this provider's Job Result. This association is scoped to this job.".to_owned()
         },
@@ -485,7 +484,7 @@ pub fn summarize_run_trust(resolutions: &[TrustResolution]) -> TrustResolution {
 /// Identity-level evidence contributed by a coordinator relationship tier.
 ///
 /// The remaining evidence sources — verified NIP-05 domains and viewer-
-/// relative social corroboration — arrive in later work packages.
+/// relative seen-in-your-network evidence — arrive in later work packages.
 #[must_use]
 pub fn relationship_evidence(relationship: Option<&CoordinatorRelationship>) -> Vec<TrustEvidence> {
     let Some(relationship) = relationship else {
@@ -685,8 +684,8 @@ mod tests {
     fn the_strongest_evidence_item_classifies_a_signer() {
         let items = vec![
             evidence(
-                TrustEvidenceKind::SocialActivity,
-                EvidenceClassification::SociallyCorroborated,
+                TrustEvidenceKind::NetworkActivity,
+                EvidenceClassification::SeenInYourNetwork,
                 EvidenceScope::Current,
             ),
             evidence(
@@ -1034,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn a_socially_corroborated_coordinator_delegates_social_corroboration() {
+    fn a_coordinator_seen_in_your_network_delegates_network_evidence() {
         let coordinator = Keys::generate();
         let provider = Keys::generate();
         let owner = Keys::generate();
@@ -1044,8 +1043,8 @@ mod tests {
                 coordinator.public_key(),
                 settled_trust_resolution(
                     vec![evidence(
-                        TrustEvidenceKind::SocialActivity,
-                        EvidenceClassification::SociallyCorroborated,
+                        TrustEvidenceKind::NetworkActivity,
+                        EvidenceClassification::SeenInYourNetwork,
                         EvidenceScope::Current,
                     )],
                     Coverage::Complete,
@@ -1057,11 +1056,11 @@ mod tests {
         let resolution = job_trust_resolution(Some(&state), &run, &run.jobs[0]);
         assert_eq!(
             resolution.classification(),
-            Some(TrustClassification::SociallyCorroborated)
+            Some(TrustClassification::SeenInYourNetwork)
         );
         assert_eq!(
             resolution.evidence().last().unwrap().summary,
-            "Accepted by a socially corroborated coordinator"
+            "Accepted by a coordinator seen in your network"
         );
     }
 
@@ -1288,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_copy_matches_the_canonical_labels() {
+    fn classification_copy_matches_the_canonical_values() {
         assert_eq!(
             TrustClassification::MaintainerDirected.label(),
             "Maintainer-directed"
@@ -1298,8 +1297,16 @@ mod tests {
             "Operationally associated"
         );
         assert_eq!(
-            TrustClassification::SociallyCorroborated.label(),
-            "Socially corroborated"
+            TrustClassification::SeenInYourNetwork.label(),
+            "Seen in your network"
+        );
+        assert_eq!(
+            TrustClassification::SeenInYourNetwork.as_str(),
+            "seen-in-your-network"
+        );
+        assert_eq!(
+            TrustEvidenceKind::NetworkActivity.as_str(),
+            "network-activity"
         );
         assert_eq!(
             TrustClassification::NoKnownContext.label(),

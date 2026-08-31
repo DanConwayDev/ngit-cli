@@ -23,10 +23,10 @@
 //! failed fetch, a failed lookup, a quote that could not be retrieved — makes
 //! coverage partial and never becomes a negative claim.
 //!
-//! Level 3 social corroboration is deferred. Its per-signer evidence would be
-//! appended in [`assemble`], and its inputs (the viewer's follow graph and the
-//! CI activity around it) would join [`CiInputs`]; nothing else in the model
-//! needs to change.
+//! Level 3 seen-in-your-network evidence is deferred. Its per-signer evidence
+//! would be appended in [`assemble`], and its inputs (the people the viewer
+//! follows and the CI activity around their repositories) would join
+//! [`CiInputs`]; nothing else in the model needs to change.
 
 use std::collections::HashMap;
 
@@ -503,7 +503,7 @@ fn assemble(
             identities.get(&signer).map_or(&[][..], Vec::as_slice),
             &repository.grasp_domains,
         ));
-        // Level 3 social corroboration would be appended here.
+        // Level 3 seen-in-your-network evidence would be appended here.
         resolutions.insert(signer, settled_trust_resolution(evidence, coverage));
     }
 

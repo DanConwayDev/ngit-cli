@@ -1472,7 +1472,7 @@ mod tests {
             CiTrustFloor::MaintainerDirected
         ));
         assert!(!meets_floor(
-            TrustClassification::SociallyCorroborated,
+            TrustClassification::SeenInYourNetwork,
             CiTrustFloor::OperationallyAssociated
         ));
         assert!(!meets_floor(

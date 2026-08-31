@@ -57,8 +57,9 @@ Port the gitworkshop model 1:1 unless noted. The load-bearing rules:
    of a signer = strongest evidence item; empty list = `NoKnownContext`
    (absence of evidence, never "untrusted").
 2. **Classifications:** `MaintainerDirected` > `OperationallyAssociated` >
-   `SociallyCorroborated` > `NoKnownContext`. Level 3 (social) is deferred —
-   see phasing — but the enum includes it from the start.
+   `SeenInYourNetwork` > `NoKnownContext`. Level 3 (viewer-relative network
+   evidence) is deferred — see phasing — but the enum includes it from the
+   start.
 3. **Temporal correctness.** A *current* standing Service Request never
    retroactively covers old runs, and neither does a quoted one. Per-run
    coverage is derived from either (a) the run's frozen `service-request` /
@@ -79,8 +80,8 @@ Port the gitworkshop model 1:1 unless noted. The load-bearing rules:
 5. **Delegation scoping.** When a Job Result is signed by a different pubkey
    than the coordinator, coordinator trust reaches the provider only through
    the Workflow Result that accepts that job, only for that job, and downgraded
-   (never above `OperationallyAssociated`, except socially-corroborated stays
-   socially-corroborated). Provider evidence never flows back to the
+   (never above `OperationallyAssociated`, except seen-in-your-network stays
+   seen-in-your-network). Provider evidence never flows back to the
    coordinator.
 6. **Rollups are conservative.** Summarizing several runs (e.g. one table
    cell) surfaces the *weakest* settled run, and any partial coverage makes the
@@ -352,9 +353,10 @@ reference left open:
   are outstanding. That is how rule 8 is kept structurally: nothing can
   settle a signer as "No known context" while a query it depends on is
   unresolved.
-- **Level 3 is a seam, not a stub.** Social evidence would be appended per
-  signer in `resolve::assemble` and its inputs added to `CiInputs`; nothing
-  else in the model changes. No placeholder types were added for it.
+- **Level 3 is a seam, not a stub.** Seen-in-your-network evidence would be
+  appended per signer in `resolve::assemble` and its inputs added to
+  `CiInputs`; nothing else in the model changes. No placeholder types were
+  added for it.
 
 ### WP3 implementation decisions
 
@@ -983,8 +985,8 @@ on WP1.
   event — a Service Request covering a later run through the control history,
   and a run quoting a Manual Trigger through validated provenance.
 
-Deferred beyond WP6: social corroboration (Level 3) for logged-in users,
-secrets provisioning (29846), NIP-11 strengthening, courtesy CI lines in
+Deferred beyond WP6: seen-in-your-network evidence (Level 3) for logged-in
+users, secrets provisioning (29846), NIP-11 strengthening, courtesy CI lines in
 `pr checkout`/`pr apply`, and PR-context Manual Triggers (see the WP6
 decisions).
 
