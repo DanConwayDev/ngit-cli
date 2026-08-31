@@ -41,7 +41,7 @@ mime_guess = "2.0"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.
-nostr = { version = "0.45.3", features = ["nip44", "nip49"] }
+nostr = { version = "0.45.4", features = ["nip44", "nip49"] }
 nostr-connect = "0.45.1"
 nostr-database = "0.45.1"
 nostr-lmdb = "0.45.2"
@@ -86,13 +86,6 @@ tokio = { version = "1.53.1", features = ["test-util"] }
 members = [
     "test_harness",
 ]
-
-# NIP-5A manifests can exceed the legacy 65 KiB NIP-44 boundary when signed
-# through NIP-46. This upstream commit implements NIP-44's extended length
-# prefix while retaining the published 0.45.3 API used by the workspace.
-# Remove the patch after the first crates.io release which contains it.
-[patch.crates-io]
-nostr = { git = "https://github.com/nostrdevkit/nostr.git", rev = "7f50222fff8dc2e446b0bb4ea9c2bc7a9be35fba" }
 
 [lib]
 name = "ngit"
