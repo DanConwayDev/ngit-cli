@@ -128,11 +128,13 @@ async fn get_comments_for_issue(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub async fn launch(
     status: String,
     labels: Vec<String>,
     json: bool,
     show_comments: bool,
+    show_history: bool,
     id: Option<String>,
     offline: bool,
     auth: SignerParams<'_>,
@@ -276,7 +278,9 @@ pub async fn launch(
             target_id,
             json,
             show_comments,
+            show_history,
             &comments,
+            &label_events,
             &cover_note_events,
             &repo_ref,
             relay_hint,
@@ -352,7 +356,9 @@ fn show_issue_details(
     target_id: nostr::prelude::EventId,
     json: bool,
     show_comments: bool,
+    show_history: bool,
     comments: &[nostr::prelude::Event],
+    label_events: &[nostr::prelude::Event],
     cover_note_events: &[nostr::prelude::Event],
     repo_ref: &ngit::repo_ref::RepoRef,
     relay_hint: Option<&RelayUrl>,
@@ -367,6 +373,11 @@ fn show_issue_details(
 
     // Resolve the effective cover note (kind 1624) for this issue.
     let cover_note = process_cover_note(issue, repo_ref, cover_note_events);
+    let edit_history = if show_history {
+        issue_edit_history(issue, repo_ref, label_events, cover_note_events, relay_hint)
+    } else {
+        vec![]
+    };
 
     if json {
         let cover_note_json = cover_note.as_ref().map(|(cn, by_different_author)| {
@@ -409,6 +420,9 @@ fn show_issue_details(
                 })
                 .collect();
             json_obj["comments"] = serde_json::Value::Array(comments_json);
+        }
+        if show_history {
+            json_obj["edit_history"] = serde_json::Value::Array(edit_history);
         }
         crate::output::set_value(json_obj);
         return Ok(());
@@ -481,7 +495,120 @@ fn show_issue_details(
         println!("Comments: {comment_count}  (use --comments to view)");
     }
 
+    if show_history {
+        println!();
+        println!("Edit History ({}):", edit_history.len());
+        for entry in &edit_history {
+            let kind = entry["kind"].as_str().unwrap_or("edit");
+            let author = entry["author"].as_str().unwrap_or("");
+            let created_at = entry["created_at"].as_u64().unwrap_or_default();
+            println!();
+            println!("  {kind}  {author}  {}", chrono_timestamp(created_at));
+            if let Some(subject) = entry["subject"].as_str() {
+                println!("  Subject: {subject}");
+            }
+            if let Some(body) = entry["body"].as_str() {
+                for line in body.lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn issue_edit_history(
+    issue: &nostr::prelude::Event,
+    repo_ref: &ngit::repo_ref::RepoRef,
+    label_events: &[nostr::prelude::Event],
+    cover_note_events: &[nostr::prelude::Event],
+    relay_hint: Option<&RelayUrl>,
+) -> Vec<serde_json::Value> {
+    let authorized_members = repo_ref.confirmed_members();
+    let is_permitted = |event: &nostr::prelude::Event| {
+        event.pubkey == issue.pubkey || authorized_members.contains(&event.pubkey)
+    };
+    let references_issue = |event: &nostr::prelude::Event| {
+        event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() >= 2 && values[0] == "e" && values[1] == issue.id.to_string()
+        })
+    };
+
+    let original_subject = tag_value(issue, "subject")
+        .ok()
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or_else(|| get_issue_title(issue, None));
+    let mut history = vec![(
+        issue.created_at.as_secs(),
+        issue.id.to_hex(),
+        serde_json::json!({
+            "kind": "original",
+            "id": event_id_to_nevent(issue.id, relay_hint),
+            "author": issue.pubkey.to_bech32().unwrap_or_default(),
+            "created_at": issue.created_at.as_secs(),
+            "subject": original_subject,
+            "body": issue.content,
+        }),
+    )];
+
+    for event in label_events.iter().filter(|event| {
+        event.kind == KIND_LABEL
+            && is_permitted(event)
+            && references_issue(event)
+            && event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.len() >= 2 && values[0] == "L" && values[1] == "#subject"
+            })
+    }) {
+        let Some(subject) = event.tags.iter().find_map(|tag| {
+            let values = tag.as_slice();
+            (values.len() >= 3
+                && values[0] == "l"
+                && values[2] == "#subject"
+                && !values[1].is_empty())
+            .then(|| values[1].clone())
+        }) else {
+            continue;
+        };
+        history.push((
+            event.created_at.as_secs(),
+            event.id.to_hex(),
+            serde_json::json!({
+                "kind": "subject",
+                "id": event_id_to_nevent(event.id, relay_hint),
+                "author": event.pubkey.to_bech32().unwrap_or_default(),
+                "created_at": event.created_at.as_secs(),
+                "subject": subject,
+                "by_maintainer": event.pubkey != issue.pubkey,
+            }),
+        ));
+    }
+
+    for event in cover_note_events.iter().filter(|event| {
+        event.kind == KIND_COVER_NOTE && is_permitted(event) && references_issue(event)
+    }) {
+        history.push((
+            event.created_at.as_secs(),
+            event.id.to_hex(),
+            serde_json::json!({
+                "kind": "description",
+                "id": event_id_to_nevent(event.id, relay_hint),
+                "author": event.pubkey.to_bech32().unwrap_or_default(),
+                "created_at": event.created_at.as_secs(),
+                "body": event.content,
+                "by_maintainer": event.pubkey != issue.pubkey,
+            }),
+        ));
+    }
+
+    history.sort_by(|(left_time, left_id, _), (right_time, right_id, _)| {
+        left_time
+            .cmp(right_time)
+            .then_with(|| right_id.cmp(left_id))
+    });
+    history.into_iter().map(|(_, _, entry)| entry).collect()
 }
 
 fn chrono_timestamp(unix_secs: u64) -> String {
@@ -567,4 +694,110 @@ fn output_json(issues: &[IssueRow<'_>], relay_hint: Option<&RelayUrl>) -> Result
         )
         .collect();
     crate::output::set(json_output)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use ngit::repo_ref::RepoRef;
+    use nostr::prelude::{EventBuilder, Keys, Tag, Timestamp, event::FinalizeEvent};
+
+    use super::*;
+
+    fn repo_ref(selected_maintainer: nostr::prelude::PublicKey) -> RepoRef {
+        RepoRef {
+            name: "test".to_string(),
+            description: String::new(),
+            identifier: "test".to_string(),
+            root_commit: String::new(),
+            git_server: vec![],
+            web: vec![],
+            upstream: vec![],
+            relays: vec![],
+            blossoms: vec![],
+            hashtags: vec![],
+            private: false,
+            maintainers: vec![selected_maintainer],
+            selected_maintainer,
+            maintainers_without_annoucnement: None,
+            events: HashMap::new(),
+            nostr_git_url: None,
+            extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead: None,
+        }
+    }
+
+    fn subject_edit(
+        keys: &Keys,
+        issue: &nostr::prelude::Event,
+        subject: &str,
+        created_at: u64,
+    ) -> nostr::prelude::Event {
+        EventBuilder::new(KIND_LABEL, "")
+            .tags([
+                Tag::parse(["e", &issue.id.to_string()]).unwrap(),
+                Tag::parse(["L", "#subject"]).unwrap(),
+                Tag::parse(["l", subject, "#subject"]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .finalize(keys)
+            .unwrap()
+    }
+
+    fn description_edit(
+        keys: &Keys,
+        issue: &nostr::prelude::Event,
+        body: &str,
+        created_at: u64,
+    ) -> nostr::prelude::Event {
+        EventBuilder::new(KIND_COVER_NOTE, body)
+            .tag(Tag::parse(["e", &issue.id.to_string()]).unwrap())
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .finalize(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn edit_history_keeps_every_authorised_revision_and_rejects_outsiders() {
+        let author = Keys::generate();
+        let outsider = Keys::generate();
+        let issue = EventBuilder::new(Kind::GitIssue, "original body")
+            .tag(Tag::parse(["subject", "original subject"]).unwrap())
+            .custom_created_at(Timestamp::from_secs(1))
+            .finalize(&author)
+            .unwrap();
+        let labels = vec![
+            subject_edit(&author, &issue, "second subject", 2),
+            subject_edit(&outsider, &issue, "spoofed subject", 3),
+            subject_edit(&author, &issue, "final subject", 4),
+        ];
+        let covers = vec![
+            description_edit(&author, &issue, "second body", 5),
+            description_edit(&outsider, &issue, "spoofed body", 6),
+            description_edit(&author, &issue, "final body", 7),
+        ];
+
+        let history = issue_edit_history(
+            &issue,
+            &repo_ref(author.public_key()),
+            &labels,
+            &covers,
+            None,
+        );
+
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0]["kind"], "original");
+        assert_eq!(history[0]["subject"], "original subject");
+        assert_eq!(history[0]["body"], "original body");
+        assert_eq!(history[1]["subject"], "second subject");
+        assert_eq!(history[2]["subject"], "final subject");
+        assert_eq!(history[3]["body"], "second body");
+        assert_eq!(history[4]["body"], "final body");
+        assert!(history.iter().all(|entry| {
+            entry["subject"] != "spoofed subject" && entry["body"] != "spoofed body"
+        }));
+    }
 }

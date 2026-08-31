@@ -1493,6 +1493,10 @@ pub enum IssueCommands {
         /// ID)
         #[arg(long)]
         comments: bool,
+        /// Include the original title/body and every authorised edit (requires
+        /// ID)
+        #[arg(long)]
+        history: bool,
         /// Show details for a specific issue (event-id or nevent)
         #[arg(value_name = "ID|nevent")]
         id: Option<String>,
@@ -1508,6 +1512,9 @@ pub enum IssueCommands {
         /// Include full comment thread (default: show count only)
         #[arg(long)]
         comments: bool,
+        /// Include the original title/body and every authorised edit
+        #[arg(long)]
+        history: bool,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

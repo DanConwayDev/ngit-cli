@@ -331,6 +331,7 @@ async fn main() {
                     status,
                     labels,
                     comments,
+                    history,
                     id,
                     offline,
                 } => {
@@ -339,6 +340,7 @@ async fn main() {
                         labels.clone(),
                         cli.json,
                         *comments,
+                        *history,
                         id.clone(),
                         *offline,
                         signer_params,
@@ -348,6 +350,7 @@ async fn main() {
                 IssueCommands::View {
                     id,
                     comments,
+                    history,
                     offline,
                 } => {
                     sub_commands::issue_list::launch(
@@ -355,6 +358,7 @@ async fn main() {
                         vec![],
                         cli.json,
                         *comments,
+                        *history,
                         Some(id.clone()),
                         *offline,
                         signer_params,
