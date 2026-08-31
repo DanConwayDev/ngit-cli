@@ -44,8 +44,11 @@ pub struct ReleaseManifest {
     pub notes: Option<String>,
     pub release_notes: Option<String>,
     pub commit: Option<String>,
+    /// Zapstore-compatible shorthand for one local APK release asset.
+    pub release_source: Option<String>,
     #[serde(default)]
     pub publication: ReleaseManifestPublication,
+    #[serde(default)]
     pub assets: Vec<ReleaseManifestAsset>,
 }
 
@@ -227,10 +230,40 @@ impl ReleaseManifest {
             validate_clean_value("release tag", tag)?;
         }
 
-        let mut assets = Vec::with_capacity(self.assets.len());
+        let mut assets =
+            Vec::with_capacity(self.assets.len() + usize::from(self.release_source.is_some()));
         let mut source_urls: HashMap<Url, usize> = HashMap::new();
         let mut source_paths: HashMap<PathBuf, usize> = HashMap::new();
         let mut filenames: HashMap<String, usize> = HashMap::new();
+
+        if let Some(release_source) = &self.release_source {
+            let file = PathBuf::from(
+                expand_template(
+                    release_source,
+                    release_version,
+                    tag,
+                    TemplateEncoding::Literal,
+                )
+                .context("invalid template in release_source")?,
+            );
+            assets.push(ResolvedReleaseManifestAsset {
+                source: ResolvedReleaseManifestSource::File(file),
+                identifier: None,
+                version: None,
+                filename: None,
+                mime: Some(APK_MIME_TYPE.to_owned()),
+                platforms: Vec::new(),
+                platform_agnostic: false,
+                min_platform_version: None,
+                target_platform_version: None,
+                supported_nips: self.supported_nips.clone(),
+                variant: None,
+                commit: None,
+                min_allowed_version: None,
+                android: None,
+                original_url: None,
+            });
+        }
 
         for (index, asset) in self.assets.iter().enumerate() {
             let source = match (&asset.source, &asset.file) {
@@ -402,6 +435,16 @@ impl ReleaseManifest {
         normalize_string_list("supported_nips", &mut self.supported_nips)?;
         validate_optional_clean_value("channel", self.channel.as_deref())?;
         validate_optional_clean_value("commit", self.commit.as_deref())?;
+        validate_optional_clean_value("release_source", self.release_source.as_deref())?;
+        if let Some(release_source) = &self.release_source {
+            validate_template(release_source).context("invalid release_source template")?;
+            if release_source.contains("://") || Path::new(release_source).is_absolute() {
+                bail!("release_source must be a repository-relative local file");
+            }
+            if !release_source.to_ascii_lowercase().ends_with(".apk") {
+                bail!("release_source must identify a local APK file");
+            }
+        }
         if self
             .notes
             .as_ref()
@@ -413,8 +456,11 @@ impl ReleaseManifest {
         if self.notes.is_some() && self.release_notes.is_some() {
             bail!("notes and release_notes are mutually exclusive");
         }
-        if self.assets.is_empty() {
-            bail!("release manifest must contain at least one asset");
+        if self.release_source.is_some() && !self.assets.is_empty() {
+            bail!("release_source and assets are mutually exclusive");
+        }
+        if self.release_source.is_none() && self.assets.is_empty() {
+            bail!("release manifest must contain release_source or at least one asset");
         }
 
         self.publication.validate_and_normalize()?;
@@ -564,16 +610,15 @@ impl ReleaseManifestAsset {
         if let Some(android) = &mut self.android {
             android.validate_and_normalize()?;
         }
-        if apk {
-            let android = self
-                .android
-                .as_ref()
-                .ok_or_else(|| anyhow!("Android APK assets require an android metadata block"))?;
+        if apk && !local_apk {
+            let android = self.android.as_ref().ok_or_else(|| {
+                anyhow!("remote Android APK assets require an android metadata block")
+            })?;
             if android.version_code.is_none() {
-                bail!("Android APK assets require android.version_code");
+                bail!("remote Android APK assets require android.version_code");
             }
             if android.certificate_sha256.is_empty() {
-                bail!("Android APK assets require android.certificate_sha256");
+                bail!("remote Android APK assets require android.certificate_sha256");
             }
         }
 
@@ -1304,10 +1349,39 @@ assets:
     }
 
     #[test]
-    fn local_apks_still_require_explicit_android_identity_metadata() {
-        let error =
-            parse_release_manifest("schema: 1\nassets:\n  - file: dist/app.apk\n").unwrap_err();
-        assert!(format!("{error:#}").contains("android metadata block"));
+    fn local_apks_may_derive_android_identity_metadata() {
+        let manifest =
+            parse_release_manifest("schema: 1\nassets:\n  - file: dist/app.apk\n").unwrap();
+        assert!(manifest.assets[0].android.is_none());
+    }
+
+    #[test]
+    fn release_source_is_a_local_apk_shorthand() {
+        let manifest = parse_release_manifest(
+            "schema: 1\nidentifier: com.example.app\nrelease_source: dist/app-{tag}.apk\n",
+        )
+        .unwrap();
+        assert!(manifest.assets.is_empty());
+        let resolved = manifest.resolve("1.2.3", Some("v1.2.3")).unwrap();
+        assert_eq!(resolved.assets.len(), 1);
+        assert_eq!(
+            resolved.assets[0].source,
+            ResolvedReleaseManifestSource::File(PathBuf::from("dist/app-v1.2.3.apk"))
+        );
+        assert_eq!(resolved.assets[0].mime.as_deref(), Some(APK_MIME_TYPE));
+        assert!(resolved.assets[0].platforms.is_empty());
+        assert!(resolved.assets[0].android.is_none());
+    }
+
+    #[test]
+    fn release_source_rejects_remote_non_apk_and_assets_conflicts() {
+        for yaml in [
+            "schema: 1\nrelease_source: https://example.com/app.apk\n",
+            "schema: 1\nrelease_source: dist/app.aab\n",
+            "schema: 1\nrelease_source: dist/app.apk\nassets:\n  - file: dist/other.apk\n",
+        ] {
+            assert!(parse_release_manifest(yaml).is_err(), "accepted:\n{yaml}");
+        }
     }
 
     #[test]

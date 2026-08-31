@@ -2,10 +2,13 @@
 
 use std::{
     collections::BTreeSet,
+    fs::File,
     io::{Read, Seek},
+    path::Path,
 };
 
 use anyhow::{Context, Result, bail};
+use apk_info::{Apk, CertificateInfo, Signature};
 use serde::Serialize;
 use zip::ZipArchive;
 
@@ -14,6 +17,7 @@ use crate::blossom::FileSnapshot;
 pub const APK_MIME_TYPE: &str = "application/vnd.android.package-archive";
 const ANDROID_MANIFEST: &str = "AndroidManifest.xml";
 const MAX_APK_ENTRIES: usize = 100_000;
+const MAX_APK_ANALYSIS_BYTES: u64 = 1024 * 1024 * 1024;
 const UNIVERSAL_ANDROID_PLATFORMS: [&str; 4] = [
     "android-arm64-v8a",
     "android-armeabi-v7a",
@@ -26,6 +30,104 @@ pub struct ApkPlatformInference {
     pub derived_platforms: Vec<String>,
     pub native_libraries_present: bool,
     pub unknown_abis: Vec<String>,
+}
+
+/// Objective Android metadata read from the same immutable snapshot uploaded
+/// to Blossom.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ApkInspection {
+    #[serde(flatten)]
+    pub platforms: ApkPlatformInference,
+    pub package: String,
+    pub version_name: String,
+    pub version_code: u64,
+    pub min_sdk_version: String,
+    pub target_sdk_version: String,
+    pub certificate_sha256: Vec<String>,
+}
+
+pub fn inspect_apk(snapshot: &FileSnapshot) -> Result<ApkInspection> {
+    inspect_apk_file_with_size(snapshot.path(), snapshot.size)
+}
+
+/// Inspect an APK directly. Release publication uses [`inspect_apk`] so the
+/// parsed file is the same immutable snapshot that is hashed and uploaded.
+pub fn inspect_apk_file(path: &Path) -> Result<ApkInspection> {
+    let size = path
+        .metadata()
+        .with_context(|| format!("failed to inspect APK size at {}", path.display()))?
+        .len();
+    inspect_apk_file_with_size(path, size)
+}
+
+fn inspect_apk_file_with_size(path: &Path, size: u64) -> Result<ApkInspection> {
+    if size > MAX_APK_ANALYSIS_BYTES {
+        bail!(
+            "APK is {} bytes, exceeding the safe analysis limit of {MAX_APK_ANALYSIS_BYTES}",
+            size
+        );
+    }
+    let file =
+        File::open(path).with_context(|| format!("failed to open APK at {}", path.display()))?;
+    let platforms = inspect_apk_archive(file)?;
+    let apk = Apk::new(path).context("failed to parse compiled Android metadata")?;
+    let package = required_apk_value("package", apk.get_package_name())?;
+    let version_name = required_apk_value("versionName", apk.get_version_name())?;
+    let version_code = required_apk_value("versionCode", apk.get_version_code())?
+        .parse::<u64>()
+        .context("APK versionCode is not an unsigned integer")?;
+    if version_code == 0 {
+        bail!("APK versionCode must be greater than zero");
+    }
+    let min_sdk_version = apk
+        .get_min_sdk_version()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "1".to_owned());
+    let target_sdk_version = apk
+        .get_attribute_value("uses-sdk", "targetSdkVersion")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| min_sdk_version.clone());
+    let certificate_sha256 = certificate_hashes(apk.get_signatures()?)?;
+
+    Ok(ApkInspection {
+        platforms,
+        package,
+        version_name,
+        version_code,
+        min_sdk_version,
+        target_sdk_version,
+        certificate_sha256,
+    })
+}
+
+fn required_apk_value(field: &str, value: Option<String>) -> Result<String> {
+    let value = value.ok_or_else(|| anyhow::anyhow!("APK does not declare {field}"))?;
+    if value.trim().is_empty() {
+        bail!("APK declares an empty {field}");
+    }
+    Ok(value)
+}
+
+fn certificate_hashes(signatures: Vec<Signature>) -> Result<Vec<String>> {
+    let mut hashes = BTreeSet::new();
+    for signature in signatures {
+        let certificates = match signature {
+            Signature::V1(certificates)
+            | Signature::V2(certificates)
+            | Signature::V3(certificates)
+            | Signature::V31(certificates) => certificates,
+            _ => continue,
+        };
+        hashes.extend(certificates.into_iter().map(
+            |CertificateInfo {
+                 sha256_fingerprint, ..
+             }| sha256_fingerprint.to_ascii_lowercase(),
+        ));
+    }
+    if hashes.is_empty() {
+        bail!("APK does not contain a recognized v1, v2, v3, or v3.1 signing certificate");
+    }
+    Ok(hashes.into_iter().collect())
 }
 
 pub fn inspect_apk_platforms(snapshot: &FileSnapshot) -> Result<ApkPlatformInference> {

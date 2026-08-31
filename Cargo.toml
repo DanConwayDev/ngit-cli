@@ -13,6 +13,7 @@ categories = ["command-line-utilities","development-tools"]
 
 [dependencies]
 anyhow = "1.0.104"
+apk-info = "1.0.12"
 async-trait = "0.1.92"
 auth-git2 = "0.6.0"
 # `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its

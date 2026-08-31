@@ -94,6 +94,10 @@ impl FileSnapshot {
             .reopen()
             .context("failed to reopen the stable asset snapshot")
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.file.path()
+    }
 }
 
 /// A server-confirmed BUD-02 blob descriptor.
