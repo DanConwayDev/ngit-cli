@@ -718,9 +718,10 @@ pub struct ReleaseViewArgs {
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ReleasePublishArgs {
-    /// Exact release version; identifiers are not normalized
+    /// Exact release version (defaults to the exact Git tag, without one
+    /// leading v)
     #[arg(value_name = "VERSION")]
-    pub release_version: String,
+    pub release_version: Option<String>,
     /// Application identifier, naddr, or application coordinate
     #[arg(long, value_name = "APP")]
     pub app: Option<String>,
@@ -736,7 +737,7 @@ pub struct ReleasePublishArgs {
     /// Release date as Unix seconds (defaults to now when creating)
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub released_at: Option<u64>,
-    /// Git tag used for {tag} manifest expansion
+    /// Exact Git tag used for version discovery and {tag} manifest expansion
     #[arg(long, value_name = "TAG")]
     pub tag: Option<String>,
     /// Git commit represented by this release (defaults to HEAD when creating)

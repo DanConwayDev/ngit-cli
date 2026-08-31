@@ -219,7 +219,7 @@ versions. In particular, `v1.2.0` and `1.2.0` are different Nostr addresses.
 | --- | --- |
 | `ngit release list` | list releases for trusted linked applications |
 | `ngit release view RELEASE` | show a release and resolve all asset details |
-| `ngit release publish VERSION` | create or explicitly edit a release |
+| `ngit release publish [VERSION]` | create or explicitly edit a release |
 | `ngit release app list` | list linked or user-owned applications |
 | `ngit release app view APP` | show application details and authority |
 | `ngit release app init` | create or explicitly edit an application |
@@ -682,7 +682,7 @@ Each asset has a `resolution` value of `resolved`, `missing`, or `invalid`, plus
 structured validation errors. A verifier result records the observed final
 URL, byte size, and hash without changing the published event.
 
-### `ngit release publish VERSION`
+### `ngit release publish [VERSION]`
 
 This command creates a release and its new URL- or file-backed asset events. It
 accepts:
@@ -691,7 +691,7 @@ accepts:
 - `--channel CHANNEL` (default `main`);
 - `--notes TEXT` or `--notes-file PATH`;
 - `--released-at UNIX_SECONDS` (default now for creation);
-- `--tag TAG` when `{tag}` manifest expansion differs from VERSION;
+- `--tag TAG` to select an exact tag when a commit has more than one;
 - `--commit COMMIT` to override the Git revision represented by the release;
 - `--manifest PATH`;
 - repeatable `--asset PLATFORM=URL` for the simple case;
@@ -729,10 +729,20 @@ Multiple candidates remain an error. An exact existing but unlinked application
 is never overwritten or linked implicitly; the user must run `release app link
 APP --edit` first.
 
-Creation requires at least one valid asset. A new release defaults its source
-commit to the repository's current `HEAD`. `--commit` and top-level manifest
-`commit` values may be any revision that resolves to a commit in the local
-repository; ngit peels the revision and writes its full commit ID. On edit,
+Creation requires at least one valid asset. When VERSION is omitted, ngit
+resolves `--commit`, top-level manifest `commit`, or `HEAD`, requires one exact
+Git tag on that commit, and removes one lowercase leading `v` to obtain the
+release version. Annotated and lightweight tags are both supported. A commit
+with no exact tag fails; one with several fails until `--tag` selects one. An
+explicit VERSION remains available for non-tag release identifiers. If
+`--tag` and a commit selector are both supplied, they must identify the same
+commit.
+
+A new release defaults its source commit to the repository's current `HEAD`.
+`--commit` and top-level manifest `commit` values may be any revision that
+resolves to a commit in the local repository; ngit peels the revision and
+writes its full commit ID. An automatically selected tag pins that same commit.
+On edit,
 omitted notes, channel, release date, commit, and asset inputs preserve their
 existing values. This includes preserving the absence of `commit` on a legacy
 release. New asset inputs append; they do not replace or remove the existing
@@ -801,9 +811,10 @@ earlier fail-fast error. Mirror URLs are operational results; only the primary
 URL is written to the kind `3063` event. A mutation without local files retains
 the same shape with a null server selection and an empty upload list.
 `blossom.server_selection.source` is `explicit`, `manifest`, or `kind_10063`.
-For APKs, each upload also contains `apk_platform_inference`, recording the
-derived platforms, whether native libraries were present, and any ABI names
-which ngit did not recognize.
+For APKs, each upload also contains `apk_platform_inference`, recording package
+identifier, version name and code, effective minimum and target SDK versions,
+signing-certificate SHA-256 hashes, derived platforms, whether native libraries
+were present, and any ABI names which ngit did not recognize.
 
 ## Asset commands
 
@@ -897,7 +908,7 @@ images:
   - https://cdn.example.org/ngit/existing-screenshot.png
 channel: main
 release_notes: CHANGELOG.md
-commit: main
+release_source: dist/ngit-{tag}.apk
 publication:
   blossom_servers:
     - https://blossom.example.org
@@ -908,24 +919,6 @@ publication:
   strict_metadata: true
   allow_partial_platforms: false
   add_application_platforms: false
-assets:
-  - source: https://downloads.example.org/ngit/{version}/ngit-linux-x86_64.tar.gz
-    platforms:
-      - linux-x86_64
-    variant: glibc-2.17
-    commit: 0123456789abcdef0123456789abcdef01234567
-  - source: https://downloads.example.org/ngit/{version}/ngit-macos-arm64.tar.gz
-    platforms:
-      - darwin-arm64
-  - source: https://cdn.example.org/ngit/{version}/checksums.txt
-    platform_agnostic: true
-  - file: dist/ngit-{version}-android-arm64-v8a.apk
-    filename: ngit-{version}-android-arm64-v8a.apk
-    mime: application/vnd.android.package-archive
-    android:
-      version_code: 10203
-      certificate_sha256:
-        - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
 Supported top-level fields are `schema`, application selector `application` or
@@ -933,7 +926,9 @@ its Zapstore-compatible alias `identifier`, expected-author `pubkey`,
 application `name`, `summary`, `description`, `tags`, `license`, `website`,
 `repository`, `icon`, `images`, and `communities`, asset-default
 `supported_nips`, `channel`, literal inline `notes`, Keep a Changelog path
-`release_notes`, release-wide `commit`, `publication`, and `assets`.
+`release_notes`, release-wide `commit`, Zapstore-compatible `release_source`,
+`publication`, and `assets`. `release_source` is shorthand for one
+repository-relative local APK and is mutually exclusive with `assets`.
 `application` and `identifier` are mutually exclusive. `publication` supports:
 
 - ordered `blossom_servers`;
@@ -947,7 +942,7 @@ An explicit CLI Blossom list replaces the manifest list. CLI relays extend the
 manifest relays. Boolean manifest values and their CLI flags are combined with
 logical OR. The manifest deliberately cannot select a signer, provide secrets,
 set the release version or output mode, enable `--edit`, or set dynamic
-`released_at`/`tag` inputs.
+`released_at` or tag-selection inputs.
 
 `notes` and `release_notes` are mutually exclusive. A `release_notes` path is
 absolute or relative to the repository root. Ngit extracts the matching
@@ -1005,8 +1000,8 @@ An asset supports:
 - `original_url`.
 
 Only the literal `{version}` and `{tag}` placeholders are expanded. `{version}`
-is the exact VERSION argument. `{tag}` is the exact resolved Git tag and MUST be
-provided explicitly when it differs from VERSION. URL substitutions are
+is the explicit VERSION or the version derived from the exact tag. `{tag}` is
+the exact selected Git tag. URL substitutions are
 percent-encoded as URL components; filenames and local paths use the literal
 value. Relative local paths are resolved from the repository root and uploaded
 through the same ordered Blossom workflow as `--file`. No shell, environment
@@ -1024,7 +1019,14 @@ single-command zero-state workflow: when no NIP-82 events exist, `release
 publish` creates the linked application, asset, and release and sends them in
 that order. APKs cannot be marked `platform_agnostic`.
 
-ngit requires one non-empty root `AndroidManifest.xml`. When the archive
+ngit requires one non-empty root `AndroidManifest.xml`, a non-empty package ID
+and version name, a positive version code, and at least one certificate from a
+recognized v1, v2, v3, or v3.1 signing structure. The APK version name must
+equal the release version, so a tag such as `v3.1.1` is checked against APK
+version `3.1.1`. The APK package ID must equal the asset identifier, which
+defaults to the application identifier.
+
+When the archive
 contains native libraries under `lib/<abi>/*.so`, the supported ABI directories
 become `android-<abi>` platforms; the standard Android ABI names use the NIP-82
 spellings. Explicit platforms are merged only when they agree with those native
@@ -1035,16 +1037,20 @@ Unknown but safely encoded ABI names are retained and reported with the
 from an APK which has native libraries, a MIME conflict, or an invalid archive
 fails before upload.
 
-v1 deliberately does not parse the binary manifest or APK signing blocks.
-`android.version_code` and at least one
-`android.certificate_sha256` therefore remain explicit, validated manifest
-metadata; `android.min_allowed_version_code` remains optional. This keeps ABI
-inference small and auditable without pretending filename or archive layout can
-prove package identity.
+For local APKs, ngit reads version code, minimum and target SDK versions, and
+certificate SHA-256 values from the snapshotted package and writes those values
+to the asset event. Corresponding manifest values are optional assertions: a
+difference fails before upload instead of overriding the APK. The optional
+`android.min_allowed_version_code` remains release policy rather than an APK
+fact. Remote APK sources are never downloaded for enrichment and therefore
+still require explicit Android identity metadata.
 
-CLI values override top-level manifest values. For release commit selection,
-precedence is `--commit`, top-level manifest `commit`, the prior value on edit,
-then `HEAD` on create. Release-wide and per-asset commit values are independent:
+CLI values override top-level manifest values. For tag-derived releases,
+`--commit`, top-level manifest `commit`, then `HEAD` choose the commit which
+must carry the exact tag; ngit retains that resolved object ID. Otherwise,
+release commit precedence is `--commit`, top-level manifest `commit`, the prior
+value on edit, then `HEAD` on create. Release-wide and per-asset commit values
+are independent:
 the former identifies the source state represented by the release, while the
 latter may identify the source of one particular artifact. Direct asset flags
 append to manifest assets; they do not replace them. Duplicate final URLs,
@@ -1061,9 +1067,10 @@ explicit decision where omission commonly creates a poor release:
   local APK platforms may be inferred from the archive snapshot.
 - A missing filename or MIME type is inferred from the final URL, response
   headers, and content sniffing. Ambiguous or generic results produce a warning.
-- Android APK assets require an explicit version code and signing certificate
-  SHA-256. Local APK platform tags are inferred from the stable archive
-  snapshot and merged with compatible declarations.
+- Local Android APK assets derive package/version, SDK, signing-certificate,
+  and platform metadata from the stable archive snapshot. Supplied values are
+  assertions. Remote APK assets require explicit version code and certificate
+  SHA-256 because ngit does not download them for enrichment.
 - Applications SHOULD have a summary, icon, website, repository URL, license,
   and platform hints. Creation warns about omissions but does not require them.
 - Releases SHOULD have non-empty notes. ngit-created releases identify a source
@@ -1453,9 +1460,9 @@ fail closed with an actionable error.
 - Updating application platforms must preserve links to other repositories and
   unknown future tags. Reconstructing only the fields ngit understands can
   silently sever another publisher's metadata.
-- APK architecture inference must inspect the same immutable bytes being
-  hashed. v1 derives ABI platforms only; version code and certificate hashes
-  stay explicit until a small, independently audited parser can validate them.
+- APK metadata inference must inspect the same immutable bytes being hashed and
+  uploaded. Declarative values can constrain those facts but never replace
+  them.
 - APKs can be split, universal, signed by multiple certificates, unsigned, or
   use signing schemes the parser does not understand. Fail safely rather than
   choosing an arbitrary certificate.

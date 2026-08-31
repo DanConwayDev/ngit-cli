@@ -6,13 +6,10 @@
 //! bounded in-process HTTP server so they exercise the real downloader while
 //! remaining hermetic.
 
-use std::{
-    fs,
-    io::{Cursor, Write},
-    time::Duration,
-};
+use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
     AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -28,7 +25,6 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
-use zip::{ZipWriter, write::SimpleFileOptions};
 
 const APP_ID: &str = "ngit-release-test";
 const RELEASE_VERSION: &str = "1.2.3";
@@ -678,15 +674,12 @@ async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
 }
 
 #[tokio::test]
-async fn local_apk_manifest_upload_preserves_android_metadata() -> Result<()> {
+async fn local_apk_manifest_upload_extracts_android_metadata() -> Result<()> {
     const CERTIFICATE_SHA256: &str =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        "e9da81bd13f11feefe7cf220311a497c8783c0eb3254e47db76e6ab6c0745310";
 
     let (harness, publisher, published) = setup(0).await?;
-    let apk_bytes = android_apk(&[
-        ("AndroidManifest.xml", b"binary manifest fixture"),
-        ("lib/arm64-v8a/libngit.so", b"native fixture"),
-    ])?;
+    let apk_bytes = android_apk()?;
     let dist = publisher.dir().join("dist");
     fs::create_dir_all(&dist).context("failed to create release artifact directory")?;
     fs::write(dist.join("ngit-1.2.3.apk"), &apk_bytes)
@@ -711,12 +704,9 @@ publication:
     - "{blossom_server}"
 assets:
   - file: dist/ngit-{{version}}.apk
+    identifier: dev.ngit.fixture
     filename: ngit-{{version}}-android-arm64-v8a.apk
     mime: application/vnd.android.package-archive
-    android:
-      version_code: 10203
-      min_allowed_version_code: 10100
-      certificate_sha256: [{CERTIFICATE_SHA256}]
 "#,
         blossom_server = blossom.base_url(),
     );
@@ -760,6 +750,14 @@ assets:
         output["result"]["blossom"]["uploads"][0]["apk_platform_inference"]["derived_platforms"][0]
             == "android-arm64-v8a"
     );
+    ensure!(
+        output["result"]["blossom"]["uploads"][0]["apk_platform_inference"]["package"]
+            == "dev.ngit.fixture"
+    );
+    ensure!(
+        output["result"]["blossom"]["uploads"][0]["apk_platform_inference"]["version_name"]
+            == RELEASE_VERSION
+    );
 
     let application = single_event(
         &harness,
@@ -790,7 +788,9 @@ assets:
     ensure!(asset.size == Some(apk_bytes.len() as u64));
     ensure!(asset.platforms == ["android-arm64-v8a"]);
     ensure!(asset.version_code == Some(10203));
-    ensure!(asset.min_allowed_version_code == Some(10100));
+    ensure!(asset.min_allowed_version_code.is_none());
+    ensure!(asset.min_platform_version.as_deref() == Some("24"));
+    ensure!(asset.target_platform_version.as_deref() == Some("35"));
     ensure!(asset.apk_certificate_hashes == [CERTIFICATE_SHA256]);
 
     let release = SoftwareRelease::parse(
@@ -811,15 +811,92 @@ assets:
 }
 
 #[tokio::test]
-async fn local_apk_rejects_platforms_absent_from_native_libraries() -> Result<()> {
-    const CERTIFICATE_SHA256: &str =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
+async fn tagged_release_source_publishes_without_cli_arguments() -> Result<()> {
     let (harness, publisher, published) = setup(0).await?;
-    let apk_bytes = android_apk(&[
-        ("AndroidManifest.xml", b"binary manifest fixture"),
-        ("lib/arm64-v8a/libngit.so", b"native fixture"),
-    ])?;
+    let apk_bytes = android_apk()?;
+    let artifact_dir = publisher.dir().join("artifacts");
+    fs::create_dir_all(&artifact_dir).context("failed to create artifact directory")?;
+    fs::write(artifact_dir.join("app-v1.2.3.apk"), &apk_bytes)
+        .context("failed to write tagged APK fixture")?;
+
+    let hash = sha256_hex(&apk_bytes);
+    let blossom = BlossomHttpServer::descriptor(
+        "201 Created",
+        &hash,
+        apk_bytes.len() as u64,
+        "application/vnd.android.package-archive",
+    )
+    .await?;
+    let manifest_dir = publisher.dir().join(".ngit");
+    fs::create_dir_all(&manifest_dir).context("failed to create manifest directory")?;
+    fs::write(
+        manifest_dir.join("release.yaml"),
+        format!(
+            r#"schema: 1
+identifier: dev.ngit.fixture
+name: ngit APK fixture
+notes: Tagged release source
+release_source: artifacts/app-{{tag}}.apk
+publication:
+  blossom_servers: ["{}"]
+"#,
+            blossom.base_url()
+        ),
+    )
+    .context("failed to write release manifest")?;
+    publisher
+        .git_ok(
+            ["tag", "-a", "v1.2.3", "-m", "release v1.2.3"],
+            "git tag v1.2.3",
+        )
+        .await?;
+    let expected_commit = git2::Repository::open(publisher.dir())?
+        .head()?
+        .peel_to_commit()?
+        .id()
+        .to_string();
+
+    let output = run_json(&publisher, &["release", "publish", "--json"]).await?;
+    let requests = blossom.finish().await?;
+    ensure!(blossom_upload_request(&requests)?.body == apk_bytes);
+    ensure!(output["result"]["release"]["version"] == RELEASE_VERSION);
+
+    let release = SoftwareRelease::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_RELEASE_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier("dev.ngit.fixture@1.2.3"),
+            "tag-derived software release",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(release.version == RELEASE_VERSION);
+    ensure!(release.commit.as_deref() == Some(expected_commit.as_str()));
+
+    let asset = SoftwareAsset::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+            "tag-derived APK asset",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(asset.identifier == "dev.ngit.fixture");
+    ensure!(asset.version == RELEASE_VERSION);
+    ensure!(asset.version_code == Some(10203));
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_apk_rejects_platforms_absent_from_native_libraries() -> Result<()> {
+    let (harness, publisher, published) = setup(0).await?;
+    let apk_bytes = android_apk()?;
     fs::write(publisher.dir().join("ngit.apk"), apk_bytes)
         .context("failed to write local Android release asset")?;
     fs::write(
@@ -829,10 +906,8 @@ async fn local_apk_rejects_platforms_absent_from_native_libraries() -> Result<()
 application: {APP_ID}
 assets:
   - file: ngit.apk
+    identifier: dev.ngit.fixture
     platforms: [android-x86_64]
-    android:
-      version_code: 10203
-      certificate_sha256: [{CERTIFICATE_SHA256}]
 "#,
         ),
     )
@@ -1989,14 +2064,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     sha256::Hash::hash(bytes).to_string()
 }
 
-fn android_apk(entries: &[(&str, &[u8])]) -> Result<Vec<u8>> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, bytes) in entries {
-        writer.start_file(*name, options)?;
-        writer.write_all(bytes)?;
-    }
-    Ok(writer.finish()?.into_inner())
+fn android_apk() -> Result<Vec<u8>> {
+    let encoded = include_str!("../fixtures/android-app-1.2.3.apk.base64")
+        .split_whitespace()
+        .collect::<String>();
+    STANDARD
+        .decode(encoded)
+        .context("failed to decode signed Android APK fixture")
 }
 
 struct CapturedBlossomRequest {

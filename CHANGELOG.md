@@ -14,6 +14,11 @@ publication.
 
 ### Added
 
+- `ngit release publish` can derive its version and source commit from one
+  exact Git tag, so tagged CI builds need no positional arguments. Schema-1
+  manifests accept Zapstore-compatible local APK `release_source`; ngit
+  extracts package/version, SDK, certificate, and ABI metadata from the stable
+  Blossom snapshot and rejects conflicts with declarative assertions.
 - Schema-1 release manifests can declare Zapstore-style application metadata.
   Tracked local icons and screenshots publish through Blossom, while existing
   HTTP(S) image URLs remain direct references and are never downloaded.

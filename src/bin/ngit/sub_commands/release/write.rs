@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use ngit::{
-    apk::{APK_MIME_TYPE, ApkPlatformInference, inspect_apk_platforms},
+    apk::{APK_MIME_TYPE, ApkInspection, ApkPlatformInference, inspect_apk},
     blossom::{
         BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
         FileSnapshot, LocalFileRequest, MultiServerUpload, MultiServerUploadError,
@@ -83,7 +83,11 @@ pub(super) async fn release_publish(
     signer: SignerParams<'_>,
 ) -> Result<CommandOutput> {
     let repo = Repo::discover().context("failed to find a git repository")?;
-    let manifest = resolve_manifest(repo.get_path()?, args)?;
+    let ResolvedReleaseInvocation {
+        release_version,
+        tagged_commit,
+        manifest,
+    } = resolve_release_invocation(&repo, args)?;
     let publication = effective_publication_settings(args, manifest.as_ref());
     let mut context =
         ReleaseContext::load_for_write(&publication.relays, publication.zapstore_relay, signer)
@@ -132,11 +136,16 @@ pub(super) async fn release_publish(
         bootstrap_application_target(&context, &discovered_applications, app_selector)?
     };
 
-    let identifier = format!("{}@{}", application_target.identifier, args.release_version);
-    let existing =
-        load_exact_release(&mut context, &application_target, &args.release_version).await?;
+    let identifier = format!("{}@{}", application_target.identifier, release_version);
+    let existing = load_exact_release(&mut context, &application_target, &release_version).await?;
     enforce_edit_guard(existing.as_ref(), args.edit, "release", &identifier)?;
-    let commit = release_commit(&context, args, manifest.as_ref(), existing.as_ref())?;
+    let commit = release_commit(
+        &context,
+        args,
+        manifest.as_ref(),
+        existing.as_ref(),
+        tagged_commit.as_deref(),
+    )?;
 
     let manifest_has_files = manifest.as_ref().is_some_and(|manifest| {
         manifest
@@ -170,7 +179,7 @@ pub(super) async fn release_publish(
                             asset,
                             source.clone(),
                             &application_target,
-                            &args.release_version,
+                            &release_version,
                         ),
                     )
                     .await?;
@@ -183,7 +192,7 @@ pub(super) async fn release_publish(
                             asset,
                             path,
                             &application_target,
-                            &args.release_version,
+                            &release_version,
                         ),
                     )
                     .await?;
@@ -213,7 +222,7 @@ pub(super) async fn release_publish(
                 url,
                 vec![platform.to_owned()],
                 &application_target,
-                &args.release_version,
+                &release_version,
             ),
         )
         .await?;
@@ -223,7 +232,7 @@ pub(super) async fn release_publish(
     for url in &args.platform_agnostic_assets {
         let input = prepare_url_asset(
             &mut context,
-            NewUrlAsset::simple(url, Vec::new(), &application_target, &args.release_version),
+            NewUrlAsset::simple(url, Vec::new(), &application_target, &release_version),
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &input)?;
@@ -236,7 +245,7 @@ pub(super) async fn release_publish(
                 &path,
                 platforms,
                 &application_target,
-                &args.release_version,
+                &release_version,
                 false,
             ),
         )
@@ -251,7 +260,7 @@ pub(super) async fn release_publish(
                 path,
                 Vec::new(),
                 &application_target,
-                &args.release_version,
+                &release_version,
                 true,
             ),
         )
@@ -292,7 +301,13 @@ pub(super) async fn release_publish(
     )
     .await?;
 
-    let notes = release_notes(&context, args, manifest.as_ref(), existing.as_ref())?;
+    let notes = release_notes(
+        &context,
+        args,
+        manifest.as_ref(),
+        existing.as_ref(),
+        &release_version,
+    )?;
     let channel = args
         .channel
         .clone()
@@ -335,7 +350,7 @@ pub(super) async fn release_publish(
         &mut context,
         &application_target,
         existing_application.as_ref(),
-        &args.release_version,
+        &release_version,
         existing.as_ref(),
     )
     .await?;
@@ -370,7 +385,7 @@ pub(super) async fn release_publish(
         &mut context,
         &application_target,
         existing_application.as_ref(),
-        &args.release_version,
+        &release_version,
         existing.as_ref(),
     )
     .await
@@ -442,7 +457,7 @@ pub(super) async fn release_publish(
         &mut context,
         &application_target,
         existing_application.as_ref(),
-        &args.release_version,
+        &release_version,
         existing.as_ref(),
     )
     .await
@@ -468,7 +483,7 @@ pub(super) async fn release_publish(
     let release_event = build_release_event(
         &context,
         &application,
-        &args.release_version,
+        &release_version,
         channel,
         notes,
         commit,
@@ -1458,10 +1473,18 @@ fn enforce_edit_guard(
     }
 }
 
-fn resolve_manifest(
-    repository_root: &Path,
+#[derive(Debug)]
+struct ResolvedReleaseInvocation {
+    release_version: String,
+    tagged_commit: Option<String>,
+    manifest: Option<ResolvedReleaseManifest>,
+}
+
+fn resolve_release_invocation(
+    repo: &Repo,
     args: &ReleasePublishArgs,
-) -> Result<Option<ResolvedReleaseManifest>> {
+) -> Result<ResolvedReleaseInvocation> {
+    let repository_root = repo.get_path()?;
     let has_direct_assets = !args.assets.is_empty()
         || !args.files.is_empty()
         || !args.asset_events.is_empty()
@@ -1472,15 +1495,154 @@ fn resolve_manifest(
         || (!args.edit
             && !has_direct_assets
             && resolve_release_manifest_path(repository_root, None)?.exists());
-    if !should_load {
-        return Ok(None);
-    }
-    let loaded = load_release_manifest(repository_root, requested)?;
-    Ok(Some(
+    let loaded = should_load
+        .then(|| load_release_manifest(repository_root, requested))
+        .transpose()?;
+    let requested_commit = args.commit.as_deref().or_else(|| {
         loaded
-            .manifest
-            .resolve(&args.release_version, args.tag.as_deref())?,
+            .as_ref()
+            .and_then(|loaded| loaded.manifest.commit.as_deref())
+    });
+
+    let (release_version, tag, tagged_commit) = match (&args.release_version, &args.tag) {
+        (Some(version), None) => (version.clone(), None, None),
+        (Some(version), Some(tag)) => {
+            let tag_commit = resolve_exact_tag(&repo.git_repo, tag)?;
+            ensure_requested_commit_matches_tag(&repo.git_repo, requested_commit, tag, tag_commit)?;
+            (
+                version.clone(),
+                Some(tag.clone()),
+                Some(tag_commit.to_string()),
+            )
+        }
+        (None, explicit_tag) => {
+            let selected_commit = match (requested_commit, explicit_tag) {
+                (Some(revision), _) => resolve_repository_commit(&repo.git_repo, revision)?,
+                (None, Some(tag)) => resolve_exact_tag(&repo.git_repo, tag)?,
+                (None, None) => resolve_repository_commit(&repo.git_repo, "HEAD")?,
+            };
+            let tag = if let Some(tag) = explicit_tag {
+                let tag_commit = resolve_exact_tag(&repo.git_repo, tag)?;
+                if tag_commit != selected_commit {
+                    return Err(coded_error_with_details(
+                        "release_tag_commit_mismatch",
+                        format!("Git tag {tag:?} does not identify the selected release commit"),
+                        json!({
+                            "tag": tag,
+                            "tag_commit": tag_commit.to_string(),
+                            "selected_commit": selected_commit.to_string(),
+                        }),
+                    ));
+                }
+                tag.clone()
+            } else {
+                exact_tag_for_commit(&repo.git_repo, selected_commit)?
+            };
+            let version = version_from_tag(&tag)?;
+            (version, Some(tag), Some(selected_commit.to_string()))
+        }
+    };
+
+    let manifest = loaded
+        .map(|loaded| loaded.manifest.resolve(&release_version, tag.as_deref()))
+        .transpose()?;
+    Ok(ResolvedReleaseInvocation {
+        release_version,
+        tagged_commit,
+        manifest,
+    })
+}
+
+fn resolve_repository_commit(repository: &git2::Repository, revision: &str) -> Result<git2::Oid> {
+    repository
+        .revparse_single(revision)
+        .with_context(|| format!("failed to resolve release commit {revision:?}"))?
+        .peel_to_commit()
+        .with_context(|| format!("release commit {revision:?} does not identify a Git commit"))
+        .map(|commit| commit.id())
+}
+
+fn resolve_exact_tag(repository: &git2::Repository, tag: &str) -> Result<git2::Oid> {
+    let reference_name = format!("refs/tags/{tag}");
+    repository
+        .find_reference(&reference_name)
+        .with_context(|| format!("failed to find exact Git tag {tag:?}"))?
+        .peel_to_commit()
+        .with_context(|| format!("Git tag {tag:?} does not identify a commit"))
+        .map(|commit| commit.id())
+}
+
+fn ensure_requested_commit_matches_tag(
+    repository: &git2::Repository,
+    requested_commit: Option<&str>,
+    tag: &str,
+    tag_commit: git2::Oid,
+) -> Result<()> {
+    let Some(requested_commit) = requested_commit else {
+        return Ok(());
+    };
+    let selected_commit = resolve_repository_commit(repository, requested_commit)?;
+    if selected_commit == tag_commit {
+        return Ok(());
+    }
+    Err(coded_error_with_details(
+        "release_tag_commit_mismatch",
+        format!("Git tag {tag:?} does not identify the selected release commit"),
+        json!({
+            "tag": tag,
+            "tag_commit": tag_commit.to_string(),
+            "selected_commit": selected_commit.to_string(),
+        }),
     ))
+}
+
+fn exact_tag_for_commit(repository: &git2::Repository, commit: git2::Oid) -> Result<String> {
+    let mut tags = Vec::new();
+    let references = repository
+        .references_glob("refs/tags/*")
+        .context("failed to enumerate Git tags")?;
+    for reference in references {
+        let reference = reference.context("failed to read a Git tag")?;
+        let Some(name) = reference
+            .name()
+            .ok()
+            .and_then(|name| name.strip_prefix("refs/tags/"))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if reference
+            .peel_to_commit()
+            .is_ok_and(|tag_commit| tag_commit.id() == commit)
+        {
+            tags.push(name);
+        }
+    }
+    tags.sort();
+    match tags.as_slice() {
+        [] => Err(coded_error_with_details(
+            "release_tag_required",
+            "the selected release commit has no exact Git tag; provide VERSION or tag the commit",
+            json!({ "commit": commit.to_string() }),
+        )),
+        [tag] => Ok(tag.clone()),
+        _ => Err(coded_error_with_details(
+            "release_tag_ambiguous",
+            "the selected release commit has multiple exact Git tags; select one with --tag",
+            json!({ "commit": commit.to_string(), "tags": tags }),
+        )),
+    }
+}
+
+fn version_from_tag(tag: &str) -> Result<String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    if version.is_empty() {
+        return Err(coded_error(
+            "invalid_release_tag",
+            "Git tag \"v\" does not contain a release version",
+        ));
+    }
+    Ok(version.to_owned())
 }
 
 fn effective_publication_settings(
@@ -1532,6 +1694,7 @@ fn release_notes(
     args: &ReleasePublishArgs,
     manifest: Option<&ResolvedReleaseManifest>,
     existing: Option<&SoftwareRelease>,
+    release_version: &str,
 ) -> Result<String> {
     if let Some(notes) = &args.notes {
         return Ok(notes.clone());
@@ -1549,7 +1712,7 @@ fn release_notes(
             let path = repository_relative_path(context.git_repo_path()?, path);
             let changelog = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read release_notes {}", path.display()))?;
-            return extract_keep_a_changelog_release_notes(&changelog, &args.release_version)
+            return extract_keep_a_changelog_release_notes(&changelog, release_version)
                 .with_context(|| {
                     format!("failed to extract release notes from {}", path.display())
                 });
@@ -2109,7 +2272,7 @@ struct PendingFileAsset {
     source_path: String,
     input: AssetInput,
     snapshot: FileSnapshot,
-    apk_platform_inference: Option<Box<ApkPlatformInference>>,
+    apk_platform_inference: Option<Box<ApkInspection>>,
 }
 
 #[derive(Debug)]
@@ -2137,7 +2300,7 @@ struct BlossomServerSelection {
 
 async fn prepare_file_asset(
     context: &mut ReleaseContext,
-    proposed: NewFileAsset,
+    mut proposed: NewFileAsset,
 ) -> Result<PendingFileAsset> {
     let source_path = repository_relative_path(context.git_repo_path()?, &proposed.source_path);
     let mut request = LocalFileRequest::new(&source_path);
@@ -2151,15 +2314,17 @@ async fn prepare_file_asset(
     })?;
     append_download_warnings(context, &snapshot.warnings)?;
 
-    let mut platforms = proposed.metadata.platforms;
-    let apk_platform_inference = infer_apk_platforms(
+    let apk_platform_inference = infer_apk_metadata(
         context,
         &snapshot,
         &proposed.source_path,
-        &mut platforms,
+        &mut proposed.metadata,
         proposed.platform_agnostic,
     )?;
-    if platforms.is_empty() && apk_platform_inference.is_none() && !proposed.platform_agnostic {
+    if proposed.metadata.platforms.is_empty()
+        && apk_platform_inference.is_none()
+        && !proposed.platform_agnostic
+    {
         return Err(coded_error(
             "asset_platform_required",
             "local file has no platform metadata; use repeatable --platform, PLATFORM=PATH, or --platform-agnostic-file",
@@ -2178,7 +2343,7 @@ async fn prepare_file_asset(
         mime: snapshot.mime_type.clone(),
         sha256: snapshot.sha256.clone(),
         size: Some(snapshot.size),
-        platforms,
+        platforms: proposed.metadata.platforms,
         min_platform_version: proposed.metadata.min_platform_version,
         target_platform_version: proposed.metadata.target_platform_version,
         supported_nips: proposed.metadata.supported_nips,
@@ -2201,13 +2366,13 @@ async fn prepare_file_asset(
     })
 }
 
-fn infer_apk_platforms(
+fn infer_apk_metadata(
     context: &mut ReleaseContext,
     snapshot: &FileSnapshot,
     source_path: &Path,
-    platforms: &mut Vec<String>,
+    metadata: &mut NewUrlAsset,
     platform_agnostic: bool,
-) -> Result<Option<ApkPlatformInference>> {
+) -> Result<Option<ApkInspection>> {
     let source_is_apk = looks_like_apk_filename(&source_path.to_string_lossy());
     let filename_is_apk = looks_like_apk_filename(&snapshot.filename);
     let mime_is_apk = snapshot.mime_type.eq_ignore_ascii_case(APK_MIME_TYPE);
@@ -2233,11 +2398,11 @@ fn infer_apk_platforms(
         ));
     }
 
-    let inference = inspect_apk_platforms(snapshot).map_err(|error| {
+    let inference = inspect_apk(snapshot).map_err(|error| {
         coded_error_with_details(
             "invalid_apk",
             format!(
-                "cannot infer Android platforms from {}: {error:#}",
+                "cannot inspect Android metadata in {}: {error:#}",
                 snapshot.filename
             ),
             json!({
@@ -2246,12 +2411,28 @@ fn infer_apk_platforms(
             }),
         )
     })?;
+    merge_apk_platforms(metadata, &inference.platforms)?;
+    apply_apk_identity_metadata(metadata, &inference)?;
+    if !inference.platforms.unknown_abis.is_empty() {
+        context.warnings.push(WarningJson::new(
+            "apk_unknown_abi",
+            format!(
+                "the APK contains unrecognized native ABI directories: {}",
+                inference.platforms.unknown_abis.join(", ")
+            ),
+        ));
+    }
+    Ok(Some(inference))
+}
+
+fn merge_apk_platforms(metadata: &mut NewUrlAsset, inference: &ApkPlatformInference) -> Result<()> {
     let derived = inference
         .derived_platforms
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let conflicting = platforms
+    let conflicting = metadata
+        .platforms
         .iter()
         .filter(|platform| {
             if inference.native_libraries_present {
@@ -2267,7 +2448,7 @@ fn infer_apk_platforms(
             "apk_platform_conflict",
             "declared platforms contradict the platforms supported by the APK",
             json!({
-                "declared_platforms": platforms,
+                "declared_platforms": metadata.platforms,
                 "derived_platforms": inference.derived_platforms,
                 "conflicting_platforms": conflicting,
                 "native_libraries_present": inference.native_libraries_present,
@@ -2275,19 +2456,95 @@ fn infer_apk_platforms(
         ));
     }
 
-    platforms.extend(inference.derived_platforms.iter().cloned());
-    platforms.sort();
-    platforms.dedup();
-    if !inference.unknown_abis.is_empty() {
-        context.warnings.push(WarningJson::new(
-            "apk_unknown_abi",
-            format!(
-                "the APK contains unrecognized native ABI directories: {}",
-                inference.unknown_abis.join(", ")
-            ),
+    metadata
+        .platforms
+        .extend(inference.derived_platforms.iter().cloned());
+    metadata.platforms.sort();
+    metadata.platforms.dedup();
+    Ok(())
+}
+
+fn apply_apk_identity_metadata(
+    metadata: &mut NewUrlAsset,
+    inference: &ApkInspection,
+) -> Result<()> {
+    assert_apk_string_metadata("identifier", &metadata.identifier, &inference.package)?;
+    assert_apk_string_metadata("version", &metadata.version, &inference.version_name)?;
+    assert_optional_apk_string_metadata(
+        "min_platform_version",
+        metadata.min_platform_version.as_deref(),
+        &inference.min_sdk_version,
+    )?;
+    assert_optional_apk_string_metadata(
+        "target_platform_version",
+        metadata.target_platform_version.as_deref(),
+        &inference.target_sdk_version,
+    )?;
+    if metadata
+        .version_code
+        .is_some_and(|declared| declared != inference.version_code)
+    {
+        return Err(apk_metadata_conflict(
+            "android.version_code",
+            metadata.version_code,
+            inference.version_code,
         ));
     }
-    Ok(Some(inference))
+    let mut declared_certificate_hashes = metadata.apk_certificate_hashes.clone();
+    declared_certificate_hashes.sort();
+    if !declared_certificate_hashes.is_empty()
+        && declared_certificate_hashes != inference.certificate_sha256
+    {
+        return Err(apk_metadata_conflict(
+            "android.certificate_sha256",
+            &metadata.apk_certificate_hashes,
+            &inference.certificate_sha256,
+        ));
+    }
+
+    metadata.identifier.clone_from(&inference.package);
+    metadata.version.clone_from(&inference.version_name);
+    metadata.min_platform_version = Some(inference.min_sdk_version.clone());
+    metadata.target_platform_version = Some(inference.target_sdk_version.clone());
+    metadata.version_code = Some(inference.version_code);
+    metadata
+        .apk_certificate_hashes
+        .clone_from(&inference.certificate_sha256);
+    Ok(())
+}
+
+fn assert_apk_string_metadata(field: &str, declared: &str, extracted: &str) -> Result<()> {
+    if declared == extracted {
+        return Ok(());
+    }
+    Err(apk_metadata_conflict(field, declared, extracted))
+}
+
+fn assert_optional_apk_string_metadata(
+    field: &str,
+    declared: Option<&str>,
+    extracted: &str,
+) -> Result<()> {
+    let Some(declared) = declared else {
+        return Ok(());
+    };
+    assert_apk_string_metadata(field, declared, extracted)
+}
+
+fn apk_metadata_conflict(
+    field: &str,
+    declared: impl Serialize,
+    extracted: impl Serialize,
+) -> anyhow::Error {
+    coded_error_with_details(
+        "apk_metadata_conflict",
+        format!("declared {field} contradicts the value extracted from the APK"),
+        json!({
+            "field": field,
+            "declared": declared,
+            "extracted": extracted,
+        }),
+    )
 }
 
 fn can_infer_local_apk_platforms(
@@ -3012,11 +3269,15 @@ fn release_commit(
     args: &ReleasePublishArgs,
     manifest: Option<&ResolvedReleaseManifest>,
     existing: Option<&SoftwareRelease>,
+    tagged_commit: Option<&str>,
 ) -> Result<Option<String>> {
     let requested = args
         .commit
         .as_deref()
         .or_else(|| manifest.and_then(|manifest| manifest.commit.as_deref()));
+    if let Some(tagged_commit) = tagged_commit {
+        return Ok(Some(tagged_commit.to_owned()));
+    }
     if let Some(revision) = requested {
         return resolve_git_commit(context, revision).map(Some);
     }
@@ -3083,6 +3344,8 @@ fn redacted_url(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use git2::{Oid, Repository, Signature};
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -3111,6 +3374,70 @@ mod tests {
             panic!("release publish command was not parsed");
         };
         args
+    }
+
+    fn repository_with_commit() -> (TempDir, Repo, Oid) {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = Repository::init(directory.path()).unwrap();
+        let commit = {
+            let mut index = repository.index().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repository.find_tree(tree_id).unwrap();
+            let signature = Signature::now("ngit test", "ngit@example.com").unwrap();
+            repository
+                .commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+                .unwrap()
+        };
+        (
+            directory,
+            Repo {
+                git_repo: repository,
+            },
+            commit,
+        )
+    }
+
+    fn add_lightweight_tag(repository: &Repository, tag: &str, commit: Oid) {
+        let object = repository.find_object(commit, None).unwrap();
+        repository.tag_lightweight(tag, &object, false).unwrap();
+    }
+
+    #[test]
+    fn publish_without_version_uses_the_single_exact_tag() {
+        let (_directory, repo, commit) = repository_with_commit();
+        add_lightweight_tag(&repo.git_repo, "v1.2.3", commit);
+
+        let invocation = resolve_release_invocation(&repo, &publish_args(&[])).unwrap();
+
+        assert_eq!(invocation.release_version, "1.2.3");
+        assert_eq!(invocation.tagged_commit, Some(commit.to_string()));
+    }
+
+    #[test]
+    fn explicit_publish_version_remains_available_without_a_tag() {
+        let (_directory, repo, _commit) = repository_with_commit();
+
+        let invocation =
+            resolve_release_invocation(&repo, &publish_args(&["custom-version"])).unwrap();
+
+        assert_eq!(invocation.release_version, "custom-version");
+        assert!(invocation.tagged_commit.is_none());
+    }
+
+    #[test]
+    fn automatic_version_requires_one_unambiguous_exact_tag() {
+        let (_directory, repo, commit) = repository_with_commit();
+        let missing = resolve_release_invocation(&repo, &publish_args(&[])).unwrap_err();
+        assert_eq!(error_code(&missing), "release_tag_required");
+
+        add_lightweight_tag(&repo.git_repo, "v1.2.3", commit);
+        add_lightweight_tag(&repo.git_repo, "stable", commit);
+        let ambiguous = resolve_release_invocation(&repo, &publish_args(&[])).unwrap_err();
+        assert_eq!(error_code(&ambiguous), "release_tag_ambiguous");
+
+        let selected =
+            resolve_release_invocation(&repo, &publish_args(&["--tag", "v1.2.3"])).unwrap();
+        assert_eq!(selected.release_version, "1.2.3");
     }
 
     #[test]
@@ -3210,6 +3537,44 @@ assets:
             Some("application.apk"),
             Some(APK_MIME_TYPE),
         ));
+    }
+
+    #[test]
+    fn apk_identity_is_extracted_and_declarations_are_only_assertions() {
+        let application = ApplicationTarget {
+            author: nostr::prelude::Keys::generate().public_key(),
+            identifier: "dev.ngit.fixture".to_owned(),
+        };
+        let mut metadata = NewUrlAsset::simple("", Vec::new(), &application, "9.9.9");
+        let inspection = ApkInspection {
+            platforms: ApkPlatformInference {
+                derived_platforms: values(&["android-arm64-v8a"]),
+                native_libraries_present: true,
+                unknown_abis: Vec::new(),
+            },
+            package: "dev.ngit.fixture".to_owned(),
+            version_name: "1.2.3".to_owned(),
+            version_code: 10_203,
+            min_sdk_version: "24".to_owned(),
+            target_sdk_version: "35".to_owned(),
+            certificate_sha256: values(&["abcdef"]),
+        };
+
+        let error = apply_apk_identity_metadata(&mut metadata, &inspection).unwrap_err();
+        let release_error = error
+            .downcast_ref::<super::super::support::ReleaseError>()
+            .expect("APK conflict should be a coded release error");
+        assert_eq!(release_error.code, "apk_metadata_conflict");
+        assert_eq!(release_error.details["field"], "version");
+        assert_eq!(release_error.details["declared"], "9.9.9");
+        assert_eq!(release_error.details["extracted"], "1.2.3");
+
+        metadata.version = inspection.version_name.clone();
+        apply_apk_identity_metadata(&mut metadata, &inspection).unwrap();
+        assert_eq!(metadata.version_code, Some(10_203));
+        assert_eq!(metadata.min_platform_version.as_deref(), Some("24"));
+        assert_eq!(metadata.target_platform_version.as_deref(), Some("35"));
+        assert_eq!(metadata.apk_certificate_hashes, ["abcdef"]);
     }
 
     #[test]
