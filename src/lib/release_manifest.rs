@@ -26,6 +26,20 @@ pub const DEFAULT_RELEASE_MANIFEST_PATH: &str = ".ngit/release.yaml";
 pub struct ReleaseManifest {
     pub schema: u32,
     pub application: Option<String>,
+    pub identifier: Option<String>,
+    pub pubkey: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub license: Option<String>,
+    pub website: Option<String>,
+    pub repository: Option<String>,
+    pub icon: Option<String>,
+    pub images: Option<Vec<String>>,
+    pub communities: Option<Vec<String>>,
+    #[serde(default)]
+    pub supported_nips: Vec<String>,
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub release_notes: Option<String>,
@@ -100,6 +114,17 @@ pub struct LoadedReleaseManifest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedReleaseManifest {
     pub application: Option<String>,
+    pub pubkey: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub license: Option<String>,
+    pub website: Option<String>,
+    pub repository: Option<String>,
+    pub icon: Option<ResolvedReleaseManifestMedia>,
+    pub images: Option<Vec<ResolvedReleaseManifestMedia>>,
+    pub communities: Option<Vec<String>>,
     pub channel: Option<String>,
     pub notes: Option<String>,
     pub release_notes: Option<PathBuf>,
@@ -111,6 +136,13 @@ pub struct ResolvedReleaseManifest {
 /// The unambiguous source of a resolved manifest asset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolvedReleaseManifestSource {
+    Url(String),
+    File(PathBuf),
+}
+
+/// One application image supplied either as an existing URL or a local file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedReleaseManifestMedia {
     Url(String),
     File(PathBuf),
 }
@@ -277,7 +309,11 @@ impl ReleaseManifest {
                 platform_agnostic: asset.platform_agnostic,
                 min_platform_version: asset.min_platform_version.clone(),
                 target_platform_version: asset.target_platform_version.clone(),
-                supported_nips: asset.supported_nips.clone(),
+                supported_nips: if asset.supported_nips.is_empty() {
+                    self.supported_nips.clone()
+                } else {
+                    asset.supported_nips.clone()
+                },
                 variant: asset.variant.clone(),
                 commit: asset.commit.clone(),
                 min_allowed_version: asset.min_allowed_version.clone(),
@@ -286,8 +322,38 @@ impl ReleaseManifest {
             });
         }
 
+        let icon = self
+            .icon
+            .as_deref()
+            .map(|value| resolve_application_media(value, "icon"))
+            .transpose()?;
+        let images = self
+            .images
+            .as_ref()
+            .map(|images| {
+                images
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        resolve_application_media(value, &format!("images[{index}]"))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+
         Ok(ResolvedReleaseManifest {
-            application: self.application.clone(),
+            application: self.application.clone().or_else(|| self.identifier.clone()),
+            pubkey: self.pubkey.clone(),
+            name: self.name.clone(),
+            summary: self.summary.clone(),
+            description: self.description.clone(),
+            tags: self.tags.clone(),
+            license: self.license.clone(),
+            website: self.website.clone(),
+            repository: self.repository.clone(),
+            icon,
+            images,
+            communities: self.communities.clone(),
             channel: self.channel.clone(),
             notes: self.notes.clone(),
             release_notes: self.release_notes.as_ref().map(PathBuf::from),
@@ -305,6 +371,35 @@ impl ReleaseManifest {
             );
         }
         validate_optional_clean_value("application", self.application.as_deref())?;
+        validate_optional_clean_value("identifier", self.identifier.as_deref())?;
+        if self.application.is_some() && self.identifier.is_some() {
+            bail!("application and identifier are mutually exclusive");
+        }
+        validate_optional_clean_value("pubkey", self.pubkey.as_deref())?;
+        validate_optional_clean_value("name", self.name.as_deref())?;
+        validate_optional_clean_value("summary", self.summary.as_deref())?;
+        validate_optional_clean_value("license", self.license.as_deref())?;
+        validate_optional_clean_value("website", self.website.as_deref())?;
+        validate_optional_clean_value("repository", self.repository.as_deref())?;
+        validate_optional_clean_value("icon", self.icon.as_deref())?;
+        if let Some(tags) = &mut self.tags {
+            normalize_string_list("tags", tags)?;
+        }
+        if let Some(images) = &mut self.images {
+            normalize_string_list("images", images)?;
+        }
+        if let Some(communities) = &mut self.communities {
+            normalize_string_list("communities", communities)?;
+            for community in communities.iter_mut() {
+                if community.len() != 64 || !community.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    bail!("communities entries must be 64 hexadecimal characters");
+                }
+                community.make_ascii_lowercase();
+            }
+            deduplicate(communities);
+        }
+        normalize_string_list("supported_nips", &mut self.supported_nips)?;
         validate_optional_clean_value("channel", self.channel.as_deref())?;
         validate_optional_clean_value("commit", self.commit.as_deref())?;
         if self
@@ -598,6 +693,14 @@ fn parse_public_url(value: &str, field: &str) -> Result<Url> {
     Ok(url)
 }
 
+fn resolve_application_media(value: &str, field: &str) -> Result<ResolvedReleaseManifestMedia> {
+    if Url::parse(value).is_ok() || value.contains("://") {
+        parse_public_url(value, field)?;
+        return Ok(ResolvedReleaseManifestMedia::Url(value.to_owned()));
+    }
+    Ok(ResolvedReleaseManifestMedia::File(PathBuf::from(value)))
+}
+
 fn validate_filename(filename: &str) -> Result<()> {
     validate_clean_value("filename", filename)?;
     if filename == "." || filename == ".." {
@@ -842,6 +945,81 @@ assets:
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("notes and release_notes are mutually exclusive"));
+    }
+
+    #[test]
+    fn resolves_zapstore_style_application_metadata_and_media() {
+        let manifest = parse_release_manifest(
+            r#"schema: 1
+identifier: com.example.app
+pubkey: npub1expected
+name: Example
+summary: Short summary
+description: |
+  Long application description.
+tags: [nostr, productivity, nostr]
+license: MIT
+website: https://example.com
+repository: naddr1repository
+icon: ./assets/icon.png
+images:
+  - https://cdn.example.com/screenshot.png
+  - ./assets/details.webp
+communities:
+  - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+supported_nips: ["01", "34", "01"]
+assets:
+  - source: https://downloads.example.com/app.tar.gz
+    platform_agnostic: true
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.tags.as_deref(),
+            Some(&["nostr".to_owned(), "productivity".to_owned()][..])
+        );
+        assert_eq!(manifest.supported_nips, ["01", "34"]);
+        assert_eq!(
+            manifest.communities.as_deref(),
+            Some(
+                &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()][..]
+            )
+        );
+
+        let resolved = manifest.resolve("1.0.0", None).unwrap();
+        assert_eq!(resolved.application.as_deref(), Some("com.example.app"));
+        assert_eq!(
+            resolved.icon,
+            Some(ResolvedReleaseManifestMedia::File(PathBuf::from(
+                "./assets/icon.png"
+            )))
+        );
+        assert_eq!(
+            resolved.images,
+            Some(vec![
+                ResolvedReleaseManifestMedia::Url(
+                    "https://cdn.example.com/screenshot.png".to_owned()
+                ),
+                ResolvedReleaseManifestMedia::File(PathBuf::from("./assets/details.webp")),
+            ])
+        );
+        assert_eq!(resolved.assets[0].supported_nips, ["01", "34"]);
+    }
+
+    #[test]
+    fn application_identifier_alias_and_media_urls_are_strict() {
+        let conflict = parse_release_manifest(
+            "schema: 1\napplication: one\nidentifier: two\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
+        )
+        .unwrap_err();
+        assert!(conflict.to_string().contains("mutually exclusive"));
+
+        let manifest = parse_release_manifest(
+            "schema: 1\nicon: ftp://example.com/icon.png\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
+        )
+        .unwrap();
+        let error = manifest.resolve("1.0.0", None).unwrap_err();
+        assert!(error.to_string().contains("icon must use HTTP or HTTPS"));
     }
 
     #[test]

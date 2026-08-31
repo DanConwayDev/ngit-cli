@@ -882,7 +882,19 @@ integrity rules.
 
 ```yaml
 schema: 1
-application: ngit
+identifier: ngit
+pubkey: npub1expectedpublisher...
+name: ngit
+summary: Nostr-native Git collaboration
+description: Decentralized Git collaboration over Nostr.
+tags: [git, nostr]
+license: MIT
+website: https://ngit.dev
+repository: nostr://npub1maintainer.../ngit
+icon: media/icon.png
+images:
+  - media/repository.png
+  - https://cdn.example.org/ngit/existing-screenshot.png
 channel: main
 release_notes: CHANGELOG.md
 commit: main
@@ -916,9 +928,13 @@ assets:
         - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ```
 
-Supported top-level fields are `schema`, `application`, `channel`, literal
-inline `notes`, Keep a Changelog path `release_notes`, release-wide `commit`,
-`publication`, and `assets`. `publication` supports:
+Supported top-level fields are `schema`, application selector `application` or
+its Zapstore-compatible alias `identifier`, expected-author `pubkey`,
+application `name`, `summary`, `description`, `tags`, `license`, `website`,
+`repository`, `icon`, `images`, and `communities`, asset-default
+`supported_nips`, `channel`, literal inline `notes`, Keep a Changelog path
+`release_notes`, release-wide `commit`, `publication`, and `assets`.
+`application` and `identifier` are mutually exclusive. `publication` supports:
 
 - ordered `blossom_servers`;
 - additional discovery and publication `relays`;
@@ -939,6 +955,40 @@ level-two Keep a Changelog section for the exact VERSION, treating one leading
 `v` as equivalent, and preserves its inner Markdown. Missing, duplicate, and
 empty matching sections are errors; ngit never falls back to the complete
 changelog. CLI `--notes` and literal `--notes-file` values take precedence.
+
+On application creation, omitted metadata falls back to repository metadata.
+For a linked existing application, the manifest is a patch with these exact
+merge and clearing rules:
+
+| Application data | Omitted from manifest | Supplied in manifest | Clear in manifest |
+| --- | --- | --- | --- |
+| `name` | Preserve | Replace | Not allowed; a name is required |
+| `description` | Preserve | Replace | `description: ""` |
+| `summary`, `license`, `website`, `repository`, `icon` | Preserve | Replace | Not supported; YAML `null` also preserves |
+| `tags`, `images`, `communities` | Preserve | Replace the complete list | Supply `[]` |
+| application platforms | Preserve | Managed by the release platform policy, not a top-level metadata field | Not supported |
+| repository-coordinate links and unknown tags | Preserve | Not directly settable | Not supported |
+
+Thus list fields are replacements rather than additions: include every entry
+that should remain. Optional scalar tags cannot currently be removed by
+`release.yaml`; clear one separately with the corresponding `ngit release app
+init --edit --clear-*` option before publishing. A supplied value that leaves
+the normalized application unchanged does not produce an application event.
+Any other supplied difference produces an ordered application replacement in
+the release batch, while repository links and unknown tags continue to
+round-trip.
+
+The optional `pubkey` accepts npub or hexadecimal form and must match the active
+signer before any upload or signature. `tags` emit `t` tags and `communities`
+emit normalized `h` tags.
+
+`icon` and `images` accept either direct HTTP(S) references or local tracked
+files. Direct URLs are published unchanged and are never fetched. Local paths
+must be relative, tracked by Git, resolve within the repository, identify an
+image MIME type, and fit the 20 MiB media bound. Ngit snapshots each local file,
+confirms it on every selected Blossom server, and uses the primary returned URL
+before signing. Local application media and local release assets share the
+same server selection and failure accounting.
 
 An asset supports:
 

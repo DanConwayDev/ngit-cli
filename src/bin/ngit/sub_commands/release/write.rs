@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    path::Path,
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
@@ -18,9 +18,9 @@ use ngit::{
     git::{Repo, RepoActions},
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
-        ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestSource,
-        extract_keep_a_changelog_release_notes, load_release_manifest,
-        resolve_release_manifest_path,
+        ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestMedia,
+        ResolvedReleaseManifestSource, extract_keep_a_changelog_release_notes,
+        load_release_manifest, resolve_release_manifest_path,
     },
     software_release::{
         AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -88,6 +88,7 @@ pub(super) async fn release_publish(
     let mut context =
         ReleaseContext::load_for_write(&publication.relays, publication.zapstore_relay, signer)
             .await?;
+    enforce_manifest_pubkey(&context, manifest.as_ref())?;
     let app_selector = args.app.as_deref().or_else(|| {
         manifest
             .as_ref()
@@ -142,13 +143,14 @@ pub(super) async fn release_publish(
             .assets
             .iter()
             .any(|asset| matches!(asset.source, ResolvedReleaseManifestSource::File(_)))
+            || manifest_has_local_application_media(manifest)
     });
     let has_local_files =
         manifest_has_files || !args.files.is_empty() || !args.platform_agnostic_files.is_empty();
     if !publication.blossom_servers.is_empty() && !has_local_files {
         return Err(coded_error(
             "blossom_server_without_file",
-            "publication.blossom_servers or --blossom-server requires a local file from --file, --platform-agnostic-file, or the release manifest",
+            "publication.blossom_servers or --blossom-server requires a local release asset or application image",
         ));
     }
 
@@ -286,9 +288,7 @@ pub(super) async fn release_publish(
         &application_target,
         &publication.blossom_servers,
         publication.blossom_server_source,
-        prepared_assets
-            .iter()
-            .any(|asset| matches!(asset, PreparedAsset::File(_))),
+        has_local_files,
     )
     .await?;
 
@@ -322,6 +322,15 @@ pub(super) async fn release_publish(
         publication.allow_partial_platforms,
         publication.add_application_platforms,
     )?;
+    let mut prepared_application = prepare_manifest_application_metadata(
+        &mut context,
+        manifest.as_ref(),
+        existing_application.as_ref(),
+        &application_target,
+        platform_policy.resulting_application_platforms.clone(),
+        blossom_selection.as_ref(),
+    )
+    .await?;
     ensure_release_state_unchanged(
         &mut context,
         &application_target,
@@ -330,10 +339,12 @@ pub(super) async fn release_publish(
         existing.as_ref(),
     )
     .await?;
-    if existing_application.is_none() {
-        let input =
-            bootstrap_application_input(&context, &application_target, release_platforms.clone())?;
-        super::write_app::add_metadata_warnings(&mut context, &input, publication.strict_metadata)?;
+    if let Some(prepared) = &prepared_application {
+        super::write_app::add_metadata_warnings(
+            &mut context,
+            &prepared.input,
+            publication.strict_metadata,
+        )?;
     }
     enforce_metadata_policy(&context, publication.strict_metadata)?;
     context.emit_human_warnings_before_signing(args.json);
@@ -345,7 +356,13 @@ pub(super) async fn release_publish(
         .clone();
     let blossom = match blossom_selection.as_ref() {
         Some(selection) => {
-            upload_prepared_file_assets(&mut prepared_assets, selection, &signer).await?
+            upload_prepared_files(
+                prepared_application.as_mut(),
+                &mut prepared_assets,
+                selection,
+                &signer,
+            )
+            .await?
         }
         None => BlossomPublication::empty(),
     };
@@ -361,44 +378,40 @@ pub(super) async fn release_publish(
         preserve_completed_blossom(error, &blossom, "state_recheck", Nip82Progress::none())
     })?;
 
-    let application = if let Some(application) = existing_application.as_ref() {
-        if platform_policy.application_platforms_added.is_empty() {
-            application.clone()
-        } else {
-            sign_application_platform_update(
-                application,
-                &platform_policy.resulting_application_platforms,
-                &signer,
-            )
-            .await
-            .map_err(|error| {
-                preserve_completed_blossom(
-                    error,
-                    &blossom,
-                    "application_signing",
-                    Nip82Progress::none(),
-                )
-            })?
-        }
-    } else {
-        sign_bootstrap_application(
-            bootstrap_application_input(&context, &application_target, release_platforms.clone())?,
-            &application_target,
-            &signer,
-        )
-        .await
-        .map_err(|error| {
-            preserve_completed_blossom(
-                error,
-                &blossom,
-                "application_signing",
-                Nip82Progress::none(),
-            )
-        })?
+    let application_changed = match (&existing_application, &prepared_application) {
+        (None, _) => true,
+        (Some(existing), Some(prepared)) => !application_input_matches(existing, &prepared.input),
+        (Some(_), None) => false,
     };
-    let signed_application_id = (existing_application.is_none()
-        || !platform_policy.application_platforms_added.is_empty())
-    .then_some(application.raw_event.id);
+    let application = match (existing_application.as_ref(), prepared_application) {
+        (Some(existing), Some(prepared)) if application_changed => {
+            sign_application_update(existing, prepared.input, &signer)
+                .await
+                .map_err(|error| {
+                    preserve_completed_blossom(
+                        error,
+                        &blossom,
+                        "application_signing",
+                        Nip82Progress::none(),
+                    )
+                })?
+        }
+        (Some(existing), _) => existing.clone(),
+        (None, Some(prepared)) => {
+            sign_bootstrap_application(prepared.input, &application_target, &signer)
+                .await
+                .map_err(|error| {
+                    preserve_completed_blossom(
+                        error,
+                        &blossom,
+                        "application_signing",
+                        Nip82Progress::none(),
+                    )
+                })?
+        }
+        (None, None) => unreachable!("a missing application always has prepared metadata"),
+    };
+    let signed_application_id = application_changed.then_some(application.raw_event.id);
     let mut new_asset_event_ids = Vec::new();
     for prepared in prepared_assets {
         let input = match prepared {
@@ -509,10 +522,10 @@ pub(super) async fn release_publish(
     };
     let application_operation = if existing_application.is_none() {
         "created"
-    } else if platform_policy.application_platforms_added.is_empty() {
-        "unchanged"
-    } else {
+    } else if application_changed {
         "edited"
+    } else {
+        "unchanged"
     };
     let result = json!({
         "operation": operation,
@@ -649,7 +662,7 @@ pub(super) async fn asset_add(
         .clone();
     let blossom = match (prepared_asset.as_mut(), blossom_selection.as_ref()) {
         (Some(prepared), Some(selection)) => {
-            upload_prepared_file_assets(std::slice::from_mut(prepared), selection, &signer).await?
+            upload_prepared_files(None, std::slice::from_mut(prepared), selection, &signer).await?
         }
         _ => BlossomPublication::empty(),
     };
@@ -848,6 +861,307 @@ impl From<&SoftwareApplication> for ApplicationTarget {
     }
 }
 
+const MAX_APPLICATION_MEDIA_BYTES: u64 = 20 * 1024 * 1024;
+
+#[derive(Debug)]
+struct PreparedApplicationMetadata {
+    input: ApplicationInput,
+    local_media: Vec<PendingApplicationMedia>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ApplicationMediaSlot {
+    Icon,
+    Image(usize),
+}
+
+#[derive(Debug)]
+struct PendingApplicationMedia {
+    source_path: String,
+    slot: ApplicationMediaSlot,
+    snapshot: FileSnapshot,
+}
+
+impl PreparedApplicationMetadata {
+    fn set_media_url(&mut self, slot: ApplicationMediaSlot, url: String) {
+        match slot {
+            ApplicationMediaSlot::Icon => self.input.icon = Some(url),
+            ApplicationMediaSlot::Image(index) => self.input.images[index] = url,
+        }
+    }
+}
+
+fn enforce_manifest_pubkey(
+    context: &ReleaseContext,
+    manifest: Option<&ResolvedReleaseManifest>,
+) -> Result<()> {
+    let Some(expected) = manifest.and_then(|manifest| manifest.pubkey.as_deref()) else {
+        return Ok(());
+    };
+    let expected = PublicKey::parse(expected).map_err(|error| {
+        coded_error_with_details(
+            "invalid_application_pubkey",
+            format!("manifest pubkey is not a valid npub or hexadecimal public key: {error}"),
+            json!({ "pubkey": expected }),
+        )
+    })?;
+    let actual = context
+        .current_signer()
+        .ok_or_else(|| coded_error("not_logged_in", "release publication requires login"))?;
+    if expected != actual {
+        return Err(coded_error_with_details(
+            "application_author_mismatch",
+            "the active signer does not match manifest pubkey",
+            json!({
+                "expected_author": expected.to_hex(),
+                "actual_author": actual.to_hex(),
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn manifest_has_application_metadata(manifest: &ResolvedReleaseManifest) -> bool {
+    manifest.name.is_some()
+        || manifest.summary.is_some()
+        || manifest.description.is_some()
+        || manifest.tags.is_some()
+        || manifest.license.is_some()
+        || manifest.website.is_some()
+        || manifest.repository.is_some()
+        || manifest.icon.is_some()
+        || manifest.images.is_some()
+        || manifest.communities.is_some()
+}
+
+fn manifest_has_local_application_media(manifest: &ResolvedReleaseManifest) -> bool {
+    manifest
+        .icon
+        .as_ref()
+        .is_some_and(|media| matches!(media, ResolvedReleaseManifestMedia::File(_)))
+        || manifest.images.as_ref().is_some_and(|images| {
+            images
+                .iter()
+                .any(|media| matches!(media, ResolvedReleaseManifestMedia::File(_)))
+        })
+}
+
+async fn prepare_manifest_application_metadata(
+    context: &mut ReleaseContext,
+    manifest: Option<&ResolvedReleaseManifest>,
+    existing: Option<&SoftwareApplication>,
+    target: &ApplicationTarget,
+    platforms: Vec<String>,
+    blossom_selection: Option<&BlossomServerSelection>,
+) -> Result<Option<PreparedApplicationMetadata>> {
+    let declared = manifest.filter(|manifest| manifest_has_application_metadata(manifest));
+    if existing.is_some()
+        && declared.is_none()
+        && existing.is_some_and(|application| application.platforms == platforms)
+    {
+        return Ok(None);
+    }
+
+    let mut input = if let Some(existing) = existing {
+        ApplicationInput::from(existing)
+    } else {
+        super::write_app::application_input_from_repository(
+            context,
+            &target.identifier,
+            Vec::new(),
+            declared.and_then(|manifest| manifest.name.as_deref()),
+        )?
+    };
+    input.platforms = platforms;
+    let mut prepared = PreparedApplicationMetadata {
+        input,
+        local_media: Vec::new(),
+    };
+
+    if let Some(manifest) = declared {
+        if let Some(name) = &manifest.name {
+            prepared.input.name.clone_from(name);
+        }
+        if let Some(summary) = &manifest.summary {
+            prepared.input.summary = Some(summary.clone());
+        }
+        if let Some(description) = &manifest.description {
+            prepared.input.description.clone_from(description);
+        }
+        if let Some(tags) = &manifest.tags {
+            prepared.input.topics.clone_from(tags);
+        }
+        if let Some(license) = &manifest.license {
+            prepared.input.license = Some(license.clone());
+        }
+        if let Some(website) = &manifest.website {
+            prepared.input.website = Some(website.clone());
+        }
+        if let Some(repository) = &manifest.repository {
+            prepared.input.repository = Some(repository.clone());
+        }
+        if let Some(communities) = &manifest.communities {
+            prepared.input.communities.clone_from(communities);
+        }
+        if let Some(icon) = &manifest.icon {
+            apply_manifest_media(context, icon, ApplicationMediaSlot::Icon, &mut prepared).await?;
+        }
+        if let Some(images) = &manifest.images {
+            prepared.input.images = Vec::with_capacity(images.len());
+            for (index, image) in images.iter().enumerate() {
+                prepared.input.images.push(String::new());
+                apply_manifest_media(
+                    context,
+                    image,
+                    ApplicationMediaSlot::Image(index),
+                    &mut prepared,
+                )
+                .await?;
+            }
+        }
+    }
+
+    if !prepared.local_media.is_empty() {
+        let selection = blossom_selection
+            .context("internal error: local application media did not select Blossom servers")?;
+        let primary = selection
+            .servers
+            .first()
+            .context("Blossom server selection is empty")?;
+        let predicted = prepared
+            .local_media
+            .iter()
+            .map(|media| {
+                primary
+                    .join(&media.snapshot.sha256)
+                    .context("failed to construct application media Blossom URL")
+                    .map(|url| (media.slot, url.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (slot, url) in predicted {
+            prepared.set_media_url(slot, url);
+        }
+    }
+    validate_application_input(&prepared.input)?;
+    Ok(Some(prepared))
+}
+
+async fn apply_manifest_media(
+    context: &mut ReleaseContext,
+    media: &ResolvedReleaseManifestMedia,
+    slot: ApplicationMediaSlot,
+    prepared: &mut PreparedApplicationMetadata,
+) -> Result<()> {
+    match media {
+        ResolvedReleaseManifestMedia::Url(url) => {
+            prepared.set_media_url(slot, url.clone());
+        }
+        ResolvedReleaseManifestMedia::File(path) => {
+            let source_path = tracked_application_media_path(context, path)?;
+            let mut request = LocalFileRequest::new(&source_path);
+            request.max_bytes = MAX_APPLICATION_MEDIA_BYTES;
+            let snapshot = snapshot_local_file(request).await.with_context(|| {
+                format!("failed to snapshot application media {}", path.display())
+            })?;
+            append_download_warnings(context, &snapshot.warnings)?;
+            if !snapshot.mime_type.starts_with("image/") {
+                return Err(coded_error_with_details(
+                    "invalid_application_media",
+                    "local application media must resolve to an image MIME type",
+                    json!({
+                        "path": path.display().to_string(),
+                        "mime": snapshot.mime_type,
+                    }),
+                ));
+            }
+            prepared.local_media.push(PendingApplicationMedia {
+                source_path: path.display().to_string(),
+                slot,
+                snapshot,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn tracked_application_media_path(context: &ReleaseContext, declared: &Path) -> Result<PathBuf> {
+    if declared.is_absolute() {
+        return Err(coded_error(
+            "application_media_not_tracked",
+            "local application media must be a repository-relative tracked file",
+        ));
+    }
+    let mut relative = PathBuf::new();
+    for component in declared.components() {
+        match component {
+            Component::Normal(component) => relative.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(coded_error(
+                    "application_media_not_tracked",
+                    "local application media must remain within the repository",
+                ));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty()
+        || context
+            .git_repo
+            .git_repo
+            .index()
+            .context("failed to read the Git index")?
+            .get_path(&relative, 0)
+            .is_none()
+    {
+        return Err(coded_error_with_details(
+            "application_media_not_tracked",
+            "local application media must be tracked by Git before publication",
+            json!({ "path": declared.display().to_string() }),
+        ));
+    }
+    let root = fs::canonicalize(context.git_repo_path()?)
+        .context("failed to resolve the repository root")?;
+    let source = root.join(&relative);
+    let resolved = fs::canonicalize(&source)
+        .with_context(|| format!("failed to resolve application media {}", declared.display()))?;
+    if !resolved.starts_with(&root) {
+        return Err(coded_error(
+            "application_media_not_tracked",
+            "local application media must not resolve outside the repository",
+        ));
+    }
+    Ok(source)
+}
+
+fn validate_application_input(input: &ApplicationInput) -> Result<()> {
+    application_event_builder(input.clone())
+        .map(|_| ())
+        .map_err(|error| {
+            coded_error_with_details(
+                "invalid_application_metadata",
+                error.to_string(),
+                json!({ "validation": error.issues }),
+            )
+        })
+}
+
+fn application_input_matches(existing: &SoftwareApplication, input: &ApplicationInput) -> bool {
+    existing.identifier == input.identifier
+        && existing.name == input.name
+        && existing.description == input.description
+        && existing.summary == input.summary
+        && existing.icon == input.icon
+        && existing.images == input.images
+        && existing.topics == input.topics
+        && existing.communities == input.communities
+        && existing.website == input.website
+        && existing.repository == input.repository
+        && existing.repository_coordinates == input.repository_coordinates
+        && existing.platforms == input.platforms
+        && existing.license == input.license
+        && existing.extra_tags == input.extra_tags
+}
+
 fn proposed_platforms(
     existing: &[SoftwareAsset],
     prepared: &[PreparedAsset],
@@ -969,14 +1283,6 @@ fn enforce_platform_policy(
     })
 }
 
-fn bootstrap_application_input(
-    context: &ReleaseContext,
-    target: &ApplicationTarget,
-    platforms: Vec<String>,
-) -> Result<ApplicationInput> {
-    super::write_app::application_input_from_repository(context, &target.identifier, platforms)
-}
-
 async fn sign_bootstrap_application(
     input: ApplicationInput,
     target: &ApplicationTarget,
@@ -1019,6 +1325,14 @@ async fn sign_application_platform_update(
 ) -> Result<SoftwareApplication> {
     let mut input = ApplicationInput::from(existing);
     input.platforms = platforms.to_vec();
+    sign_application_update(existing, input, signer).await
+}
+
+async fn sign_application_update(
+    existing: &SoftwareApplication,
+    input: ApplicationInput,
+    signer: &std::sync::Arc<ngit::NgitSigner>,
+) -> Result<SoftwareApplication> {
     let builder = application_event_builder(input).map_err(|error| {
         coded_error_with_details(
             "invalid_application_metadata",
@@ -2124,7 +2438,8 @@ impl<'a> Nip82Progress<'a> {
     }
 }
 
-async fn upload_prepared_file_assets(
+async fn upload_prepared_files(
+    prepared_application: Option<&mut PreparedApplicationMetadata>,
     prepared_assets: &mut [PreparedAsset],
     selection: &BlossomServerSelection,
     signer: &std::sync::Arc<ngit::NgitSigner>,
@@ -2132,6 +2447,17 @@ async fn upload_prepared_file_assets(
     let mut uploads = Vec::new();
     let mut outcomes = Vec::new();
     let mut possible_orphan_blobs = Vec::new();
+    if let Some(prepared) = prepared_application {
+        upload_prepared_application_media(
+            prepared,
+            selection,
+            signer,
+            &mut uploads,
+            &mut outcomes,
+            &mut possible_orphan_blobs,
+        )
+        .await?;
+    }
     for prepared in prepared_assets {
         let PreparedAsset::File(pending) = prepared else {
             continue;
@@ -2196,6 +2522,74 @@ async fn upload_prepared_file_assets(
     })
 }
 
+async fn upload_prepared_application_media(
+    prepared: &mut PreparedApplicationMetadata,
+    selection: &BlossomServerSelection,
+    signer: &std::sync::Arc<ngit::NgitSigner>,
+    uploads: &mut Vec<Value>,
+    outcomes: &mut Vec<Vec<BlossomServerOutcome>>,
+    possible_orphan_blobs: &mut Vec<PossibleOrphanBlob>,
+) -> Result<()> {
+    for index in 0..prepared.local_media.len() {
+        let pending = &prepared.local_media[index];
+        let upload = match confirm_snapshot_on_servers(
+            &selection.servers,
+            &pending.snapshot,
+            signer,
+        )
+        .await
+        {
+            Ok(upload) => upload,
+            Err(error) => {
+                let (stage, server) = failed_blossom_operation(&error);
+                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
+                uploads.push(failed_application_media_upload_json(pending, &error));
+                outcomes.push(error.servers.clone());
+                let message = blossom_failure_message(
+                    &error.message,
+                    outcomes,
+                    possible_orphan_blobs,
+                    Nip82Progress::none(),
+                    BLOSSOM_RETRY_RECOVERY,
+                );
+                return Err(coded_error_with_details(
+                    "blossom_publication_failed",
+                    message,
+                    json!({
+                        "stage": stage,
+                        "server": server,
+                        "blossom": blossom_json(selection, uploads),
+                        "possible_orphan_blobs": possible_orphan_blobs,
+                        "release_events_signed": false,
+                        "release_events_published": false,
+                        "recovery": BLOSSOM_RETRY_RECOVERY,
+                    }),
+                ));
+            }
+        };
+        let slot = pending.slot;
+        let url = upload.primary.url.to_string();
+        uploads.push(application_media_upload_json(pending, &upload));
+        outcomes.push(upload.servers.clone());
+        possible_orphan_blobs.extend(possible_orphans_from_upload(&pending.snapshot, &upload));
+        prepared.set_media_url(slot, url);
+    }
+    if let Err(error) = validate_application_input(&prepared.input) {
+        let publication = BlossomPublication {
+            json: blossom_json(selection, uploads),
+            outcomes: outcomes.clone(),
+            possible_orphan_blobs: possible_orphan_blobs.clone(),
+        };
+        return Err(preserve_completed_blossom(
+            error,
+            &publication,
+            "application_metadata",
+            Nip82Progress::none(),
+        ));
+    }
+    Ok(())
+}
+
 fn blossom_json(selection: &BlossomServerSelection, uploads: &[Value]) -> Value {
     json!({
         "server_selection": selection,
@@ -2214,6 +2608,47 @@ fn blossom_upload_json(pending: &PendingFileAsset, upload: &MultiServerUpload) -
         "primary_url": upload.primary.url,
         "servers": upload.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
     })
+}
+
+fn application_media_upload_json(
+    pending: &PendingApplicationMedia,
+    upload: &MultiServerUpload,
+) -> Value {
+    json!({
+        "entity": "application_media",
+        "field": application_media_field(pending.slot),
+        "source": pending.source_path,
+        "filename": pending.snapshot.filename,
+        "sha256": pending.snapshot.sha256,
+        "size": pending.snapshot.size.to_string(),
+        "mime": pending.snapshot.mime_type,
+        "primary_url": upload.primary.url,
+        "servers": upload.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+    })
+}
+
+fn failed_application_media_upload_json(
+    pending: &PendingApplicationMedia,
+    error: &MultiServerUploadError,
+) -> Value {
+    json!({
+        "entity": "application_media",
+        "field": application_media_field(pending.slot),
+        "source": pending.source_path,
+        "filename": pending.snapshot.filename,
+        "sha256": pending.snapshot.sha256,
+        "size": pending.snapshot.size.to_string(),
+        "mime": pending.snapshot.mime_type,
+        "primary_url": Value::Null,
+        "servers": error.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+    })
+}
+
+fn application_media_field(slot: ApplicationMediaSlot) -> String {
+    match slot {
+        ApplicationMediaSlot::Icon => "icon".to_owned(),
+        ApplicationMediaSlot::Image(index) => format!("images[{index}]"),
+    }
 }
 
 fn failed_blossom_upload_json(pending: &PendingFileAsset, error: &MultiServerUploadError) -> Value {

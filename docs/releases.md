@@ -87,7 +87,20 @@ bytes in that asset's `platforms` list; do not repeat the file entry:
 
 ```yaml
 schema: 1
-application: com.example.my-app
+identifier: com.example.my-app
+pubkey: npub1expectedpublisher...
+name: Example App
+summary: A short store listing summary
+description: |
+  A longer application description.
+tags: [nostr, productivity]
+license: MIT
+website: https://example.com
+repository: nostr://npub1maintainer.../example
+icon: assets/icon.png
+images:
+  - assets/screenshot.png
+  - https://cdn.example.com/existing-screenshot.png
 channel: main
 release_notes: CHANGELOG.md
 publication:
@@ -119,11 +132,31 @@ Top-level fields are:
 - `schema`: required and currently `1`;
 - `application`: application identifier, optional when repository discovery is
   unambiguous;
+- `identifier`: Zapstore-compatible alias for `application`; the two are
+  mutually exclusive;
+- application metadata: `pubkey`, `name`, `summary`, `description`, `tags`,
+  `license`, `website`, `repository`, `icon`, `images`, and `communities`;
+- `supported_nips`: default for assets which do not set their own list;
 - `channel`: defaults to `main` on creation;
 - `notes`: literal inline release notes;
 - `release_notes`: repository-relative or absolute Keep a Changelog file;
 - `publication`: stable transport and release-policy defaults for CI;
 - `assets`: one or more asset objects.
+
+Application metadata uses the same top-level names as `zapstore.yaml` where
+their meanings agree. `pubkey` is an expected-publisher guard, not a secret:
+publication fails before upload when it does not match the active signer.
+Supplied metadata creates the application on the first release and replaces a
+linked application when its declared values change; omitted fields retain an
+existing value or use repository metadata during creation.
+
+For `icon` and `images`, an HTTP(S) URL is retained exactly as supplied and is
+never downloaded or re-uploaded. Any other value is a repository-relative
+local file: it must be tracked by Git, resolve inside the repository, have an
+image MIME type, and be no larger than 20 MiB. Local images are snapshotted and
+confirmed on every selected Blossom server before any NIP-82 event is signed;
+the application event uses the first server's returned URL. Thus local media is
+Blossom-first while existing CDN or Blossom URLs remain usable as references.
 
 `notes` and `release_notes` are mutually exclusive. For `release_notes`, ngit
 selects the level-two section matching the exact positional VERSION, allowing

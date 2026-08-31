@@ -130,6 +130,7 @@ pub struct SoftwareApplication {
     pub icon: Option<String>,
     pub images: Vec<String>,
     pub topics: Vec<String>,
+    pub communities: Vec<String>,
     pub website: Option<String>,
     pub repository: Option<String>,
     pub repository_coordinates: Vec<AddressPointer>,
@@ -157,6 +158,7 @@ impl SoftwareApplication {
             icon: optional_value(event, "icon"),
             images: repeated_values(event, "image"),
             topics: repeated_values(event, "t"),
+            communities: repeated_values(event, "h"),
             website: optional_value(event, "url"),
             repository: optional_value(event, "repository"),
             repository_coordinates: address_pointers(event, "a"),
@@ -375,7 +377,7 @@ pub fn validate_application(event: &Event) -> Vec<ValidationIssue> {
     for field in ["summary", "icon", "url", "repository", "license"] {
         validate_single_tag(event, field, false, &mut issues);
     }
-    for field in ["image", "t", "f"] {
+    for field in ["image", "t", "h", "f"] {
         validate_repeated_tag(event, field, false, &mut issues);
     }
     validate_addresses(event, "a", GIT_REPOSITORY_KIND, false, &mut issues);
@@ -537,6 +539,7 @@ pub struct ApplicationInput {
     pub icon: Option<String>,
     pub images: Vec<String>,
     pub topics: Vec<String>,
+    pub communities: Vec<String>,
     pub website: Option<String>,
     pub repository: Option<String>,
     pub repository_coordinates: Vec<AddressPointer>,
@@ -556,6 +559,7 @@ impl From<&SoftwareApplication> for ApplicationInput {
             icon: application.icon.clone(),
             images: application.images.clone(),
             topics: application.topics.clone(),
+            communities: application.communities.clone(),
             website: application.website.clone(),
             repository: application.repository.clone(),
             repository_coordinates: application.repository_coordinates.clone(),
@@ -582,6 +586,7 @@ pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder
     }
     validate_input_values("image", &input.images, &mut issues);
     validate_input_values("t", &input.topics, &mut issues);
+    validate_input_values("h", &input.communities, &mut issues);
     validate_optional_url("icon", input.icon.as_deref(), &mut issues);
     validate_optional_url("url", input.website.as_deref(), &mut issues);
     for image in &input.images {
@@ -603,6 +608,7 @@ pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder
     push_optional(&mut tags, "icon", input.icon);
     push_repeated(&mut tags, "image", input.images);
     push_repeated(&mut tags, "t", input.topics);
+    push_repeated(&mut tags, "h", input.communities);
     push_optional(&mut tags, "url", input.website);
     push_optional(&mut tags, "repository", input.repository);
     for address in input.repository_coordinates {
@@ -1410,6 +1416,7 @@ fn is_application_tag(name: &str) -> bool {
             | "icon"
             | "image"
             | "t"
+            | "h"
             | "url"
             | "repository"
             | "a"
@@ -1511,6 +1518,7 @@ mod tests {
             icon: Some("https://example.com/icon.png".to_string()),
             images: vec!["https://example.com/screenshot.png".to_string()],
             topics: vec!["git".to_string(), "nostr".to_string()],
+            communities: vec![HASH_A.to_string()],
             website: Some("https://ngit.dev".to_string()),
             repository: Some("nostr://dan@example.com/ngit".to_string()),
             repository_coordinates: vec![repository],
@@ -1538,6 +1546,7 @@ mod tests {
         assert_eq!(preserved.icon, parsed.icon);
         assert_eq!(preserved.images, parsed.images);
         assert_eq!(preserved.topics, parsed.topics);
+        assert_eq!(preserved.communities, parsed.communities);
         assert_eq!(preserved.website, parsed.website);
         assert_eq!(preserved.repository, parsed.repository);
         assert_eq!(
