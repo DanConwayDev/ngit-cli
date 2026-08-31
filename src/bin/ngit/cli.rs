@@ -433,8 +433,24 @@ pub enum Commands {
     Sync(sub_commands::sync::SubCommandArgs),
     /// install and update ngit's repository skill for coding agents
     Skill(SkillArgs),
+    /// inspect and update the ngit installation
+    Update(UpdateArgs),
     /// list accounts, create an account, login, logout or export keys
     Account(AccountSubCommandArgs),
+}
+
+#[derive(clap::Args)]
+pub struct UpdateArgs {
+    /// Install this exact signed release instead of selecting the newest
+    /// eligible version
+    #[arg(value_name = "VERSION")]
+    pub target: Option<String>,
+    /// Check release readiness without modifying the installation
+    #[arg(long)]
+    pub check: bool,
+    /// Extend release discovery with a relay (repeatable)
+    #[arg(long = "relay", value_name = "URL")]
+    pub relays: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2165,6 +2181,33 @@ mod tests {
             Cli::try_parse_from(args)
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
         }
+    }
+
+    #[test]
+    fn update_command_parses_version_check_and_relays() {
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "update",
+            "3.0.2",
+            "--check",
+            "--relay",
+            "wss://releases.example",
+        ])
+        .expect("update should parse");
+        let Some(Commands::Update(args)) = cli.command else {
+            panic!("expected update command");
+        };
+        assert_eq!(args.target.as_deref(), Some("3.0.2"));
+        assert!(args.check);
+        assert_eq!(args.relays, ["wss://releases.example"]);
+
+        let cli = Cli::try_parse_from(["ngit", "update", "--check"])
+            .expect("update should allow automatic version selection");
+        let Some(Commands::Update(args)) = cli.command else {
+            panic!("expected update command");
+        };
+        assert!(args.target.is_none());
+        assert!(args.check);
     }
 
     #[test]

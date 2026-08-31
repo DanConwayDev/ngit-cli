@@ -1206,7 +1206,11 @@ impl Connect for Client {
             if version_check::is_version_check_relay(&relay_url)
                 && !VERSION_CHECK_STATE_REQUESTED.swap(true, Ordering::AcqRel)
             {
-                filters.push(version_check::ngit_repo_state_filter());
+                if let Ok(update_filters) =
+                    version_check::background_update_filters_from_cache(git_repo_path).await
+                {
+                    filters.extend(update_filters);
+                }
             }
             fresh_non_proposal_event_ids = HashSet::new();
 
@@ -2792,14 +2796,18 @@ async fn process_fetched_events(
 ) -> Result<()> {
     for event in &events {
         if !request.existing_events.contains(&event.id) {
-            let is_version_check_state_for_background_fetch =
-                version_check::is_ngit_repo_state_event(event)
-                    && !request_includes_ngit_repo(request);
-            if !is_version_check_state_for_background_fetch
-                && event.kind != KIND_PRIVATE_GIT_RELAY_LIST
-            {
+            let is_background_update_event = version_check::is_update_check_event(event)
+                && (!version_check::is_ngit_repo_state_event(event)
+                    || !request_includes_ngit_repo(request));
+            if !is_background_update_event && event.kind != KIND_PRIVATE_GIT_RELAY_LIST {
                 if let Some(git_repo_path) = git_repo_path {
                     save_event_in_local_cache(git_repo_path, event).await?;
+                }
+            }
+            if version_check::is_update_check_event(event) {
+                save_event_in_global_cache(git_repo_path, event).await?;
+                if is_background_update_event {
+                    continue;
                 }
             }
             if event.kind == KIND_PRIVATE_GIT_RELAY_LIST {
@@ -2853,12 +2861,6 @@ async fn process_fetched_events(
                     });
                 }
             } else if event.kind.eq(&STATE_KIND) {
-                if version_check::is_ngit_repo_state_event(event) {
-                    save_event_in_global_cache(git_repo_path, event).await?;
-                    if !request_includes_ngit_repo(request) {
-                        continue;
-                    }
-                }
                 let existing_state = if report.updated_state.is_some() {
                     report.updated_state
                 } else {

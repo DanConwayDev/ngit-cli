@@ -25,6 +25,7 @@ pub mod release_download;
 pub mod release_manifest;
 pub mod repo_ref;
 pub mod repo_state;
+pub mod self_update;
 pub mod signer;
 pub mod software_release;
 pub mod tls;

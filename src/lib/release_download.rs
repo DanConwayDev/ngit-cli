@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::Path,
     time::Duration,
 };
 
@@ -19,6 +20,7 @@ use reqwest::{
     redirect::Policy,
 };
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 
 use crate::software_release::valid_mime_essence;
 
@@ -139,13 +141,36 @@ pub struct MimeResolution {
 
 /// Download an HTTP(S) asset without buffering its body in memory.
 pub async fn download_url_asset(request: UrlAssetRequest) -> Result<DownloadedAsset> {
+    download_url_asset_with_destination(request, None).await
+}
+
+/// Download and verify an HTTP(S) asset while retaining its exact bytes.
+///
+/// The destination must not already exist. Callers can therefore stage an
+/// update without accidentally truncating an existing binary or archive.
+pub async fn download_url_asset_to_path(
+    request: UrlAssetRequest,
+    destination: &Path,
+) -> Result<DownloadedAsset> {
+    download_url_asset_with_destination(request, Some(destination)).await
+}
+
+async fn download_url_asset_with_destination(
+    request: UrlAssetRequest,
+    destination: Option<&Path>,
+) -> Result<DownloadedAsset> {
     validate_limits(request.limits)?;
 
     let source_url = Url::parse(&request.source_url).context("invalid asset source URL")?;
     validate_publication_url(&source_url)?;
 
     let total_timeout = request.limits.total_timeout;
-    match tokio::time::timeout(total_timeout, download_url_asset_inner(request, source_url)).await {
+    match tokio::time::timeout(
+        total_timeout,
+        download_url_asset_inner(request, source_url, destination),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => bail!(
             "asset download exceeded its total timeout of {} seconds",
@@ -157,6 +182,7 @@ pub async fn download_url_asset(request: UrlAssetRequest) -> Result<DownloadedAs
 async fn download_url_asset_inner(
     request: UrlAssetRequest,
     source_url: Url,
+    destination: Option<&Path>,
 ) -> Result<DownloadedAsset> {
     let limits = request.limits;
     let redirect_policy = Policy::custom(move |attempt| {
@@ -229,6 +255,18 @@ async fn download_url_asset_inner(
 
     let mut engine = sha256::Hash::engine();
     let mut size = 0_u64;
+    let mut destination = if let Some(path) = destination {
+        Some(
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .await
+                .context("failed to create asset destination")?,
+        )
+    } else {
+        None
+    };
     while let Some(chunk) = response
         .chunk()
         .await
@@ -246,6 +284,16 @@ async fn download_url_asset_inner(
             );
         }
         engine.input(&chunk);
+        if let Some(file) = &mut destination {
+            file.write_all(&chunk)
+                .await
+                .context("failed to write downloaded asset")?;
+        }
+    }
+    if let Some(file) = &mut destination {
+        file.flush()
+            .await
+            .context("failed to flush downloaded asset")?;
     }
     let sha256 = sha256::Hash::from_engine(engine).to_string();
     for url in [&source_url, &final_url] {
@@ -1027,6 +1075,32 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("accept-encoding: identity\r\n")
         );
+    }
+
+    #[tokio::test]
+    async fn optionally_retains_the_same_verified_bytes() {
+        let body = b"standalone update archive";
+        let content_length = body.len().to_string();
+        let response = http_response(
+            "200 OK",
+            &[
+                ("Content-Length", &content_length),
+                ("Content-Type", "application/gzip"),
+            ],
+            body,
+        );
+        let (address, server) = spawn_one_shot_http_server(response).await;
+        let source_url = format!("http://{address}/ngit.tar.gz");
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("download");
+
+        let downloaded = download_url_asset_to_path(UrlAssetRequest::new(source_url), &destination)
+            .await
+            .expect("download retained asset");
+
+        assert_eq!(std::fs::read(destination).unwrap(), body);
+        assert_eq!(downloaded.size, body.len() as u64);
+        completed_request(server).await;
     }
 
     #[tokio::test]

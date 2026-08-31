@@ -77,6 +77,12 @@ model, plaintext migration, and how to opt out.
 See [publishing releases](docs/releases.md) for local files, release manifests,
 multi-platform assets, and ngit-ci artifact workflows.
 
+ngit checks trusted release readiness without listing the complete release
+history. Standalone installations can run `ngit update`; Nix, Cargo, and
+other package-managed installations are detected and left untouched. See
+[ngit updates and standalone installation](docs/self-update.md) for the trust,
+CI-delay, and website-installer contracts.
+
 See [publishing static sites](docs/nsites.md) for deploying an already-built
 directory with `ngit nsite publish` through Blossom and NIP-5A.
 
