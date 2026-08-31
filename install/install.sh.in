@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+
+# Canonical ngit standalone bootstrap installer.
+#
+# The ngit-dev-website deployment renders the two placeholders below from one
+# exact, validated NIP-82 main-channel release. This script intentionally does
+# not discover "latest" or execute unpinned downloads at runtime.
+
+set -eu
+
+VERSION='@@VERSION@@'
+ASSET_MANIFEST=$(cat <<'NGIT_ASSET_MANIFEST'
+@@ASSET_MANIFEST@@
+NGIT_ASSET_MANIFEST
+)
+
+RECEIPT_FILENAME='.ngit-install-receipt.json'
+BINARIES='ngit git-remote-nostr'
+
+info() {
+    printf '[INFO] %s\n' "$1"
+}
+
+fail() {
+    printf '[ERROR] %s\n' "$1" >&2
+    exit 1
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+detect_target() {
+    ngit_os=$(uname -s)
+    ngit_arch=$(uname -m)
+    case "$ngit_os:$ngit_arch" in
+        Linux:x86_64|Linux:amd64)
+            if ldd --version 2>&1 | grep -qi musl; then
+                printf '%s\n' 'linux-x86_64-musl'
+            else
+                printf '%s\n' 'linux-x86_64-gnu'
+            fi
+            ;;
+        Linux:aarch64|Linux:arm64) printf '%s\n' 'linux-aarch64-gnu' ;;
+        Darwin:x86_64|Darwin:arm64|Darwin:aarch64) printf '%s\n' 'darwin-universal' ;;
+        *) return 1 ;;
+    esac
+}
+
+select_asset() {
+    ngit_target=$1
+    printf '%s\n' "$ASSET_MANIFEST" | awk -F '|' -v target="$ngit_target" '
+        $1 == target && NF == 5 { print; found += 1 }
+        END { if (found != 1) exit 1 }
+    '
+}
+
+download() {
+    ngit_url=$1
+    ngit_destination=$2
+    if command_exists curl; then
+        curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$ngit_destination" "$ngit_url"
+    elif command_exists wget; then
+        wget --https-only --output-document "$ngit_destination" "$ngit_url"
+    else
+        fail 'curl or wget is required'
+    fi
+}
+
+sha256() {
+    if command_exists sha256sum; then
+        sha256sum "$1" | awk '{ print $1 }'
+    elif command_exists shasum; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    else
+        fail 'sha256sum or shasum is required to verify the release asset'
+    fi
+}
+
+find_install_dir() {
+    for ngit_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
+        if mkdir -p "$ngit_dir" 2>/dev/null && [ -w "$ngit_dir" ]; then
+            printf '%s\n' "$ngit_dir"
+            return 0
+        fi
+    done
+    if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+        printf '%s\n' /usr/local/bin
+        return 0
+    fi
+    return 1
+}
+
+write_receipt() {
+    ngit_dir=$1
+    ngit_temporary="$ngit_dir/$RECEIPT_FILENAME.tmp.$$"
+    umask 022
+    printf '{\n  "schema": 1,\n  "method": "standalone",\n  "version": "%s"\n}\n' \
+        "$VERSION" >"$ngit_temporary"
+    mv "$ngit_temporary" "$ngit_dir/$RECEIPT_FILENAME"
+}
+
+delegate_existing_install() {
+    if ! command_exists ngit; then
+        return 1
+    fi
+    ngit_existing=$(command -v ngit)
+    ngit_existing_dir=$(dirname "$ngit_existing")
+    if [ ! -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+        return 1
+    fi
+    if ! ngit update --help >/dev/null 2>&1; then
+        return 1
+    fi
+    info 'Delegating the existing standalone installation to ngit update'
+    exec ngit update
+}
+
+main() {
+    case "$VERSION" in
+        [0-9]*.[0-9]*.[0-9]*) ;;
+        *) fail 'installer template was not rendered by the release deployment' ;;
+    esac
+    delegate_existing_install || true
+
+    ngit_target=$(detect_target) || fail 'this operating system and architecture are not supported by the standalone installer'
+    ngit_asset=$(select_asset "$ngit_target") || fail "the release has no unique asset for $ngit_target"
+    IFS='|' read -r _ ngit_url ngit_expected_sha ngit_filename ngit_mime <<EOF
+$ngit_asset
+EOF
+    case "$ngit_expected_sha" in
+        *[!0-9a-f]*|'') fail 'the rendered asset SHA-256 is invalid' ;;
+    esac
+    [ "${#ngit_expected_sha}" -eq 64 ] || fail 'the rendered asset SHA-256 is invalid'
+
+    ngit_temp=$(mktemp -d)
+    trap 'rm -rf "$ngit_temp"' EXIT HUP INT TERM
+    ngit_archive="$ngit_temp/$ngit_filename"
+    info "Downloading ngit v$VERSION for $ngit_target"
+    download "$ngit_url" "$ngit_archive"
+    ngit_actual_sha=$(sha256 "$ngit_archive")
+    [ "$ngit_actual_sha" = "$ngit_expected_sha" ] || fail "SHA-256 mismatch: expected $ngit_expected_sha, observed $ngit_actual_sha"
+
+    ngit_extract="$ngit_temp/extracted"
+    mkdir "$ngit_extract"
+    case "$ngit_filename:$ngit_mime" in
+        *.tar.gz:*|*.tgz:*|*:application/gzip) tar -xzf "$ngit_archive" -C "$ngit_extract" ;;
+        *.zip:*|*:application/zip) unzip -q "$ngit_archive" -d "$ngit_extract" ;;
+        *) fail "unsupported release archive $ngit_filename ($ngit_mime)" ;;
+    esac
+
+    ngit_dir=$(find_install_dir) || fail 'no writable standalone installation directory is available'
+    for ngit_binary in $BINARIES; do
+        ngit_source=$(find "$ngit_extract" -type f -name "$ngit_binary" -print -quit)
+        [ -n "$ngit_source" ] || fail "release archive is missing $ngit_binary"
+        ngit_staged="$ngit_dir/.$ngit_binary.new.$$"
+        cp "$ngit_source" "$ngit_staged"
+        chmod 0755 "$ngit_staged"
+        mv "$ngit_staged" "$ngit_dir/$ngit_binary"
+    done
+    write_receipt "$ngit_dir"
+
+    ngit_reported=$("$ngit_dir/ngit" --version)
+    [ "$ngit_reported" = "ngit $VERSION" ] || fail "installed ngit reported an unexpected version: $ngit_reported"
+    info "Installed ngit v$VERSION to $ngit_dir"
+}
+
+main "$@"

@@ -23,6 +23,7 @@ pub mod pr_status;
 pub mod release;
 pub mod repo;
 pub mod repository_fetch;
+pub mod self_update;
 pub mod send;
 pub mod set_cover_note;
 pub mod set_subject;

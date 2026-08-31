@@ -107,8 +107,13 @@ async fn main() {
         std::process::exit(0); // Exit the program
     }
 
-    print_update_notice_if_available_at_startup().await;
-    if !matches!(cli.command, Some(Commands::Init(_) | Commands::Skill(_))) {
+    if !matches!(cli.command, Some(Commands::Update(_))) {
+        print_update_notice_if_available_at_startup().await;
+    }
+    if !matches!(
+        cli.command,
+        Some(Commands::Init(_) | Commands::Skill(_) | Commands::Update(_))
+    ) {
         print_skill_notice_if_available().await;
     }
 
@@ -522,6 +527,7 @@ async fn main() {
                 sub_commands::skill::launch(&args.skill_command, cli.force, cli.json, signer_params)
                     .await
             }
+            Commands::Update(args) => sub_commands::self_update::launch(args).await,
             Commands::Merge(args) => {
                 sub_commands::merge::launch(
                     args.id.as_deref(),

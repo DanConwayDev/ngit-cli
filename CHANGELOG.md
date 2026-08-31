@@ -14,6 +14,11 @@ publication.
 
 ### Added
 
+- Add `ngit update`, `ngit update --check`, and exact-version selection backed
+  by ngit's signed repository state and trusted NIP-82 release assets. Only
+  receipted standalone Unix installations are replaced automatically; Nix,
+  Cargo, and unreceipted installations receive non-mutating guidance. The
+  canonical website installer template now shares this update path.
 - Release manifests can set `release_notes: CHANGELOG.md` to publish the
   matching Keep a Changelog version section. Missing, duplicate, and empty
   sections fail rather than falling back to the complete changelog.
