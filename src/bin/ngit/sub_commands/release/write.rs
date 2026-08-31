@@ -19,7 +19,8 @@ use ngit::{
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
         ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestSource,
-        load_release_manifest, resolve_release_manifest_path,
+        extract_keep_a_changelog_release_notes, load_release_manifest,
+        resolve_release_manifest_path,
     },
     software_release::{
         AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -305,7 +306,7 @@ pub(super) async fn release_publish(
     if notes.trim().is_empty() {
         context.warnings.push(WarningJson::new(
             "release_notes_missing",
-            "release notes are empty; provide --notes, --notes-file, or manifest notes",
+            "release notes are empty; provide --notes, --notes-file, manifest notes, or manifest release_notes",
         ));
     }
     let release_platforms = proposed_platforms(&assets, &prepared_assets, &reused_assets);
@@ -1226,9 +1227,22 @@ fn release_notes(
         return fs::read_to_string(&path)
             .with_context(|| format!("failed to read release notes {}", path.display()));
     }
-    Ok(manifest
-        .and_then(|manifest| manifest.notes.clone())
-        .or_else(|| existing.map(|release| release.notes.clone()))
+    if let Some(manifest) = manifest {
+        if let Some(notes) = &manifest.notes {
+            return Ok(notes.clone());
+        }
+        if let Some(path) = &manifest.release_notes {
+            let path = repository_relative_path(context.git_repo_path()?, path);
+            let changelog = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read release_notes {}", path.display()))?;
+            return extract_keep_a_changelog_release_notes(&changelog, &args.release_version)
+                .with_context(|| {
+                    format!("failed to extract release notes from {}", path.display())
+                });
+        }
+    }
+    Ok(existing
+        .map(|release| release.notes.clone())
         .unwrap_or_default())
 }
 

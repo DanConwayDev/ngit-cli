@@ -28,6 +28,7 @@ pub struct ReleaseManifest {
     pub application: Option<String>,
     pub channel: Option<String>,
     pub notes: Option<String>,
+    pub release_notes: Option<String>,
     pub commit: Option<String>,
     #[serde(default)]
     pub publication: ReleaseManifestPublication,
@@ -101,6 +102,7 @@ pub struct ResolvedReleaseManifest {
     pub application: Option<String>,
     pub channel: Option<String>,
     pub notes: Option<String>,
+    pub release_notes: Option<PathBuf>,
     pub commit: Option<String>,
     pub publication: ReleaseManifestPublication,
     pub assets: Vec<ResolvedReleaseManifestAsset>,
@@ -288,6 +290,7 @@ impl ReleaseManifest {
             application: self.application.clone(),
             channel: self.channel.clone(),
             notes: self.notes.clone(),
+            release_notes: self.release_notes.as_ref().map(PathBuf::from),
             commit: self.commit.clone(),
             publication: self.publication.clone(),
             assets,
@@ -311,6 +314,10 @@ impl ReleaseManifest {
         {
             bail!("notes must not be empty when supplied");
         }
+        validate_optional_clean_value("release_notes", self.release_notes.as_deref())?;
+        if self.notes.is_some() && self.release_notes.is_some() {
+            bail!("notes and release_notes are mutually exclusive");
+        }
         if self.assets.is_empty() {
             bail!("release manifest must contain at least one asset");
         }
@@ -324,6 +331,67 @@ impl ReleaseManifest {
         }
         Ok(())
     }
+}
+
+/// Extract one version's notes from a Keep a Changelog document.
+///
+/// The matching level-two heading may use `[VERSION]` or `VERSION`, with an
+/// optional leading `v`. Its body ends at the next level-two heading. Markdown
+/// inside the body is preserved, apart from surrounding blank lines.
+pub fn extract_keep_a_changelog_release_notes(
+    changelog: &str,
+    release_version: &str,
+) -> Result<String> {
+    validate_clean_value("release version", release_version)?;
+    let release_version = release_version.strip_prefix('v').unwrap_or(release_version);
+    let lines = changelog.lines().collect::<Vec<_>>();
+    let matches = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let version = keep_a_changelog_heading_version(line)?;
+            (version.strip_prefix('v').unwrap_or(version) == release_version).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    let start = match matches.as_slice() {
+        [] => bail!(
+            "release_notes does not contain a Keep a Changelog section for version {release_version:?}"
+        ),
+        [start] => start + 1,
+        _ => bail!(
+            "release_notes contains multiple Keep a Changelog sections for version {release_version:?}"
+        ),
+    };
+    let end = lines[start..]
+        .iter()
+        .position(|line| is_level_two_heading(line))
+        .map_or(lines.len(), |offset| start + offset);
+    let section = &lines[start..end];
+    let first = section
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("Keep a Changelog section for version {release_version:?} is empty")
+        })?;
+    let last = section
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .expect("a non-empty line was found");
+    Ok(section[first..=last].join("\n"))
+}
+
+fn keep_a_changelog_heading_version(line: &str) -> Option<&str> {
+    let heading = line.strip_prefix("## ")?.trim();
+    if let Some(bracketed) = heading.strip_prefix('[') {
+        return bracketed.split_once(']').map(|(version, _)| version);
+    }
+    heading.split_whitespace().next()
+}
+
+fn is_level_two_heading(line: &str) -> bool {
+    line.strip_prefix("## ")
+        .is_some_and(|heading| !heading.trim().is_empty())
 }
 
 impl ReleaseManifestPublication {
@@ -744,12 +812,97 @@ assets:
     fn rejects_empty_supplied_values() {
         for yaml in [
             "schema: 1\napplication: '  '\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
+            "schema: 1\nrelease_notes: '  '\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
             "schema: 1\nassets: []\n",
             "schema: 1\nassets:\n  - source: ''\n    platform_agnostic: true\n",
             "schema: 1\nassets:\n  - source: https://example.com/a\n    platforms: ['  ']\n",
         ] {
             assert!(parse_release_manifest(yaml).is_err(), "accepted:\n{yaml}");
         }
+    }
+
+    #[test]
+    fn accepts_release_notes_path_and_rejects_inline_notes_conflict() {
+        let manifest = parse_release_manifest(
+            "schema: 1\nrelease_notes: CHANGELOG.md\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.release_notes.as_deref(), Some("CHANGELOG.md"));
+        assert_eq!(
+            manifest
+                .resolve("1.2.3", None)
+                .unwrap()
+                .release_notes
+                .as_deref(),
+            Some(Path::new("CHANGELOG.md"))
+        );
+
+        let error = parse_release_manifest(
+            "schema: 1\nnotes: Inline\nrelease_notes: CHANGELOG.md\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("notes and release_notes are mutually exclusive"));
+    }
+
+    #[test]
+    fn extracts_matching_keep_a_changelog_section() {
+        let changelog = r#"# Changelog
+
+## [Unreleased]
+
+- Not released.
+
+## [1.2.3] - 2026-08-31
+
+### Added
+
+- Manifest release notes.
+
+### Fixed
+
+- A release bug.
+
+## [1.2.2] - 2026-08-01
+
+- Previous release.
+"#;
+        let expected = "### Added\n\n- Manifest release notes.\n\n### Fixed\n\n- A release bug.";
+        assert_eq!(
+            extract_keep_a_changelog_release_notes(changelog, "1.2.3").unwrap(),
+            expected
+        );
+        assert_eq!(
+            extract_keep_a_changelog_release_notes(changelog, "v1.2.3").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn supports_unbracketed_version_headings() {
+        let changelog = "## v2.0.0 - Stable\n\nRelease notes.\n\n## 1.9.0\n\nOld notes.\n";
+        assert_eq!(
+            extract_keep_a_changelog_release_notes(changelog, "2.0.0").unwrap(),
+            "Release notes."
+        );
+    }
+
+    #[test]
+    fn rejects_missing_duplicate_and_empty_changelog_sections() {
+        let missing =
+            extract_keep_a_changelog_release_notes("## [1.0.0] - 2026-01-01\n\nNotes.\n", "2.0.0")
+                .unwrap_err();
+        assert!(missing.to_string().contains("does not contain"));
+
+        let duplicate = extract_keep_a_changelog_release_notes(
+            "## [2.0.0]\n\nOne.\n\n## [v2.0.0]\n\nTwo.\n",
+            "2.0.0",
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("multiple"));
+
+        let empty = extract_keep_a_changelog_release_notes("## [2.0.0]\n\n## [1.0.0]\n", "2.0.0")
+            .unwrap_err();
+        assert!(empty.to_string().contains("is empty"));
     }
 
     #[test]
