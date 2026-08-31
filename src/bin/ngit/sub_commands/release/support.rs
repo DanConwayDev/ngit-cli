@@ -1076,6 +1076,7 @@ pub(super) fn application_json(
         "icon": application.icon,
         "images": application.images,
         "topics": application.topics,
+        "communities": application.communities,
         "website": application.website,
         "repository": application.repository,
         "platforms": application.platforms,

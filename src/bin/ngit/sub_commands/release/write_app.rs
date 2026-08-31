@@ -201,6 +201,7 @@ pub(super) async fn app_link(
         icon: existing.icon.clone(),
         images: dedup(existing.images.clone()),
         topics: dedup(existing.topics.clone()),
+        communities: dedup(existing.communities.clone()),
         website: existing.website.clone(),
         repository: existing.repository.clone(),
         repository_coordinates: merged_repository_coordinates(&context, Some(&existing)),
@@ -326,6 +327,9 @@ fn application_input(
             existing.map(|application| application.topics.clone()),
             context.repo_ref.hashtags.clone(),
         ),
+        communities: existing.map_or_else(Vec::new, |application| {
+            dedup(application.communities.clone())
+        }),
         website: patch_optional(
             args.website.clone(),
             args.clear_website,
@@ -448,11 +452,13 @@ pub(super) fn application_input_from_repository(
     context: &ReleaseContext,
     identifier: &str,
     platforms: Vec<String>,
+    name_override: Option<&str>,
 ) -> Result<ApplicationInput> {
-    if context.repo_ref.name.is_empty() {
+    let name = name_override.unwrap_or(&context.repo_ref.name);
+    if name.is_empty() {
         return Err(coded_error(
             "metadata_confirmation_required",
-            "application name is required; create the application explicitly with release app init --name",
+            "application name is required; set manifest name or create the application explicitly with release app init --name",
         ));
     }
     let canonical_repository = context
@@ -461,12 +467,13 @@ pub(super) fn application_input_from_repository(
         .to_string();
     Ok(ApplicationInput {
         identifier: identifier.to_owned(),
-        name: context.repo_ref.name.clone(),
+        name: name.to_owned(),
         description: context.repo_ref.description.clone(),
         summary: None,
         icon: None,
         images: Vec::new(),
         topics: dedup(context.repo_ref.hashtags.clone()),
+        communities: Vec::new(),
         website: context.repo_ref.web.first().cloned(),
         repository: Some(canonical_repository),
         repository_coordinates: context.ordered_repo_coordinates(),

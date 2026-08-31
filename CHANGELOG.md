@@ -14,6 +14,9 @@ publication.
 
 ### Added
 
+- Schema-1 release manifests can declare Zapstore-style application metadata.
+  Tracked local icons and screenshots publish through Blossom, while existing
+  HTTP(S) image URLs remain direct references and are never downloaded.
 - Add `ngit update`, `ngit update --check`, and exact-version selection backed
   by ngit's signed repository state and trusted NIP-82 release assets. Only
   receipted standalone Unix installations are replaced automatically; Nix,

@@ -16,8 +16,9 @@ use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
     AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
-    SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND, SoftwareAsset,
-    SoftwareRelease, application_event_builder, asset_event_builder, release_event_builder,
+    SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication,
+    SoftwareAsset, SoftwareRelease, application_event_builder, asset_event_builder,
+    release_event_builder,
 };
 use nostr_sdk::prelude::*;
 use serde_json::Value;
@@ -178,6 +179,147 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
 }
 
 #[tokio::test]
+async fn manifest_publishes_application_metadata_and_tracked_media_to_blossom() -> Result<()> {
+    const ICON_BYTES: &[u8] = b"tracked application icon fixture\n";
+    const ASSET_BYTES: &[u8] = b"application metadata release archive\n";
+    const COMMUNITY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let (harness, publisher, published) = setup(0).await?;
+    let asset_server = AssetHttpServer::spawn(vec![ServedAsset {
+        path: "/application-metadata.tar.gz",
+        body: ASSET_BYTES,
+        content_type: "application/gzip",
+    }])
+    .await?;
+    let icon_hash = sha256_hex(ICON_BYTES);
+    let blossom = BlossomHttpServer::descriptor(
+        "201 Created",
+        &icon_hash,
+        ICON_BYTES.len() as u64,
+        "image/png",
+    )
+    .await?;
+
+    let media_dir = publisher.dir().join("media");
+    let manifest_dir = publisher.dir().join(".ngit");
+    fs::create_dir_all(&media_dir).context("failed to create application media directory")?;
+    fs::create_dir_all(&manifest_dir).context("failed to create release manifest directory")?;
+    fs::write(media_dir.join("icon.png"), ICON_BYTES)
+        .context("failed to write application icon")?;
+    let manifest = format!(
+        r#"schema: 1
+identifier: {APP_ID}
+pubkey: {pubkey}
+name: Manifest Application
+summary: Metadata sourced from release.yaml
+description: |
+  Application metadata can stay in source control.
+tags: [nostr, releases]
+license: MIT
+website: https://example.invalid/application
+repository: nostr://example.invalid/application
+icon: media/icon.png
+images:
+  - https://cdn.example.invalid/application/screenshot.png
+communities:
+  - {COMMUNITY}
+supported_nips: ["34", "82"]
+notes: Application metadata release
+publication:
+  blossom_servers:
+    - "{blossom_server}"
+assets:
+  - source: "{asset_server}/application-metadata.tar.gz"
+    filename: application-metadata.tar.gz
+    mime: application/gzip
+    platforms: [linux-x86_64]
+"#,
+        pubkey = published.maintainer_keys.public_key().to_bech32()?,
+        blossom_server = blossom.base_url(),
+        asset_server = asset_server.base_url(),
+    );
+    fs::write(manifest_dir.join("release.yaml"), manifest)
+        .context("failed to write application metadata release manifest")?;
+    let add = publisher
+        .git(["add", "media/icon.png", ".ngit/release.yaml"])
+        .output()
+        .await
+        .context("failed to spawn git add for application metadata")?;
+    ensure!(add.status.success(), "git add failed: {add:?}");
+    let commit = publisher
+        .git([
+            "commit",
+            "-m",
+            "add release application metadata",
+            "--no-gpg-sign",
+        ])
+        .output()
+        .await
+        .context("failed to spawn git commit for application metadata")?;
+    ensure!(commit.status.success(), "git commit failed: {commit:?}");
+
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--manifest",
+            ".ngit/release.yaml",
+            "--json",
+        ],
+    )
+    .await?;
+    asset_server.finish().await?;
+    let blossom_url = blossom
+        .blob_url()
+        .context("Blossom descriptor URL missing")?
+        .to_owned();
+    let blossom_requests = blossom.finish().await?;
+    ensure!(blossom_upload_request(&blossom_requests)?.body == ICON_BYTES);
+    ensure!(output["result"]["application_operation"] == "created");
+    ensure!(output["result"]["blossom"]["uploads"][0]["entity"] == "application_media");
+    ensure!(output["result"]["blossom"]["uploads"][0]["field"] == "icon");
+
+    let application = SoftwareApplication::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_APPLICATION_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier(APP_ID),
+            "manifest application metadata",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(application.name == "Manifest Application");
+    ensure!(application.summary.as_deref() == Some("Metadata sourced from release.yaml"));
+    ensure!(application.description == "Application metadata can stay in source control.\n");
+    ensure!(application.topics == ["nostr", "releases"]);
+    ensure!(application.license.as_deref() == Some("MIT"));
+    ensure!(application.website.as_deref() == Some("https://example.invalid/application"));
+    ensure!(application.repository.as_deref() == Some("nostr://example.invalid/application"));
+    ensure!(application.icon.as_deref() == Some(blossom_url.as_str()));
+    ensure!(application.images == ["https://cdn.example.invalid/application/screenshot.png"]);
+    ensure!(application.communities == [COMMUNITY]);
+
+    let asset = SoftwareAsset::parse(
+        &single_event(
+            &harness,
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+            "application metadata release asset",
+        )
+        .await?,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(asset.supported_nips == ["34", "82"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn release_publish_never_overwrites_an_unlinked_default_application() -> Result<()> {
     let (harness, publisher, published) = setup(0).await?;
     let application = application_event_builder(ApplicationInput {
@@ -274,6 +416,9 @@ Previous release notes.
     let manifest = format!(
         r#"schema: 1
 application: {APP_ID}
+name: Manifest-updated application
+summary: Updated without downloading its image URL
+icon: https://cdn.example.invalid/application-icon.png
 channel: beta
 release_notes: CHANGELOG.md
 assets:
@@ -311,6 +456,7 @@ assets:
     )
     .await?;
     ensure!(published_release["result"]["operation"] == "created");
+    ensure!(published_release["result"]["application_operation"] == "edited");
     let application = single_event(
         &harness,
         Filter::new()
@@ -320,6 +466,13 @@ assets:
         "existing software application",
     )
     .await?;
+    let parsed_application =
+        SoftwareApplication::parse(&application).map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(parsed_application.name == "Manifest-updated application");
+    ensure!(
+        parsed_application.icon.as_deref()
+            == Some("https://cdn.example.invalid/application-icon.png")
+    );
     ensure!(
         published_release["result"]["publication"]["ordered_events"][0]["event_id"]
             == application.id.to_hex()
