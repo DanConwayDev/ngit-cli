@@ -1,64 +1,14 @@
-//! Migrated port of legacy
-//! `tests/legacy/git_remote_nostr/fetch.
-//! rs::creates_commits_from_open_proposal_with_no_warnings_printed`.
-//!
-//! The legacy test drove `git-remote-nostr` directly through a PTY with a
-//! hand-typed `fetch <oid> refs/heads/<branch>` line, then asserted on the
-//! *absence* of warning text in the helper's stdout. Both the PTY surface
-//! and the exact-stdout assertion are banned by the new harness boundary
-//! rules (see `AGENTS.md` § "Test harness boundary"). The behavioural
-//! contract the legacy test pinned was actually narrower than its
-//! assertion suggested:
-//!
-//! > After a contributor publishes a PR-kind proposal, a maintainer
-//! > cloning the announced repo over `nostr://` must end up with a
-//! > remote-tracking `pr/...` ref whose oid is the published PR's tip.
-//!
-//! That is *the* observable side-effect of fetching a proposal. If the
-//! ref doesn't show up — or shows up pointing at the wrong oid — `git
-//! checkout pr/<branch>` is dead. We assert exactly that, on refs on
-//! disk, not on stdout. No PTY, no exact-string asserts, no `#[serial]`.
-//!
-//! The proposal setup is driven by the new
-//! [`test_harness::Harness::publish_three_open_proposals`] scenario
-//! builder rather than the legacy `cli_tester_create_proposals` helper.
-//! That builder pins each proposal to `KIND_PULL_REQUEST` via
-//! `ngit send --force-pr` so this test stays green when ngit's
-//! default-kind heuristic in `src/bin/ngit/sub_commands/send.rs:236-243`
-//! evolves underneath it — the whole point of the migration plan's
-//! "Force-flag discipline" section.
-//!
-//! Flow:
-//!
-//! 1. Harness: one vanilla relay (`"default"` — user metadata) + one grasp
-//!    server (`"repo"` — git data + repo-relay).
-//! 2. `harness.publish_repo(...)` — maintainer publishes a repo.
-//! 3. `harness.publish_three_open_proposals(&repo)` — fresh contributor
-//!    publishes three PR-kind proposals on `feature-1`, `feature-2`,
-//!    `feature-3`.
-//! 4. `harness.clone_published_repo(..., CloneLogin::AsMaintainer)` —
-//!    maintainer-view clone. `git clone` itself runs `git fetch` as part of
-//!    setup, so the cloned repo already has every remote-tracking ref the
-//!    remote-helper advertised.
-//! 5. Assert: every PublishedPr tip has a matching remote-tracking ref under
-//!    `refs/remotes/origin/` whose oid equals the PR's tip.
-//!
-//! ## Why the maintainer (not the contributor) clones
-//!
-//! `git_remote_nostr/list.rs` produces shorter `pr/<branch>` ref names
-//! when the current user matches the proposal author, and longer
-//! `pr/<branch>(<shorthand-event-id>)` names otherwise. Cloning as the
-//! maintainer hits the not-the-author branch — the more common
-//! review-side flow — and exercises the longer ref-naming path that the
-//! legacy test never explicitly covered.
+//! Default-fetch regression coverage for foreign proposals. A routine clone
+//! must cache enough Nostr metadata for later `ngit pr checkout`, but it must
+//! not create remote-tracking proposal branches or download their tip commits.
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
-use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, RepoSnapshot};
+use anyhow::{Context, Result};
+use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, Repo, RepoSnapshot};
 
 #[tokio::test]
-async fn fetched_proposal_tip_lands_in_pr_remote_tracking_ref() -> Result<()> {
+async fn foreign_proposal_branches_and_tips_are_not_fetched_by_default() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -79,41 +29,39 @@ async fn fetched_proposal_tip_lands_in_pr_remote_tracking_ref() -> Result<()> {
 
     let prs: [PublishedPr; 3] = harness.publish_three_open_proposals(&published).await?;
 
-    // --- 2. maintainer clones, which fetches everything once -----------
+    // --- 2. maintainer clones with the default selective behavior ------
     let reviewer = harness
         .clone_published_repo(&published, CloneLogin::AsMaintainer)
         .await?;
 
-    // --- 3. observable side-effect: at least one PR tip on disk -------
-    //
-    // The legacy test asserted on stdout warnings; we assert on the only
-    // contract that matters to the calling git user — that the fetched
-    // proposal tip is reachable via a remote-tracking ref.
+    // --- 3. no proposal branches or proposal-only tip objects ----------
     let snapshot = reviewer.snapshot()?;
     let remote_refs = collect_remote_refs(&snapshot);
-
-    let mut matches: Vec<(String, String)> = Vec::new();
-    for pr in &prs {
-        if let Some(ref_name) = remote_refs.iter().find_map(|(name, oid)| {
-            (oid == &pr.tip && name.starts_with("refs/remotes/origin/") && name.contains("/pr/"))
-                .then(|| name.clone())
-        }) {
-            matches.push((ref_name, pr.tip.clone()));
-        }
-    }
-
     assert!(
-        !matches.is_empty(),
-        "expected at least one remote-tracking pr/... ref pointing at a published PR tip.\n\
-         published PR tips: {:#?}\n\
-         remote-tracking refs in clone: {:#?}",
-        prs.iter()
-            .map(|p| (p.branch_name.clone(), p.tip.clone()))
-            .collect::<Vec<_>>(),
+        remote_refs.keys().all(|name| !name.contains("/pr/")),
+        "default clone unexpectedly created foreign PR tracking refs: {:#?}",
         remote_refs,
     );
+    for pr in &prs {
+        assert!(
+            !commit_exists(&reviewer, &pr.tip).await?,
+            "default clone unexpectedly downloaded proposal tip {} for {:?}",
+            pr.tip,
+            pr.branch_name,
+        );
+    }
 
     Ok(())
+}
+
+async fn commit_exists(repo: &Repo, oid: &str) -> Result<bool> {
+    let object = format!("{oid}^{{commit}}");
+    let out = repo
+        .git(["cat-file", "-e", &object])
+        .output()
+        .await
+        .with_context(|| format!("failed to inspect proposal commit {oid}"))?;
+    Ok(out.status.success())
 }
 
 /// Filter a snapshot's refs down to `refs/remotes/...` entries. Returns a

@@ -243,6 +243,12 @@ async fn ls_remote_ref(
         .clone_published_repo(published, CloneLogin::None)
         .await
         .context("failed to create fresh clone for proposal ref")?;
+    clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for ls-remote compatibility check",
+        )
+        .await?;
     let output = clone
         .git(["ls-remote", "origin"])
         .output()
@@ -440,6 +446,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // --- 5. Maintainer clones ------------------------------------------------
     let maintainer_clone = harness
         .clone_published_repo(&published, CloneLogin::AsMaintainer)
+        .await?;
+    maintainer_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for raw remote-ref checkout",
+        )
+        .await?;
+    maintainer_clone
+        .git_ok(["fetch", "origin"], "fetch automatic PR branches")
         .await?;
 
     // Verify the patch branch is advertised before attempting checkout.

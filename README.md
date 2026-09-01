@@ -51,18 +51,21 @@ Run `ngit --customize` to list supported git config keys and their environment-v
 
 ```sh
 git config nostr.repo-relay-only true       # only publish nostr events to repo relays
-git config nostr.auto-pr-branches false     # fetch PR branches only after `ngit pr checkout`
+git config nostr.auto-pr-branches true      # fetch every open and draft PR branch
 git config nostr.http-io-timeout-ms 600000  # allow large GRASP pushes up to 10 minutes of socket silence
 ```
 
-`nostr.auto-pr-branches` defaults to `true` and follows normal Git config
-precedence, so repository-local config overrides global config. Set it to
-`false` to avoid advertising and downloading every open or draft PR branch;
-add `--global` to make that the default for all repositories. Running
-`ngit pr checkout <id>` opts that PR branch back in and configures it for later
-`git fetch` and `git pull`. Run `git fetch --prune` once to remove any PR
-branches fetched before opting out. To override a global setting during the
-initial clone, use `git clone --config nostr.auto-pr-branches=true <nostr-url>`.
+`nostr.auto-pr-branches` defaults to `false` and follows normal Git config
+precedence, so repository-local config overrides global config. Open and draft
+PRs from other users are not advertised or downloaded as branches during
+routine Git operations. Running `ngit pr checkout <id>` creates the familiar
+`pr/<branch-name>(<shorthand-id>)` local branch and configures it for later
+`git fetch`, `git pull`, and `git push`. Set the option to `true` (and add
+`--global` if desired) to restore automatic PR branches. Run
+`git fetch --prune` once to remove branches fetched by an older ngit version;
+unset config uses the new default in both fresh and existing clones.
+To enable automatic PR branches during the initial clone, use
+`git clone --config nostr.auto-pr-branches=true <nostr-url>`.
 
 Set `NGIT_CACHE_DIR` to place ngit's global event cache in a different
 writable directory, for example in a sandbox or ephemeral agent environment.

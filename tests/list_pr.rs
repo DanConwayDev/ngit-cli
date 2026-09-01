@@ -42,8 +42,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use nostr::prelude::ToBech32;
-use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
+use nostr::prelude::{Filter, ToBech32};
+use test_harness::{
+    CloneLogin, Harness, KIND_PULL_REQUEST_UPDATE, PublishRepoOpts, PublishedPr, PublishedRepo,
+    Repo,
+};
 
 async fn setup() -> Result<(Harness, PublishedRepo, [PublishedPr; 3])> {
     let harness = Harness::builder(
@@ -184,6 +187,24 @@ async fn rev_parse(repo: &Repo, reference: &str) -> Result<String> {
         .to_string())
 }
 
+async fn current_branch(repo: &Repo) -> Result<String> {
+    let out = repo
+        .git(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .await
+        .context("failed to spawn git symbolic-ref HEAD")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git symbolic-ref --short HEAD exited {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("git symbolic-ref stdout not utf-8")?
+        .trim()
+        .to_string())
+}
+
 /// Folds legacy
 /// `when_there_are_open_proposals::open_proposal_listed_in_prs_namespace`.
 ///
@@ -200,7 +221,7 @@ async fn rev_parse(repo: &Repo, reference: &str) -> Result<String> {
 /// `HEAD` itself, the `^{}` peeled tag refs if any) that the legacy
 /// PTY-driven raw `list` output didn't include.
 #[tokio::test]
-async fn open_pr_proposals_are_listed_under_pr_namespaces() -> Result<()> {
+async fn enabling_auto_pr_branches_lists_open_prs_under_pr_namespaces() -> Result<()> {
     let (harness, published, prs) = setup().await?;
 
     // CloneLogin::None: no `nostr.npub` set, so `list.rs:236` always
@@ -209,6 +230,12 @@ async fn open_pr_proposals_are_listed_under_pr_namespaces() -> Result<()> {
     let test_repo = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "enable automatic PR branches",
+    )
+    .await?;
 
     let ls = ls_remote(&test_repo, "origin").await?;
 
@@ -250,39 +277,32 @@ async fn open_pr_proposals_are_listed_under_pr_namespaces() -> Result<()> {
 }
 
 #[tokio::test]
-async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> Result<()> {
+async fn auto_pr_branches_config_respects_global_and_local_precedence() -> Result<()> {
     let (harness, published, prs) = setup().await?;
     let test_repo = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
 
-    let global_home = test_repo.dir().join(".git/test-global-home");
-    set_global_config(&test_repo, &global_home, "nostr.auto-pr-branches", "false").await?;
-    let globally_disabled =
-        ls_remote_with_global_home(&test_repo, "origin", Some(&global_home)).await?;
+    let default_disabled = ls_remote(&test_repo, "origin").await?;
     assert!(
-        globally_disabled
+        default_disabled
             .refs
             .keys()
             .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
-        "global config should disable automatic PR refs: {:#?}",
-        globally_disabled.refs,
+        "automatic PR refs should be disabled by default: {:#?}",
+        default_disabled.refs,
     );
 
-    git_ok(
-        &test_repo,
-        ["config", "--local", "nostr.auto-pr-branches", "true"],
-        "override global automatic PR branch setting locally",
-    )
-    .await?;
-    let locally_enabled =
+    let global_home = test_repo.dir().join(".git/test-global-home");
+    set_global_config(&test_repo, &global_home, "nostr.auto-pr-branches", "true").await?;
+    let globally_enabled =
         ls_remote_with_global_home(&test_repo, "origin", Some(&global_home)).await?;
     for pr in &prs {
         assert!(
-            locally_enabled
+            globally_enabled
                 .refs
                 .contains_key(&format!("refs/heads/{}", expected_long_branch(pr))),
-            "local true should override global false for {:?}",
+            "global true should enable automatic PR refs for {:?}",
             pr.branch_name,
         );
     }
@@ -290,9 +310,29 @@ async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> R
     git_ok(
         &test_repo,
         ["config", "--local", "nostr.auto-pr-branches", "false"],
-        "disable automatic PR branches",
+        "disable automatic PR branches locally",
     )
     .await?;
+    let locally_disabled =
+        ls_remote_with_global_home(&test_repo, "origin", Some(&global_home)).await?;
+    assert!(
+        locally_disabled
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
+        "local false should override global true: {:#?}",
+        locally_disabled.refs,
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_checkout_tracks_pull_and_maintainer_push_updates() -> Result<()> {
+    let (harness, published, prs) = setup().await?;
+    let test_repo = harness
+        .clone_published_repo(&published, CloneLogin::AsMaintainer)
+        .await?;
 
     let before_checkout = ls_remote(&test_repo, "origin").await?;
     assert!(
@@ -302,6 +342,16 @@ async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> R
             .all(|name| !name.starts_with("refs/heads/pr/") && !name.starts_with("refs/pr/")),
         "no PR refs should be advertised before an explicit checkout: {:#?}",
         before_checkout.refs,
+    );
+
+    let snapshot = test_repo.snapshot()?;
+    assert!(
+        snapshot
+            .refs
+            .keys()
+            .all(|name| !name.starts_with("refs/remotes/origin/pr/")),
+        "a default clone should not create foreign PR tracking branches: {:#?}",
+        snapshot.refs,
     );
 
     let selected = &prs[0];
@@ -317,6 +367,11 @@ async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> R
         checkout.status,
         String::from_utf8_lossy(&checkout.stdout),
         String::from_utf8_lossy(&checkout.stderr),
+    );
+    assert_eq!(
+        current_branch(&test_repo).await?,
+        branch,
+        "checkout should create the friendly shorthand-suffixed branch name",
     );
 
     assert_eq!(
@@ -392,18 +447,70 @@ async fn disabling_auto_pr_branches_only_tracks_explicitly_checked_out_pr() -> R
         "git pull should recreate the selected PR remote-tracking ref",
     );
 
+    std::fs::write(
+        test_repo.dir().join("maintainer-follow-up.md"),
+        "maintainer follow-up\n",
+    )
+    .context("failed to write maintainer-follow-up.md")?;
+    git_ok(
+        &test_repo,
+        ["add", "maintainer-follow-up.md"],
+        "git add maintainer follow-up",
+    )
+    .await?;
+    git_ok(
+        &test_repo,
+        ["commit", "-m", "add maintainer follow-up", "--no-gpg-sign"],
+        "git commit maintainer follow-up",
+    )
+    .await?;
+    let update_tip = rev_parse(&test_repo, "HEAD").await?;
+
+    test_repo.nostr_push(["origin", &branch]).await?;
+
+    let update = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .author(published.maintainer_keys.public_key())
+                .kind(KIND_PULL_REQUEST_UPDATE),
+        )
+        .await?
+        .into_iter()
+        .find(|event| {
+            event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("c")
+                    && values.get(1).map(String::as_str) == Some(update_tip.as_str())
+            })
+        })
+        .context("maintainer push did not publish a PR update at the new tip")?;
+    let selected_event_id = selected.event_id.to_hex();
+    assert!(
+        update.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("E")
+                && values.get(1).map(String::as_str) == Some(selected_event_id.as_str())
+        }),
+        "PR update should reference the contributor's original proposal",
+    );
+    assert_eq!(
+        rev_parse(&test_repo, &format!("refs/remotes/origin/{branch}")).await?,
+        update_tip,
+        "git push should advance the selected PR remote-tracking ref",
+    );
+
     Ok(())
 }
 
 /// A proposal author addresses their own PR by its bare branch name
 /// (`pr/<branch>`), but `ngit pr checkout` creates the shorthand-id suffixed
-/// name regardless of authorship. With automatic PR branches disabled, either
+/// name regardless of authorship. With automatic PR branches disabled by
+/// default, either
 /// local branch must opt the author's own proposal back in.
 #[tokio::test]
-async fn disabled_auto_pr_branches_own_pr_opts_in_via_bare_branch_or_checkout() -> Result<()> {
+async fn default_auto_pr_branches_own_pr_opts_in_via_bare_branch_or_checkout() -> Result<()> {
     let (harness, published, prs) = setup().await?;
-    // The clone itself runs with the default (enabled) config, so all
-    // proposal objects are already local when the phases below start.
     let test_repo = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
@@ -420,10 +527,21 @@ async fn disabled_auto_pr_branches_own_pr_opts_in_via_bare_branch_or_checkout() 
         "configure the clone as the proposal author",
     )
     .await?;
+
+    // Fetch the proposal object once through the explicit compatibility
+    // setting, then remove the override so both phases below exercise the
+    // default-disabled selection behavior.
     git_ok(
         &test_repo,
-        ["config", "--local", "nostr.auto-pr-branches", "false"],
-        "disable automatic PR branches",
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "temporarily enable automatic PR branches",
+    )
+    .await?;
+    git_ok(&test_repo, ["fetch", "origin"], "fetch own proposal object").await?;
+    git_ok(
+        &test_repo,
+        ["config", "--local", "--unset", "nostr.auto-pr-branches"],
+        "restore the default automatic PR branch setting",
     )
     .await?;
 

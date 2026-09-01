@@ -211,6 +211,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let maintainer_clone = harness
         .clone_published_repo(&published, CloneLogin::AsMaintainer)
         .await?;
+    maintainer_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for raw remote-ref checkout",
+        )
+        .await?;
+    maintainer_clone
+        .git_ok(["fetch", "origin"], "fetch automatic PR branches")
+        .await?;
 
     // Verify the patch branch is advertised before attempting checkout.
     let snap = maintainer_clone
@@ -327,6 +336,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // the single upgrade PR event's `c` (= the new commit OID).
     let new_clone = harness
         .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+    new_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for ls-remote compatibility check",
+        )
         .await?;
     let ls_out = new_clone
         .git(["ls-remote", "origin"])

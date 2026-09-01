@@ -63,6 +63,12 @@ async fn arrange(identifier: &str) -> Result<Arranged> {
             ..Default::default()
         })
         .await?;
+    publisher
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for CI merge fixtures",
+        )
+        .await?;
 
     let contributor = harness
         .clone_published_repo(

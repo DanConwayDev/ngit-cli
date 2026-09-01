@@ -100,10 +100,12 @@ publication.
   relays, and from the account's inbox or outbox relays while publishing, but
   decline challenges from unrelated relays such as indexers and fallbacks.
 - Now that ngit-grasp repository-relay synchronization has matured, repository state and collaboration events are fetched exclusively from relays declared by the repository. This makes repository relays the authoritative collaboration view and allows grasp servers to provide moderation in the future without filtered events being restored from user relays. URL hints, fallback relays, and announcement indexers are limited to repository announcements; user relays are limited to profile metadata, relay lists, and user GRASP lists. Publishing still fans out to relevant user relays unless `--repo-relay-only` or `nostr.repo-relay-only` is set.
-- Set `nostr.auto-pr-branches=false` to omit unselected open and draft PRs from
-  routine remote listings and fetches. `ngit pr checkout` opts an individual PR
-  back in and keeps later fetch and pull tracking intact; the default remains
-  `true` for backward compatibility.
+- Open and draft PRs from other users are no longer downloaded as branches by
+  default. `ngit pr checkout` opts an individual PR back in with its familiar
+  shorthand-suffixed branch name and keeps later fetch, pull, and push tracking
+  intact. The new default applies to fresh and existing clones; existing clones
+  keep previously downloaded tracking refs until `git fetch --prune`. Set
+  `nostr.auto-pr-branches=true` explicitly to restore automatic downloading.
 - Global event caching now falls back to an in-memory cache when persistent storage is unavailable, allowing ngit to operate in restricted or sandboxed environments. Set `NGIT_CACHE_DIR` to select a writable persistent cache directory; repository caches remain strict and require the Git common directory to be writable.
 - Upgrade NostrDevKit dependencies from the `0.45.0-alpha.2` prerelease series to the stable `0.45.0` release.
 - Align maintainer terminology with gitworkshop: every pubkey in the directional maintainer graph has maintainer rights, while "invited" identifies an unreciprocated relationship rather than reduced authority. Reciprocal graph membership confirms co-maintainers, and a unique highest-listed confirmed maintainer is shown as a coordination-only lead. `ngit repo` describes whom each confirmed maintainer lists and, when informative, who invited an unconfirmed maintainer. Acceptance defaults now reciprocate the sole confirmed maintainer or unique lead, retaining the selected maintainer only for ambiguous non-interactive cases.

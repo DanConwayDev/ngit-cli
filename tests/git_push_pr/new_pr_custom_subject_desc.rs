@@ -309,6 +309,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let new_clone = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
+    new_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for ls-remote compatibility check",
+        )
+        .await?;
     let ls_out = new_clone
         .git(["ls-remote", "origin"])
         .output()

@@ -283,6 +283,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let maintainer_clone = harness
         .clone_published_repo(&published, CloneLogin::AsMaintainer)
         .await?;
+    maintainer_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for raw remote-ref checkout",
+        )
+        .await?;
+    maintainer_clone
+        .git_ok(["fetch", "origin"], "fetch automatic PR branches")
+        .await?;
 
     // Verify the patch branch is advertised before attempting checkout.
     let snap = maintainer_clone
@@ -572,6 +581,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // only `proposal` `list.rs` sees is the original patch root.
     let new_clone = harness
         .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+    new_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for ls-remote compatibility check",
+        )
         .await?;
     let ls_out = new_clone
         .git(["ls-remote", "origin"])
