@@ -203,7 +203,9 @@ separate live line for each server. A line changes from byte transfer to
 the HTTP operation advances, so a fully sent small request is not presented as
 an upload which is still transferring. Headings and server lines include their
 elapsed time. Ngit clears this display before invoking a signer and after each
-file, so an interactive signer never competes with a live progress renderer.
+file. Before each per-file authorization it detaches the complete Blossom
+progress draw target, then reattaches only after signing returns, so an
+interactive signer never competes with a live progress renderer.
 An upload attempt can take up to 30 minutes while bytes continue moving, but
 fails after 30 seconds without body progress or a server response. Presence and
 post-upload verification requests use 15-second attempts with bounded retries.

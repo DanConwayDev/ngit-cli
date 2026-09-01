@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -2656,6 +2659,8 @@ struct BlossomPublication {
 struct ReleaseBlossomProgress {
     multi: MultiProgress,
     heading: ProgressBar,
+    render_to_stderr: bool,
+    draw_target_attached: AtomicBool,
     verbose: bool,
     heading_style: ProgressStyle,
     upload_style: ProgressStyle,
@@ -2796,10 +2801,14 @@ impl ReleaseBlossomProgress {
         } else {
             ProgressDrawTarget::hidden()
         };
-        Self::with_draw_target(draw_target, visible && is_verbose())
+        Self::with_draw_target(draw_target, visible, visible && is_verbose())
     }
 
-    fn with_draw_target(draw_target: ProgressDrawTarget, verbose: bool) -> Result<Arc<Self>> {
+    fn with_draw_target(
+        draw_target: ProgressDrawTarget,
+        render_to_stderr: bool,
+        verbose: bool,
+    ) -> Result<Arc<Self>> {
         let multi = MultiProgress::with_draw_target(draw_target);
         let heading_style = ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {msg}")?
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
@@ -2814,6 +2823,8 @@ impl ReleaseBlossomProgress {
         Ok(Arc::new(Self {
             multi,
             heading,
+            render_to_stderr,
+            draw_target_attached: AtomicBool::new(render_to_stderr),
             verbose,
             heading_style,
             upload_style,
@@ -2823,6 +2834,7 @@ impl ReleaseBlossomProgress {
     }
 
     fn start_spinner(&self, message: String) {
+        self.restore_draw_target();
         self.clear_placement_bars();
         self.heading.reset();
         self.heading.unset_length();
@@ -2843,6 +2855,7 @@ impl ReleaseBlossomProgress {
         confirmed: usize,
         unavailable: usize,
     ) {
+        self.restore_draw_target();
         let message = {
             let mut activity = self
                 .activity
@@ -2979,11 +2992,25 @@ impl ReleaseBlossomProgress {
     }
 
     fn prepare_for_authorization(&self) {
-        // A remote signer writes its own interactive terminal UI. Leave no
-        // active progress renderer competing with it; UploadBatchStarted will
-        // redraw the upload state after signing completes.
+        // A remote signer writes its own interactive terminal UI. Detach the
+        // complete MultiProgress target rather than merely clearing its bars:
+        // a retained target can otherwise redraw while the signer owns the
+        // terminal. UploadBatchStarted reattaches after signing completes.
         self.heading.finish_and_clear();
         self.clear_placement_bars();
+        let _ = self.multi.clear();
+        self.multi.set_draw_target(ProgressDrawTarget::hidden());
+        self.draw_target_attached.store(false, Ordering::Release);
+    }
+
+    fn restore_draw_target(&self) {
+        if self.render_to_stderr {
+            self.multi.set_draw_target(ProgressDrawTarget::stderr());
+            self.draw_target_attached.store(true, Ordering::Release);
+        } else {
+            self.multi.set_draw_target(ProgressDrawTarget::hidden());
+            self.draw_target_attached.store(false, Ordering::Release);
+        }
     }
 
     fn upload_body_finished(
@@ -4636,13 +4663,15 @@ assets:
 
     #[test]
     fn blossom_progress_stops_rendering_while_authorization_is_signed() -> Result<()> {
-        let progress = ReleaseBlossomProgress::new(true)?;
+        let progress =
+            ReleaseBlossomProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
             servers: 2,
             checks: 2,
         });
         assert!(!progress.heading.is_finished());
+        assert!(progress.draw_target_attached.load(Ordering::Acquire));
 
         progress.update(&BlossomProgressEvent::AuthorizationStarted {
             batch: 1,
@@ -4651,6 +4680,7 @@ assets:
             filenames: vec!["release.tar.gz".to_owned()],
         });
         assert!(progress.heading.is_finished());
+        assert!(!progress.draw_target_attached.load(Ordering::Acquire));
 
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch: 1,
@@ -4663,6 +4693,7 @@ assets:
             bytes: 20,
         });
         assert!(!progress.heading.is_finished());
+        assert!(progress.draw_target_attached.load(Ordering::Acquire));
 
         progress.update(&BlossomProgressEvent::UploadBatchFinished {
             batch: 1,
