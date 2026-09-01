@@ -1495,7 +1495,7 @@ pub enum IssueCommands {
         comments: bool,
         /// Include the original title/body and every authorised edit (requires
         /// ID)
-        #[arg(long)]
+        #[arg(long, requires = "id")]
         history: bool,
         /// Show details for a specific issue (event-id or nevent)
         #[arg(value_name = "ID|nevent")]
@@ -1713,6 +1713,26 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn issue_list_history_requires_an_issue_id() {
+        for args in [
+            ["ngit", "issue", "list", "--history"].as_slice(),
+            ["ngit", "issue", "list", "--history", "--json"].as_slice(),
+        ] {
+            let Err(error) = Cli::try_parse_from(args) else {
+                panic!("issue list accepted --history without an issue ID: {args:?}");
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
+
+        Cli::try_parse_from(["ngit", "issue", "list", "--history", "deadbeef"])
+            .expect("issue list should accept --history with an issue ID");
+    }
+
     fn key_file(path: &Path, value: &[u8]) {
         fs::write(path, value).unwrap();
         #[cfg(unix)]
