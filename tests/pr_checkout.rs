@@ -23,11 +23,10 @@
 //! - The `test_repo` is a `CloneLogin::None` clone of the published `nostr://`
 //!   URL — what real users do (`git clone <nostr-url>`), not the legacy
 //!   `GitTestRepo::default()` + `nostr.repo` config shape. The clone gives us
-//!   an `origin` remote, a populated `main` matching the publisher's, and
-//!   remote-tracking refs for every advertised proposal branch. With no
-//!   `nostr.npub` set, `src/bin/git_remote_nostr/list.rs:236` falls through to
-//!   the long-form `pr/<branch>(<shorthand>)` ref path; every assertion against
-//!   an expected ref builds that long form via [`expected_branch_name`].
+//!   an `origin` remote and a populated `main` matching the publisher's, but
+//!   deliberately no foreign proposal branches. `ngit pr checkout` must fetch
+//!   and materialize the selected proposal under the long-form
+//!   `pr/<branch>(<shorthand>)` name built by [`expected_branch_name`].
 //!
 //! ## PR-kind branch tracking
 //!
@@ -36,9 +35,8 @@
 //! the local branch's upstream to the nostr remote (writing
 //! `refs/remotes/<remote>/<pr-branch>` at the checked-out tip and
 //! calling `set_upstream`) so that the user can `git pull` later.
-//! That's true regardless of whether the test_repo was cloned via
-//! `git clone <nostr-url>` (which would have pre-populated those
-//! remote-tracking refs) or just had the remote added afterwards.
+//! That's true even though the default clone does not pre-populate proposal
+//! remote-tracking refs.
 //!
 //! Successive `ngit pr checkout` invocations against the same PR
 //! follow the regular Cases 2-5 in `checkout_pr` (up-to-date,
@@ -591,6 +589,16 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
     //     maintainer ensures the revision PR_UPDATE passes the
     //     `permissioned_users` filter and is visible to
     //     `get_all_proposal_patch_pr_pr_update_events_from_cache`.
+    //     Explicit checkout also fetches the previous PR tip that revision
+    //     validation needs now that foreign proposal branches are not fetched
+    //     by default.
+    run_pr_checkout(&publisher, pr).await?;
+    git_ok(
+        &publisher,
+        ["checkout", "main"],
+        "git checkout main after fetching proposal tip",
+    )
+    .await?;
     //
     // local "rebase base" commit on main — mirrors legacy
     // `create_proposals_with_rebased_first_proposal`'s "commit for

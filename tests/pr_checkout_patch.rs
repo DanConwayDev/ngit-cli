@@ -20,18 +20,10 @@
 //!
 //! ## Why this file exists alongside `pr_checkout.rs`
 //!
-//! `checkout_pr` (PR-kind) adds an upstream-deferral short-circuit at
-//! `src/bin/ngit/sub_commands/checkout.rs:247` that `checkout_patch`
-//! does not have: once a local PR branch has any upstream set,
-//! subsequent `ngit pr checkout` invocations return Ok with "Run git
-//! pull to update." instead of going down case-3/4/5. A real cloned
-//! `test_repo` always ends up with upstream set after the first
-//! checkout because `checkout_remote_branch_with_tracking` at
-//! `checkout.rs:223` wires it. The PR-kind suite therefore `#[ignore]`s
-//! the three cases that hit the deferral path; this file picks up the
-//! slack by exercising the patch-kind path where the legacy assertions
-//! still hold. See `pr_checkout.rs`'s module-level doc-comment for the
-//! full write-up.
+//! Patch proposals reconstruct commits locally rather than fetching a PR tip
+//! directly, so this file keeps that separate construction path covered. See
+//! `pr_checkout.rs`'s module-level doc-comment for the shared branch-update
+//! behavior.
 //!
 //! ## Shape (shared by every test)
 //!
@@ -41,9 +33,9 @@
 //!   series with a cover letter) via
 //!   `harness.publish_three_open_patch_proposals`.
 //! - `test_repo` = `CloneLogin::None` clone of the published `nostr://` URL —
-//!   what a real user does (`git clone <nostr-url>`). With no `nostr.npub` set,
-//!   the long-form `pr/<branch>(<shorthand>)` ref name is what gets advertised
-//!   by `src/bin/git_remote_nostr/list.rs:236`; assertions build that form via
+//!   what a real user does (`git clone <nostr-url>`). The default clone has no
+//!   proposal branches; explicit checkout reconstructs the selected proposal
+//!   under the long-form `pr/<branch>(<shorthand>)` name asserted via
 //!   [`expected_branch_name`].
 //!
 //! ## Why no `--offline`
@@ -555,7 +547,16 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
 
     // (2) Publisher (maintainer) publishes a rebased revision.
     //     Using the maintainer ensures the revision patches are visible to
-    //     `get_all_proposal_patch_pr_pr_update_events_from_cache`.
+    //     `get_all_proposal_patch_pr_pr_update_events_from_cache`. Explicit
+    //     checkout reconstructs the previous tip that revision validation
+    //     needs now that foreign proposals are not fetched by default.
+    run_pr_checkout(&publisher, series).await?;
+    git_ok(
+        &publisher,
+        ["checkout", "main"],
+        "git checkout main after reconstructing proposal tip",
+    )
+    .await?;
     std::fs::write(publisher.dir().join("amazing.md"), "rebase base content\n")
         .context("write amazing.md")?;
     git_ok(&publisher, ["add", "amazing.md"], "git add amazing.md").await?;

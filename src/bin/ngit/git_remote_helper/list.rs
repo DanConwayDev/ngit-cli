@@ -389,7 +389,7 @@ fn auto_pr_branches_enabled(git_repo: &Repo) -> Result<bool> {
 
     match config.get_bool(AUTO_PR_BRANCHES_CONFIG) {
         Ok(enabled) => Ok(enabled),
-        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(true),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(false),
         Err(error) => Err(error).context(format!(
             "failed to read {AUTO_PR_BRANCHES_CONFIG} as a boolean"
         )),

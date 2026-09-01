@@ -133,16 +133,23 @@ where
 }
 
 /// Patch-kind counterpart of
-/// `tests/list_pr.rs::open_pr_proposals_are_listed_under_pr_namespaces`.
+/// `tests/list_pr.
+/// rs::enabling_auto_pr_branches_lists_open_prs_under_pr_namespaces`.
 /// Same three-ref-form-per-proposal assertion shape; the construction
 /// difference is hidden inside the scenario builder.
 #[tokio::test]
-async fn open_patch_proposals_are_listed_under_pr_namespaces() -> Result<()> {
+async fn enabling_auto_pr_branches_lists_open_patch_proposals() -> Result<()> {
     let (harness, published, series) = setup().await?;
 
     let test_repo = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "enable automatic PR branches",
+    )
+    .await?;
 
     let ls = ls_remote(&test_repo, "origin").await?;
 
@@ -180,18 +187,11 @@ async fn open_patch_proposals_are_listed_under_pr_namespaces() -> Result<()> {
 }
 
 #[tokio::test]
-async fn disabled_auto_pr_branches_reconstructs_only_checked_out_patch_series() -> Result<()> {
+async fn default_auto_pr_branches_reconstructs_only_checked_out_patch_series() -> Result<()> {
     let (harness, published, series) = setup().await?;
     let test_repo = harness
         .clone_published_repo(&published, CloneLogin::None)
         .await?;
-
-    git_ok(
-        &test_repo,
-        ["config", "--local", "nostr.auto-pr-branches", "false"],
-        "disable automatic PR branches",
-    )
-    .await?;
 
     let before_checkout = ls_remote(&test_repo, "origin").await?;
     assert!(

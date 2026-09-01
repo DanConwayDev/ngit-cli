@@ -80,7 +80,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     .build()
     .await?;
 
-    let (_publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
 
     // --- original proposal -------------------------------------------------
     //
@@ -107,6 +107,17 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .cover_letter_event
         .clone()
         .context("original proposal did not produce a cover-letter event")?;
+
+    // This event-shape fixture deliberately publishes the revision through a
+    // second fresh clone. Opt into the legacy fetch-all mode so that generic
+    // scenario helper has the original proposal tip needed to validate the
+    // revision. Checkout behavior itself is covered in pr_checkout_patch.rs.
+    publisher
+        .git_ok(
+            ["config", "--global", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for the revision fixture",
+        )
+        .await?;
 
     // --- revision ----------------------------------------------------------
     //

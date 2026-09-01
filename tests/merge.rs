@@ -891,12 +891,25 @@ async fn merge_without_id_resolves_unauthored_bare_branch_by_tip() -> Result<()>
     } = setup().await?;
     let pr = &prs[0];
 
-    // Fetch so the contributor's PR tip objects are locally available, then
+    // Explicit checkout makes the contributor's PR tip object locally
+    // available under the standard shorthand branch. Return to main, then
     // create a bare `pr/<name>` branch at the published tip — what a
     // maintainer does when checking out a contributor's PR with plain git
     // under a friendly branch name.
+    let checkout = publisher
+        .ngit(["pr", "checkout", &pr.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        checkout.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        checkout.status,
+        String::from_utf8_lossy(&checkout.stdout),
+        String::from_utf8_lossy(&checkout.stderr),
+    );
     publisher
-        .git_ok(["fetch", "origin"], "git fetch origin")
+        .git_ok(["checkout", "main"], "git checkout main")
         .await?;
     let bare_branch = format!("pr/{}", pr.branch_name);
     publisher
@@ -1125,6 +1138,15 @@ async fn merge_without_id_ambiguous_name_and_tip_still_errors() -> Result<()> {
         .await?;
     contributor_b
         .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for duplicate-tip setup",
+        )
+        .await?;
+    contributor_b
+        .git_ok(["fetch", "origin"], "fetch contributor A's PR tip")
+        .await?;
+    contributor_b
+        .git_ok(
             ["checkout", "-b", "pr/dup", &shared_tip],
             "git checkout -b pr/dup at shared tip (b)",
         )
@@ -1147,6 +1169,12 @@ async fn merge_without_id_ambiguous_name_and_tip_still_errors() -> Result<()> {
 
     // The maintainer checks out the shared tip under the bare name and asks
     // for a merge with no id.
+    publisher
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for ambiguous-tip setup",
+        )
+        .await?;
     publisher
         .git_ok(["fetch", "origin"], "git fetch origin")
         .await?;

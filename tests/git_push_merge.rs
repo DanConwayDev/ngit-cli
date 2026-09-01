@@ -336,6 +336,12 @@ async fn rev_parse(repo: &Repo, rev: &str) -> Result<String> {
 /// `make_commits_for_proposal` reconstructing the commits locally during
 /// `git-remote-nostr list`.
 async fn merge_pr_with_merge_commit(repo: &Repo, proposal: &MergedProposal) -> Result<String> {
+    git_ok(
+        repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "enable automatic PR branches for raw remote-ref merge",
+    )
+    .await?;
     git_ok(repo, ["fetch", "origin"], "git fetch origin").await?;
 
     // Sanity: the remote helper advertises the proposal tip under the
@@ -384,6 +390,12 @@ async fn merge_pr_with_merge_commit(repo: &Repo, proposal: &MergedProposal) -> R
 /// Returns the resulting `main` tip oid (= the proposal tip) so the caller
 /// can spot a silent regression to the `--no-ff` shape.
 async fn merge_pr_with_fast_forward(repo: &Repo, proposal: &MergedProposal) -> Result<String> {
+    git_ok(
+        repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "enable automatic PR branches for raw remote-ref merge",
+    )
+    .await?;
     git_ok(repo, ["fetch", "origin"], "git fetch origin").await?;
 
     let remote_ref = format!("origin/{}", long_branch(proposal));

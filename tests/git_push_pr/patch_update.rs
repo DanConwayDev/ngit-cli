@@ -205,6 +205,15 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let maintainer_clone = harness
         .clone_published_repo(&published, CloneLogin::AsMaintainer)
         .await?;
+    maintainer_clone
+        .git_ok(
+            ["config", "--local", "nostr.auto-pr-branches", "true"],
+            "enable automatic PR branches for raw remote-ref checkout",
+        )
+        .await?;
+    maintainer_clone
+        .git_ok(["fetch", "origin"], "fetch automatic PR branches")
+        .await?;
 
     // Sanity-check that the patch branch is actually advertised to the
     // maintainer — if `list.rs` ever stops advertising patches as
