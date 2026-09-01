@@ -2,18 +2,23 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Component, Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use ngit::{
     apk::{APK_MIME_TYPE, ApkInspection, ApkPlatformInference, inspect_apk},
     blossom::{
+        BatchUploadError, BatchUploadResult, BlossomProgress, BlossomProgressEvent,
         BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
-        FileSnapshot, LocalFileRequest, MultiServerUpload, MultiServerUploadError,
+        DEFAULT_UPLOAD_CONCURRENCY, FileSnapshot, LocalFileRequest, MultiServerUpload,
         PossibleOrphanBlob, blossom_server_list_filter, blossom_server_list_from_events,
-        canonicalize_blossom_server_root, confirm_snapshot_on_servers, snapshot_local_file,
+        canonicalize_blossom_server_root, multi_server_upload_from_batch_outcome,
+        snapshot_local_file, upload_snapshot_batch_to_servers_with_progress,
     },
-    client::{sign_draft_event, sign_event},
+    client::{is_verbose, sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
     git::{Repo, RepoActions},
     release_download::{UrlAssetRequest, download_url_asset},
@@ -376,6 +381,7 @@ pub(super) async fn release_publish(
                 &mut prepared_assets,
                 selection,
                 &signer,
+                args.json,
             )
             .await?
         }
@@ -677,7 +683,14 @@ pub(super) async fn asset_add(
         .clone();
     let blossom = match (prepared_asset.as_mut(), blossom_selection.as_ref()) {
         (Some(prepared), Some(selection)) => {
-            upload_prepared_files(None, std::slice::from_mut(prepared), selection, &signer).await?
+            upload_prepared_files(
+                None,
+                std::slice::from_mut(prepared),
+                selection,
+                &signer,
+                args.json,
+            )
+            .await?
         }
         _ => BlossomPublication::empty(),
     };
@@ -2631,6 +2644,185 @@ struct BlossomPublication {
     possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
+struct ReleaseBlossomProgress {
+    bar: ProgressBar,
+    verbose: bool,
+    spinner_style: ProgressStyle,
+    upload_style: ProgressStyle,
+}
+
+impl ReleaseBlossomProgress {
+    fn new(json_output: bool) -> Result<Arc<Self>> {
+        let bar = if json_output {
+            ProgressBar::hidden()
+        } else {
+            ProgressBar::new_spinner()
+        };
+        let spinner_style =
+            ProgressStyle::with_template(" {spinner} {msg}")?.tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let upload_style = ProgressStyle::with_template(
+            " {spinner} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {eta} {msg}",
+        )?
+        .progress_chars("##-")
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        Ok(Arc::new(Self {
+            bar,
+            verbose: !json_output && is_verbose(),
+            spinner_style,
+            upload_style,
+        }))
+    }
+
+    fn start_spinner(&self, message: String) {
+        self.bar.reset();
+        self.bar.unset_length();
+        self.bar.set_style(self.spinner_style.clone());
+        self.bar.set_message(message);
+        self.bar.enable_steady_tick(Duration::from_millis(100));
+        self.bar.force_draw();
+    }
+
+    fn start_upload_bar(
+        &self,
+        batch: usize,
+        batches: usize,
+        blobs: usize,
+        placements: usize,
+        bytes: u64,
+    ) {
+        self.bar.reset();
+        self.bar.set_length(bytes);
+        self.bar.set_position(0);
+        self.bar.set_style(self.upload_style.clone());
+        self.bar.set_message(format!(
+            "Blossom batch {batch}/{batches}: {blobs} blob(s), {placements} placement(s)"
+        ));
+        self.bar.enable_steady_tick(Duration::from_millis(100));
+        self.bar.force_draw();
+    }
+
+    fn set_operation_message(
+        &self,
+        phase: &str,
+        filename: &str,
+        server: &Url,
+        attempt: usize,
+        max_attempts: usize,
+    ) {
+        let server = server.host_str().unwrap_or_else(|| server.as_str());
+        self.bar.set_message(format!(
+            "{phase} {filename} on {server} (attempt {attempt}/{max_attempts})"
+        ));
+    }
+
+    fn print_placement(
+        &self,
+        filename: &str,
+        server: &Url,
+        status: BlossomServerStatus,
+        message: Option<&str>,
+    ) {
+        if !self.verbose {
+            return;
+        }
+        let status = blossom_status_label(status);
+        let detail = message.map_or_else(String::new, |message| format!(": {message}"));
+        self.bar
+            .println(format!("  {filename} -> {server}: {status}{detail}"));
+    }
+}
+
+impl BlossomProgress for ReleaseBlossomProgress {
+    fn update(&self, event: &BlossomProgressEvent) {
+        match event {
+            BlossomProgressEvent::PresenceChecksStarted {
+                blobs,
+                servers,
+                checks,
+            } => self.start_spinner(format!(
+                "checking {blobs} Blossom blob(s) across {servers} server(s) ({checks} placement(s))"
+            )),
+            BlossomProgressEvent::PresenceChecksFinished { .. }
+            | BlossomProgressEvent::UploadBatchFinished { .. } => self.bar.finish_and_clear(),
+            BlossomProgressEvent::AuthorizationStarted {
+                batch,
+                batches,
+                blobs,
+            } => {
+                self.bar.finish_and_clear();
+                if self.verbose {
+                    eprintln!(
+                        "authorizing Blossom batch {batch}/{batches} for {blobs} blob(s)..."
+                    );
+                }
+            }
+            BlossomProgressEvent::UploadBatchStarted {
+                batch,
+                batches,
+                blobs,
+                placements,
+                bytes,
+            } => self.start_upload_bar(*batch, *batches, *blobs, *placements, *bytes),
+            BlossomProgressEvent::UploadRequestStarted {
+                filename,
+                server,
+                attempt,
+                max_attempts,
+                additional_bytes,
+                ..
+            } => {
+                self.bar.inc_length(*additional_bytes);
+                self.set_operation_message(
+                    "uploading",
+                    filename,
+                    server,
+                    *attempt,
+                    *max_attempts,
+                );
+            }
+            BlossomProgressEvent::UploadedBytes { bytes, .. } => self.bar.inc(*bytes),
+            BlossomProgressEvent::VerificationStarted {
+                filename,
+                server,
+                attempt,
+                max_attempts,
+                ..
+            } => self.set_operation_message(
+                "verifying",
+                filename,
+                server,
+                *attempt,
+                *max_attempts,
+            ),
+            BlossomProgressEvent::RetryScheduled {
+                filename,
+                server,
+                next_attempt,
+                max_attempts,
+                ..
+            } => self.set_operation_message(
+                "retrying",
+                filename,
+                server,
+                *next_attempt,
+                *max_attempts,
+            ),
+            BlossomProgressEvent::PlacementFinished {
+                filename,
+                server,
+                status,
+                message,
+            } => self.print_placement(filename, server, *status, message.as_deref()),
+        }
+    }
+}
+
+impl Drop for ReleaseBlossomProgress {
+    fn drop(&mut self) {
+        self.bar.finish_and_clear();
+    }
+}
+
 impl BlossomPublication {
     fn empty() -> Self {
         Self {
@@ -2700,64 +2892,79 @@ async fn upload_prepared_files(
     prepared_assets: &mut [PreparedAsset],
     selection: &BlossomServerSelection,
     signer: &std::sync::Arc<ngit::NgitSigner>,
+    json_output: bool,
 ) -> Result<BlossomPublication> {
+    let snapshots = prepared_upload_snapshots(prepared_application.as_deref(), prepared_assets)?;
+
+    let progress = ReleaseBlossomProgress::new(json_output)?;
+    let batch = upload_snapshot_batch_to_servers_with_progress(
+        &selection.servers,
+        &snapshots,
+        signer,
+        DEFAULT_UPLOAD_CONCURRENCY,
+        progress,
+    )
+    .await;
+    let batch = match batch {
+        Ok(batch) => batch,
+        Err(error) => {
+            drop(snapshots);
+            return Err(blossom_batch_failure(
+                prepared_application.as_deref(),
+                prepared_assets,
+                selection,
+                error,
+            ));
+        }
+    };
+
+    let (confirmed_by_hash, possible_orphan_blobs) = confirmed_batch_uploads(&snapshots, &batch)?;
+    drop(snapshots);
+
     let mut uploads = Vec::new();
     let mut outcomes = Vec::new();
-    let mut possible_orphan_blobs = Vec::new();
     if let Some(prepared) = prepared_application {
-        upload_prepared_application_media(
-            prepared,
-            selection,
-            signer,
-            &mut uploads,
-            &mut outcomes,
-            &mut possible_orphan_blobs,
-        )
-        .await?;
+        for index in 0..prepared.local_media.len() {
+            let (slot, url, upload_json, server_outcomes) = {
+                let pending = &prepared.local_media[index];
+                let upload = confirmed_by_hash
+                    .get(&pending.snapshot.sha256)
+                    .context("prepared application media was not in the Blossom batch")?;
+                (
+                    pending.slot,
+                    upload.primary.url.to_string(),
+                    application_media_upload_json(pending, upload),
+                    upload.servers.clone(),
+                )
+            };
+            uploads.push(upload_json);
+            outcomes.push(server_outcomes);
+            prepared.set_media_url(slot, url);
+        }
+        if let Err(error) = validate_application_input(&prepared.input) {
+            let publication = BlossomPublication {
+                json: blossom_json(selection, &uploads),
+                outcomes,
+                possible_orphan_blobs,
+            };
+            return Err(preserve_completed_blossom(
+                error,
+                &publication,
+                "application_metadata",
+                Nip82Progress::none(),
+            ));
+        }
     }
     for prepared in prepared_assets {
         let PreparedAsset::File(pending) = prepared else {
             continue;
         };
-        let upload = match confirm_snapshot_on_servers(
-            &selection.servers,
-            &pending.snapshot,
-            signer,
-        )
-        .await
-        {
-            Ok(upload) => upload,
-            Err(error) => {
-                let (stage, server) = failed_blossom_operation(&error);
-                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
-                uploads.push(failed_blossom_upload_json(pending, &error));
-                outcomes.push(error.servers.clone());
-                let message = blossom_failure_message(
-                    &error.message,
-                    &outcomes,
-                    &possible_orphan_blobs,
-                    Nip82Progress::none(),
-                    BLOSSOM_RETRY_RECOVERY,
-                );
-                return Err(coded_error_with_details(
-                    "blossom_publication_failed",
-                    message,
-                    json!({
-                        "stage": stage,
-                        "server": server,
-                        "blossom": blossom_json(selection, &uploads),
-                        "possible_orphan_blobs": possible_orphan_blobs,
-                        "release_events_signed": false,
-                        "release_events_published": false,
-                        "recovery": BLOSSOM_RETRY_RECOVERY,
-                    }),
-                ));
-            }
-        };
+        let upload = confirmed_by_hash
+            .get(&pending.snapshot.sha256)
+            .context("prepared release asset was not in the Blossom batch")?;
         pending.input.url = Some(upload.primary.url.to_string());
-        uploads.push(blossom_upload_json(pending, &upload));
+        uploads.push(blossom_upload_json(pending, upload));
         outcomes.push(upload.servers.clone());
-        possible_orphan_blobs.extend(possible_orphans_from_upload(&pending.snapshot, &upload));
         if let Err(error) = validate_asset_input(&pending.input) {
             let publication = BlossomPublication {
                 json: blossom_json(selection, &uploads),
@@ -2779,72 +2986,131 @@ async fn upload_prepared_files(
     })
 }
 
-async fn upload_prepared_application_media(
-    prepared: &mut PreparedApplicationMetadata,
-    selection: &BlossomServerSelection,
-    signer: &std::sync::Arc<ngit::NgitSigner>,
-    uploads: &mut Vec<Value>,
-    outcomes: &mut Vec<Vec<BlossomServerOutcome>>,
-    possible_orphan_blobs: &mut Vec<PossibleOrphanBlob>,
+fn prepared_upload_snapshots<'a>(
+    prepared_application: Option<&'a PreparedApplicationMetadata>,
+    prepared_assets: &'a [PreparedAsset],
+) -> Result<Vec<&'a FileSnapshot>> {
+    let mut seen_hashes = HashMap::new();
+    let mut snapshots = Vec::new();
+    if let Some(prepared) = prepared_application {
+        for pending in &prepared.local_media {
+            include_batch_snapshot(&pending.snapshot, &mut seen_hashes, &mut snapshots)?;
+        }
+    }
+    for prepared in prepared_assets {
+        let PreparedAsset::File(pending) = prepared else {
+            continue;
+        };
+        include_batch_snapshot(&pending.snapshot, &mut seen_hashes, &mut snapshots)?;
+    }
+    Ok(snapshots)
+}
+
+fn confirmed_batch_uploads(
+    snapshots: &[&FileSnapshot],
+    batch: &BatchUploadResult,
+) -> Result<(HashMap<String, MultiServerUpload>, Vec<PossibleOrphanBlob>)> {
+    let batch_by_hash = batch
+        .blobs
+        .iter()
+        .map(|blob| (blob.sha256.as_str(), blob))
+        .collect::<HashMap<_, _>>();
+    let mut confirmed_by_hash = HashMap::new();
+    let mut possible_orphan_blobs = Vec::new();
+    for snapshot in snapshots {
+        let outcome = batch_by_hash
+            .get(snapshot.sha256.as_str())
+            .context("Blossom batch omitted a prepared release file")?;
+        let upload = multi_server_upload_from_batch_outcome(snapshot, outcome)
+            .map_err(anyhow::Error::new)?;
+        possible_orphan_blobs.extend(possible_orphans_from_upload(snapshot, &upload));
+        confirmed_by_hash.insert(snapshot.sha256.clone(), upload);
+    }
+    Ok((confirmed_by_hash, possible_orphan_blobs))
+}
+
+fn include_batch_snapshot<'a>(
+    snapshot: &'a FileSnapshot,
+    seen_hashes: &mut HashMap<&'a str, &'a str>,
+    snapshots: &mut Vec<&'a FileSnapshot>,
 ) -> Result<()> {
-    for index in 0..prepared.local_media.len() {
-        let pending = &prepared.local_media[index];
-        let upload = match confirm_snapshot_on_servers(
-            &selection.servers,
-            &pending.snapshot,
-            signer,
-        )
-        .await
-        {
-            Ok(upload) => upload,
-            Err(error) => {
-                let (stage, server) = failed_blossom_operation(&error);
-                possible_orphan_blobs.extend(error.possible_orphan_blobs.iter().cloned());
-                uploads.push(failed_application_media_upload_json(pending, &error));
-                outcomes.push(error.servers.clone());
-                let message = blossom_failure_message(
-                    &error.message,
-                    outcomes,
-                    possible_orphan_blobs,
-                    Nip82Progress::none(),
-                    BLOSSOM_RETRY_RECOVERY,
-                );
-                return Err(coded_error_with_details(
-                    "blossom_publication_failed",
-                    message,
-                    json!({
-                        "stage": stage,
-                        "server": server,
-                        "blossom": blossom_json(selection, uploads),
-                        "possible_orphan_blobs": possible_orphan_blobs,
-                        "release_events_signed": false,
-                        "release_events_published": false,
-                        "recovery": BLOSSOM_RETRY_RECOVERY,
-                    }),
-                ));
-            }
-        };
-        let slot = pending.slot;
-        let url = upload.primary.url.to_string();
-        uploads.push(application_media_upload_json(pending, &upload));
-        outcomes.push(upload.servers.clone());
-        possible_orphan_blobs.extend(possible_orphans_from_upload(&pending.snapshot, &upload));
-        prepared.set_media_url(slot, url);
+    if let Some(previous_mime) = seen_hashes.get(snapshot.sha256.as_str()) {
+        if *previous_mime != snapshot.mime_type {
+            return Err(coded_error_with_details(
+                "conflicting_blossom_metadata",
+                "local files with the same SHA-256 must use the same MIME type",
+                json!({
+                    "sha256": snapshot.sha256,
+                    "first_mime": previous_mime,
+                    "conflicting_mime": snapshot.mime_type,
+                }),
+            ));
+        }
+        return Ok(());
     }
-    if let Err(error) = validate_application_input(&prepared.input) {
-        let publication = BlossomPublication {
-            json: blossom_json(selection, uploads),
-            outcomes: outcomes.clone(),
-            possible_orphan_blobs: possible_orphan_blobs.clone(),
-        };
-        return Err(preserve_completed_blossom(
-            error,
-            &publication,
-            "application_metadata",
-            Nip82Progress::none(),
-        ));
-    }
+    seen_hashes.insert(snapshot.sha256.as_str(), snapshot.mime_type.as_str());
+    snapshots.push(snapshot);
     Ok(())
+}
+
+fn blossom_batch_failure(
+    prepared_application: Option<&PreparedApplicationMetadata>,
+    prepared_assets: &[PreparedAsset],
+    selection: &BlossomServerSelection,
+    error: BatchUploadError,
+) -> anyhow::Error {
+    let BatchUploadError {
+        message,
+        blobs,
+        possible_orphan_blobs,
+    } = error;
+    let by_hash = blobs
+        .iter()
+        .map(|blob| (blob.sha256.as_str(), blob))
+        .collect::<HashMap<_, _>>();
+    let mut uploads = Vec::new();
+    if let Some(prepared) = prepared_application {
+        for pending in &prepared.local_media {
+            let servers = by_hash
+                .get(pending.snapshot.sha256.as_str())
+                .map_or(&[][..], |blob| blob.servers.as_slice());
+            uploads.push(failed_application_media_upload_json(pending, servers));
+        }
+    }
+    for prepared in prepared_assets {
+        let PreparedAsset::File(pending) = prepared else {
+            continue;
+        };
+        let servers = by_hash
+            .get(pending.snapshot.sha256.as_str())
+            .map_or(&[][..], |blob| blob.servers.as_slice());
+        uploads.push(failed_blossom_upload_json(pending, servers));
+    }
+    let outcomes = blobs
+        .iter()
+        .map(|blob| blob.servers.clone())
+        .collect::<Vec<_>>();
+    let (stage, server) = failed_blossom_operation(&outcomes);
+    let human_message = blossom_failure_message(
+        &message,
+        &outcomes,
+        &possible_orphan_blobs,
+        Nip82Progress::none(),
+        BLOSSOM_RETRY_RECOVERY,
+    );
+    coded_error_with_details(
+        "blossom_publication_failed",
+        human_message,
+        json!({
+            "stage": stage,
+            "server": server,
+            "blossom": blossom_json(selection, &uploads),
+            "possible_orphan_blobs": possible_orphan_blobs,
+            "release_events_signed": false,
+            "release_events_published": false,
+            "recovery": BLOSSOM_RETRY_RECOVERY,
+        }),
+    )
 }
 
 fn blossom_json(selection: &BlossomServerSelection, uploads: &[Value]) -> Value {
@@ -2886,7 +3152,7 @@ fn application_media_upload_json(
 
 fn failed_application_media_upload_json(
     pending: &PendingApplicationMedia,
-    error: &MultiServerUploadError,
+    servers: &[BlossomServerOutcome],
 ) -> Value {
     json!({
         "entity": "application_media",
@@ -2897,7 +3163,7 @@ fn failed_application_media_upload_json(
         "size": pending.snapshot.size.to_string(),
         "mime": pending.snapshot.mime_type,
         "primary_url": Value::Null,
-        "servers": error.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+        "servers": servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
     })
 }
 
@@ -2908,7 +3174,10 @@ fn application_media_field(slot: ApplicationMediaSlot) -> String {
     }
 }
 
-fn failed_blossom_upload_json(pending: &PendingFileAsset, error: &MultiServerUploadError) -> Value {
+fn failed_blossom_upload_json(
+    pending: &PendingFileAsset,
+    servers: &[BlossomServerOutcome],
+) -> Value {
     json!({
         "source": pending.source_path,
         "filename": pending.snapshot.filename,
@@ -2916,8 +3185,8 @@ fn failed_blossom_upload_json(pending: &PendingFileAsset, error: &MultiServerUpl
         "size": pending.snapshot.size.to_string(),
         "mime": pending.snapshot.mime_type,
         "apk_platform_inference": pending.apk_platform_inference,
-        "primary_url": error.servers.first().and_then(|outcome| outcome.descriptor.as_ref()).map(|descriptor| descriptor.url.as_str()),
-        "servers": error.servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
+        "primary_url": servers.first().and_then(|outcome| outcome.descriptor.as_ref()).map(|descriptor| descriptor.url.as_str()),
+        "servers": servers.iter().map(blossom_server_outcome_json).collect::<Vec<_>>(),
     })
 }
 
@@ -2931,10 +3200,10 @@ fn blossom_server_outcome_json(outcome: &BlossomServerOutcome) -> Value {
     })
 }
 
-fn failed_blossom_operation(error: &MultiServerUploadError) -> (Value, Value) {
-    error
-        .servers
+fn failed_blossom_operation(outcomes: &[Vec<BlossomServerOutcome>]) -> (Value, Value) {
+    outcomes
         .iter()
+        .flatten()
         .find(|outcome| {
             matches!(
                 outcome.status,
@@ -2944,6 +3213,16 @@ fn failed_blossom_operation(error: &MultiServerUploadError) -> (Value, Value) {
         .map_or((Value::Null, Value::Null), |outcome| {
             (json!(outcome.operation), json!(outcome.server))
         })
+}
+
+fn blossom_status_label(status: BlossomServerStatus) -> &'static str {
+    match status {
+        BlossomServerStatus::Stored => "stored",
+        BlossomServerStatus::AlreadyPresent => "already_present",
+        BlossomServerStatus::Failed => "failed",
+        BlossomServerStatus::Unknown => "unknown",
+        BlossomServerStatus::NotAttempted => "not_attempted",
+    }
 }
 
 fn possible_orphans_from_upload(
@@ -2980,14 +3259,11 @@ fn blossom_failure_message(
                 BlossomServerOperation::Upload => "upload",
                 BlossomServerOperation::Mirror => "mirror",
             };
-            let status = match outcome.status {
-                BlossomServerStatus::Stored => "stored",
-                BlossomServerStatus::AlreadyPresent => "already_present",
-                BlossomServerStatus::Failed => "failed",
-                BlossomServerStatus::Unknown => "unknown",
-                BlossomServerStatus::NotAttempted => "not_attempted",
-            };
-            format!("{operation} {}: {status}", outcome.server)
+            let status = blossom_status_label(outcome.status);
+            outcome.message.as_ref().map_or_else(
+                || format!("{operation} {}: {status}", outcome.server),
+                |message| format!("{operation} {}: {status} ({message})", outcome.server),
+            )
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -3735,6 +4011,65 @@ assets:
                 .contains("upload https://blossom.example/: stored")
         );
         assert!(error.message.contains("recovery:"));
+        Ok(())
+    }
+
+    #[test]
+    fn blossom_failure_message_includes_server_failure_detail() -> Result<()> {
+        let server = Url::parse("https://blossom.example/")?;
+        let message = blossom_failure_message(
+            "one or more Blossom uploads failed",
+            &[vec![BlossomServerOutcome {
+                server,
+                operation: BlossomServerOperation::Upload,
+                status: BlossomServerStatus::Failed,
+                descriptor: None,
+                message: Some("HTTP 413 Payload Too Large: quota exceeded".to_owned()),
+            }]],
+            &[],
+            Nip82Progress::none(),
+            BLOSSOM_RETRY_RECOVERY,
+        );
+
+        assert!(message.contains(
+            "upload https://blossom.example/: failed (HTTP 413 Payload Too Large: quota exceeded)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn blossom_progress_bar_expands_for_retried_upload_bytes() -> Result<()> {
+        let progress = ReleaseBlossomProgress::new(true)?;
+        let server = Url::parse("https://blossom.example/")?;
+        progress.update(&BlossomProgressEvent::UploadBatchStarted {
+            batch: 1,
+            batches: 2,
+            blobs: 1,
+            placements: 1,
+            bytes: 10,
+        });
+        progress.update(&BlossomProgressEvent::UploadedBytes {
+            batch: 1,
+            bytes: 10,
+        });
+        progress.update(&BlossomProgressEvent::UploadRequestStarted {
+            batch: 1,
+            batches: 2,
+            filename: "release.tar.gz".to_owned(),
+            server,
+            attempt: 2,
+            max_attempts: 3,
+            additional_bytes: 10,
+        });
+        progress.update(&BlossomProgressEvent::UploadedBytes {
+            batch: 1,
+            bytes: 10,
+        });
+
+        assert!(progress.bar.is_hidden());
+        assert_eq!(progress.bar.length(), Some(20));
+        assert_eq!(progress.bar.position(), 20);
+        assert!(progress.bar.message().contains("attempt 2/3"));
         Ok(())
     }
 }

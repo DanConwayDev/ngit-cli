@@ -6,7 +6,7 @@
 //! bounded in-process HTTP server so they exercise the real downloader while
 //! remaining hermetic.
 
-use std::{fs, time::Duration};
+use std::{collections::HashSet, fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -181,20 +181,14 @@ async fn manifest_publishes_application_metadata_and_tracked_media_to_blossom() 
     const COMMUNITY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     let (harness, publisher, published) = setup(0).await?;
-    let asset_server = AssetHttpServer::spawn(vec![ServedAsset {
-        path: "/application-metadata.tar.gz",
-        body: ASSET_BYTES,
-        content_type: "application/gzip",
-    }])
-    .await?;
     let icon_hash = sha256_hex(ICON_BYTES);
-    let blossom = BlossomHttpServer::descriptor(
-        "201 Created",
-        &icon_hash,
-        ICON_BYTES.len() as u64,
-        "image/png",
-    )
+    let asset_hash = sha256_hex(ASSET_BYTES);
+    let blossom = BlossomHttpServer::batch(vec![
+        BatchBlossomBlob::new(ICON_BYTES, "image/png"),
+        BatchBlossomBlob::new(ASSET_BYTES, "application/gzip"),
+    ])
     .await?;
+    let icon_url = format!("{}/{icon_hash}.blob", blossom.base_url());
 
     let media_dir = publisher.dir().join("media");
     let manifest_dir = publisher.dir().join(".ngit");
@@ -202,6 +196,8 @@ async fn manifest_publishes_application_metadata_and_tracked_media_to_blossom() 
     fs::create_dir_all(&manifest_dir).context("failed to create release manifest directory")?;
     fs::write(media_dir.join("icon.png"), ICON_BYTES)
         .context("failed to write application icon")?;
+    fs::write(media_dir.join("application-metadata.tar.gz"), ASSET_BYTES)
+        .context("failed to write release asset")?;
     let manifest = format!(
         r#"schema: 1
 identifier: {APP_ID}
@@ -225,19 +221,23 @@ publication:
   blossom_servers:
     - "{blossom_server}"
 assets:
-  - source: "{asset_server}/application-metadata.tar.gz"
+  - file: media/application-metadata.tar.gz
     filename: application-metadata.tar.gz
     mime: application/gzip
     platforms: [linux-x86_64]
 "#,
         pubkey = published.maintainer_keys.public_key().to_bech32()?,
         blossom_server = blossom.base_url(),
-        asset_server = asset_server.base_url(),
     );
     fs::write(manifest_dir.join("release.yaml"), manifest)
         .context("failed to write application metadata release manifest")?;
     let add = publisher
-        .git(["add", "media/icon.png", ".ngit/release.yaml"])
+        .git([
+            "add",
+            "media/icon.png",
+            "media/application-metadata.tar.gz",
+            ".ngit/release.yaml",
+        ])
         .output()
         .await
         .context("failed to spawn git add for application metadata")?;
@@ -266,16 +266,34 @@ assets:
         ],
     )
     .await?;
-    asset_server.finish().await?;
-    let blossom_url = blossom
-        .blob_url()
-        .context("Blossom descriptor URL missing")?
-        .to_owned();
     let blossom_requests = blossom.finish().await?;
-    ensure!(blossom_upload_request(&blossom_requests)?.body == ICON_BYTES);
+    let upload_requests = blossom_requests
+        .iter()
+        .filter(|request| request.head.starts_with("PUT /upload HTTP/1.1\r\n"))
+        .collect::<Vec<_>>();
+    ensure!(upload_requests.len() == 2);
+    ensure!(
+        upload_requests
+            .iter()
+            .any(|request| request.body == ICON_BYTES)
+    );
+    ensure!(
+        upload_requests
+            .iter()
+            .any(|request| request.body == ASSET_BYTES)
+    );
+    let authorizations = upload_requests
+        .iter()
+        .map(|request| {
+            request_header(&request.head, "authorization")
+                .context("batched Blossom upload omitted authorization")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(authorizations[0] == authorizations[1]);
     ensure!(output["result"]["application_operation"] == "created");
     ensure!(output["result"]["blossom"]["uploads"][0]["entity"] == "application_media");
     ensure!(output["result"]["blossom"]["uploads"][0]["field"] == "icon");
+    ensure!(output["result"]["blossom"]["uploads"][1]["sha256"] == asset_hash);
 
     let application = SoftwareApplication::parse(
         &single_event(
@@ -296,7 +314,7 @@ assets:
     ensure!(application.license.as_deref() == Some("MIT"));
     ensure!(application.website.as_deref() == Some("https://example.invalid/application"));
     ensure!(application.repository.as_deref() == Some("nostr://example.invalid/application"));
-    ensure!(application.icon.as_deref() == Some(blossom_url.as_str()));
+    ensure!(application.icon.as_deref() == Some(icon_url.as_str()));
     ensure!(application.images == ["https://cdn.example.invalid/application/screenshot.png"]);
     ensure!(application.communities == [COMMUNITY]);
 
@@ -2132,6 +2150,23 @@ impl BlossomHttpServer {
         })
     }
 
+    async fn batch(blobs: Vec<BatchBlossomBlob>) -> Result<Self> {
+        ensure!(!blobs.is_empty(), "Blossom batch fixture requires a blob");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind Blossom batch fixture")?;
+        let address = listener
+            .local_addr()
+            .context("failed to inspect Blossom batch fixture address")?;
+        let base_url = format!("http://{address}");
+        let task = tokio::spawn(serve_blossom_batch(listener, base_url.clone(), blobs));
+        Ok(Self {
+            base_url,
+            blob_url: None,
+            task: Some(task),
+        })
+    }
+
     fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -2150,6 +2185,22 @@ impl BlossomHttpServer {
             .await
             .context("Blossom server did not terminate")?
             .context("Blossom server task panicked")?
+    }
+}
+
+struct BatchBlossomBlob {
+    sha256: String,
+    body: Vec<u8>,
+    mime: String,
+}
+
+impl BatchBlossomBlob {
+    fn new(body: &[u8], mime: &str) -> Self {
+        Self {
+            sha256: sha256_hex(body),
+            body: body.to_vec(),
+            mime: mime.to_owned(),
+        }
     }
 }
 
@@ -2198,6 +2249,83 @@ async fn serve_blossom_errors(
     for _ in 0..3 {
         requests.push(serve_one_blossom_request(&listener, &response).await?);
     }
+    Ok(requests)
+}
+
+async fn serve_blossom_batch(
+    listener: TcpListener,
+    base_url: String,
+    blobs: Vec<BatchBlossomBlob>,
+) -> Result<Vec<CapturedBlossomRequest>> {
+    let mut stored = HashSet::new();
+    let mut requests = Vec::with_capacity(blobs.len() * 3);
+    for _ in 0..blobs.len() * 3 {
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .context("timed out waiting for a Blossom batch request")?
+            .context("failed to accept a Blossom batch request")?;
+        let request = read_blossom_request(&mut stream).await?;
+        let request_line = request.head.lines().next().unwrap_or_default();
+        let response = if request_line.starts_with("HEAD /") {
+            let hash = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .trim_start_matches('/');
+            let blob = blobs
+                .iter()
+                .find(|blob| blob.sha256 == hash)
+                .with_context(|| format!("unexpected Blossom HEAD hash {hash}"))?;
+            if stored.contains(hash) {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    blob.mime,
+                    blob.body.len()
+                )
+            } else {
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned()
+            }
+        } else {
+            ensure!(
+                request_line.starts_with("PUT /upload "),
+                "unexpected Blossom batch request: {request_line}"
+            );
+            let hash = request_header(&request.head, "x-sha-256")
+                .context("Blossom batch upload omitted X-SHA-256")?;
+            let blob = blobs
+                .iter()
+                .find(|blob| blob.sha256 == hash)
+                .with_context(|| format!("unexpected Blossom upload hash {hash}"))?;
+            ensure!(request.body == blob.body, "Blossom upload body changed");
+            stored.insert(hash.to_owned());
+            let descriptor = serde_json::json!({
+                "url": format!("{base_url}/{hash}.blob"),
+                "sha256": hash,
+                "size": blob.body.len(),
+                "type": blob.mime,
+                "uploaded": 1,
+            })
+            .to_string();
+            format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{descriptor}",
+                descriptor.len()
+            )
+        };
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .context("failed to write Blossom batch response")?;
+        stream
+            .shutdown()
+            .await
+            .context("failed to finish Blossom batch response")?;
+        requests.push(request);
+    }
+    ensure!(
+        stored.len() == blobs.len(),
+        "not every Blossom blob was stored"
+    );
     Ok(requests)
 }
 
