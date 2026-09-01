@@ -2665,6 +2665,7 @@ struct ReleaseBlossomProgress {
     heading_style: ProgressStyle,
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
+    finished_style: ProgressStyle,
     activity: Mutex<ReleaseBlossomActivity>,
 }
 
@@ -2692,6 +2693,7 @@ struct ReleaseBlossomActivity {
     confirmed: usize,
     unavailable: usize,
     active: HashMap<(String, String), ActiveBlossomPlacement>,
+    finished_bars: Vec<ProgressBar>,
 }
 
 impl ReleaseBlossomActivity {
@@ -2716,6 +2718,7 @@ impl ReleaseBlossomActivity {
             confirmed,
             unavailable,
             active: HashMap::new(),
+            finished_bars: Vec::new(),
         };
     }
 
@@ -2819,6 +2822,8 @@ impl ReleaseBlossomProgress {
         let phase_style =
             ProgressStyle::with_template("   {spinner} [{elapsed_precise}] {prefix} — {msg}")?
                 .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let finished_style =
+            ProgressStyle::with_template("   [{elapsed_precise}] {prefix} — {msg}")?;
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
             multi,
@@ -2829,6 +2834,7 @@ impl ReleaseBlossomProgress {
             heading_style,
             upload_style,
             phase_style,
+            finished_style,
             activity: Mutex::new(ReleaseBlossomActivity::default()),
         }))
     }
@@ -2908,9 +2914,11 @@ impl ReleaseBlossomProgress {
             placement.bar.set_position(0);
             placement.bar.set_prefix(blossom_server_label(server));
             placement.bar.set_style(self.upload_style.clone());
-            placement
-                .bar
-                .set_message(format!("uploading (attempt {attempt}/{max_attempts})"));
+            placement.bar.set_message(if attempt > 1 {
+                format!("uploading (attempt {attempt}/{max_attempts})")
+            } else {
+                "uploading".to_owned()
+            });
             activity.message()
         };
         self.heading.set_message(message);
@@ -2960,7 +2968,7 @@ impl ReleaseBlossomProgress {
     }
 
     fn finish_operation(&self, filename: &str, server: &Url, status: BlossomServerStatus) -> bool {
-        let (bar, heading_message) = {
+        let heading_message = {
             let mut activity = self
                 .activity
                 .lock()
@@ -2968,9 +2976,11 @@ impl ReleaseBlossomProgress {
             let Some(bar) = activity.finish(filename, server, status) else {
                 return false;
             };
-            (bar, activity.message())
+            bar.set_style(self.finished_style.clone());
+            bar.finish_with_message(blossom_finished_status_label(status));
+            activity.finished_bars.push(bar);
+            activity.message()
         };
-        bar.finish_and_clear();
         self.heading.set_message(heading_message);
         true
     }
@@ -2989,6 +2999,10 @@ impl ReleaseBlossomProgress {
             placement.bar.finish_and_clear();
         }
         activity.active.clear();
+        for bar in &activity.finished_bars {
+            bar.finish_and_clear();
+        }
+        activity.finished_bars.clear();
     }
 
     fn prepare_for_authorization(&self) {
@@ -3019,6 +3033,7 @@ impl ReleaseBlossomProgress {
         server: &Url,
         attempt: usize,
         max_attempts: usize,
+        idle_timeout_secs: u64,
     ) {
         let sent = {
             let activity = self
@@ -3034,9 +3049,34 @@ impl ReleaseBlossomProgress {
             filename,
             server,
             ReleaseBlossomPhase::AwaitingResponse,
-            format!(
-                "{} sent; awaiting server response (attempt {attempt}/{max_attempts})",
-                HumanBytes(sent)
+            blossom_timed_attempt_message(
+                &format!("{} sent; awaiting server response", HumanBytes(sent)),
+                attempt,
+                max_attempts,
+                idle_timeout_secs,
+                "idle limit",
+            ),
+        );
+    }
+
+    fn verification_started(
+        &self,
+        filename: &str,
+        server: &Url,
+        attempt: usize,
+        max_attempts: usize,
+        timeout_secs: u64,
+    ) {
+        self.set_operation_phase(
+            filename,
+            server,
+            ReleaseBlossomPhase::Verifying,
+            blossom_timed_attempt_message(
+                "verifying stored blob",
+                attempt,
+                max_attempts,
+                timeout_secs,
+                "timeout",
             ),
         );
     }
@@ -3056,6 +3096,19 @@ impl ReleaseBlossomProgress {
         self.heading
             .println(format!("  {filename} -> {server}: {status}{detail}"));
     }
+
+    fn placement_finished(
+        &self,
+        filename: &str,
+        server: &Url,
+        status: BlossomServerStatus,
+        message: Option<&str>,
+    ) {
+        let tracked = self.finish_operation(filename, server, status);
+        if !tracked || self.verbose {
+            self.print_placement(filename, server, status, message);
+        }
+    }
 }
 
 fn blossom_server_label(server: &Url) -> String {
@@ -3065,6 +3118,29 @@ fn blossom_server_label(server: &Url) -> String {
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .to_owned()
+}
+
+fn blossom_finished_status_label(status: BlossomServerStatus) -> &'static str {
+    match status {
+        BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent => "done: confirmed",
+        BlossomServerStatus::Failed => "done: failed",
+        BlossomServerStatus::Unknown => "done: unavailable",
+        BlossomServerStatus::NotAttempted => "done: not attempted",
+    }
+}
+
+fn blossom_timed_attempt_message(
+    action: &str,
+    attempt: usize,
+    max_attempts: usize,
+    timeout_secs: u64,
+    timeout_label: &str,
+) -> String {
+    if attempt > 1 {
+        format!("{action} (attempt {attempt}/{max_attempts}; {timeout_secs}s {timeout_label})")
+    } else {
+        format!("{action} ({timeout_secs}s {timeout_label})")
+    }
 }
 
 impl BlossomProgress for ReleaseBlossomProgress {
@@ -3124,19 +3200,28 @@ impl BlossomProgress for ReleaseBlossomProgress {
                 server,
                 attempt,
                 max_attempts,
+                idle_timeout_secs,
                 ..
-            } => self.upload_body_finished(filename, server, *attempt, *max_attempts),
+            } => self.upload_body_finished(
+                filename,
+                server,
+                *attempt,
+                *max_attempts,
+                *idle_timeout_secs,
+            ),
             BlossomProgressEvent::VerificationStarted {
                 filename,
                 server,
                 attempt,
                 max_attempts,
+                timeout_secs,
                 ..
-            } => self.set_operation_phase(
+            } => self.verification_started(
                 filename,
                 server,
-                ReleaseBlossomPhase::Verifying,
-                format!("verifying stored blob (attempt {attempt}/{max_attempts})"),
+                *attempt,
+                *max_attempts,
+                *timeout_secs,
             ),
             BlossomProgressEvent::RetryScheduled {
                 filename,
@@ -3155,12 +3240,7 @@ impl BlossomProgress for ReleaseBlossomProgress {
                 server,
                 status,
                 message,
-            } => {
-                let tracked = self.finish_operation(filename, server, *status);
-                if !tracked || self.verbose {
-                    self.print_placement(filename, server, *status, message.as_deref());
-                }
-            }
+            } => self.placement_finished(filename, server, *status, message.as_deref()),
             BlossomProgressEvent::UploadBatchFinished { .. } => self.finish_upload_group(),
         }
     }
@@ -4605,6 +4685,16 @@ assets:
             total_bytes: 10,
             additional_bytes: 0,
         });
+        let bar = progress
+            .activity
+            .lock()
+            .unwrap()
+            .active
+            .get(&("release.tar.gz".to_owned(), server.to_string()))
+            .unwrap()
+            .bar
+            .clone();
+        assert_eq!(bar.message(), "uploading");
         progress.update(&BlossomProgressEvent::UploadedBytes {
             batch: 1,
             filename: "release.tar.gz".to_owned(),
@@ -4618,21 +4708,14 @@ assets:
             server: server.clone(),
             attempt: 1,
             max_attempts: 3,
+            idle_timeout_secs: 30,
         });
-
-        let bar = progress
-            .activity
-            .lock()
-            .unwrap()
-            .active
-            .get(&("release.tar.gz".to_owned(), server.to_string()))
-            .unwrap()
-            .bar
-            .clone();
         assert!(progress.heading.is_hidden());
         assert_eq!(bar.length(), Some(10));
         assert_eq!(bar.position(), 10);
         assert!(bar.message().contains("sent; awaiting server response"));
+        assert!(bar.message().contains("30s idle limit"));
+        assert!(!bar.message().contains("attempt 1/3"));
         assert!(progress.heading.message().contains("1 awaiting response"));
 
         progress.update(&BlossomProgressEvent::RetryScheduled {
@@ -4752,10 +4835,34 @@ assets:
             server: first_server.clone(),
             attempt: 1,
             max_attempts: 3,
+            timeout_secs: 15,
         });
         let mixed = progress.heading.message();
         assert!(mixed.contains("1 uploading"));
         assert!(mixed.contains("1 verifying storage"));
+
+        let verifying_bar = progress
+            .activity
+            .lock()
+            .unwrap()
+            .active
+            .get(&("ngit-grasp.tar.gz".to_owned(), first_server.to_string()))
+            .unwrap()
+            .bar
+            .clone();
+        assert!(verifying_bar.message().contains("15s timeout"));
+        assert!(!verifying_bar.message().contains("attempt 1/3"));
+
+        progress.update(&BlossomProgressEvent::VerificationStarted {
+            batch: 1,
+            batches: 1,
+            filename: "ngit-grasp.tar.gz".to_owned(),
+            server: first_server.clone(),
+            attempt: 2,
+            max_attempts: 3,
+            timeout_secs: 15,
+        });
+        assert!(verifying_bar.message().contains("attempt 2/3; 15s timeout"));
 
         progress.update(&BlossomProgressEvent::PlacementFinished {
             filename: "ngit-grasp.tar.gz".to_owned(),
@@ -4766,6 +4873,16 @@ assets:
         let placed = progress.heading.message();
         assert!(placed.contains("1/3 confirmed"));
         assert!(placed.contains("1 uploading"));
+        let activity = progress.activity.lock().unwrap();
+        assert_eq!(activity.finished_bars.len(), 1);
+        assert_eq!(activity.finished_bars[0].message(), "done: confirmed");
+        drop(activity);
+
+        progress.update(&BlossomProgressEvent::UploadBatchFinished {
+            batch: 1,
+            batches: 1,
+        });
+        assert!(progress.activity.lock().unwrap().finished_bars.is_empty());
         Ok(())
     }
 }

@@ -149,6 +149,7 @@ pub enum BlossomProgressEvent {
         server: Url,
         attempt: usize,
         max_attempts: usize,
+        idle_timeout_secs: u64,
     },
     VerificationStarted {
         batch: usize,
@@ -157,6 +158,7 @@ pub enum BlossomProgressEvent {
         server: Url,
         attempt: usize,
         max_attempts: usize,
+        timeout_secs: u64,
     },
     RetryScheduled {
         batch: usize,
@@ -527,6 +529,7 @@ async fn upload_snapshot_with_authorization_inner(
                     server: progress.server.clone(),
                     attempt: progress.attempt,
                     max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                    idle_timeout_secs: IDLE_TIMEOUT.as_secs(),
                 });
         }
     }
@@ -553,6 +556,7 @@ async fn upload_snapshot_with_authorization_inner(
                         server: progress.server.clone(),
                         attempt: progress.attempt,
                         max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                        idle_timeout_secs: IDLE_TIMEOUT.as_secs(),
                     });
             }
         }
@@ -705,15 +709,11 @@ async fn upload_snapshot_with_confirmation(
         .await
         {
             Ok(upload) => {
-                progress.update(&BlossomProgressEvent::VerificationStarted {
-                    batch,
-                    batches,
-                    filename: snapshot.filename.clone(),
-                    server: server.clone(),
-                    attempt: attempt + 1,
-                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
-                });
-                match snapshot_is_present_with_retry(client, server, snapshot).await {
+                match snapshot_is_present_with_retry_and_progress(
+                    client, server, snapshot, &progress, batch, batches,
+                )
+                .await
+                {
                     Ok(true) => return Ok(BatchStoreConfirmation::Response(upload)),
                     Ok(false) => {
                         last_error = Some(BlobRequestError::unknown(
@@ -739,15 +739,10 @@ async fn upload_snapshot_with_confirmation(
             }
             Err(error) => {
                 if error.possible_orphan {
-                    progress.update(&BlossomProgressEvent::VerificationStarted {
-                        batch,
-                        batches,
-                        filename: snapshot.filename.clone(),
-                        server: server.clone(),
-                        attempt: attempt + 1,
-                        max_attempts: PLACEMENT_MAX_ATTEMPTS,
-                    });
-                    if let Ok(true) = snapshot_is_present_with_retry(client, server, snapshot).await
+                    if let Ok(true) = snapshot_is_present_with_retry_and_progress(
+                        client, server, snapshot, &progress, batch, batches,
+                    )
+                    .await
                     {
                         return Ok(BatchStoreConfirmation::Presence);
                     }
@@ -1311,8 +1306,40 @@ async fn snapshot_is_present_with_retry(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
+    snapshot_is_present_with_retry_notifying(client, server, snapshot, |_| {}).await
+}
+
+async fn snapshot_is_present_with_retry_and_progress(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    progress: &Arc<dyn BlossomProgress>,
+    batch: usize,
+    batches: usize,
+) -> std::result::Result<bool, BlobRequestError> {
+    snapshot_is_present_with_retry_notifying(client, server, snapshot, |attempt| {
+        progress.update(&BlossomProgressEvent::VerificationStarted {
+            batch,
+            batches,
+            filename: snapshot.filename.clone(),
+            server: server.clone(),
+            attempt,
+            max_attempts: PLACEMENT_MAX_ATTEMPTS,
+            timeout_secs: PRESENCE_REQUEST_TIMEOUT.as_secs(),
+        });
+    })
+    .await
+}
+
+async fn snapshot_is_present_with_retry_notifying(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    mut notify_attempt: impl FnMut(usize),
+) -> std::result::Result<bool, BlobRequestError> {
     let mut last_error = None;
     for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
+        notify_attempt(attempt + 1);
         match snapshot_is_present(client, server, snapshot).await {
             Ok(present) => return Ok(present),
             Err(error) if error.retryable => last_error = Some(error),
@@ -3067,6 +3094,17 @@ mod tests {
             })
             .count();
         assert_eq!(completed_bodies, 2);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                BlossomProgressEvent::VerificationStarted {
+                    attempt: 1,
+                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                    timeout_secs: 15,
+                    ..
+                }
+            )
+        }));
         assert!(matches!(
             events.last(),
             Some(BlossomProgressEvent::UploadBatchFinished {
