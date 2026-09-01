@@ -304,6 +304,39 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         "cloned refs/heads/main ({cloned_oid}) does not match publisher's ({main_oid})",
     );
 
+    // Git sends `option verbosity 0` to remote helpers for `clone -q`.
+    // Exercise a second real clone because checking the protocol response
+    // alone would miss setup output emitted before ngit reads the option.
+    let quiet_clone_dir_name = "quiet-cloned";
+    let quiet_clone_target = cloner.dir().join(quiet_clone_dir_name);
+    let quiet_clone_output = cloner
+        .git(["clone", "-q", &clone_url, quiet_clone_dir_name])
+        .output()
+        .await
+        .context("failed to spawn quiet git clone")?;
+    assert!(
+        quiet_clone_output.status.success(),
+        "git clone -q exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        quiet_clone_output.status,
+        String::from_utf8_lossy(&quiet_clone_output.stdout),
+        String::from_utf8_lossy(&quiet_clone_output.stderr),
+    );
+    assert!(
+        quiet_clone_output.stderr.is_empty(),
+        "git clone -q produced stderr output: {}",
+        String::from_utf8_lossy(&quiet_clone_output.stderr),
+    );
+    assert_eq!(
+        std::fs::read_to_string(quiet_clone_target.join("README.md"))?,
+        "hello, grasp!\n",
+        "quiet clone did not check out the publisher's file",
+    );
+    assert_eq!(
+        read_local_ref_oid(&quiet_clone_target, "refs/heads/main")?,
+        main_oid,
+        "quiet clone did not reproduce the publisher's main ref",
+    );
+
     Ok(())
 }
 

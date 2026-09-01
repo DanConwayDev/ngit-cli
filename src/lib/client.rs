@@ -74,8 +74,39 @@ use crate::{
     version_check,
 };
 
+const REMOTE_HELPER_QUIET_ENV: &str = "NGIT_REMOTE_HELPER_QUIET";
+const REMOTE_HELPER_VERBOSE_ENV: &str = "NGIT_REMOTE_HELPER_VERBOSE";
+
+/// Apply Git's remote-helper `verbosity` option to this process.
+///
+/// Git uses `0` for quiet, `1` for normal output, and larger values for
+/// increasingly verbose output. The helper is a dedicated child process, so
+/// process-local environment flags let the library's existing progress paths
+/// observe the negotiated mode without changing ordinary ngit commands.
+pub fn set_remote_helper_verbosity(verbosity: u8) {
+    if verbosity == 0 {
+        std::env::set_var(REMOTE_HELPER_QUIET_ENV, "1");
+    } else {
+        std::env::remove_var(REMOTE_HELPER_QUIET_ENV);
+    }
+
+    if verbosity > 1 {
+        std::env::set_var(REMOTE_HELPER_VERBOSE_ENV, "1");
+    } else {
+        std::env::remove_var(REMOTE_HELPER_VERBOSE_ENV);
+    }
+}
+
+#[must_use]
+pub fn is_quiet() -> bool {
+    std::env::var(REMOTE_HELPER_QUIET_ENV).is_ok()
+}
+
+#[must_use]
 pub fn is_verbose() -> bool {
-    std::env::var("NGIT_VERBOSE").is_ok()
+    !is_quiet()
+        && (std::env::var("NGIT_VERBOSE").is_ok()
+            || std::env::var(REMOTE_HELPER_VERBOSE_ENV).is_ok())
 }
 
 /// Default SOCKS5 proxy used to reach `.onion` relays and clone URLs.
@@ -239,7 +270,7 @@ impl RelayProgressHandle {
 impl RelayProgressReporter {
     fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
         let heading_message = heading_message.into();
-        let mode = if silent || std::env::var("NGITTEST").is_ok() {
+        let mode = if silent || is_quiet() || std::env::var("NGITTEST").is_ok() {
             RelayProgressMode::Hidden
         } else if is_verbose() || !animate {
             RelayProgressMode::Detailed

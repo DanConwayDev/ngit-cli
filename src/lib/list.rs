@@ -16,7 +16,7 @@ use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
 use crate::{
-    client::is_verbose,
+    client::{is_quiet, is_verbose},
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -172,8 +172,9 @@ pub async fn list_from_remotes(
     }
 
     let verbose = is_verbose();
+    let quiet = is_quiet();
     let is_test = std::env::var("NGITTEST").is_ok();
-    let spinner_state = if !verbose {
+    let spinner_state = if !verbose && !quiet {
         Some(Arc::new(Mutex::new(GitSpinnerState::new())))
     } else {
         None
@@ -442,7 +443,9 @@ pub async fn list_from_remotes(
             }
             Err((url, error)) => {
                 has_errors = true;
-                let _ = term.write_line(&format!("failed to list from {}: {}", url, error));
+                if !quiet {
+                    let _ = term.write_line(&format!("failed to list from {}: {}", url, error));
+                }
             }
         }
     }

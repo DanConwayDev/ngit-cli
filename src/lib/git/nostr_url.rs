@@ -8,7 +8,7 @@ use nostr::prelude::{
 };
 
 use super::{Repo, get_git_config_item, save_git_config_item};
-use crate::client::nip05_query;
+use crate::client::{is_quiet, nip05_query};
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -218,11 +218,15 @@ impl NostrUrlDecoded {
                             let s = npub_or_nip05.split('@').collect::<Vec<&str>>();
                             if s.len() == 2 { s[1] } else { s[0] }
                         };
-                        term.write_line(&format!("fetching pubic key info from {domain}..."))?;
+                        if !is_quiet() {
+                            term.write_line(&format!("fetching pubic key info from {domain}..."))?;
+                        }
                         let res = nip05_query(npub_or_nip05).await.context(format!(
                             "failed to get nostr public key for {npub_or_nip05} from {domain}"
                         ))?;
-                        term.clear_last_lines(1)?;
+                        if !is_quiet() {
+                            term.clear_last_lines(1)?;
+                        }
                         nip05 = Some(npub_or_nip05.to_string());
                         let _ = save_nip05_to_git_config_cache(
                             npub_or_nip05,
