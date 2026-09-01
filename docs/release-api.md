@@ -772,8 +772,10 @@ back when that latest event is invalid. It fails before signing when no source
 yields a server. Every selected server is required in v1: any unconfirmed
 placement aborts NIP-82 publication rather than silently reducing the
 requested durability. Discovery requires at least one completed author-relay
-route and reports other failed routes as `relay_discovery_incomplete`; an
-explicit override is the deterministic recovery when stale discovery is
+route and reports other failed routes as `relay_discovery_incomplete`. Human
+warnings include the failed/queried count and failed relay URLs; JSON warning
+details retain `relays` and also include numeric `failed` and `queried` fields.
+An explicit override is the deterministic recovery when stale discovery is
 unacceptable.
 
 Before publishing, ngit MUST:
