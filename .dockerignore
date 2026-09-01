@@ -8,6 +8,5 @@ Dockerfile
 *.nix
 .envrc
 .env
-skills/
 docs/architecture/
 AGENTS.md
