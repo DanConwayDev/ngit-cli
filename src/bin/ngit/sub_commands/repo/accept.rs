@@ -150,8 +150,14 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     let mut repo_coordinate = resolved_repo_coordinate.coordinate;
 
     // Fetch latest data from relays
-    let private_discovery =
-        prepare_account_for_repo_fetch(&mut client, &mut repo_coordinate, &signer, &user_ref).await;
+    let private_discovery = prepare_account_for_repo_fetch(
+        &git_repo,
+        &mut client,
+        &repo_coordinate,
+        &signer,
+        &user_ref,
+    )
+    .await;
     ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,

@@ -3220,6 +3220,20 @@ pub fn private_relay_probe_decision(
     }
 }
 
+/// Whether resolving a repository still requires the selected account's
+/// encrypted kind-10318 relay list.
+///
+/// A cached announcement already supplies the repository relays and a saved
+/// public classification rules out private discovery. Direct NIP-11 private
+/// relay hints likewise make account-wide discovery unnecessary.
+pub fn needs_private_relay_discovery(
+    configured_privacy: Option<bool>,
+    has_cached_announcement: bool,
+    has_nip11_private_relays: bool,
+) -> bool {
+    !has_cached_announcement && configured_privacy != Some(false) && !has_nip11_private_relays
+}
+
 pub fn get_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     proposal_ids: &HashSet<EventId>,

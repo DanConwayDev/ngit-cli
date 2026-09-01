@@ -170,7 +170,7 @@ pub(crate) async fn sync_with_client(
     let decoded_nostr_url = selected_remote.decoded_url;
     let mut repo_coordinate = resolved_repo.coordinate;
     let private_discovery = if let Some((signer, user_ref)) = active_login.as_ref() {
-        prepare_account_for_repo_fetch(client, &mut repo_coordinate, signer, user_ref).await
+        prepare_account_for_repo_fetch(git_repo, client, &repo_coordinate, signer, user_ref).await
     } else {
         ngit::login::user::PrivateGitRelayDiscovery::Absent
     };

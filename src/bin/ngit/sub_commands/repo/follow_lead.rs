@@ -183,9 +183,14 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         .context("no nostr repository found")?;
     print_selected_repo(&resolved);
     let mut selected_coordinate = resolved.coordinate.clone();
-    let private_discovery =
-        prepare_account_for_repo_fetch(&mut client, &mut selected_coordinate, &signer, &user_ref)
-            .await;
+    let private_discovery = prepare_account_for_repo_fetch(
+        &git_repo,
+        &mut client,
+        &selected_coordinate,
+        &signer,
+        &user_ref,
+    )
+    .await;
     ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,

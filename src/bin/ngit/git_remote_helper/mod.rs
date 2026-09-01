@@ -17,8 +17,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
-    finish_fetch_progress, get_repo_ref_from_cache, is_verbose, private_relay_probe_decision,
-    save_repository_privacy_to_git_config, warn_if_invited_as_maintainer,
+    finish_fetch_progress, get_repo_ref_from_cache, is_verbose, needs_private_relay_discovery,
+    private_relay_probe_decision, save_repository_privacy_to_git_config,
+    warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
 use ngit::{
@@ -86,22 +87,6 @@ fn command_config_value_from(command: &mut Command, key: &str) -> Result<Option<
             .context("Git command-scoped config is not valid UTF-8")?
             .to_string(),
     ))
-}
-
-/// Whether this repository operation still needs account-private relay
-/// discovery through kind 10318.
-///
-/// A verified repository announcement records its privacy classification in
-/// `nostr.private` and its repository relays in the local cache. An
-/// unclassified private-service URL can instead use its NIP-11 result. Only a
-/// still-unclassified repository without that direct private hint needs the
-/// account's encrypted relay list to search for a private announcement.
-fn needs_private_relay_discovery(
-    configured_privacy: Option<bool>,
-    has_cached_announcement: bool,
-    has_nip11_private_relays: bool,
-) -> bool {
-    !has_cached_announcement && configured_privacy != Some(false) && !has_nip11_private_relays
 }
 
 #[derive(Default, Clone)]

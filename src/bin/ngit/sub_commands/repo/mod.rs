@@ -356,14 +356,20 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     };
     let selected_remote =
         get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
-    let mut repo_coordinate = resolved_repo.coordinate;
+    let repo_coordinate = resolved_repo.coordinate;
     // Fetch latest data from relays — suppress the summary line.
     // fetching_quietly writes a blank line to stderr after errors so there
     // is clear separation before the repo info below.
     if !offline {
         let private_discovery = if let Some((signer, user_ref, _)) = active_login.as_ref() {
-            prepare_account_for_repo_fetch(&mut client, &mut repo_coordinate, signer, user_ref)
-                .await
+            prepare_account_for_repo_fetch(
+                &git_repo,
+                &mut client,
+                &repo_coordinate,
+                signer,
+                user_ref,
+            )
+            .await
         } else {
             ngit::login::user::PrivateGitRelayDiscovery::Absent
         };

@@ -677,7 +677,8 @@ pub async fn launch(
     print_selected_repo(&resolved);
     let mut coordinate = resolved.coordinate;
     let private_discovery =
-        prepare_account_for_repo_fetch(&mut client, &mut coordinate, &signer, &user_ref).await;
+        prepare_account_for_repo_fetch(&git_repo, &mut client, &coordinate, &signer, &user_ref)
+            .await;
     ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,
