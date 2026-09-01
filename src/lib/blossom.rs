@@ -63,16 +63,24 @@ enum AuthorizationEncodingPreference {
     Legacy,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementRequirement {
+    EveryServer,
+    OneServerPerBlob,
+}
+
 #[derive(Clone, Copy)]
 struct BatchAuthorizationOptions {
     batch_size: usize,
     encoding_preference: AuthorizationEncodingPreference,
+    placement_requirement: PlacementRequirement,
 }
 
 impl BatchAuthorizationOptions {
     const DEFAULT: Self = Self {
         batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
         encoding_preference: AuthorizationEncodingPreference::Bud11,
+        placement_requirement: PlacementRequirement::EveryServer,
     };
 
     // Release assets must interoperate with deployed servers which accept only
@@ -81,6 +89,7 @@ impl BatchAuthorizationOptions {
     const LEGACY_PER_BLOB: Self = Self {
         batch_size: 1,
         encoding_preference: AuthorizationEncodingPreference::Legacy,
+        placement_requirement: PlacementRequirement::OneServerPerBlob,
     };
 }
 
@@ -271,13 +280,14 @@ pub struct PossibleOrphanBlob {
     pub url: Option<Url>,
 }
 
-/// Successful result of confirming one blob on every selected server.
+/// Successful result of confirming one blob on one or more selected servers.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MultiServerUpload {
-    /// A descriptor for the first server, whose URL is suitable for a NIP-82
-    /// `url` tag. When a strict HEAD proves the blob was already present, ngit
-    /// synthesizes this descriptor from the verified metadata and uses
-    /// `uploaded: 0` because HEAD does not expose the original upload time.
+    /// A descriptor for the first confirmed server, whose URL is suitable for
+    /// a NIP-82 `url` tag. When a strict HEAD proves the blob was already
+    /// present, ngit synthesizes this descriptor from the verified metadata
+    /// and uses `uploaded: 0` because HEAD does not expose the original upload
+    /// time.
     pub primary: BlobDescriptor,
     pub servers: Vec<BlossomServerOutcome>,
 }
@@ -290,14 +300,14 @@ pub struct MultiServerUploadError {
     pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
-/// Per-blob output from a batch which places every blob on every server.
+/// Per-blob output from a batch which attempts every selected server.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BatchBlobUploadOutcome {
     pub sha256: String,
     pub servers: Vec<BlossomServerOutcome>,
 }
 
-/// Successful all-blob, all-server upload result.
+/// Successful result satisfying the caller's placement requirement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BatchUploadResult {
     pub blobs: Vec<BatchBlobUploadOutcome>,
@@ -729,8 +739,9 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
     .await
 }
 
-/// Batch placement for software releases which retains compatibility with
-/// deployed Blossom servers that require padded Base64 and exactly one `x`
+/// Batch placement for software releases which attempts every selected server
+/// while requiring one confirmed copy of every blob. It retains compatibility
+/// with deployed servers that require padded Base64 and exactly one `x`
 /// authorization tag.
 pub async fn upload_release_snapshot_batch_to_servers_with_progress(
     servers: &[Url],
@@ -867,7 +878,9 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
     progress.update(&BlossomProgressEvent::PresenceChecksFinished {
         missing: missing.len(),
     });
-    if presence_failed {
+    if presence_failed
+        && authorization_options.placement_requirement == PlacementRequirement::EveryServer
+    {
         return Err(BatchUploadError {
             message:
                 "one or more Blossom presence checks failed; no upload authorization was signed"
@@ -877,7 +890,11 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
         });
     }
     if missing.is_empty() {
-        return Ok(BatchUploadResult { blobs });
+        return finish_batch_for_requirement(
+            blobs,
+            authorization_options.placement_requirement,
+            Vec::new(),
+        );
     }
 
     let missing_blob_indices = missing
@@ -1033,7 +1050,9 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             batch,
             batches: authorization_batches,
         });
-        if chunk_failed {
+        if chunk_failed
+            && authorization_options.placement_requirement == PlacementRequirement::EveryServer
+        {
             upload_failed = true;
             break;
         }
@@ -1049,7 +1068,58 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
         });
     }
 
+    finish_batch_for_requirement(
+        blobs,
+        authorization_options.placement_requirement,
+        uncertain,
+    )
+}
+
+fn finish_batch_for_requirement(
+    blobs: Vec<BatchBlobUploadOutcome>,
+    requirement: PlacementRequirement,
+    uncertain: Vec<PossibleOrphanBlob>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    let unavailable = blobs
+        .iter()
+        .filter(|blob| !blob.servers.iter().any(server_outcome_is_confirmed))
+        .count();
+    if unavailable != 0 {
+        let mut possible_orphan_blobs = stored_batch_blobs(&blobs);
+        possible_orphan_blobs.extend(uncertain);
+        return Err(BatchUploadError {
+            message: format!(
+                "{unavailable}/{} Blossom blobs were not confirmed on any selected server; no publication event was signed",
+                blobs.len()
+            ),
+            blobs,
+            possible_orphan_blobs,
+        });
+    }
+    if requirement == PlacementRequirement::EveryServer
+        && blobs.iter().any(|blob| {
+            blob.servers
+                .iter()
+                .any(|outcome| !server_outcome_is_confirmed(outcome))
+        })
+    {
+        let mut possible_orphan_blobs = stored_batch_blobs(&blobs);
+        possible_orphan_blobs.extend(uncertain);
+        return Err(BatchUploadError {
+            message: "one or more Blossom placements failed; no publication event was signed"
+                .to_owned(),
+            blobs,
+            possible_orphan_blobs,
+        });
+    }
     Ok(BatchUploadResult { blobs })
+}
+
+fn server_outcome_is_confirmed(outcome: &BlossomServerOutcome) -> bool {
+    matches!(
+        outcome.status,
+        BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+    )
 }
 
 fn empty_batch_error(message: &str) -> BatchUploadError {
@@ -1288,24 +1358,27 @@ pub fn multi_server_upload_from_batch_outcome(
     snapshot: &FileSnapshot,
     blob: &BatchBlobUploadOutcome,
 ) -> std::result::Result<MultiServerUpload, MultiServerUploadError> {
-    let Some(first) = blob.servers.first() else {
+    let Some(primary_outcome) = blob
+        .servers
+        .iter()
+        .find(|outcome| server_outcome_is_confirmed(outcome))
+    else {
         return Err(MultiServerUploadError {
-            message: "Blossom placement returned no server outcome".to_owned(),
+            message: "Blossom placement returned no confirmed server outcome".to_owned(),
             servers: blob.servers.clone(),
             possible_orphan_blobs: Vec::new(),
         });
     };
-    let primary = if let Some(descriptor) = first.descriptor.clone() {
+    let primary = if let Some(descriptor) = primary_outcome.descriptor.clone() {
         descriptor
     } else {
-        let url =
-            blossom_endpoint_url(first.server.as_str(), &snapshot.sha256).map_err(|error| {
-                MultiServerUploadError {
-                    message: format!("failed to construct verified Blossom blob URL: {error:#}"),
-                    servers: blob.servers.clone(),
-                    possible_orphan_blobs: stored_batch_blobs(std::slice::from_ref(blob)),
-                }
-            })?;
+        let url = blossom_endpoint_url(primary_outcome.server.as_str(), &snapshot.sha256).map_err(
+            |error| MultiServerUploadError {
+                message: format!("failed to construct verified Blossom blob URL: {error:#}"),
+                servers: blob.servers.clone(),
+                possible_orphan_blobs: stored_batch_blobs(std::slice::from_ref(blob)),
+            },
+        )?;
         BlobDescriptor {
             url,
             sha256: snapshot.sha256.clone(),
@@ -2579,6 +2652,86 @@ mod tests {
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_batch_succeeds_when_each_blob_has_one_confirmed_server() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"resilient release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (confirmed_url, confirmed_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let servers = [Url::parse(&failed_url)?, Url::parse(&confirmed_url)?];
+
+        let result = upload_release_snapshot_batch_to_servers_with_progress(
+            &servers,
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            2,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await?;
+        completed_request(failed_server).await?;
+        tokio::time::timeout(SERVER_TIMEOUT, confirmed_server)
+            .await
+            .context("timed out waiting for confirmed release placement")???;
+
+        assert_eq!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [BlossomServerStatus::Failed, BlossomServerStatus::Stored]
+        );
+        let upload = multi_server_upload_from_batch_outcome(&snapshot, &result.blobs[0])?;
+        assert!(
+            upload.primary.url.as_str().starts_with(&confirmed_url),
+            "the first confirmed server must supply the published URL"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_batch_fails_when_a_blob_has_no_confirmed_server() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"unavailable release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+
+        let error = upload_release_snapshot_batch_to_servers_with_progress(
+            &[Url::parse(&failed_url)?],
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            1,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await
+        .unwrap_err();
+        completed_request(failed_server).await?;
+
+        assert!(
+            error
+                .message
+                .contains("1/1 Blossom blobs were not confirmed on any selected server")
+        );
+        assert!(error.possible_orphan_blobs.is_empty());
         Ok(())
     }
 

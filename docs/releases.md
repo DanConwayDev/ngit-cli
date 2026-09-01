@@ -17,12 +17,14 @@ ngit release publish "$VERSION" \
   --json
 ```
 
-The file is snapshotted once, confirmed on every selected Blossom server, and
-represented by one asset event with two `f` platform tags. Ngit skips exact
-copies and directly uploads missing ones with bounded retries and post-upload
-verification before it signs the event. On a repository with no existing
-NIP-82 events, the same command creates and publishes the linked application,
-asset, and release in dependency order.
+The file is snapshotted once and placement is attempted on every selected
+Blossom server. Ngit skips exact copies and directly uploads missing ones with
+bounded retries and post-upload verification. It proceeds once the blob is
+confirmed on at least one server, warning when the requested replication is
+incomplete, and represents the bytes with one asset event carrying two `f`
+platform tags. On a repository with no existing NIP-82 events, the same command
+creates and publishes the linked application, asset, and release in dependency
+order.
 
 For an existing application, a `main` release must cover every application
 platform. If the release intentionally introduces a new main-channel platform,
@@ -154,9 +156,10 @@ For `icon` and `images`, an HTTP(S) URL is retained exactly as supplied and is
 never downloaded or re-uploaded. Any other value is a repository-relative
 local file: it must be tracked by Git, resolve inside the repository, have an
 image MIME type, and be no larger than 20 MiB. Local images are snapshotted and
-confirmed on every selected Blossom server before any NIP-82 event is signed;
-the application event uses the first server's returned URL. Thus local media is
-Blossom-first while existing CDN or Blossom URLs remain usable as references.
+attempted on every selected Blossom server before any NIP-82 event is signed;
+each image must be confirmed on at least one server. The application event uses
+the first confirmed server's URL. Thus local media is Blossom-first while
+existing CDN or Blossom URLs remain usable as references.
 
 `notes` and `release_notes` are mutually exclusive. For `release_notes`, ngit
 selects the level-two section matching the exact positional VERSION, allowing
@@ -172,8 +175,9 @@ CLI `--notes` and `--notes-file` take precedence over either manifest field.
 
 The optional `publication` block supports:
 
-- `blossom_servers`: ordered required placements; the first supplies the asset
-  event URL and every missing copy is uploaded directly;
+- `blossom_servers`: ordered replication targets; every missing copy is
+  attempted directly and the first confirmed server supplies the asset event
+  URL;
 - `relays`: additional discovery and publication relays;
 - `zapstore_relay`: add `wss://relay.zapstore.dev` as a publication-only
   target;

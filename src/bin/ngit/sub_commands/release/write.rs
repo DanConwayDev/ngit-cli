@@ -388,6 +388,10 @@ pub(super) async fn release_publish(
         }
         None => BlossomPublication::empty(),
     };
+    if let Some(warning) = blossom.incomplete_replication_warning() {
+        context.warnings.push(warning);
+        context.emit_human_warnings_before_signing(args.json);
+    }
     ensure_release_state_unchanged(
         &mut context,
         &application_target,
@@ -695,6 +699,10 @@ pub(super) async fn asset_add(
         }
         _ => BlossomPublication::empty(),
     };
+    if let Some(warning) = blossom.incomplete_replication_warning() {
+        context.warnings.push(warning);
+        context.emit_human_warnings_before_signing(args.json);
+    }
     ensure_release_state_unchanged(
         &mut context,
         &application_target,
@@ -2925,6 +2933,46 @@ impl BlossomPublication {
     fn has_uploads(&self) -> bool {
         !self.outcomes.is_empty()
     }
+
+    fn incomplete_replication_warning(&self) -> Option<WarningJson> {
+        let placements = self.outcomes.iter().flatten().collect::<Vec<_>>();
+        let confirmed = placements
+            .iter()
+            .filter(|outcome| {
+                matches!(
+                    outcome.status,
+                    BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+                )
+            })
+            .count();
+        if confirmed == placements.len() {
+            return None;
+        }
+        let incomplete_servers = placements
+            .iter()
+            .filter(|outcome| {
+                !matches!(
+                    outcome.status,
+                    BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+                )
+            })
+            .map(|outcome| outcome.server.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let message = format!(
+            "Blossom replication incomplete: {confirmed}/{} placements confirmed; unconfirmed servers: {}; publication will proceed because every blob has at least one confirmed copy",
+            placements.len(),
+            incomplete_servers.join(", ")
+        );
+        Some(
+            WarningJson::new("blossom_replication_incomplete", message).with_details(json!({
+                "confirmed": confirmed,
+                "placements": placements.len(),
+                "servers": incomplete_servers,
+            })),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4121,6 +4169,44 @@ assets:
         assert!(message.contains(
             "upload https://blossom.example/: failed (HTTP 413 Payload Too Large: quota exceeded)"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_blossom_replication_is_an_actionable_warning() -> Result<()> {
+        let available = Url::parse("https://available.example/")?;
+        let unavailable = Url::parse("https://unavailable.example/")?;
+        let publication = BlossomPublication {
+            json: json!({}),
+            outcomes: vec![vec![
+                BlossomServerOutcome {
+                    server: available,
+                    operation: BlossomServerOperation::Upload,
+                    status: BlossomServerStatus::Stored,
+                    descriptor: None,
+                    message: None,
+                },
+                BlossomServerOutcome {
+                    server: unavailable.clone(),
+                    operation: BlossomServerOperation::Upload,
+                    status: BlossomServerStatus::Unknown,
+                    descriptor: None,
+                    message: Some("connection timed out".to_owned()),
+                },
+            ]],
+            possible_orphan_blobs: Vec::new(),
+        };
+
+        let warning = publication
+            .incomplete_replication_warning()
+            .context("partial placement should produce a warning")?;
+        assert_eq!(warning.code, "blossom_replication_incomplete");
+        assert!(warning.message.contains("1/2 placements confirmed"));
+        assert!(warning.message.contains(unavailable.as_str()));
+        assert!(warning.message.contains("publication will proceed"));
+        assert_eq!(warning.details["confirmed"], 1);
+        assert_eq!(warning.details["placements"], 2);
+        assert_eq!(warning.details["servers"][0], unavailable.as_str());
         Ok(())
     }
 

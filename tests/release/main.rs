@@ -1098,8 +1098,8 @@ async fn url_apks_cannot_claim_to_be_platform_agnostic() -> Result<()> {
 }
 
 #[tokio::test]
-async fn presence_failure_stops_before_upload_and_release_signing() -> Result<()> {
-    const ASSET_BYTES: &[u8] = b"unplaced Blossom release archive\n";
+async fn presence_failure_on_one_server_publishes_from_a_confirmed_replica() -> Result<()> {
+    const ASSET_BYTES: &[u8] = b"resilient Blossom release archive\n";
 
     let (harness, publisher, published) = setup(0).await?;
     create_application(&publisher).await?;
@@ -1116,7 +1116,7 @@ async fn presence_failure_stops_before_upload_and_release_signing() -> Result<()
     .await?;
     let mirror =
         BlossomHttpServer::error("500 Internal Server Error", "presence check failed").await?;
-    let failure = run_json_expecting_failure(
+    let output = run_json(
         &publisher,
         &[
             "release",
@@ -1131,32 +1131,95 @@ async fn presence_failure_stops_before_upload_and_release_signing() -> Result<()
             "--blossom-server",
             mirror.base_url(),
             "--notes",
-            "This release must not be published",
+            "This release has one confirmed replica",
             "--json",
         ],
     )
     .await?;
     let primary_root = primary.base_url_with_slash();
     let mirror_root = mirror.base_url_with_slash();
+    let primary_blob_url = primary
+        .blob_url()
+        .context("primary Blossom fixture omitted its blob URL")?
+        .to_owned();
+    primary.finish().await?;
     mirror.finish().await?;
+
+    let blossom = &output["result"]["blossom"]["uploads"][0];
+    ensure!(blossom["primary_url"] == primary_blob_url);
+    ensure!(blossom["servers"][0]["server"] == primary_root);
+    ensure!(blossom["servers"][0]["status"] == "stored");
+    ensure!(blossom["servers"][1]["server"] == mirror_root);
+    ensure!(blossom["servers"][1]["status"] == "failed");
+    let warning = output["warnings"]
+        .as_array()
+        .context("release warnings were not an array")?
+        .iter()
+        .find(|warning| warning["code"] == "blossom_replication_incomplete")
+        .context("release omitted the incomplete Blossom replication warning")?;
+    ensure!(warning["details"]["confirmed"] == 1);
+    ensure!(warning["details"]["placements"] == 2);
+    ensure!(warning["details"]["servers"][0] == mirror_root);
+
+    let release_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kinds([SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND])
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(
+        release_events.len() == 2,
+        "asset and release were not published"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_fails_when_no_blossom_server_confirms_the_blob() -> Result<()> {
+    const ASSET_BYTES: &[u8] = b"unavailable Blossom release archive\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    fs::write(publisher.dir().join("unavailable.zip"), ASSET_BYTES)
+        .context("failed to write unavailable release asset")?;
+    let server =
+        BlossomHttpServer::error("500 Internal Server Error", "presence check failed").await?;
+    let failure = run_json_expecting_failure(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--file",
+            "linux-x86_64=unavailable.zip",
+            "--blossom-server",
+            server.base_url(),
+            "--notes",
+            "This release must not be published",
+            "--json",
+        ],
+    )
+    .await?;
+    let server_root = server.base_url_with_slash();
+    server.finish().await?;
 
     ensure!(failure["error"]["code"] == "blossom_publication_failed");
     let details = &failure["error"]["details"];
-    ensure!(details["stage"] == "upload");
-    ensure!(details["server"] == mirror_root);
+    ensure!(details["server"] == server_root);
     ensure!(details["release_events_signed"] == false);
     ensure!(details["release_events_published"] == false);
-    ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "not_attempted");
-    ensure!(details["blossom"]["uploads"][0]["servers"][1]["status"] == "failed");
+    ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "failed");
     ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(0));
-    let message = failure["error"]["message"]
-        .as_str()
-        .context("Blossom failure message missing")?;
-    ensure!(message.contains(&primary_root));
-    ensure!(message.contains(&mirror_root));
-    ensure!(message.contains("not_attempted"));
-    ensure!(message.contains("failed"));
-    ensure!(message.contains("recovery:"));
+    ensure!(
+        failure["error"]["message"]
+            .as_str()
+            .context("Blossom failure message missing")?
+            .contains("not confirmed on any selected server")
+    );
 
     let release_events = harness
         .relay("default")
@@ -1168,7 +1231,7 @@ async fn presence_failure_stops_before_upload_and_release_signing() -> Result<()
         .await?;
     ensure!(
         release_events.is_empty(),
-        "failed Blossom mirroring still published NIP-82 events"
+        "release without a confirmed Blossom copy published NIP-82 events"
     );
     Ok(())
 }
