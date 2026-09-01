@@ -175,6 +175,75 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
 }
 
 #[tokio::test]
+async fn release_publish_ignores_unrelated_legacy_application_metadata() -> Result<()> {
+    const TARGET_APP_ID: &str = "ngit-grasp";
+    const ASSET_BYTES: &[u8] = b"unrelated legacy application regression\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    let legacy_release_coordinate = format!(
+        "30063:{}:ngit@v1.6.0",
+        published.maintainer_keys.public_key().to_hex()
+    );
+    let legacy_application = EventBuilder::new(
+        SOFTWARE_APPLICATION_KIND,
+        "Historical zsp application metadata",
+    )
+    .tags([
+        Tag::parse(["d", "ngit"])?,
+        Tag::parse(["name", "ngit"])?,
+        Tag::parse(["a", legacy_release_coordinate.as_str()])?,
+    ])
+    .finalize(&published.maintainer_keys)?;
+    publish_to_default_relay(&harness, &legacy_application).await?;
+    wait_for_relay_event(&harness, legacy_application.id).await?;
+
+    let server = AssetHttpServer::spawn(vec![ServedAsset {
+        path: "/ngit-grasp.tar.gz",
+        body: ASSET_BYTES,
+        content_type: "application/gzip",
+    }])
+    .await?;
+    let asset_argument = format!("linux-x86_64={}/ngit-grasp.tar.gz", server.base_url());
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            "0.1.0",
+            "--app",
+            TARGET_APP_ID,
+            "--asset",
+            &asset_argument,
+            "--notes",
+            "Release for a different application",
+            "--json",
+        ],
+    )
+    .await?;
+    server.finish().await?;
+
+    ensure!(output["result"]["application_operation"] == "created");
+    ensure!(
+        output["warnings"]
+            .as_array()
+            .context("release warnings were not an array")?
+            .iter()
+            .all(|warning| warning["code"] != "invalid_application"),
+        "unrelated legacy application produced an invalid_application warning"
+    );
+    single_event(
+        &harness,
+        Filter::new()
+            .kind(SOFTWARE_APPLICATION_KIND)
+            .author(published.maintainer_keys.public_key())
+            .identifier(TARGET_APP_ID),
+        "explicitly selected software application",
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn manifest_publishes_application_metadata_and_tracked_media_to_blossom() -> Result<()> {
     const ICON_BYTES: &[u8] = b"tracked application icon fixture\n";
     const ASSET_BYTES: &[u8] = b"application metadata release archive\n";

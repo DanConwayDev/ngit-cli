@@ -161,10 +161,13 @@ impl SoftwareApplication {
             communities: repeated_values(event, "h"),
             website: optional_value(event, "url"),
             repository: optional_value(event, "repository"),
-            repository_coordinates: address_pointers(event, "a"),
+            repository_coordinates: address_pointers(event, "a")
+                .into_iter()
+                .filter(|address| address.coordinate.kind == GIT_REPOSITORY_KIND)
+                .collect(),
             platforms: unique_values(event, "f"),
             license: optional_value(event, "license"),
-            extra_tags: extra_tags(event, is_application_tag),
+            extra_tags: application_extra_tags(event),
         })
     }
 
@@ -380,7 +383,7 @@ pub fn validate_application(event: &Event) -> Vec<ValidationIssue> {
     for field in ["image", "t", "h", "f"] {
         validate_repeated_tag(event, field, false, &mut issues);
     }
-    validate_addresses(event, "a", GIT_REPOSITORY_KIND, false, &mut issues);
+    validate_application_addresses(event, &mut issues);
     validate_url_tag(event, "icon", &mut issues);
     validate_url_tag(event, "image", &mut issues);
     validate_url_tag(event, "url", &mut issues);
@@ -617,10 +620,9 @@ pub fn application_event_builder(input: ApplicationInput) -> Result<EventBuilder
     push_repeated(&mut tags, "f", sorted_unique(input.platforms));
     push_optional(&mut tags, "license", input.license);
     tags.extend(
-        input
-            .extra_tags
-            .into_iter()
-            .filter(|tag| !is_application_tag(tag.kind())),
+        input.extra_tags.into_iter().filter(|tag| {
+            !is_application_tag(tag.kind()) || is_legacy_application_address_tag(tag)
+        }),
     );
 
     let mut builder = EventBuilder::new(SOFTWARE_APPLICATION_KIND, input.description).tags(tags);
@@ -1022,6 +1024,34 @@ fn validate_addresses(
     }
 }
 
+fn validate_application_addresses(event: &Event, issues: &mut Vec<ValidationIssue>) {
+    for tag in event.tags.iter().filter(|tag| tag.kind() == "a") {
+        validate_tag_shape(tag, "a", true, issues);
+        let Some(value) = tag.as_slice().get(1) else {
+            continue;
+        };
+        match Coordinate::parse(value) {
+            Ok(coordinate)
+                if (coordinate.kind == GIT_REPOSITORY_KIND
+                    || coordinate.kind == SOFTWARE_RELEASE_KIND)
+                    && !coordinate.identifier.is_empty() => {}
+            Ok(coordinate) => issues.push(ValidationIssue::field(
+                ValidationCode::InvalidRepositoryCoordinate,
+                "a",
+                format!(
+                    "expected kind {GIT_REPOSITORY_KIND} repository or legacy kind {SOFTWARE_RELEASE_KIND} release address, found {coordinate}"
+                ),
+            )),
+            Err(_) => issues.push(ValidationIssue::field(
+                ValidationCode::InvalidCoordinate,
+                "a",
+                format!("invalid coordinate {value:?}"),
+            )),
+        }
+        validate_relay_hint(tag.as_slice().get(2).map(String::as_str), "a", issues);
+    }
+}
+
 fn validate_optional_address(
     event: &Event,
     name: &'static str,
@@ -1370,6 +1400,37 @@ fn extra_tags(event: &Event, known: impl Fn(&str) -> bool) -> Vec<Tag> {
         .collect()
 }
 
+fn application_extra_tags(event: &Event) -> Vec<Tag> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| !is_application_tag(tag.kind()) || is_legacy_application_address_tag(tag))
+        .cloned()
+        .collect()
+}
+
+fn is_legacy_application_address_tag(tag: &Tag) -> bool {
+    let fields = tag.as_slice();
+    if tag.kind() != "a" || !(2..=3).contains(&fields.len()) {
+        return false;
+    }
+    let Some(value) = fields.get(1) else {
+        return false;
+    };
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return false;
+    }
+    if fields
+        .get(2)
+        .is_some_and(|hint| RelayUrl::parse(hint).is_err())
+    {
+        return false;
+    }
+    Coordinate::parse(value).is_ok_and(|coordinate| {
+        coordinate.kind == SOFTWARE_RELEASE_KIND && !coordinate.identifier.is_empty()
+    })
+}
+
 fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
     values
         .into_iter()
@@ -1556,6 +1617,45 @@ mod tests {
         assert_eq!(preserved.platforms, parsed.platforms);
         assert_eq!(preserved.license, parsed.license);
         assert_eq!(preserved.extra_tags, parsed.extra_tags);
+    }
+
+    #[test]
+    fn application_round_trips_legacy_release_address_as_extra_metadata() {
+        let keys = keys();
+        let repository = AddressPointer {
+            coordinate: Coordinate::new(GIT_REPOSITORY_KIND, keys.public_key()).identifier("ngit"),
+            relay_hint: None,
+        };
+        let legacy_release_address = tag([
+            "a",
+            &Coordinate::new(SOFTWARE_RELEASE_KIND, keys.public_key())
+                .identifier("ngit@v1.6.0")
+                .to_string(),
+        ]);
+        let event = EventBuilder::new(SOFTWARE_APPLICATION_KIND, "legacy application")
+            .tags(vec![
+                tag(["d", "ngit"]),
+                tag(["name", "ngit"]),
+                address_tag("a", repository.clone()),
+                legacy_release_address.clone(),
+            ])
+            .finalize(&keys)
+            .unwrap();
+
+        let parsed = SoftwareApplication::parse(&event).unwrap();
+        assert_eq!(parsed.repository_coordinates, vec![repository]);
+        assert_eq!(parsed.extra_tags, vec![legacy_release_address.clone()]);
+
+        let migrated = application_event_builder(ApplicationInput::from(&parsed))
+            .unwrap()
+            .finalize(&keys)
+            .unwrap();
+        let reparsed = SoftwareApplication::parse(&migrated).unwrap();
+        assert_eq!(
+            reparsed.repository_coordinates,
+            parsed.repository_coordinates
+        );
+        assert_eq!(reparsed.extra_tags, vec![legacy_release_address]);
     }
 
     #[test]
