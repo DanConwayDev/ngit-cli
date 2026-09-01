@@ -109,6 +109,32 @@ async fn issue_view_history_includes_original_and_every_authorised_edit() -> Res
         .collect();
     assert_eq!(bodies, ["final body"]);
 
+    let human_output = publisher
+        .ngit([
+            "issue",
+            "view",
+            issue_id,
+            "--comments",
+            "--history",
+            "--offline",
+        ])
+        .output()
+        .await
+        .context("failed to render human issue history")?;
+    assert!(
+        human_output.status.success(),
+        "human issue view exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        human_output.status,
+        String::from_utf8_lossy(&human_output.stdout),
+        String::from_utf8_lossy(&human_output.stderr),
+    );
+    let human = String::from_utf8(human_output.stdout).context("human output was not UTF-8")?;
+    // The original body must appear exactly once: in the history timeline,
+    // not duplicated by the --comments original-description section. A count
+    // of zero would mean history stopped rendering in the human view.
+    assert_eq!(human.matches("original body").count(), 1);
+    assert!(!human.contains("Original Description:"));
+
     Ok(())
 }
 

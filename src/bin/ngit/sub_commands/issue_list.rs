@@ -479,8 +479,8 @@ fn show_issue_details(
         for line in cn.content.lines() {
             println!("  {line}");
         }
-        // Show original description only when --comments is used.
-        if show_comments && !issue.content.is_empty() {
+        // History already includes the original description.
+        if show_comments && !show_history && !issue.content.is_empty() {
             println!();
             println!("Original Description:");
             for line in issue.content.lines() {
@@ -526,16 +526,34 @@ fn show_issue_details(
         println!("Edit History ({}):", edit_history.len());
         for entry in &edit_history {
             let kind = entry["kind"].as_str().unwrap_or("edit");
+            let label = match kind {
+                "original" => "Original",
+                "subject" => "Subject changed",
+                "description" => "Description changed",
+                _ => "Edit",
+            };
             let author = entry["author"].as_str().unwrap_or("");
+            let author_role = match entry["author_role"].as_str() {
+                Some("author") => "issue author",
+                Some("maintainer") => "maintainer",
+                Some("moderator") => "moderator",
+                _ => "unknown role",
+            };
             let created_at = entry["created_at"].as_u64().unwrap_or_default();
             println!();
-            println!("  {kind}  {author}  {}", chrono_timestamp(created_at));
+            println!("  {label} · {}", chrono_timestamp(created_at));
+            println!("    Author: {author} ({author_role})");
             if let Some(subject) = entry["subject"].as_str() {
-                println!("  Subject: {subject}");
+                println!("    Subject: {subject}");
             }
             if let Some(body) = entry["body"].as_str() {
-                for line in body.lines() {
-                    println!("  {line}");
+                println!("    Body:");
+                if body.is_empty() {
+                    println!("      (empty)");
+                } else {
+                    for line in body.lines() {
+                        println!("      {line}");
+                    }
                 }
             }
         }
