@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -2650,6 +2650,93 @@ struct ReleaseBlossomProgress {
     verbose: bool,
     spinner_style: ProgressStyle,
     upload_style: ProgressStyle,
+    activity: Mutex<ReleaseBlossomActivity>,
+}
+
+#[derive(Clone, Copy)]
+enum ReleaseBlossomPhase {
+    Uploading,
+    Verifying,
+    Retrying,
+}
+
+struct ActiveBlossomPlacement {
+    filename: String,
+    phase: ReleaseBlossomPhase,
+}
+
+#[derive(Default)]
+struct ReleaseBlossomActivity {
+    batch: usize,
+    batches: usize,
+    blobs: usize,
+    placements: usize,
+    completed: usize,
+    active: HashMap<(String, String), ActiveBlossomPlacement>,
+}
+
+impl ReleaseBlossomActivity {
+    fn start(&mut self, batch: usize, batches: usize, blobs: usize, placements: usize) {
+        *self = Self {
+            batch,
+            batches,
+            blobs,
+            placements,
+            completed: 0,
+            active: HashMap::new(),
+        };
+    }
+
+    fn set_phase(&mut self, filename: &str, server: &Url, phase: ReleaseBlossomPhase) {
+        self.active.insert(
+            (filename.to_owned(), server.to_string()),
+            ActiveBlossomPlacement {
+                filename: filename.to_owned(),
+                phase,
+            },
+        );
+    }
+
+    fn finish(&mut self, filename: &str, server: &Url) -> bool {
+        if self
+            .active
+            .remove(&(filename.to_owned(), server.to_string()))
+            .is_none()
+        {
+            return false;
+        }
+        self.completed = self.completed.saturating_add(1).min(self.placements);
+        true
+    }
+
+    fn message(&self) -> String {
+        let mut uploading = 0;
+        let mut verifying = 0;
+        let mut retrying = 0;
+        let mut filenames = BTreeSet::new();
+        for placement in self.active.values() {
+            filenames.insert(placement.filename.as_str());
+            match placement.phase {
+                ReleaseBlossomPhase::Uploading => uploading += 1,
+                ReleaseBlossomPhase::Verifying => verifying += 1,
+                ReleaseBlossomPhase::Retrying => retrying += 1,
+            }
+        }
+        let subject = if self.blobs == 1 {
+            filenames
+                .first()
+                .map_or_else(|| "1 blob".to_owned(), |filename| (*filename).to_owned())
+        } else {
+            format!("{} blobs", self.blobs)
+        };
+        let pending = self
+            .placements
+            .saturating_sub(self.completed.saturating_add(self.active.len()));
+        format!(
+            "Blossom batch {}/{}: {subject}; {}/{} placed; {uploading} uploading; {verifying} verifying; {retrying} retrying; {pending} pending",
+            self.batch, self.batches, self.completed, self.placements
+        )
+    }
 }
 
 impl ReleaseBlossomProgress {
@@ -2671,6 +2758,7 @@ impl ReleaseBlossomProgress {
             verbose: !json_output && is_verbose(),
             spinner_style,
             upload_style,
+            activity: Mutex::new(ReleaseBlossomActivity::default()),
         }))
     }
 
@@ -2691,29 +2779,48 @@ impl ReleaseBlossomProgress {
         placements: usize,
         bytes: u64,
     ) {
+        let message = {
+            let mut activity = self
+                .activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            activity.start(batch, batches, blobs, placements);
+            activity.message()
+        };
         self.bar.reset();
         self.bar.set_length(bytes);
         self.bar.set_position(0);
         self.bar.set_style(self.upload_style.clone());
-        self.bar.set_message(format!(
-            "Blossom batch {batch}/{batches}: {blobs} blob(s), {placements} placement(s)"
-        ));
+        self.bar.set_message(message);
         self.bar.enable_steady_tick(Duration::from_millis(100));
         self.bar.force_draw();
     }
 
-    fn set_operation_message(
-        &self,
-        phase: &str,
-        filename: &str,
-        server: &Url,
-        attempt: usize,
-        max_attempts: usize,
-    ) {
-        let server = server.host_str().unwrap_or_else(|| server.as_str());
-        self.bar.set_message(format!(
-            "{phase} {filename} on {server} (attempt {attempt}/{max_attempts})"
-        ));
+    fn set_operation_phase(&self, filename: &str, server: &Url, phase: ReleaseBlossomPhase) {
+        let message = {
+            let mut activity = self
+                .activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            activity.set_phase(filename, server, phase);
+            activity.message()
+        };
+        self.bar.set_message(message);
+    }
+
+    fn finish_operation(&self, filename: &str, server: &Url) {
+        let message = {
+            let mut activity = self
+                .activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            activity
+                .finish(filename, server)
+                .then(|| activity.message())
+        };
+        if let Some(message) = message {
+            self.bar.set_message(message);
+        }
     }
 
     fn print_placement(
@@ -2767,53 +2874,32 @@ impl BlossomProgress for ReleaseBlossomProgress {
             BlossomProgressEvent::UploadRequestStarted {
                 filename,
                 server,
-                attempt,
-                max_attempts,
                 additional_bytes,
                 ..
             } => {
                 self.bar.inc_length(*additional_bytes);
-                self.set_operation_message(
-                    "uploading",
-                    filename,
-                    server,
-                    *attempt,
-                    *max_attempts,
-                );
+                self.set_operation_phase(filename, server, ReleaseBlossomPhase::Uploading);
             }
             BlossomProgressEvent::UploadedBytes { bytes, .. } => self.bar.inc(*bytes),
             BlossomProgressEvent::VerificationStarted {
                 filename,
                 server,
-                attempt,
-                max_attempts,
                 ..
-            } => self.set_operation_message(
-                "verifying",
-                filename,
-                server,
-                *attempt,
-                *max_attempts,
-            ),
+            } => self.set_operation_phase(filename, server, ReleaseBlossomPhase::Verifying),
             BlossomProgressEvent::RetryScheduled {
                 filename,
                 server,
-                next_attempt,
-                max_attempts,
                 ..
-            } => self.set_operation_message(
-                "retrying",
-                filename,
-                server,
-                *next_attempt,
-                *max_attempts,
-            ),
+            } => self.set_operation_phase(filename, server, ReleaseBlossomPhase::Retrying),
             BlossomProgressEvent::PlacementFinished {
                 filename,
                 server,
                 status,
                 message,
-            } => self.print_placement(filename, server, *status, message.as_deref()),
+            } => {
+                self.finish_operation(filename, server);
+                self.print_placement(filename, server, *status, message.as_deref());
+            }
         }
     }
 }
@@ -4070,7 +4156,68 @@ assets:
         assert!(progress.bar.is_hidden());
         assert_eq!(progress.bar.length(), Some(20));
         assert_eq!(progress.bar.position(), 20);
-        assert!(progress.bar.message().contains("attempt 2/3"));
+        assert!(progress.bar.message().contains("1 uploading"));
+        Ok(())
+    }
+
+    #[test]
+    fn blossom_progress_combines_concurrent_placement_activity() -> Result<()> {
+        let progress = ReleaseBlossomProgress::new(true)?;
+        let first_server = Url::parse("https://one.example/")?;
+        let second_server = Url::parse("https://two.example/")?;
+        progress.update(&BlossomProgressEvent::UploadBatchStarted {
+            batch: 1,
+            batches: 1,
+            blobs: 2,
+            placements: 3,
+            bytes: 30,
+        });
+        progress.update(&BlossomProgressEvent::UploadRequestStarted {
+            batch: 1,
+            batches: 1,
+            filename: "ngit-grasp.tar.gz".to_owned(),
+            server: first_server.clone(),
+            attempt: 1,
+            max_attempts: 3,
+            additional_bytes: 0,
+        });
+        progress.update(&BlossomProgressEvent::UploadRequestStarted {
+            batch: 1,
+            batches: 1,
+            filename: "SHA256SUMS".to_owned(),
+            server: second_server.clone(),
+            attempt: 1,
+            max_attempts: 3,
+            additional_bytes: 0,
+        });
+
+        let uploading = progress.bar.message();
+        assert!(uploading.contains("2 blobs"));
+        assert!(uploading.contains("2 uploading"));
+        assert!(uploading.contains("1 pending"));
+        assert!(!uploading.contains("SHA256SUMS"));
+
+        progress.update(&BlossomProgressEvent::VerificationStarted {
+            batch: 1,
+            batches: 1,
+            filename: "ngit-grasp.tar.gz".to_owned(),
+            server: first_server.clone(),
+            attempt: 1,
+            max_attempts: 3,
+        });
+        let mixed = progress.bar.message();
+        assert!(mixed.contains("1 uploading"));
+        assert!(mixed.contains("1 verifying"));
+
+        progress.update(&BlossomProgressEvent::PlacementFinished {
+            filename: "ngit-grasp.tar.gz".to_owned(),
+            server: first_server,
+            status: BlossomServerStatus::Stored,
+            message: None,
+        });
+        let placed = progress.bar.message();
+        assert!(placed.contains("1/3 placed"));
+        assert!(placed.contains("1 uploading"));
         Ok(())
     }
 }
