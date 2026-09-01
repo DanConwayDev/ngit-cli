@@ -190,6 +190,12 @@ the policy is enabled. Version, signer credentials, `--released-at`, `--tag`,
 `--edit`, and output format remain runtime inputs so a committed manifest
 cannot supply secrets, silently replace an event, or freeze per-release data.
 
+All local application media and release assets share one placement batch plan.
+Human output shows a byte progress bar for each authorization batch and labels
+presence checks, the current upload or verification, and retries. `--verbose`
+also retains each per-server outcome and failure message. `--json` keeps stdout
+machine-readable and does not draw progress bars.
+
 Each asset has exactly one source:
 
 - `file`: a repository-relative or absolute local path uploaded through

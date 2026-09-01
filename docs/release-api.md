@@ -754,7 +754,12 @@ When local files are present, explicit `--blossom-server` values take first
 precedence, followed by `publication.blossom_servers` from the loaded manifest.
 Either ordered list replaces discovery. Every missing selected server receives
 the same direct streaming `PUT /upload`; list order determines the published
-primary URL and result ordering.
+primary URL and result ordering. Local application media and release assets are
+deduplicated by hash and placed in one batch plan. Authorization events cover at
+most 20 missing hashes each; uploads within a batch use bounded concurrency.
+Human mode draws aggregate byte progress for each authorization batch and
+identifies active upload, verification, and retry work. JSON mode draws no
+progress bar.
 Without an override, ngit uses the ordered `server` tags from the latest kind
 `10063` event authored by the application author, and fails rather than falling
 back when that latest event is invalid. It fails before signing when no source
@@ -1232,8 +1237,9 @@ content-addressed and may be retried after fixing the server set. No automatic
 orphan deletion is attempted. If a later state check, signing operation, or
 relay publication fails, its existing error code and details are retained and
 enriched with the completed Blossom report and possible orphan blobs. Human
-errors include the ordered server outcomes, possible orphan locations, signed
-application ID, asset IDs, release-signature state, and recovery guidance. JSON
+errors include the ordered server outcomes and retained failure messages,
+possible orphan locations, signed application ID, asset IDs, release-signature
+state, and recovery guidance. JSON
 represents the same downstream progress explicitly as
 `signed_application_id`, `signed_asset_ids`,
 `release_event_signed`, and `publication_complete`; it never infers that all
