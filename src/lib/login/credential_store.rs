@@ -1190,14 +1190,62 @@ mod file_store {
         temp.write_all(&data)
             .and_then(|()| temp.as_file().sync_all())
             .with_context(|| format!("failed to write a replacement for {}", path.display()))?;
-        temp.persist(path)
-            .map_err(|error| error.error)
+        persist_replacement(temp, path)
             .with_context(|| format!("failed to replace {}", path.display()))?;
         #[cfg(unix)]
         fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .with_context(|| format!("failed to sync {}", parent.display()))?;
         Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn persist_replacement(temp: NamedTempFile, path: &Path) -> std::io::Result<()> {
+        temp.persist(path).map(|_| ()).map_err(|error| error.error)
+    }
+
+    #[cfg(windows)]
+    fn persist_replacement(temp: NamedTempFile, path: &Path) -> std::io::Result<()> {
+        use std::{io, iter, os::windows::ffi::OsStrExt, ptr};
+
+        use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+        // ReplaceFileW can replace a target while readers that share delete
+        // access still hold its previous identity. Close the temporary file
+        // before calling it because Windows opens the replacement exclusively.
+        let temp_path = temp.into_temp_path();
+        let replaced_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        let replacement_path = temp_path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        let replaced = unsafe {
+            ReplaceFileW(
+                replaced_path.as_ptr(),
+                replacement_path.as_ptr(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        if replaced != 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            return temp_path
+                .persist(path)
+                .map(|_| ())
+                .map_err(|error| error.error);
+        }
+        Err(error)
     }
 }
 

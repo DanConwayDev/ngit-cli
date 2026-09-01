@@ -73,6 +73,9 @@ zeroize = "1.9.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 mockall = "0.15.0"
