@@ -176,10 +176,9 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
     //   - publishes a kind-30618 state event
     //   - causes the grasp to graduate the announcement out of purgatory
     let push_output = publisher
-        .git(["push", "-u", "origin", "main"])
-        .output()
+        .nostr_push(["-u", "origin", "main"])
         .await
-        .context("failed to spawn git push")?;
+        .context("failed to push initial state")?;
     assert!(
         push_output.status.success(),
         "git push exited non-zero ({:?})\nstdout: {}\nstderr: {}",
@@ -335,6 +334,94 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         read_local_ref_oid(&quiet_clone_target, "refs/heads/main")?,
         main_oid,
         "quiet clone did not reproduce the publisher's main ref",
+    );
+
+    // The direct CLI uses the same output mode as the remote helper. Primary
+    // command output remains available, while setup and progress chatter are
+    // suppressed.
+    let quiet_ngit_output = publisher
+        .ngit(["-q", "issue", "list", "--offline"])
+        .output()
+        .await
+        .context("failed to spawn quiet ngit command")?;
+    assert!(
+        quiet_ngit_output.status.success(),
+        "ngit -q issue list exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        quiet_ngit_output.status,
+        String::from_utf8_lossy(&quiet_ngit_output.stdout),
+        String::from_utf8_lossy(&quiet_ngit_output.stderr),
+    );
+    assert!(
+        quiet_ngit_output.stderr.is_empty(),
+        "ngit -q produced stderr output: {}",
+        String::from_utf8_lossy(&quiet_ngit_output.stderr),
+    );
+
+    // A quiet push exercises the helper's full write path, including Git's
+    // own transport progress, ngit's push reporter, relay publication, and
+    // signing. It must still update the observable remote ref.
+    std::fs::write(publisher.dir().join("QUIET.md"), "quiet round-trip\n")?;
+    publisher
+        .git_ok(["add", "QUIET.md"], "git add QUIET.md")
+        .await?;
+    publisher
+        .git_ok(
+            ["commit", "-m", "quiet round-trip", "--no-gpg-sign"],
+            "git commit quiet round-trip",
+        )
+        .await?;
+    let updated_oid = publisher
+        .snapshot()?
+        .refs
+        .get("refs/heads/main")
+        .context("refs/heads/main missing after quiet round-trip commit")?
+        .clone();
+    let quiet_push_output = publisher
+        .nostr_push(["-q", "origin", "main"])
+        .await
+        .context("quiet nostr push")?;
+    assert!(
+        quiet_push_output.stderr.is_empty(),
+        "git push -q produced stderr output: {}",
+        String::from_utf8_lossy(&quiet_push_output.stderr),
+    );
+    assert_eq!(
+        read_bare_ref_oid(&bare_repo_path, "refs/heads/main")?,
+        updated_oid,
+        "quiet push did not update the bare repository",
+    );
+
+    // Fetch uses the same Git verbosity negotiation, and must update the
+    // tracking ref without printing either relay or pack-transfer progress.
+    let quiet_fetch_output = cloner
+        .git([
+            "-C",
+            quiet_clone_target
+                .to_str()
+                .context("quiet clone path is not UTF-8")?,
+            "fetch",
+            "-q",
+            "origin",
+        ])
+        .output()
+        .await
+        .context("failed to spawn quiet git fetch")?;
+    assert!(
+        quiet_fetch_output.status.success(),
+        "git fetch -q exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+        quiet_fetch_output.status,
+        String::from_utf8_lossy(&quiet_fetch_output.stdout),
+        String::from_utf8_lossy(&quiet_fetch_output.stderr),
+    );
+    assert!(
+        quiet_fetch_output.stderr.is_empty(),
+        "git fetch -q produced stderr output: {}",
+        String::from_utf8_lossy(&quiet_fetch_output.stderr),
+    );
+    assert_eq!(
+        read_local_ref_oid(&quiet_clone_target, "refs/remotes/origin/main")?,
+        updated_oid,
+        "quiet fetch did not update origin/main",
     );
 
     Ok(())

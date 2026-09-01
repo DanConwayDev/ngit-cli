@@ -97,7 +97,7 @@ pub async fn discover_private_repository_relays(relays: &[RelayUrl]) -> Vec<Rela
                         classifications.insert(relay, advertises);
                     }
                     Err(error) => {
-                        if crate::client::is_verbose() {
+                        if crate::output_mode::is_verbose() {
                             eprintln!("nostr: ignoring unavailable NIP-11 document: {error:#}");
                         }
                     }

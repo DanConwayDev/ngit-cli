@@ -29,6 +29,7 @@ use crate::{
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
     login::user::UserRef,
+    output_mode::{is_quiet, write_progress_line},
     repo_ref::{
         RepoRef, format_grasp_server_url_as_grasp06_prs_url, is_grasp_server_clone_url,
         is_grasp_server_in_list, normalize_grasp_server_url,
@@ -59,7 +60,10 @@ pub fn push_to_remote(
     remote_helper::validate_clone_url(git_server_url)?;
 
     if remote_helper::handles_url(git_server_url) {
-        term.write_line(&format!("push: {git_server_url} via Git remote helper..."))?;
+        write_progress_line(
+            term,
+            &format!("push: {git_server_url} via Git remote helper..."),
+        )?;
         return remote_helper::push(
             git_repo,
             git_server_url,
@@ -79,7 +83,10 @@ pub fn push_to_remote(
     let mut ref_updates = HashMap::new();
 
     for protocol in &protocols_to_attempt {
-        term.write_line(format!("push: {} over {protocol}...", server_url.short_name(),).as_str())?;
+        write_progress_line(
+            term,
+            format!("push: {} over {protocol}...", server_url.short_name()).as_str(),
+        )?;
 
         let formatted_url = server_url.format_as(protocol)?;
 
@@ -99,7 +106,8 @@ pub fn push_to_remote(
             if !is_libgit2_internal_error(&error) {
                 return Err(error);
             }
-            term.write_line(
+            write_progress_line(
+                term,
                 format!(
                     "push: libgit2 failed over {protocol} with an internal error ({error}); retrying with system git..."
                 )
@@ -117,7 +125,8 @@ pub fn push_to_remote(
 
         match attempt {
             Err(error) => {
-                term.write_line(
+                write_progress_line(
+                    term,
                     format!(
                         "push: {formatted_url} failed over {protocol}{}: {error}",
                         if protocol == &ServerProtocol::Ssh {
@@ -141,7 +150,10 @@ pub fn push_to_remote(
                     .all(|error| error.is_none())
                 {
                     if !failed_protocols.is_empty() {
-                        term.write_line(format!("push: succeeded over {protocol}").as_str())?;
+                        write_progress_line(
+                            term,
+                            format!("push: succeeded over {protocol}").as_str(),
+                        )?;
                         let _ = set_protocol_preference(
                             git_repo,
                             protocol,
@@ -183,7 +195,6 @@ pub fn push_to_remote(
                 ""
             },
         );
-        term.write_line(format!("push: {error}").as_str())?;
         Err(error)
     }
 }
@@ -390,6 +401,9 @@ impl<'a> PushReporter<'a> {
         }
     }
     fn write_all(&self, lines_to_clear: usize) {
+        if is_quiet() {
+            return;
+        }
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.remote_msgs {
             let _ = self.term.write_line(format!("remote: {msg}").as_str());
@@ -510,14 +524,16 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     }
 
     if !repo_grasps.is_empty() {
-        eprintln!(
-            "pushing proposal refs to {}",
-            if repo_ref.is_authorized_maintainer(&user_ref.public_key) {
-                "repository git servers"
-            } else {
-                "repository grasp servers"
-            }
-        );
+        if !is_quiet() {
+            eprintln!(
+                "pushing proposal refs to {}",
+                if repo_ref.is_authorized_maintainer(&user_ref.public_key) {
+                    "repository git servers"
+                } else {
+                    "repository grasp servers"
+                }
+            );
+        }
     } else if git_server.is_none() {
         eprintln!(
             "The repository doesn't list a grasp server so your proposal cannot be submitted as a nostr Pull Request."
@@ -666,16 +682,18 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         })?
     };
 
-    eprintln!(
-        "posting {}",
-        if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
-            "proposal revision as new PR event, and a close status for the old patch"
-        } else if events.iter().any(|e| e.kind.eq(&KIND_PULL_REQUEST_UPDATE)) {
-            "proposal revision as PR update event"
-        } else {
-            "proposal as PR event"
-        }
-    );
+    if !is_quiet() {
+        eprintln!(
+            "posting {}",
+            if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
+                "proposal revision as new PR event, and a close status for the old patch"
+            } else if events.iter().any(|e| e.kind.eq(&KIND_PULL_REQUEST_UPDATE)) {
+                "proposal revision as PR update event"
+            } else {
+                "proposal as PR event"
+            }
+        );
+    }
     Ok(events)
 }
 
@@ -799,7 +817,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                     responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
                 } else {
                     responses.push((clone_url.clone(), Ok(())));
-                    term.write_line(&format!("push: commit data sent to {display_url}"))?;
+                    write_progress_line(term, &format!("push: commit data sent to {display_url}"))?;
                     unsigned_pr_event = Some(draft_pr_event);
                 }
             }

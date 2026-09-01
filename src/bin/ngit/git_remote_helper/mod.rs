@@ -17,9 +17,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
-    finish_fetch_progress, get_repo_ref_from_cache, is_quiet, is_verbose,
-    needs_private_relay_discovery, private_relay_probe_decision,
-    save_repository_privacy_to_git_config, set_remote_helper_verbosity,
+    finish_fetch_progress, get_repo_ref_from_cache, needs_private_relay_discovery,
+    private_relay_probe_decision, save_repository_privacy_to_git_config,
     warn_if_invited_as_maintainer,
 };
 use git::{RepoActions, nostr_url::NostrUrlDecoded};
@@ -35,6 +34,7 @@ use ngit::{
             refresh_user_and_private_git_relays,
         },
     },
+    output_mode::{OutputMode, is_quiet, is_verbose, set_git_verbosity, set_output_mode},
     relay_information::discover_private_repository_relays,
     signer::NgitSigner,
     utils::read_line,
@@ -237,7 +237,7 @@ fn respond_to_option(tokens: &[&str], push_options: &mut PushOptions) -> bool {
     match tokens {
         ["option", "verbosity", value] => match value.parse::<u8>() {
             Ok(verbosity) => {
-                set_remote_helper_verbosity(verbosity);
+                set_git_verbosity(verbosity);
                 println!("ok");
             }
             Err(error) => println!("error invalid verbosity: {error}"),
@@ -286,7 +286,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         command_config_value("nostr.signer")?.map(|selector| SignerInfo::Selection { selector });
 
     if std::env::var("NGITTEST").is_ok() {
-        std::env::set_var("NGIT_VERBOSE", "1");
+        set_output_mode(OutputMode::Verbose);
     }
 
     // Direct `--version` and no-argument invocations do not speak the helper
@@ -350,9 +350,8 @@ pub async fn run(args: &[String]) -> Result<()> {
         || !nip11_private_relays.is_empty();
 
     let _ = set_git_timeout(Some(&git_repo));
-    if !is_quiet() {
-        let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
-    }
+    // quiet suppression happens inside print_update_notice_if_available
+    let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     if let Some(repo_ref) = cached_repo_ref.as_ref().filter(|repo_ref| repo_ref.private) {

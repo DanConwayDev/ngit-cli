@@ -28,6 +28,7 @@ use crate::{
         Repo, RepoActions, get_git_config_item, get_git_config_item_global,
         get_git_config_item_system, open_global_configs_for_repo,
     },
+    output_mode::TransientLine,
 };
 
 #[derive(Debug)]
@@ -1112,9 +1113,9 @@ async fn get_signer(
             } else {
                 let signer = Arc::new(crate::NgitSigner::Connect(Arc::new(s)));
                 let term = console::Term::stderr();
-                term.write_line("connecting to remote signer...")?;
+                let progress = TransientLine::write(&term, "connecting to remote signer...")?;
                 let public_key = fetch_public_key(&signer).await?;
-                term.clear_last_lines(1)?;
+                progress.clear()?;
                 Ok((signer, public_key))
             }
         }

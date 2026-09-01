@@ -64,6 +64,7 @@ use crate::{
         get_likely_logged_in_user,
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
+    output_mode::{TransientLine, is_quiet, is_verbose, write_progress_line},
     relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
@@ -73,41 +74,6 @@ use crate::{
     signer::NgitSigner,
     version_check,
 };
-
-const REMOTE_HELPER_QUIET_ENV: &str = "NGIT_REMOTE_HELPER_QUIET";
-const REMOTE_HELPER_VERBOSE_ENV: &str = "NGIT_REMOTE_HELPER_VERBOSE";
-
-/// Apply Git's remote-helper `verbosity` option to this process.
-///
-/// Git uses `0` for quiet, `1` for normal output, and larger values for
-/// increasingly verbose output. The helper is a dedicated child process, so
-/// process-local environment flags let the library's existing progress paths
-/// observe the negotiated mode without changing ordinary ngit commands.
-pub fn set_remote_helper_verbosity(verbosity: u8) {
-    if verbosity == 0 {
-        std::env::set_var(REMOTE_HELPER_QUIET_ENV, "1");
-    } else {
-        std::env::remove_var(REMOTE_HELPER_QUIET_ENV);
-    }
-
-    if verbosity > 1 {
-        std::env::set_var(REMOTE_HELPER_VERBOSE_ENV, "1");
-    } else {
-        std::env::remove_var(REMOTE_HELPER_VERBOSE_ENV);
-    }
-}
-
-#[must_use]
-pub fn is_quiet() -> bool {
-    std::env::var(REMOTE_HELPER_QUIET_ENV).is_ok()
-}
-
-#[must_use]
-pub fn is_verbose() -> bool {
-    !is_quiet()
-        && (std::env::var("NGIT_VERBOSE").is_ok()
-            || std::env::var(REMOTE_HELPER_VERBOSE_ENV).is_ok())
-}
 
 /// Default SOCKS5 proxy used to reach `.onion` relays and clone URLs.
 ///
@@ -1742,12 +1708,12 @@ pub async fn sign_draft_event(
 pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude::PublicKey> {
     if signer.is_remote() {
         let term = console::Term::stderr();
-        term.write_line("fetching npub from remote signer...")?;
+        let progress = TransientLine::write(&term, "fetching npub from remote signer...")?;
         let public_key = signer
             .get_public_key()
             .await
             .context("failed to get npub from remote signer")?;
-        term.clear_last_lines(1)?;
+        progress.clear()?;
         Ok(public_key)
     } else {
         signer
@@ -3928,9 +3894,9 @@ async fn fetching_with_report_policy_outcome(
     // stdout.
     let term = console::Term::stderr();
     if outcome.report.to_string().is_empty() {
-        term.write_line("no updates")?;
+        write_progress_line(&term, "no updates")?;
     } else {
-        term.write_line(&format!("updates: {}", outcome.report))?;
+        write_progress_line(&term, &format!("updates: {}", outcome.report))?;
     }
     Ok(outcome)
 }

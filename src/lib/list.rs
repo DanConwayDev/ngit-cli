@@ -16,13 +16,13 @@ use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
 use crate::{
-    client::{is_quiet, is_verbose},
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         remote_helper,
     },
     git_http_auth::{authorization_for_url, refresh_private_git_auth_for_url},
+    output_mode::{is_quiet, is_verbose},
     repo_ref::is_grasp_server_clone_url,
     repo_state::RepoState,
     signer::NgitSigner,
@@ -180,8 +180,8 @@ pub async fn list_from_remotes(
         None
     };
     // Under test conditions the draw target must be hidden even though
-    // verbose is true (NGITTEST sets NGIT_VERBOSE). A visible
-    // MultiProgress writes ANSI cursor-movement sequences to stderr and
+    // verbose is true (the ngit process selects verbose mode under NGITTEST). A
+    // visible MultiProgress writes ANSI cursor-movement sequences to stderr and
     // the subsequent `progress_reporter.clear()` erases lines of real
     // git-remote-helper output that tests rely on.
     let progress_reporter = if verbose && !is_test {

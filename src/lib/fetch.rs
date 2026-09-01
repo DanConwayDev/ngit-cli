@@ -12,7 +12,6 @@ use git2::{Progress, Repository};
 
 use crate::{
     cli_interactor::count_lines_per_msg_vec,
-    client::is_quiet,
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -20,6 +19,7 @@ use crate::{
         utils::check_ssh_keys,
     },
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
+    output_mode::{is_quiet, write_progress_line},
     repo_ref::{RepoRef, is_grasp_server_in_list},
     signer::NgitSigner,
     utils::{
@@ -27,13 +27,6 @@ use crate::{
         set_protocol_preference,
     },
 };
-
-fn write_progress_line(term: &console::Term, message: &str) -> Result<()> {
-    if !is_quiet() {
-        term.write_line(message)?;
-    }
-    Ok(())
-}
 
 /// Ensure a single commit OID is present locally, fetching from git servers
 /// on demand if it isn't.

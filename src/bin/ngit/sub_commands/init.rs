@@ -28,6 +28,7 @@ use ngit::{
     },
     git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
     list::{list_from_remote, list_from_remotes},
+    output_mode::is_quiet,
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, latest_event_repo_ref,
@@ -2143,7 +2144,11 @@ async fn launch_with_mode(
         repo_edit_preflight.as_ref(),
     )
     .await;
-    if result.is_ok() && suggest_skill && should_suggest_skill(&git_repo, git_repo_path) {
+    if result.is_ok()
+        && suggest_skill
+        && !is_quiet()
+        && should_suggest_skill(&git_repo, git_repo_path)
+    {
         print_skill_suggestion();
     }
     result

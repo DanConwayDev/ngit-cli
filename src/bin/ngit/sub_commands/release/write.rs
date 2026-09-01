@@ -18,9 +18,10 @@ use ngit::{
         canonicalize_blossom_server_root, multi_server_upload_from_batch_outcome,
         snapshot_local_file, upload_snapshot_batch_to_servers_with_progress,
     },
-    client::{is_verbose, sign_draft_event, sign_event},
+    client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
     git::{Repo, RepoActions},
+    output_mode::{is_quiet, is_verbose},
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
         ResolvedReleaseManifest, ResolvedReleaseManifestAsset, ResolvedReleaseManifestMedia,
@@ -2653,7 +2654,7 @@ struct ReleaseBlossomProgress {
 
 impl ReleaseBlossomProgress {
     fn new(json_output: bool) -> Result<Arc<Self>> {
-        let bar = if json_output {
+        let bar = if json_output || is_quiet() {
             ProgressBar::hidden()
         } else {
             ProgressBar::new_spinner()

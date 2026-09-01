@@ -144,6 +144,11 @@ pub async fn background_update_filters_from_cache(
 }
 
 pub async fn print_update_notice_if_available(git_repo_path: Option<&Path>) -> Result<()> {
+    // The notice is advisory, so quiet mode suppresses it for every caller,
+    // including `--version`, which bypasses normal CLI parsing.
+    if crate::output_mode::is_quiet() {
+        return Ok(());
+    }
     if UPDATE_NOTICE_CHECKED.swap(true, AtomicOrdering::Relaxed) {
         return Ok(());
     }

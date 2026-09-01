@@ -491,7 +491,7 @@ impl CiReport {
         // Shape rejections are diagnostics for a publisher, not something a
         // reader of this repository can act on, so they follow ngit's
         // verbosity idiom. They stay in the JSON document unconditionally.
-        if ngit::client::is_verbose() {
+        if ngit::output_mode::is_verbose() {
             for skipped in &self.skipped {
                 println!("  {skipped}");
             }

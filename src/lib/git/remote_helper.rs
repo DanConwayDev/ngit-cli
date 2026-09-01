@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use console::Term;
 
 use super::Repo;
+use crate::output_mode::is_quiet;
 
 /// Schemes that must never be delegated as Git remote helpers.
 ///
@@ -74,7 +75,12 @@ pub(crate) fn is_direct_pr_clone_url(url: &str) -> bool {
 }
 
 pub(crate) fn list(repo: &Repo, url: &str) -> Result<HashMap<String, String>> {
-    let output = run_git(repo, ["ls-remote", "--symref", "--", url], None)?;
+    let mut args = vec!["ls-remote", "--symref"];
+    if is_quiet() {
+        args.push("--quiet");
+    }
+    args.extend(["--", url]);
+    let output = run_git(repo, args, None)?;
     ensure_success("list", url, &output)?;
     parse_ls_remote(std::str::from_utf8(&output.stdout).context("Git returned non-UTF-8 refs")?)
 }
@@ -88,6 +94,9 @@ pub(crate) fn fetch(repo: &Repo, url: &str, oids: &[String], term: &Term) -> Res
         OsString::from("--"),
         OsString::from(url),
     ];
+    if is_quiet() {
+        args.insert(1, OsString::from("--quiet"));
+    }
     args.extend(oids.iter().map(OsString::from));
 
     let output = run_git(repo, args, Some(term))?;
@@ -113,11 +122,15 @@ pub(crate) fn push(
             posix_shell_quote(ssh_key_file)
         )));
     }
+    let push_command_index = args.len();
     args.extend([
         OsString::from("push"),
         OsString::from("--porcelain"),
         OsString::from("--no-verify"),
     ]);
+    if is_quiet() {
+        args.insert(push_command_index + 1, OsString::from("--quiet"));
+    }
     args.extend(
         push_options
             .iter()
@@ -186,7 +199,7 @@ where
         .context("failed to capture Git stderr")?;
     let stdout_reader = thread::spawn(move || read_pipe(stdout, None));
     let stderr_reader = thread::spawn({
-        let term = term.cloned();
+        let term = if is_quiet() { None } else { term.cloned() };
         move || read_pipe(stderr, term)
     });
 

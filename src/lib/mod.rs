@@ -17,6 +17,7 @@ pub mod login;
 pub mod mbox_parser;
 pub mod nsite;
 pub mod oci;
+pub mod output_mode;
 pub mod proposal_base;
 pub mod push;
 pub mod relay_auth;

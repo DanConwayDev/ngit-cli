@@ -31,6 +31,7 @@ use crate::{
     git::{Repo, RepoActions},
     git_http_auth::refresh_private_git_auth_for_url,
     login::user::{UserRef, publish_private_git_relay_list},
+    output_mode::is_quiet,
     repo_ref::{
         RepoRef, apply_grasp_infrastructure, format_grasp_server_url_as_clone_url,
         latest_event_repo_ref,
@@ -213,10 +214,12 @@ pub async fn build_maintainership_acceptance_with_defaults(
 
     // --- Step 5: sign the announcement ---
 
-    eprintln!(
-        "info: accepting co-maintainership of '{}' with defaults",
-        name
-    );
+    if !is_quiet() {
+        eprintln!(
+            "info: accepting co-maintainership of '{}' with defaults",
+            name
+        );
+    }
 
     let event = my_repo_ref.to_event(signer).await?;
 
@@ -255,9 +258,11 @@ pub async fn finalize_maintainership_acceptance(
     // coordinate means removal surfaces naturally. `ngit repo follow-lead`
     // is the explicit way to move the checkout to the resolved lead.
 
-    eprintln!(
-        "info: co-maintainership accepted. run `ngit repo edit` to customise your announcement."
-    );
+    if !is_quiet() {
+        eprintln!(
+            "info: co-maintainership accepted. run `ngit repo edit` to customise your announcement."
+        );
+    }
 
     Ok(())
 }
@@ -282,7 +287,9 @@ pub async fn accept_maintainership_with_defaults(
 ) -> Result<()> {
     let acceptance =
         build_maintainership_acceptance_with_defaults(repo_ref, user_ref, client, signer).await?;
-    eprintln!("info: publishing your repository announcement to nostr...");
+    if !is_quiet() {
+        eprintln!("info: publishing your repository announcement to nostr...");
+    }
 
     client.set_signer(signer.clone()).await;
 
@@ -610,7 +617,12 @@ pub async fn wait_for_grasp_servers(
     let expand_delay_ms: u64 = if is_test { 500 } else { 5000 };
     let total = clone_urls.len() as u64;
 
-    let spinner_multi = MultiProgress::new();
+    let quiet = is_quiet();
+    let spinner_multi = if quiet {
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+    } else {
+        MultiProgress::new()
+    };
     let spinner_pb = spinner_multi.add(
         ProgressBar::new_spinner()
             .with_style(
@@ -636,14 +648,16 @@ pub async fn wait_for_grasp_servers(
 
     let server_bars = create_server_bars(&clone_urls, &detail_multi);
 
-    let timer_handle = spawn_expand_timer(
-        expand_delay_ms,
-        spinner_pb.clone(),
-        detail_multi.clone(),
-        heading_bar,
-        reveal_state.clone(),
-        server_bars.clone(),
-    );
+    let timer_handle = (!quiet).then(|| {
+        spawn_expand_timer(
+            expand_delay_ms,
+            spinner_pb.clone(),
+            detail_multi.clone(),
+            heading_bar,
+            reveal_state.clone(),
+            server_bars.clone(),
+        )
+    });
 
     let git_repo_path = git_repo.get_path()?.to_path_buf();
     let poll_ctx = Arc::new(PollContext {
@@ -670,7 +684,9 @@ pub async fn wait_for_grasp_servers(
     let results = join_all(futures).await;
     let final_ready = ready_count.load(Ordering::Relaxed);
 
-    timer_handle.abort();
+    if let Some(timer_handle) = timer_handle {
+        timer_handle.abort();
+    }
 
     if reveal_state.revealed.load(Ordering::Acquire) {
         let _ = detail_multi.clear();
