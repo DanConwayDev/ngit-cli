@@ -2656,12 +2656,10 @@ struct BlossomPublication {
 struct ReleaseBlossomProgress {
     multi: MultiProgress,
     heading: ProgressBar,
-    visible: bool,
     verbose: bool,
     heading_style: ProgressStyle,
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
-    finished_style: ProgressStyle,
     activity: Mutex<ReleaseBlossomActivity>,
 }
 
@@ -2689,7 +2687,6 @@ struct ReleaseBlossomActivity {
     confirmed: usize,
     unavailable: usize,
     active: HashMap<(String, String), ActiveBlossomPlacement>,
-    finished_bars: Vec<ProgressBar>,
 }
 
 impl ReleaseBlossomActivity {
@@ -2714,7 +2711,6 @@ impl ReleaseBlossomActivity {
             confirmed,
             unavailable,
             active: HashMap::new(),
-            finished_bars: Vec::new(),
         };
     }
 
@@ -2752,7 +2748,6 @@ impl ReleaseBlossomActivity {
             self.unavailable = self.unavailable.saturating_add(1);
         }
         let bar = placement.bar;
-        self.finished_bars.push(bar.clone());
         Some(bar)
     }
 
@@ -2791,17 +2786,6 @@ impl ReleaseBlossomActivity {
         }
         format!("{} — {}", self.subject(), phases.join("; "))
     }
-
-    fn completion_message(&self) -> String {
-        let total = self.confirmed.saturating_add(self.unavailable);
-        format!(
-            "{} — {}/{} confirmed; {} unavailable",
-            self.subject(),
-            self.confirmed,
-            total,
-            self.unavailable
-        )
-    }
 }
 
 impl ReleaseBlossomProgress {
@@ -2812,34 +2796,28 @@ impl ReleaseBlossomProgress {
         } else {
             ProgressDrawTarget::hidden()
         };
-        Self::with_draw_target(draw_target, visible, visible && is_verbose())
+        Self::with_draw_target(draw_target, visible && is_verbose())
     }
 
-    fn with_draw_target(
-        draw_target: ProgressDrawTarget,
-        visible: bool,
-        verbose: bool,
-    ) -> Result<Arc<Self>> {
+    fn with_draw_target(draw_target: ProgressDrawTarget, verbose: bool) -> Result<Arc<Self>> {
         let multi = MultiProgress::with_draw_target(draw_target);
-        let heading_style =
-            ProgressStyle::with_template(" {spinner} {msg}")?.tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let heading_style = ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {msg}")?
+            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let upload_style = ProgressStyle::with_template(
-            "   {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}",
+            "   [{elapsed_precise}] {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}",
         )?
         .progress_chars("##-");
         let phase_style =
-            ProgressStyle::with_template("   {spinner} {prefix} — {msg}")?.tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
-        let finished_style = ProgressStyle::with_template("   {prefix} — {msg}")?;
+            ProgressStyle::with_template("   {spinner} [{elapsed_precise}] {prefix} — {msg}")?
+                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
             multi,
             heading,
-            visible,
             verbose,
             heading_style,
             upload_style,
             phase_style,
-            finished_style,
             activity: Mutex::new(ReleaseBlossomActivity::default()),
         }))
     }
@@ -2979,33 +2957,14 @@ impl ReleaseBlossomProgress {
             };
             (bar, activity.message())
         };
-        bar.set_style(self.finished_style.clone());
-        let marker = if matches!(
-            status,
-            BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
-        ) {
-            "confirmed"
-        } else {
-            blossom_status_label(status)
-        };
-        bar.finish_with_message(marker.to_owned());
+        bar.finish_and_clear();
         self.heading.set_message(heading_message);
         true
     }
 
     fn finish_upload_group(&self) {
-        let summary = {
-            let activity = self
-                .activity
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            activity.completion_message()
-        };
         self.heading.finish_and_clear();
         self.clear_placement_bars();
-        if self.visible {
-            let _ = self.multi.println(summary);
-        }
     }
 
     fn clear_placement_bars(&self) {
@@ -3016,29 +2975,15 @@ impl ReleaseBlossomProgress {
         for placement in activity.active.values() {
             placement.bar.finish_and_clear();
         }
-        for bar in &activity.finished_bars {
-            bar.finish_and_clear();
-        }
         activity.active.clear();
-        activity.finished_bars.clear();
     }
 
-    fn authorization_started(
-        &self,
-        batch: usize,
-        batches: usize,
-        blobs: usize,
-        filenames: &[String],
-    ) {
-        let subject = if blobs == 1 {
-            filenames.first().map_or_else(
-                || format!("Blossom upload file {batch}/{batches}"),
-                |filename| format!("Blossom upload file {batch}/{batches}: {filename}"),
-            )
-        } else {
-            format!("Blossom upload group {batch}/{batches}: {blobs} files")
-        };
-        self.start_spinner(format!("{subject} — authorizing server uploads"));
+    fn prepare_for_authorization(&self) {
+        // A remote signer writes its own interactive terminal UI. Leave no
+        // active progress renderer competing with it; UploadBatchStarted will
+        // redraw the upload state after signing completes.
+        self.heading.finish_and_clear();
+        self.clear_placement_bars();
     }
 
     fn upload_body_finished(
@@ -3108,12 +3053,7 @@ impl BlossomProgress for ReleaseBlossomProgress {
             BlossomProgressEvent::PresenceChecksFinished { .. } => {
                 self.heading.finish_and_clear();
             }
-            BlossomProgressEvent::AuthorizationStarted {
-                batch,
-                batches,
-                blobs,
-                filenames,
-            } => self.authorization_started(*batch, *batches, *blobs, filenames),
+            BlossomProgressEvent::AuthorizationStarted { .. } => self.prepare_for_authorization(),
             BlossomProgressEvent::UploadBatchStarted {
                 batch,
                 batches,
@@ -3203,6 +3143,7 @@ impl Drop for ReleaseBlossomProgress {
     fn drop(&mut self) {
         self.heading.finish_and_clear();
         self.clear_placement_bars();
+        let _ = self.multi.clear();
     }
 }
 
@@ -4694,6 +4635,45 @@ assets:
     }
 
     #[test]
+    fn blossom_progress_stops_rendering_while_authorization_is_signed() -> Result<()> {
+        let progress = ReleaseBlossomProgress::new(true)?;
+        progress.update(&BlossomProgressEvent::PresenceChecksStarted {
+            blobs: 1,
+            servers: 2,
+            checks: 2,
+        });
+        assert!(!progress.heading.is_finished());
+
+        progress.update(&BlossomProgressEvent::AuthorizationStarted {
+            batch: 1,
+            batches: 1,
+            blobs: 1,
+            filenames: vec!["release.tar.gz".to_owned()],
+        });
+        assert!(progress.heading.is_finished());
+
+        progress.update(&BlossomProgressEvent::UploadBatchStarted {
+            batch: 1,
+            batches: 1,
+            blobs: 1,
+            filenames: vec!["release.tar.gz".to_owned()],
+            placements: 2,
+            confirmed: 0,
+            unavailable: 0,
+            bytes: 20,
+        });
+        assert!(!progress.heading.is_finished());
+
+        progress.update(&BlossomProgressEvent::UploadBatchFinished {
+            batch: 1,
+            batches: 1,
+        });
+        assert!(progress.heading.is_finished());
+        assert!(progress.activity.lock().unwrap().active.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn blossom_progress_combines_concurrent_placement_activity() -> Result<()> {
         let progress = ReleaseBlossomProgress::new(true)?;
         let first_server = Url::parse("https://one.example/")?;
@@ -4757,5 +4737,4 @@ assets:
         assert!(placed.contains("1 uploading"));
         Ok(())
     }
-
 }

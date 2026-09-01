@@ -201,9 +201,14 @@ run concurrently. Human output therefore labels `upload file N/M` and draws a
 separate live line for each server. A line changes from byte transfer to
 `awaiting server response`, `verifying stored blob`, or `waiting to retry` as
 the HTTP operation advances, so a fully sent small request is not presented as
-an upload which is still transferring. `--verbose` also retains each
-per-server outcome and failure message. `--json` keeps stdout machine-readable
-and does not draw progress bars.
+an upload which is still transferring. Headings and server lines include their
+elapsed time. Ngit clears this display before invoking a signer and after each
+file, so an interactive signer never competes with a live progress renderer.
+An upload attempt can take up to 30 minutes while bytes continue moving, but
+fails after 30 seconds without body progress or a server response. Presence and
+post-upload verification requests use 15-second attempts with bounded retries.
+`--verbose` also retains each per-server outcome and failure message. `--json`
+keeps stdout machine-readable and does not draw progress bars.
 
 Each asset has exactly one source:
 
