@@ -111,3 +111,97 @@ async fn issue_view_history_includes_original_and_every_authorised_edit() -> Res
 
     Ok(())
 }
+
+#[tokio::test]
+async fn issue_history_distinguishes_maintainer_and_moderator_edits() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (lead, graph) = harness
+        .publish_repo_with_role_graph("issue-history-roles")
+        .await?;
+
+    let created = ngit_json(
+        &lead,
+        [
+            "issue",
+            "create",
+            "--subject",
+            "original subject",
+            "--body",
+            "original body",
+            "--json",
+        ],
+    )
+    .await?;
+    let issue_id = created["id"].as_str().context("issue create omitted id")?;
+
+    ngit_json(
+        &lead,
+        [
+            "issue",
+            "set-subject",
+            issue_id,
+            "--subject",
+            "maintainer subject",
+            "--nsec",
+            &graph.co_maintainer_nsec,
+            "--json",
+        ],
+    )
+    .await?;
+
+    ngit_json(
+        &lead,
+        [
+            "issue",
+            "set-cover-note",
+            issue_id,
+            "--body",
+            "moderator body",
+            "--nsec",
+            &graph.moderator_nsec,
+            "--json",
+        ],
+    )
+    .await?;
+
+    let viewed = ngit_json(
+        &lead,
+        [
+            "issue",
+            "view",
+            issue_id,
+            "--history",
+            "--offline",
+            "--json",
+        ],
+    )
+    .await?;
+    assert_eq!(viewed["cover_note"]["author_role"], "moderator");
+    assert!(viewed["cover_note"]["by_maintainer"].is_null());
+
+    let history = viewed["edit_history"]
+        .as_array()
+        .context("issue view omitted edit_history")?;
+    let subject_edit = history
+        .iter()
+        .find(|entry| entry["subject"] == "maintainer subject")
+        .context("history omitted the maintainer subject edit")?;
+    assert_eq!(subject_edit["author_role"], "maintainer");
+    assert_eq!(subject_edit["by_maintainer"], true);
+
+    let description_edit = history
+        .iter()
+        .find(|entry| entry["body"] == "moderator body")
+        .context("history omitted the moderator description edit")?;
+    assert_eq!(description_edit["author_role"], "moderator");
+    assert!(description_edit["by_maintainer"].is_null());
+
+    Ok(())
+}

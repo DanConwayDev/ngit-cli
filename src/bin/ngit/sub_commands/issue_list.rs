@@ -350,6 +350,23 @@ fn describe_issue_row(issue: &nostr::prelude::Event, rows: &[IssueRow<'_>]) -> S
     )
 }
 
+fn issue_author_role(
+    issue: &nostr::prelude::Event,
+    author: nostr::prelude::PublicKey,
+    confirmed_maintainers: &[nostr::prelude::PublicKey],
+    confirmed_moderators: &[nostr::prelude::PublicKey],
+) -> &'static str {
+    if author == issue.pubkey {
+        "author"
+    } else if confirmed_maintainers.contains(&author) {
+        "maintainer"
+    } else if confirmed_moderators.contains(&author) {
+        "moderator"
+    } else {
+        "unknown"
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn show_issue_details(
     issues: &[IssueRow<'_>],
@@ -380,14 +397,23 @@ fn show_issue_details(
     };
 
     if json {
-        let cover_note_json = cover_note.as_ref().map(|(cn, by_different_author)| {
+        let confirmed_maintainers = repo_ref.confirmed_maintainers();
+        let confirmed_moderators = repo_ref.confirmed_moderators();
+        let cover_note_json = cover_note.as_ref().map(|(cn, _)| {
+            let author_role = issue_author_role(
+                issue,
+                cn.pubkey,
+                &confirmed_maintainers,
+                &confirmed_moderators,
+            );
             let mut obj = serde_json::json!({
                 "id": event_id_to_nevent(cn.id, relay_hint),
                 "author": cn.pubkey.to_bech32().unwrap_or_default(),
+                "author_role": author_role,
                 "created_at": cn.created_at.as_secs(),
                 "body": cn.content,
             });
-            if *by_different_author {
+            if author_role == "maintainer" {
                 obj["by_maintainer"] = serde_json::Value::Bool(true);
             }
             obj
@@ -525,9 +551,12 @@ fn issue_edit_history(
     cover_note_events: &[nostr::prelude::Event],
     relay_hint: Option<&RelayUrl>,
 ) -> Vec<serde_json::Value> {
-    let authorized_members = repo_ref.confirmed_members();
+    let confirmed_maintainers = repo_ref.confirmed_maintainers();
+    let confirmed_moderators = repo_ref.confirmed_moderators();
     let is_permitted = |event: &nostr::prelude::Event| {
-        event.pubkey == issue.pubkey || authorized_members.contains(&event.pubkey)
+        event.pubkey == issue.pubkey
+            || confirmed_maintainers.contains(&event.pubkey)
+            || confirmed_moderators.contains(&event.pubkey)
     };
     let references_issue = |event: &nostr::prelude::Event| {
         event.tags.iter().any(|tag| {
@@ -544,6 +573,7 @@ fn issue_edit_history(
         "kind": "original",
         "id": event_id_to_nevent(issue.id, relay_hint),
         "author": issue.pubkey.to_bech32().unwrap_or_default(),
+        "author_role": "author",
         "created_at": issue.created_at.as_secs(),
         "subject": original_subject,
         "body": issue.content,
@@ -569,35 +599,47 @@ fn issue_edit_history(
         }) else {
             continue;
         };
-        revisions.push((
-            event.created_at.as_secs(),
-            event.id.to_hex(),
-            serde_json::json!({
-                "kind": "subject",
-                "id": event_id_to_nevent(event.id, relay_hint),
-                "author": event.pubkey.to_bech32().unwrap_or_default(),
-                "created_at": event.created_at.as_secs(),
-                "subject": subject,
-                "by_maintainer": event.pubkey != issue.pubkey,
-            }),
-        ));
+        let author_role = issue_author_role(
+            issue,
+            event.pubkey,
+            &confirmed_maintainers,
+            &confirmed_moderators,
+        );
+        let mut entry = serde_json::json!({
+            "kind": "subject",
+            "id": event_id_to_nevent(event.id, relay_hint),
+            "author": event.pubkey.to_bech32().unwrap_or_default(),
+            "author_role": author_role,
+            "created_at": event.created_at.as_secs(),
+            "subject": subject,
+        });
+        if author_role == "maintainer" {
+            entry["by_maintainer"] = serde_json::Value::Bool(true);
+        }
+        revisions.push((event.created_at.as_secs(), event.id.to_hex(), entry));
     }
 
     for event in cover_note_events.iter().filter(|event| {
         event.kind == KIND_COVER_NOTE && is_permitted(event) && references_issue(event)
     }) {
-        revisions.push((
-            event.created_at.as_secs(),
-            event.id.to_hex(),
-            serde_json::json!({
-                "kind": "description",
-                "id": event_id_to_nevent(event.id, relay_hint),
-                "author": event.pubkey.to_bech32().unwrap_or_default(),
-                "created_at": event.created_at.as_secs(),
-                "body": event.content,
-                "by_maintainer": event.pubkey != issue.pubkey,
-            }),
-        ));
+        let author_role = issue_author_role(
+            issue,
+            event.pubkey,
+            &confirmed_maintainers,
+            &confirmed_moderators,
+        );
+        let mut entry = serde_json::json!({
+            "kind": "description",
+            "id": event_id_to_nevent(event.id, relay_hint),
+            "author": event.pubkey.to_bech32().unwrap_or_default(),
+            "author_role": author_role,
+            "created_at": event.created_at.as_secs(),
+            "body": event.content,
+        });
+        if author_role == "maintainer" {
+            entry["by_maintainer"] = serde_json::Value::Bool(true);
+        }
+        revisions.push((event.created_at.as_secs(), event.id.to_hex(), entry));
     }
 
     revisions.sort_by(|(left_time, left_id, _), (right_time, right_id, _)| {
@@ -762,6 +804,7 @@ mod tests {
     #[test]
     fn edit_history_keeps_every_authorised_revision_and_rejects_outsiders() {
         let author = Keys::generate();
+        let maintainer = Keys::generate();
         let outsider = Keys::generate();
         let issue = EventBuilder::new(Kind::GitIssue, "original body")
             .tag(Tag::parse(["subject", "original subject"]).unwrap())
@@ -771,30 +814,40 @@ mod tests {
         let labels = vec![
             subject_edit(&author, &issue, "second subject", 1),
             subject_edit(&outsider, &issue, "spoofed subject", 3),
-            subject_edit(&author, &issue, "final subject", 4),
+            subject_edit(&maintainer, &issue, "maintainer subject", 4),
+            subject_edit(&author, &issue, "final subject", 5),
         ];
         let covers = vec![
-            description_edit(&author, &issue, "second body", 5),
-            description_edit(&outsider, &issue, "spoofed body", 6),
-            description_edit(&author, &issue, "final body", 7),
+            description_edit(&maintainer, &issue, "maintainer body", 6),
+            description_edit(&outsider, &issue, "spoofed body", 7),
+            description_edit(&author, &issue, "final body", 8),
         ];
 
         let history = issue_edit_history(
             &issue,
-            &repo_ref(author.public_key()),
+            &repo_ref(maintainer.public_key()),
             &labels,
             &covers,
             None,
         );
 
-        assert_eq!(history.len(), 5);
+        assert_eq!(history.len(), 6);
         assert_eq!(history[0]["kind"], "original");
         assert_eq!(history[0]["subject"], "original subject");
         assert_eq!(history[0]["body"], "original body");
+        assert_eq!(history[0]["author_role"], "author");
         assert_eq!(history[1]["subject"], "second subject");
-        assert_eq!(history[2]["subject"], "final subject");
-        assert_eq!(history[3]["body"], "second body");
-        assert_eq!(history[4]["body"], "final body");
+        assert_eq!(history[1]["author_role"], "author");
+        assert!(history[1]["by_maintainer"].is_null());
+        assert_eq!(history[2]["subject"], "maintainer subject");
+        assert_eq!(history[2]["author_role"], "maintainer");
+        assert_eq!(history[2]["by_maintainer"], true);
+        assert_eq!(history[3]["subject"], "final subject");
+        assert_eq!(history[3]["author_role"], "author");
+        assert_eq!(history[4]["body"], "maintainer body");
+        assert_eq!(history[4]["author_role"], "maintainer");
+        assert_eq!(history[5]["body"], "final body");
+        assert_eq!(history[5]["author_role"], "author");
         assert!(history.iter().all(|entry| {
             entry["subject"] != "spoofed subject" && entry["body"] != "spoofed body"
         }));
