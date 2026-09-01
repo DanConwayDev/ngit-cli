@@ -48,7 +48,8 @@ const AUTHORIZATION_SIGNING_ALLOWANCE: Duration = Duration::from_secs(2 * 60 * 6
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const PLACEMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const PRESENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const UPLOAD_REQUEST_TIMEOUT: Duration = TOTAL_TIMEOUT;
 const PLACEMENT_MAX_ATTEMPTS: usize = 3;
 const PLACEMENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
@@ -514,6 +515,7 @@ async fn upload_snapshot_with_authorization_inner(
     let streamed_size = snapshot.size;
     let streamed = Arc::new(AtomicU64::new(0));
     let streamed_for_progress = streamed.clone();
+    let (upload_activity, upload_activity_rx) = tokio::sync::mpsc::unbounded_channel();
     if streamed_size == 0 {
         if let Some(progress) = &progress {
             progress
@@ -532,6 +534,7 @@ async fn upload_snapshot_with_authorization_inner(
         if let (Some(progress), Ok(bytes)) = (&progress_for_stream, chunk) {
             let bytes = bytes.len().try_into().unwrap_or(u64::MAX);
             let previous = streamed_for_progress.fetch_add(bytes, Ordering::Relaxed);
+            let _ = upload_activity.send(previous.saturating_add(bytes));
             progress
                 .reporter
                 .update(&BlossomProgressEvent::UploadedBytes {
@@ -564,15 +567,62 @@ async fn upload_snapshot_with_authorization_inner(
         .header(AUTHORIZATION, authorization)
         .body(body);
 
-    let response = tokio::time::timeout_at(deadline, request.send())
-        .await
-        .map_err(|_| {
-            BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
-        })
-        .and_then(|result| result.map_err(|error| classify_send_error(error, "upload", true)));
-    let response = response?;
+    let response = send_upload_request_with_progress_timeout(
+        request,
+        upload_activity_rx,
+        deadline,
+        IDLE_TIMEOUT,
+        snapshot.size,
+    )
+    .await?;
 
-    read_store_response(response, snapshot, deadline, "upload").await
+    let response_deadline = deadline.min(tokio::time::Instant::now() + IDLE_TIMEOUT);
+    read_store_response(response, snapshot, response_deadline, "upload").await
+}
+
+async fn send_upload_request_with_progress_timeout(
+    request: reqwest::RequestBuilder,
+    mut activity: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    deadline: tokio::time::Instant,
+    idle_timeout: Duration,
+    total_bytes: u64,
+) -> std::result::Result<reqwest::Response, BlobRequestError> {
+    let request = request.send();
+    tokio::pin!(request);
+    let total_timer = tokio::time::sleep_until(deadline);
+    tokio::pin!(total_timer);
+    let idle_timer = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle_timer);
+    let mut activity_open = true;
+    let mut uploaded_bytes = 0;
+
+    loop {
+        tokio::select! {
+            response = &mut request => {
+                return response.map_err(|error| classify_send_error(error, "upload", true));
+            }
+            _ = &mut total_timer => {
+                return Err(BlobRequestError::unknown(
+                    anyhow!("Blossom upload exceeded its 30 minute total timeout after sending {uploaded_bytes}/{total_bytes} bytes"),
+                    true,
+                ));
+            }
+            _ = &mut idle_timer => {
+                return Err(BlobRequestError::unknown(
+                    anyhow!("Blossom upload made no progress for 30 seconds after sending {uploaded_bytes}/{total_bytes} bytes"),
+                    true,
+                ));
+            }
+            next = activity.recv(), if activity_open => {
+                if let Some(bytes) = next {
+                    uploaded_bytes = uploaded_bytes.max(bytes);
+                    idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                } else {
+                    activity_open = false;
+                }
+            }
+        }
+    }
 }
 
 async fn upload_snapshot_with_compatible_authorization(
@@ -636,7 +686,7 @@ async fn upload_snapshot_with_confirmation(
 ) -> std::result::Result<BatchStoreConfirmation, BlobRequestError> {
     let mut last_error = None;
     for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
-        let deadline = tokio::time::Instant::now() + PLACEMENT_REQUEST_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + UPLOAD_REQUEST_TIMEOUT;
         match upload_snapshot_with_compatible_authorization(
             client,
             server.as_str(),
@@ -841,7 +891,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 .collect(),
         })
         .collect::<Vec<_>>();
-    let client = blossom_http_client().map_err(|error| BatchUploadError {
+    let client = blossom_streaming_http_client().map_err(|error| BatchUploadError {
         message: format!("failed to prepare Blossom batch client: {error:#}"),
         blobs: blobs.clone(),
         possible_orphan_blobs: Vec::new(),
@@ -1197,11 +1247,17 @@ fn batch_upload_window(operation_count: usize, concurrency: usize) -> Result<Dur
     // Each upload attempt has one PUT window followed by up to `attempts`
     // verification HEAD windows. Keep the authorization valid for every
     // bounded operation even though normal successful uploads use only two.
-    let request_windows = attempts
-        .checked_mul(attempts.saturating_add(1))
+    let upload_window = UPLOAD_REQUEST_TIMEOUT
+        .checked_mul(attempts)
+        .context("Blossom upload window overflowed")?;
+    let presence_windows = attempts
+        .checked_mul(attempts)
         .context("Blossom upload request window count overflowed")?;
-    let operation_window = PLACEMENT_REQUEST_TIMEOUT
-        .checked_mul(request_windows)
+    let presence_window = PRESENCE_REQUEST_TIMEOUT
+        .checked_mul(presence_windows)
+        .context("Blossom presence-check window overflowed")?;
+    let operation_window = upload_window
+        .checked_add(presence_window)
         .context("Blossom upload operation window overflowed")?;
     operation_window
         .checked_mul(u32::try_from(waves).context("Blossom upload wave count is too large")?)
@@ -1247,7 +1303,7 @@ async fn snapshot_is_present(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
-    snapshot_is_present_once(client, server, snapshot, PLACEMENT_REQUEST_TIMEOUT).await
+    snapshot_is_present_once(client, server, snapshot, PRESENCE_REQUEST_TIMEOUT).await
 }
 
 async fn snapshot_is_present_with_retry(
@@ -1669,6 +1725,14 @@ fn blossom_http_client() -> Result<reqwest::Client> {
         .redirect(Policy::none())
         .build()
         .context("failed to create the Blossom HTTP client")
+}
+
+fn blossom_streaming_http_client() -> Result<reqwest::Client> {
+    crate::tls::http_client_builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to create the streaming Blossom HTTP client")
 }
 
 async fn read_store_response(
@@ -3205,10 +3269,49 @@ mod tests {
     #[test]
     fn batch_authorization_window_covers_every_bounded_upload_wave() -> Result<()> {
         let attempts = PLACEMENT_MAX_ATTEMPTS as u32;
-        let operation_window = PLACEMENT_REQUEST_TIMEOUT * (attempts * (attempts + 1));
+        let operation_window =
+            UPLOAD_REQUEST_TIMEOUT * attempts + PRESENCE_REQUEST_TIMEOUT * (attempts * attempts);
         assert_eq!(batch_upload_window(1, 4)?, operation_window);
         assert_eq!(batch_upload_window(8, 4)?, operation_window * 2);
         assert_eq!(batch_upload_window(9, 4)?, operation_window * 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steadily_progressing_upload_can_outlive_the_idle_timeout() -> Result<()> {
+        let (server_url, server) = spawn_one_shot_server(|_| TestResponse {
+            status: "200 OK",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let chunk_count = 5_u64;
+        let body = stream::unfold((0_u64, activity_tx), move |(chunk, activity)| async move {
+            if chunk == chunk_count {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let sent = chunk + 1;
+            let _ = activity.send(sent);
+            Some((Ok::<Vec<u8>, std::io::Error>(vec![b'x']), (sent, activity)))
+        });
+        let request = blossom_streaming_http_client()?
+            .put(format!("{server_url}/upload"))
+            .header(CONTENT_LENGTH, chunk_count)
+            .body(reqwest::Body::wrap_stream(body));
+
+        send_upload_request_with_progress_timeout(
+            request,
+            activity_rx,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            Duration::from_millis(80),
+            chunk_count,
+        )
+        .await?;
+
+        let request = completed_request(server).await?;
+        assert_eq!(request.body, vec![b'x'; chunk_count as usize]);
         Ok(())
     }
 
