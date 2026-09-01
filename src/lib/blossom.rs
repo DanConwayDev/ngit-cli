@@ -57,6 +57,33 @@ const MAX_PRESENCE_REDIRECTS: usize = 5;
 pub const DEFAULT_AUTHORIZATION_BATCH_SIZE: usize = 20;
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
+#[derive(Clone, Copy, Debug)]
+enum AuthorizationEncodingPreference {
+    Bud11,
+    Legacy,
+}
+
+#[derive(Clone, Copy)]
+struct BatchAuthorizationOptions {
+    batch_size: usize,
+    encoding_preference: AuthorizationEncodingPreference,
+}
+
+impl BatchAuthorizationOptions {
+    const DEFAULT: Self = Self {
+        batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
+        encoding_preference: AuthorizationEncodingPreference::Bud11,
+    };
+
+    // Release assets must interoperate with deployed servers which accept only
+    // one `x` tag and padded standard Base64. The same signed per-blob event is
+    // still reused across every selected server.
+    const LEGACY_PER_BLOB: Self = Self {
+        batch_size: 1,
+        encoding_preference: AuthorizationEncodingPreference::Legacy,
+    };
+}
+
 /// Observable milestones emitted by the Blossom batch placement engine.
 ///
 /// Byte totals describe HTTP request bodies, so a retry or compatible
@@ -513,24 +540,25 @@ async fn upload_snapshot_with_compatible_authorization(
     deadline: tokio::time::Instant,
     progress: UploadProgressContext,
 ) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let (primary_authorization, fallback_authorization) = match authorization.encoding_preference {
+        AuthorizationEncodingPreference::Bud11 => (&authorization.bud11, &authorization.legacy),
+        AuthorizationEncodingPreference::Legacy => (&authorization.legacy, &authorization.bud11),
+    };
     let primary = upload_snapshot_with_authorization_inner(
         client,
         server_url,
         snapshot,
-        authorization.bud11.clone(),
+        primary_authorization.clone(),
         deadline,
         Some(progress.clone()),
     )
     .await;
-    if primary
-        .as_ref()
-        .is_err_and(|error| error.status == Some(StatusCode::UNAUTHORIZED))
-    {
+    if primary.as_ref().is_err_and(auth_encoding_may_be_rejected) {
         return upload_snapshot_with_authorization_inner(
             client,
             server_url,
             snapshot,
-            authorization.legacy.clone(),
+            fallback_authorization.clone(),
             deadline,
             Some(UploadProgressContext {
                 preallocated: false,
@@ -540,6 +568,13 @@ async fn upload_snapshot_with_compatible_authorization(
         .await;
     }
     primary
+}
+
+fn auth_encoding_may_be_rejected(error: &BlobRequestError) -> bool {
+    matches!(
+        error.status,
+        Some(StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND)
+    )
 }
 
 enum BatchStoreConfirmation {
@@ -683,6 +718,46 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
     concurrency: usize,
     progress: Arc<dyn BlossomProgress>,
 ) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::DEFAULT,
+    )
+    .await
+}
+
+/// Batch placement for software releases which retains compatibility with
+/// deployed Blossom servers that require padded Base64 and exactly one `x`
+/// authorization tag.
+pub async fn upload_release_snapshot_batch_to_servers_with_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::LEGACY_PER_BLOB,
+    )
+    .await
+}
+
+async fn upload_snapshot_batch_to_servers_with_options_and_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+    authorization_options: BatchAuthorizationOptions,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
     if servers.is_empty() {
         return Err(empty_batch_error("at least one Blossom server is required"));
     }
@@ -815,11 +890,11 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
         .collect::<Vec<_>>();
     let authorization_batches = missing_hashes
         .len()
-        .div_ceil(DEFAULT_AUTHORIZATION_BATCH_SIZE);
+        .div_ceil(authorization_options.batch_size);
     let mut upload_failed = false;
     let mut uncertain = Vec::new();
     for (batch_index, hashes) in missing_hashes
-        .chunks(DEFAULT_AUTHORIZATION_BATCH_SIZE)
+        .chunks(authorization_options.batch_size)
         .enumerate()
     {
         let batch = batch_index + 1;
@@ -874,12 +949,14 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
                 &blobs,
             ));
         }
-        let authorization = compatible_authorization_headers(&event).map_err(|error| {
-            batch_progress_error(
-                format!("failed to encode Blossom batch authorization: {error:#}"),
-                &blobs,
-            )
-        })?;
+        let authorization =
+            compatible_authorization_headers(&event, authorization_options.encoding_preference)
+                .map_err(|error| {
+                    batch_progress_error(
+                        format!("failed to encode Blossom batch authorization: {error:#}"),
+                        &blobs,
+                    )
+                })?;
         let upload_bytes = uploads.iter().fold(0_u64, |total, (blob_index, _)| {
             total.saturating_add(snapshots[*blob_index].size)
         });
@@ -1685,9 +1762,13 @@ fn authorization_header(event: &Event) -> Result<HeaderValue> {
 struct CompatibleAuthorization {
     bud11: HeaderValue,
     legacy: HeaderValue,
+    encoding_preference: AuthorizationEncodingPreference,
 }
 
-fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthorization> {
+fn compatible_authorization_headers(
+    event: &Event,
+    encoding_preference: AuthorizationEncodingPreference,
+) -> Result<CompatibleAuthorization> {
     let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
     let header = |encoded: String| {
         HeaderValue::from_str(&format!("Nostr {encoded}"))
@@ -1696,6 +1777,7 @@ fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthoriza
     Ok(CompatibleAuthorization {
         bud11: header(URL_SAFE_NO_PAD.encode(&event))?,
         legacy: header(STANDARD.encode(event))?,
+        encoding_preference,
     })
 }
 
@@ -2167,7 +2249,7 @@ mod tests {
             let primary = read_request(&mut primary_stream).await?;
             primary_stream
                 .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 29\r\nConnection: close\r\n\r\ninvalid base64 for auth event",
                 )
                 .await?;
 
@@ -2407,7 +2489,8 @@ mod tests {
         let keys = Keys::generate();
         let event = server_list_event(&keys, 1, "compatibility", []);
         let event_json = serde_json::to_vec(&event)?;
-        let headers = compatible_authorization_headers(&event)?;
+        let headers =
+            compatible_authorization_headers(&event, AuthorizationEncodingPreference::Bud11)?;
         let bud11 = headers
             .bud11
             .to_str()?
@@ -2612,6 +2695,31 @@ mod tests {
             BlossomServerStatus::Stored
         );
         Ok(())
+    }
+
+    #[test]
+    fn authorization_encoding_fallback_covers_deployed_rejection_statuses() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+        ] {
+            let error = BlobRequestError::http(
+                anyhow!("authorization rejected"),
+                status,
+                RequestFailureKind::Definite,
+                false,
+            );
+            assert!(auth_encoding_may_be_rejected(&error));
+        }
+
+        let error = BlobRequestError::http(
+            anyhow!("upload too large"),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            RequestFailureKind::Definite,
+            false,
+        );
+        assert!(!auth_encoding_may_be_rejected(&error));
     }
 
     #[tokio::test]

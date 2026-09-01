@@ -358,7 +358,24 @@ assets:
                 .context("batched Blossom upload omitted authorization")
         })
         .collect::<Result<Vec<_>>>()?;
-    ensure!(authorizations[0] == authorizations[1]);
+    ensure!(authorizations[0] != authorizations[1]);
+    for (request, authorization) in upload_requests.iter().zip(authorizations) {
+        let encoded = authorization
+            .strip_prefix("Nostr ")
+            .context("Blossom authorization omitted the Nostr scheme")?;
+        let event: Event = serde_json::from_slice(
+            &STANDARD
+                .decode(encoded)
+                .context("release authorization did not use padded standard Base64")?,
+        )?;
+        let authorized_hashes = tag_values(&event, "x");
+        ensure!(authorized_hashes.len() == 1);
+        ensure!(
+            authorized_hashes[0]
+                == request_header(&request.head, "x-sha-256")
+                    .context("Blossom upload omitted X-SHA-256")?
+        );
+    }
     ensure!(output["result"]["application_operation"] == "created");
     ensure!(output["result"]["blossom"]["uploads"][0]["entity"] == "application_media");
     ensure!(output["result"]["blossom"]["uploads"][0]["field"] == "icon");

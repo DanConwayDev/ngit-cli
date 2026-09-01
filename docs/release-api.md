@@ -1206,12 +1206,13 @@ report the snapshot's exact `Content-Length` and MIME type. BUD-01 `307` and
 hash. A failed or ambiguous presence check prevents uploads for that snapshot;
 an exact match is recorded as `already_present` and skipped.
 
-When copies are missing, ngit signs a short-lived BUD-11 kind `24242`
-authorization containing `t=upload`, `x=<lowercase sha256>`, every selected
+When copies are missing, ngit signs one short-lived kind `24242` authorization
+per snapshot containing `t=upload`, one `x=<lowercase sha256>`, every selected
 server domain, and an expiration tag. It reuses that event across the missing
-servers. The HTTP `Authorization` value first uses URL-safe unpadded encoding;
-a server which returns `401` is retried once with legacy padded standard
-base64 of the same event. Authenticated PUT requests never follow redirects.
+servers. Release uploads first use padded standard Base64 for compatibility
+with deployed servers; an authorization-format rejection is retried once with
+BUD-11 URL-safe unpadded encoding of the same event. Authenticated PUT requests
+never follow redirects.
 
 Each missing server receives `PUT /upload` with `Content-Length`,
 `Content-Type`, and `X-SHA-256` headers and the snapshot as its streaming body.
@@ -1578,8 +1579,9 @@ fail closed with an actionable error.
 - BUD-10 Blossom URIs are not accepted as returned primary URLs in v1. Require
   an ordinary HTTP(S) URL that existing NIP-82 clients can retrieve.
 - Upload authorization events have narrow lifetimes and scopes. Never cache or
-  print them, create one only after preflight, scope it to the hash and selected
-  domains, and account for remote-signer latency and clock skew.
+  print them, create one per snapshot only after preflight, scope it to that
+  hash and the selected domains, and account for remote-signer latency and
+  clock skew.
 - Servers may deduplicate by hash while serving different headers or filenames.
   NIP-82 integrity is byte-based; display metadata still needs deterministic
   selection.
