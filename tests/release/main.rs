@@ -1214,12 +1214,12 @@ async fn release_fails_when_no_blossom_server_confirms_the_blob() -> Result<()> 
     ensure!(details["release_events_published"] == false);
     ensure!(details["blossom"]["uploads"][0]["servers"][0]["status"] == "failed");
     ensure!(details["possible_orphan_blobs"].as_array().map(Vec::len) == Some(0));
-    ensure!(
-        failure["error"]["message"]
-            .as_str()
-            .context("Blossom failure message missing")?
-            .contains("not confirmed on any selected server")
-    );
+    let message = failure["error"]["message"]
+        .as_str()
+        .context("Blossom failure message missing")?;
+    ensure!(message.contains("not confirmed on any selected server"));
+    ensure!(message.contains("unavailable.zip"));
+    ensure!(message.contains("NO CONFIRMED COPY"));
 
     let release_events = harness
         .relay("default")

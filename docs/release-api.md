@@ -761,11 +761,12 @@ precedence, followed by `publication.blossom_servers` from the loaded manifest.
 Either ordered list replaces discovery. Every missing selected server receives
 the same direct streaming `PUT /upload`; list order determines the published
 primary URL and result ordering. Local application media and release assets are
-deduplicated by hash and placed in one batch plan. Authorization events cover at
-most 20 missing hashes each; uploads within a batch use bounded concurrency.
-Human mode draws aggregate byte progress for each authorization batch and
-identifies active upload, verification, and retry work. JSON mode draws no
-progress bar.
+deduplicated by hash and placed in one plan. Release compatibility requires one
+authorization event per missing file; the event is reused across that file's
+missing servers, whose uploads use bounded concurrency. Human mode labels these
+steps `upload file N/M`, draws one line per server placement, and distinguishes
+body transfer, waiting for the HTTP response, post-upload verification, and
+retry delay. JSON mode draws no progress bars.
 Without an override, ngit uses the ordered `server` tags from the latest kind
 `10063` event authored by the application author, and fails rather than falling
 back when that latest event is invalid. It fails before signing when no source

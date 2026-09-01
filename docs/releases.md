@@ -194,11 +194,16 @@ the policy is enabled. Version, signer credentials, `--released-at`, `--tag`,
 `--edit`, and output format remain runtime inputs so a committed manifest
 cannot supply secrets, silently replace an event, or freeze per-release data.
 
-All local application media and release assets share one placement batch plan.
-Human output shows a byte progress bar for each authorization batch and labels
-presence checks, the current upload or verification, and retries. `--verbose`
-also retains each per-server outcome and failure message. `--json` keeps stdout
-machine-readable and does not draw progress bars.
+All local application media and release assets share one placement plan.
+For compatibility with deployed Blossom servers, release authorization and
+upload proceed one file at a time; the missing server placements for that file
+run concurrently. Human output therefore labels `upload file N/M` and draws a
+separate live line for each server. A line changes from byte transfer to
+`awaiting server response`, `verifying stored blob`, or `waiting to retry` as
+the HTTP operation advances, so a fully sent small request is not presented as
+an upload which is still transferring. `--verbose` also retains each
+per-server outcome and failure message. `--json` keeps stdout machine-readable
+and does not draw progress bars.
 
 Each asset has exactly one source:
 

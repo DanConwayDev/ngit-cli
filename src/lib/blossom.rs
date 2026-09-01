@@ -113,12 +113,16 @@ pub enum BlossomProgressEvent {
         batch: usize,
         batches: usize,
         blobs: usize,
+        filenames: Vec<String>,
     },
     UploadBatchStarted {
         batch: usize,
         batches: usize,
         blobs: usize,
+        filenames: Vec<String>,
         placements: usize,
+        confirmed: usize,
+        unavailable: usize,
         bytes: u64,
     },
     UploadRequestStarted {
@@ -128,11 +132,22 @@ pub enum BlossomProgressEvent {
         server: Url,
         attempt: usize,
         max_attempts: usize,
+        total_bytes: u64,
         additional_bytes: u64,
     },
     UploadedBytes {
         batch: usize,
+        filename: String,
+        server: Url,
         bytes: u64,
+    },
+    UploadBodyFinished {
+        batch: usize,
+        batches: usize,
+        filename: String,
+        server: Url,
+        attempt: usize,
+        max_attempts: usize,
     },
     VerificationStarted {
         batch: usize,
@@ -486,6 +501,7 @@ async fn upload_snapshot_with_authorization_inner(
                 server: progress.server.clone(),
                 attempt: progress.attempt,
                 max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                total_bytes: snapshot.size,
                 additional_bytes: if progress.preallocated {
                     0
                 } else {
@@ -493,19 +509,49 @@ async fn upload_snapshot_with_authorization_inner(
                 },
             });
     }
-    let transferred = Arc::new(AtomicU64::new(0));
-    let transferred_by_stream = transferred.clone();
     let progress_for_stream = progress.clone();
+    let streamed_filename = snapshot.filename.clone();
+    let streamed_size = snapshot.size;
+    let streamed = Arc::new(AtomicU64::new(0));
+    let streamed_for_progress = streamed.clone();
+    if streamed_size == 0 {
+        if let Some(progress) = &progress {
+            progress
+                .reporter
+                .update(&BlossomProgressEvent::UploadBodyFinished {
+                    batch: progress.batch,
+                    batches: progress.batches,
+                    filename: streamed_filename.clone(),
+                    server: progress.server.clone(),
+                    attempt: progress.attempt,
+                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                });
+        }
+    }
     let body_stream = ReaderStream::new(tokio::fs::File::from_std(file)).inspect(move |chunk| {
         if let (Some(progress), Ok(bytes)) = (&progress_for_stream, chunk) {
             let bytes = bytes.len().try_into().unwrap_or(u64::MAX);
-            transferred_by_stream.fetch_add(bytes, Ordering::Relaxed);
+            let previous = streamed_for_progress.fetch_add(bytes, Ordering::Relaxed);
             progress
                 .reporter
                 .update(&BlossomProgressEvent::UploadedBytes {
                     batch: progress.batch,
+                    filename: streamed_filename.clone(),
+                    server: progress.server.clone(),
                     bytes,
                 });
+            if previous < streamed_size && previous.saturating_add(bytes) >= streamed_size {
+                progress
+                    .reporter
+                    .update(&BlossomProgressEvent::UploadBodyFinished {
+                        batch: progress.batch,
+                        batches: progress.batches,
+                        filename: streamed_filename.clone(),
+                        server: progress.server.clone(),
+                        attempt: progress.attempt,
+                        max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                    });
+            }
         }
     });
     let body = reqwest::Body::wrap_stream(body_stream);
@@ -524,19 +570,6 @@ async fn upload_snapshot_with_authorization_inner(
             BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
         })
         .and_then(|result| result.map_err(|error| classify_send_error(error, "upload", true)));
-    if let Some(progress) = &progress {
-        let remaining = snapshot
-            .size
-            .saturating_sub(transferred.load(Ordering::Relaxed));
-        if remaining != 0 {
-            progress
-                .reporter
-                .update(&BlossomProgressEvent::UploadedBytes {
-                    batch: progress.batch,
-                    bytes: remaining,
-                });
-        }
-    }
     let response = response?;
 
     read_store_response(response, snapshot, deadline, "upload").await
@@ -916,6 +949,16 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
     {
         let batch = batch_index + 1;
         let hashes_in_chunk = hashes.iter().copied().collect::<HashSet<_>>();
+        let chunk_blob_indices = snapshots
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot)| hashes_in_chunk.contains(snapshot.sha256.as_str()))
+            .map(|(blob_index, _)| blob_index)
+            .collect::<Vec<_>>();
+        let filenames = chunk_blob_indices
+            .iter()
+            .map(|blob_index| snapshots[*blob_index].filename.clone())
+            .collect::<Vec<_>>();
         let uploads = missing
             .iter()
             .copied()
@@ -949,6 +992,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             batch,
             batches: authorization_batches,
             blobs: hashes.len(),
+            filenames: filenames.clone(),
         });
         let (event, expires) =
             upload_authorization_with_lifetime(hashes, servers, signer, authorization_lifetime)
@@ -977,11 +1021,23 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
         let upload_bytes = uploads.iter().fold(0_u64, |total, (blob_index, _)| {
             total.saturating_add(snapshots[*blob_index].size)
         });
+        let total_placements = chunk_blob_indices.len().saturating_mul(servers.len());
+        let confirmed = chunk_blob_indices
+            .iter()
+            .flat_map(|blob_index| blobs[*blob_index].servers.iter())
+            .filter(|outcome| server_outcome_is_confirmed(outcome))
+            .count();
+        let unavailable = total_placements
+            .saturating_sub(confirmed)
+            .saturating_sub(uploads.len());
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch,
             batches: authorization_batches,
             blobs: hashes.len(),
+            filenames,
             placements: uploads.len(),
+            confirmed,
+            unavailable,
             bytes: upload_bytes,
         });
         let upload_results = stream::iter(uploads)
@@ -2911,6 +2967,7 @@ mod tests {
                     blobs: 1,
                     placements: 1,
                     bytes,
+                    ..
                 } if *bytes == snapshot.size
             )
         }));
@@ -2932,6 +2989,20 @@ mod tests {
             })
             .sum::<u64>();
         assert_eq!(uploaded_bytes, snapshot.size * 2);
+        let completed_bodies = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    BlossomProgressEvent::UploadBodyFinished {
+                        filename,
+                        server,
+                        ..
+                    } if filename == &snapshot.filename && server == &server_url
+                )
+            })
+            .count();
+        assert_eq!(completed_bodies, 2);
         assert!(matches!(
             events.last(),
             Some(BlossomProgressEvent::UploadBatchFinished {
