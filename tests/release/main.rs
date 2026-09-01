@@ -93,7 +93,7 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
     .await?;
     let asset_argument = format!("linux-x86_64={}/zero-state.tar.gz", server.base_url());
 
-    let output = run_json(
+    let (output, stderr) = run_json_with_stderr(
         &publisher,
         &[
             "release",
@@ -108,6 +108,15 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
     )
     .await?;
     server.finish().await?;
+
+    let fetch_summaries = stderr
+        .lines()
+        .filter(|line| *line == "no updates" || line.starts_with("updates: "))
+        .count();
+    ensure!(
+        fetch_summaries == 1,
+        "release publish emitted {fetch_summaries} fetch summaries:\n{stderr}"
+    );
 
     ensure!(output["result"]["application_operation"] == "created");
     ensure!(
@@ -2149,6 +2158,12 @@ async fn assert_read_apis(repo: &Repo, asset_event: &Event) -> Result<()> {
 }
 
 async fn run_json(repo: &Repo, args: &[&str]) -> Result<Value> {
+    run_json_with_stderr(repo, args)
+        .await
+        .map(|(value, _)| value)
+}
+
+async fn run_json_with_stderr(repo: &Repo, args: &[&str]) -> Result<(Value, String)> {
     let output = repo
         .ngit(args.iter().copied())
         .output()
@@ -2162,7 +2177,8 @@ async fn run_json(repo: &Repo, args: &[&str]) -> Result<Value> {
             String::from_utf8_lossy(&output.stderr),
         );
     }
-    parse_json(&output.stdout, args)
+    let value = parse_json(&output.stdout, args)?;
+    Ok((value, String::from_utf8_lossy(&output.stderr).into_owned()))
 }
 
 async fn run_json_expecting_failure(repo: &Repo, args: &[&str]) -> Result<Value> {

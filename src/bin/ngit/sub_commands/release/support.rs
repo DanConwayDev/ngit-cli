@@ -9,7 +9,8 @@ use ngit::{
     NgitSigner,
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
-        get_events_from_local_cache, get_repo_ref_from_cache, send_events,
+        fetching_without_summary, get_events_from_local_cache, get_repo_ref_from_cache,
+        send_events,
     },
     event_ordering::latest_event,
     git::{Repo, RepoActions},
@@ -344,7 +345,7 @@ impl ReleaseContext {
     }
 
     pub(super) async fn refresh_repository(&mut self) -> Result<()> {
-        fetching_with_report(
+        fetching_without_summary(
             self.git_repo_path()?,
             &self.client,
             &self.selected_coordinate,
