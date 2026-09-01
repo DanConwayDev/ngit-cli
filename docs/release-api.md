@@ -108,6 +108,12 @@ first, followed by the remaining coordinates in the ordering defined by
 [the maintainer model](architecture/maintainer-model.md). A canonical clone URL
 SHOULD be included in `repository` when one can be resolved.
 
+For compatibility with historical zsp/Zapstore events, ngit also accepts an
+application `a` tag containing a kind `30063` release coordinate. It preserves
+that pointer as extra metadata when replacing the application, but does not
+treat it as a Git repository coordinate. Newly created application events do
+not emit this legacy pointer unless it was inherited from an existing event.
+
 ### Release
 
 A software release event has:
