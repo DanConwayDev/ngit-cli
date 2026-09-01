@@ -540,18 +540,15 @@ fn issue_edit_history(
         .ok()
         .filter(|subject| !subject.is_empty())
         .unwrap_or_else(|| get_issue_title(issue, None));
-    let mut history = vec![(
-        issue.created_at.as_secs(),
-        issue.id.to_hex(),
-        serde_json::json!({
-            "kind": "original",
-            "id": event_id_to_nevent(issue.id, relay_hint),
-            "author": issue.pubkey.to_bech32().unwrap_or_default(),
-            "created_at": issue.created_at.as_secs(),
-            "subject": original_subject,
-            "body": issue.content,
-        }),
-    )];
+    let original = serde_json::json!({
+        "kind": "original",
+        "id": event_id_to_nevent(issue.id, relay_hint),
+        "author": issue.pubkey.to_bech32().unwrap_or_default(),
+        "created_at": issue.created_at.as_secs(),
+        "subject": original_subject,
+        "body": issue.content,
+    });
+    let mut revisions = vec![];
 
     for event in label_events.iter().filter(|event| {
         event.kind == KIND_LABEL
@@ -572,7 +569,7 @@ fn issue_edit_history(
         }) else {
             continue;
         };
-        history.push((
+        revisions.push((
             event.created_at.as_secs(),
             event.id.to_hex(),
             serde_json::json!({
@@ -589,7 +586,7 @@ fn issue_edit_history(
     for event in cover_note_events.iter().filter(|event| {
         event.kind == KIND_COVER_NOTE && is_permitted(event) && references_issue(event)
     }) {
-        history.push((
+        revisions.push((
             event.created_at.as_secs(),
             event.id.to_hex(),
             serde_json::json!({
@@ -603,12 +600,14 @@ fn issue_edit_history(
         ));
     }
 
-    history.sort_by(|(left_time, left_id, _), (right_time, right_id, _)| {
+    revisions.sort_by(|(left_time, left_id, _), (right_time, right_id, _)| {
         left_time
             .cmp(right_time)
             .then_with(|| right_id.cmp(left_id))
     });
-    history.into_iter().map(|(_, _, entry)| entry).collect()
+    std::iter::once(original)
+        .chain(revisions.into_iter().map(|(_, _, entry)| entry))
+        .collect()
 }
 
 fn chrono_timestamp(unix_secs: u64) -> String {
@@ -770,7 +769,7 @@ mod tests {
             .finalize(&author)
             .unwrap();
         let labels = vec![
-            subject_edit(&author, &issue, "second subject", 2),
+            subject_edit(&author, &issue, "second subject", 1),
             subject_edit(&outsider, &issue, "spoofed subject", 3),
             subject_edit(&author, &issue, "final subject", 4),
         ];
