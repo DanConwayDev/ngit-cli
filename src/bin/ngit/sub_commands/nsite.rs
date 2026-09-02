@@ -169,7 +169,7 @@ async fn publish(
     let (_, aggregate) = manifest_event_builder(&files, &manifest_input)?;
 
     context.emit_human_warnings_before_signing(json_output);
-    if !json_output {
+    if !json_output && !ngit::output_mode::is_quiet() {
         eprintln!(
             "confirming {} unique blob(s) across {} Blossom server(s)...",
             blobs.len(),

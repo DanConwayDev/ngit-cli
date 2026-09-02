@@ -11,6 +11,8 @@ use nostr::{
 };
 use nostr_connect::client::NostrConnect;
 
+use crate::output_mode::TransientLine;
+
 /// Signer abstraction covering both local keys and remote NIP-46 bunker.
 #[derive(Clone)]
 pub enum NgitSigner {
@@ -103,10 +105,10 @@ impl NgitSigner {
         }
 
         let term = console::Term::stderr();
-        term.write_line(&remote_signing_message(description))?;
+        let progress = TransientLine::write(&term, &remote_signing_message(description))?;
         let result = operation.await;
         if result.is_ok() {
-            term.clear_last_lines(1)?;
+            progress.clear()?;
         }
         result
     }
@@ -160,12 +162,12 @@ impl std::fmt::Debug for NgitSigner {
 pub async fn fetch_public_key_from_signer(signer: &Arc<NgitSigner>) -> Result<PublicKey> {
     if signer.is_remote() {
         let term = console::Term::stderr();
-        term.write_line("fetching npub from remote signer...")?;
+        let progress = TransientLine::write(&term, "fetching npub from remote signer...")?;
         let public_key = signer
             .get_public_key()
             .await
             .map_err(|e| anyhow!("failed to get npub from remote signer: {e}"))?;
-        term.clear_last_lines(1)?;
+        progress.clear()?;
         Ok(public_key)
     } else {
         signer

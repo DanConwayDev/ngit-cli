@@ -33,6 +33,7 @@ use crate::{
         nostr_url::{NostrUrlDecoded, use_nip05_git_config_cache_to_find_nip05_from_public_key},
     },
     login::user::{PrivateGitRelayDiscovery, get_user_details},
+    output_mode::{is_quiet, write_progress_line},
 };
 
 #[derive(Clone)]
@@ -2579,7 +2580,9 @@ pub async fn try_and_get_repo_coordinates_when_remote_unknown(
 pub fn print_selected_repo(resolved: &ResolvedRepoCoordinate) {
     // Suppress in test builds to keep unit tests deterministic; integration
     // tests can opt-in with NGIT_PRINT_SELECTED_REPO=1.
-    if cfg!(test) && std::env::var("NGIT_PRINT_SELECTED_REPO").is_err() {
+    if crate::output_mode::is_quiet()
+        || (cfg!(test) && std::env::var("NGIT_PRINT_SELECTED_REPO").is_err())
+    {
         return;
     }
     let dim = Style::new().color256(247);
@@ -2702,7 +2705,7 @@ async fn get_repo_coordinate_from_user_prompt(
                 continue;
             };
             let term = console::Term::stderr();
-            term.write_line("searching for repository...")?;
+            write_progress_line(&term, "searching for repository...")?;
             if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
                 bail!("private Git relay discovery is unavailable: {error}");
             }
@@ -2754,7 +2757,9 @@ async fn get_repo_coordinate_from_user_prompt(
                 eprintln!("couldn't find repository");
                 continue;
             } else {
-                eprintln!("repository found");
+                if !is_quiet() {
+                    eprintln!("repository found");
+                }
                 break coordinate;
             }
         }

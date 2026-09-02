@@ -24,9 +24,10 @@ use crate::{client::save_event_in_global_cache, get_dirs};
 use crate::{
     client::{
         Connect, RelayProgressReporter, finish_fetch_progress, get_event_from_global_cache,
-        is_verbose, sign_draft_event, sign_event,
+        sign_draft_event, sign_event,
     },
     git_events::{KIND_PRIVATE_GIT_RELAY_LIST, KIND_USER_GRASP_LIST},
+    output_mode::is_verbose,
 };
 
 const PRIVATE_RELAY_LIST_UPDATE_ATTEMPTS: usize = 3;
@@ -253,7 +254,7 @@ impl PrivateGitRelayList {
         let list = Self::from_plaintext(event, &plaintext).map_err(Invalid)?;
         if let Some(cache_dir) = cache_dir {
             if let Err(error) = write_cached_private_git_relay_list(cache_dir, event, &plaintext) {
-                if crate::client::is_verbose() {
+                if crate::output_mode::is_verbose() {
                     eprintln!("nostr: failed to cache decrypted private Git relay list: {error:#}");
                 }
             }

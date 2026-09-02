@@ -19,6 +19,7 @@ use crate::{
         utils::check_ssh_keys,
     },
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
+    output_mode::{is_quiet, write_progress_line},
     repo_ref::{RepoRef, is_grasp_server_in_list},
     signer::NgitSigner,
     utils::{
@@ -89,7 +90,7 @@ pub async fn ensure_commit_local(
         .is_ok()
             && git_repo.does_commit_exist(oid)?
         {
-            let _ = term.write_line(&format!("fetched git data from {git_server_url}"));
+            let _ = write_progress_line(term, &format!("fetched git data from {git_server_url}"));
             return Ok(());
         }
     }
@@ -132,9 +133,10 @@ pub fn fetch_from_git_server(
     }
 
     if remote_helper::handles_url(git_server_url) {
-        term.write_line(&format!(
-            "fetching {git_server_url} via Git remote helper..."
-        ))?;
+        write_progress_line(
+            term,
+            &format!("fetching {git_server_url} via Git remote helper..."),
+        )?;
         return remote_helper::fetch(git_repo, git_server_url, oids, term);
     }
 
@@ -146,7 +148,8 @@ pub fn fetch_from_git_server(
     let mut failed_protocols = vec![];
     let mut success = false;
     for protocol in &protocols_to_attempt {
-        term.write_line(
+        write_progress_line(
+            term,
             format!("fetching {} over {protocol}...", server_url.short_name(),).as_str(),
         )?;
 
@@ -160,23 +163,26 @@ pub fn fetch_from_git_server(
             term,
         );
         if let Err(error) = res {
-            term.write_line(&format!(
-                "fetch: {formatted_url} failed over {protocol}{}: {error}",
-                if protocol == &ServerProtocol::Ssh {
-                    if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
-                        format!(" with ssh key from {ssh_key_file}")
+            write_progress_line(
+                term,
+                &format!(
+                    "fetch: {formatted_url} failed over {protocol}{}: {error}",
+                    if protocol == &ServerProtocol::Ssh {
+                        if let Some(ssh_key_file) = &decoded_nostr_url.ssh_key_file_path() {
+                            format!(" with ssh key from {ssh_key_file}")
+                        } else {
+                            String::new()
+                        }
                     } else {
                         String::new()
                     }
-                } else {
-                    String::new()
-                }
-            ))?;
+                ),
+            )?;
             failed_protocols.push(protocol);
         } else {
             success = true;
             if !failed_protocols.is_empty() {
-                term.write_line(format!("fetch: succeeded over {protocol}").as_str())?;
+                write_progress_line(term, format!("fetch: succeeded over {protocol}").as_str())?;
                 let _ = set_protocol_preference(git_repo, protocol, &server_url, &Direction::Push);
             }
             break;
@@ -195,7 +201,7 @@ pub fn fetch_from_git_server(
                 ""
             },
         );
-        term.write_line(format!("fetch: {error}").as_str())?;
+        write_progress_line(term, format!("fetch: {error}").as_str())?;
         Err(error)
     }
 }
@@ -236,9 +242,10 @@ pub fn fetch_refs_from_git_server(
     }
 
     if remote_helper::handles_url(git_server_url) {
-        term.write_line(&format!(
-            "fetching {git_server_url} via Git remote helper..."
-        ))?;
+        write_progress_line(
+            term,
+            &format!("fetching {git_server_url} via Git remote helper..."),
+        )?;
         let oids: Vec<String> = missing.iter().map(|(_, oid)| oid.clone()).collect();
         return remote_helper::fetch(git_repo, git_server_url, &oids, term);
     }
@@ -251,7 +258,8 @@ pub fn fetch_refs_from_git_server(
     let mut failed_protocols = vec![];
     let mut success = false;
     for protocol in &protocols_to_attempt {
-        term.write_line(
+        write_progress_line(
+            term,
             format!("fetching {} over {protocol}...", server_url.short_name()).as_str(),
         )?;
         let formatted_url = server_url.format_as(protocol)?;
@@ -264,9 +272,10 @@ pub fn fetch_refs_from_git_server(
             term,
         );
         if let Err(error) = res {
-            term.write_line(&format!(
-                "fetch: {formatted_url} failed over {protocol}: {error}"
-            ))?;
+            write_progress_line(
+                term,
+                &format!("fetch: {formatted_url} failed over {protocol}: {error}"),
+            )?;
             failed_protocols.push(protocol);
         } else {
             success = true;
@@ -281,7 +290,7 @@ pub fn fetch_refs_from_git_server(
             server_url.short_name(),
             join_with_and(&failed_protocols)
         );
-        term.write_line(format!("fetch: {error}").as_str())?;
+        write_progress_line(term, format!("fetch: {error}").as_str())?;
         Err(error)
     }
 }
@@ -321,23 +330,25 @@ fn fetch_from_git_server_url(
         fetch_options.proxy_options(proxy);
     }
     let mut remote_callbacks = git2::RemoteCallbacks::new();
-    let fetch_reporter = Arc::new(Mutex::new(FetchReporter::new(term)));
-    remote_callbacks.sideband_progress({
-        let fetch_reporter = Arc::clone(&fetch_reporter);
-        move |data| {
-            let mut reporter = fetch_reporter.lock().unwrap();
-            reporter.process_remote_msg(data);
-            true
-        }
-    });
-    remote_callbacks.transfer_progress({
-        let fetch_reporter = Arc::clone(&fetch_reporter);
-        move |stats| {
-            let mut reporter = fetch_reporter.lock().unwrap();
-            reporter.process_transfer_progress_update(&stats);
-            true
-        }
-    });
+    if !is_quiet() {
+        let fetch_reporter = Arc::new(Mutex::new(FetchReporter::new(term)));
+        remote_callbacks.sideband_progress({
+            let fetch_reporter = Arc::clone(&fetch_reporter);
+            move |data| {
+                let mut reporter = fetch_reporter.lock().unwrap();
+                reporter.process_remote_msg(data);
+                true
+            }
+        });
+        remote_callbacks.transfer_progress({
+            let fetch_reporter = Arc::clone(&fetch_reporter);
+            move |stats| {
+                let mut reporter = fetch_reporter.lock().unwrap();
+                reporter.process_transfer_progress_update(&stats);
+                true
+            }
+        });
+    }
 
     if !dont_authenticate {
         remote_callbacks.credentials(auth.credentials(&git_config));

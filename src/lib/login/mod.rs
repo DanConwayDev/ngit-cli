@@ -10,8 +10,8 @@ use crate::client::Client;
 use crate::client::MockConnect;
 use crate::{
     cli_interactor::Interactor,
-    client::is_verbose,
     git::{Repo, RepoActions},
+    output_mode::is_verbose,
 };
 
 pub mod credential_store;

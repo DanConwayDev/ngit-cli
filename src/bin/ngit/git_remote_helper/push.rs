@@ -25,6 +25,7 @@ use ngit::{
     },
     list::list_from_remotes,
     login::{SignerInfo, existing::load_existing_login, user::UserRef},
+    output_mode::write_progress_line,
     proposal_base::{
         ProposalBaseInference, commits_after_base, infer_proposal_base,
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
@@ -1195,7 +1196,8 @@ pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
                     {
                         if from_tip.eq(&remote_value_tip) {
                             // remote already at correct state
-                            term.write_line(
+                            write_progress_line(
+                                term,
                                 format!("{short_name} {to} already up-to-date").as_str(),
                             )?;
                         }
@@ -1251,7 +1253,8 @@ pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
                 } else {
                     // existing nostr branch not on remote
                     // report - creating new branch
-                    term.write_line(
+                    write_progress_line(
+                        term,
                         format!(
                             "{short_name} {to} doesn't exist and will be added as a new branch"
                         )
@@ -1723,7 +1726,8 @@ async fn get_issue_resolution_status_events(
                     )
                     .await?;
 
-                    term.write_line(
+                    write_progress_line(
+                        term,
                         format!(
                             "commit {}: create issue status resolved event for {}",
                             short_sha1(&commit_hash),
@@ -2255,7 +2259,8 @@ async fn create_merge_events(
             .values()
             .any(|m| *m == MergedPRCommitType::MergeCommit)
         {
-            term.write_line(
+            write_progress_line(
+                term,
                 format!(
                     "merge commit {}: create nostr proposal status event",
                     merged_patches
@@ -2273,7 +2278,8 @@ async fn create_merge_events(
             .values()
             .any(|m| matches!(m, MergedPRCommitType::PatchApplied { .. }))
         {
-            term.write_line(
+            write_progress_line(
+                term,
                 format!(
                     "applied commits from proposal: create nostr proposal status event for {}",
                     event_to_cover_letter(&proposal)?
@@ -2282,7 +2288,8 @@ async fn create_merge_events(
                 .as_str(),
             )?;
         } else {
-            term.write_line(
+            write_progress_line(
+                term,
                 format!(
                     "fast-forward merge: create nostr proposal status event for {}",
                     event_to_cover_letter(&proposal)?

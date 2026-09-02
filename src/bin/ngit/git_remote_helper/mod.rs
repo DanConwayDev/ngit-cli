@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use client::{
     Connect, FetchReport, PrivateRelayProbeDecision, consolidate_fetch_outcome,
-    finish_fetch_progress, get_repo_ref_from_cache, is_verbose, needs_private_relay_discovery,
+    finish_fetch_progress, get_repo_ref_from_cache, needs_private_relay_discovery,
     private_relay_probe_decision, save_repository_privacy_to_git_config,
     warn_if_invited_as_maintainer,
 };
@@ -34,6 +34,7 @@ use ngit::{
             refresh_user_and_private_git_relays,
         },
     },
+    output_mode::{OutputMode, is_quiet, is_verbose, set_git_verbosity, set_output_mode},
     relay_information::discover_private_repository_relays,
     signer::NgitSigner,
     utils::read_line,
@@ -222,6 +223,50 @@ fn apply_ngit_push_option(push_options: &mut PushOptions, key: &str, value: &str
     true
 }
 
+fn print_capabilities() {
+    println!("option");
+    println!("push");
+    println!("fetch");
+    println!("push-options");
+    println!();
+}
+
+/// Handle an `option` command and write its remote-helper protocol response.
+/// Returns `false` when `tokens` is not an option command.
+fn respond_to_option(tokens: &[&str], push_options: &mut PushOptions) -> bool {
+    match tokens {
+        ["option", "verbosity", value] => match value.parse::<u8>() {
+            Ok(verbosity) => {
+                set_git_verbosity(verbosity);
+                println!("ok");
+            }
+            Err(error) => println!("error invalid verbosity: {error}"),
+        },
+        ["option", "push-option", rest @ ..] => {
+            let option = strip_git_quoting(&rest.join(" "));
+            let handled_by_ngit = if let Some((key, value)) = option.split_once('=') {
+                apply_ngit_push_option(push_options, key, value)
+            } else {
+                false
+            };
+            if !handled_by_ngit {
+                push_options.git_server_extras.push(option);
+            }
+            println!("ok");
+        }
+        ["option", "cas", value] => match parse_cas_option(value) {
+            Ok((ref_name, expected)) => {
+                push_options.force_with_lease.insert(ref_name, expected);
+                println!("ok");
+            }
+            Err(error) => println!("error {error}"),
+        },
+        ["option", ..] => println!("unsupported"),
+        _ => return false,
+    }
+    true
+}
+
 mod fetch;
 mod list;
 pub(crate) mod push;
@@ -241,8 +286,40 @@ pub async fn run(args: &[String]) -> Result<()> {
         command_config_value("nostr.signer")?.map(|selector| SignerInfo::Selection { selector });
 
     if std::env::var("NGITTEST").is_ok() {
-        std::env::set_var("NGIT_VERBOSE", "1");
+        set_output_mode(OutputMode::Verbose);
     }
+
+    // Direct `--version` and no-argument invocations do not speak the helper
+    // protocol, so preserve their immediate output instead of waiting on
+    // stdin. A real Git invocation always supplies a URL and starts with
+    // capability negotiation.
+    if args.is_empty() || args.first().map(String::as_str) == Some("--version") {
+        process_args(args).await?;
+        return Ok(());
+    }
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    let mut list_outputs = None;
+    let mut push_options = PushOptions::default();
+
+    // Git sends verbosity after capabilities. Defer URL resolution, relay
+    // discovery, update notices, and every other visible operation until the
+    // helper has received those options, otherwise `git clone -q` cannot
+    // suppress setup output that has already been written.
+    loop {
+        let tokens = read_line(&stdin, &mut line)?;
+        if respond_to_option(&tokens, &mut push_options) {
+            continue;
+        }
+        match tokens.as_slice() {
+            ["capabilities"] => print_capabilities(),
+            ["fetch", _, _] | ["push", _] | ["list"] | ["list", "for-push"] => break,
+            [] => return Ok(()),
+            _ => bail!(format!("unknown command: {}", line.trim().to_owned())),
+        }
+    }
+    let pending_command = line.trim().to_owned();
 
     let Some((remote_name, decoded_nostr_url, git_repo)) = process_args(args).await? else {
         return Ok(());
@@ -273,6 +350,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         || !nip11_private_relays.is_empty();
 
     let _ = set_git_timeout(Some(&git_repo));
+    // quiet suppression happens inside print_update_notice_if_available
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
@@ -380,52 +458,31 @@ pub async fn run(args: &[String]) -> Result<()> {
     // this is the repository the helper operates on, so its privacy
     // classification may be recorded in the local git config
     save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
-    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
-    let _ = ngit::agent_guidance::warn_if_maintainer(&git_repo, &repo_ref).await;
+    if !is_quiet() {
+        warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
+        let _ = ngit::agent_guidance::warn_if_maintainer(&git_repo, &repo_ref).await;
+    }
 
     repo_ref.set_nostr_git_url(decoded_nostr_url.clone());
 
-    let stdin = io::stdin();
-    let mut line = String::new();
-
-    let mut list_outputs = None;
-    let mut push_options: PushOptions = PushOptions::default();
+    let mut pending_command = Some(pending_command);
     loop {
-        let tokens = read_line(&stdin, &mut line)?;
+        let pending = pending_command.take();
+        let tokens = if let Some(command) = pending.as_deref() {
+            command
+                .split(' ')
+                .filter(|token| !token.is_empty())
+                .collect()
+        } else {
+            read_line(&stdin, &mut line)?
+        };
+
+        if respond_to_option(&tokens, &mut push_options) {
+            continue;
+        }
 
         match tokens.as_slice() {
-            ["capabilities"] => {
-                println!("option");
-                println!("push");
-                println!("fetch");
-                println!("push-options");
-                println!();
-            }
-            ["option", "verbosity"] => {
-                println!("ok");
-            }
-            ["option", "push-option", rest @ ..] => {
-                let option = strip_git_quoting(&rest.join(" "));
-                let handled_by_ngit = if let Some((key, value)) = option.split_once('=') {
-                    apply_ngit_push_option(&mut push_options, key, value)
-                } else {
-                    false
-                };
-                if !handled_by_ngit {
-                    push_options.git_server_extras.push(option);
-                }
-                println!("ok");
-            }
-            ["option", "cas", value] => match parse_cas_option(value) {
-                Ok((ref_name, expected)) => {
-                    push_options.force_with_lease.insert(ref_name, expected);
-                    println!("ok");
-                }
-                Err(error) => println!("error {error}"),
-            },
-            ["option", ..] => {
-                println!("unsupported");
-            }
+            ["capabilities"] => print_capabilities(),
             ["fetch", oid, refstr] => {
                 refresh_private_git_auth(&repo_ref, signer.as_ref()).await?;
                 fetch::run_fetch(&git_repo, &repo_ref, &stdin, oid, refstr, signer.as_ref())
@@ -636,7 +693,7 @@ async fn fetching_with_report_for_helper(
         if verbose {
             term.write_line("nostr: no updates")?;
         }
-    } else {
+    } else if !is_quiet() {
         term.write_line(&format!("nostr updates: {report}"))?;
     }
     Ok(report)

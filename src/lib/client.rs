@@ -64,6 +64,7 @@ use crate::{
         get_likely_logged_in_user,
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
+    output_mode::{TransientLine, is_quiet, is_verbose, write_progress_line},
     relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
@@ -73,10 +74,6 @@ use crate::{
     signer::NgitSigner,
     version_check,
 };
-
-pub fn is_verbose() -> bool {
-    std::env::var("NGIT_VERBOSE").is_ok()
-}
 
 /// Default SOCKS5 proxy used to reach `.onion` relays and clone URLs.
 ///
@@ -239,7 +236,7 @@ impl RelayProgressHandle {
 impl RelayProgressReporter {
     fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
         let heading_message = heading_message.into();
-        let mode = if silent || std::env::var("NGITTEST").is_ok() {
+        let mode = if silent || is_quiet() || std::env::var("NGITTEST").is_ok() {
             RelayProgressMode::Hidden
         } else if is_verbose() || !animate {
             RelayProgressMode::Detailed
@@ -1711,12 +1708,12 @@ pub async fn sign_draft_event(
 pub async fn fetch_public_key(signer: &Arc<NgitSigner>) -> Result<nostr::prelude::PublicKey> {
     if signer.is_remote() {
         let term = console::Term::stderr();
-        term.write_line("fetching npub from remote signer...")?;
+        let progress = TransientLine::write(&term, "fetching npub from remote signer...")?;
         let public_key = signer
             .get_public_key()
             .await
             .context("failed to get npub from remote signer")?;
-        term.clear_last_lines(1)?;
+        progress.clear()?;
         Ok(public_key)
     } else {
         signer
@@ -3897,9 +3894,9 @@ async fn fetching_with_report_policy_outcome(
     // stdout.
     let term = console::Term::stderr();
     if outcome.report.to_string().is_empty() {
-        term.write_line("no updates")?;
+        write_progress_line(&term, "no updates")?;
     } else {
-        term.write_line(&format!("updates: {}", outcome.report))?;
+        write_progress_line(&term, &format!("updates: {}", outcome.report))?;
     }
     Ok(outcome)
 }

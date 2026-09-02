@@ -15,7 +15,9 @@ use ngit::{
     cli_interactor::{self, CliError},
     client,
     git::{self, RepoActions, utils::set_git_timeout},
-    git_events, login, repo_ref,
+    git_events, login,
+    output_mode::{OutputMode, is_quiet, set_output_mode},
+    repo_ref,
 };
 
 mod ci_commit;
@@ -69,6 +71,9 @@ async fn main() {
     }
 
     if version_flag_requested() {
+        if quiet_flag_requested() {
+            set_output_mode(OutputMode::Quiet);
+        }
         print_update_notice_if_available_at_startup().await;
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return;
@@ -76,15 +81,18 @@ async fn main() {
 
     let cli = Cli::parse();
     output::set_json_mode(cli.json);
+    set_output_mode(if cli.quiet {
+        OutputMode::Quiet
+    } else if cli.verbose || std::env::var("NGITTEST").is_ok() {
+        OutputMode::Verbose
+    } else {
+        OutputMode::Normal
+    });
 
     // Non-interactive by default; set NGIT_INTERACTIVE_MODE only when -i is
     // specified
     if cli.interactive {
         std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
-    }
-
-    if cli.verbose || std::env::var("NGITTEST").is_ok() {
-        std::env::set_var("NGIT_VERBOSE", "1");
     }
 
     if cli.repo_relay_only {
@@ -108,12 +116,15 @@ async fn main() {
     }
 
     if !matches!(cli.command, Some(Commands::Update(_))) {
+        // quiet suppression happens inside print_update_notice_if_available
         print_update_notice_if_available_at_startup().await;
     }
-    if !matches!(
-        cli.command,
-        Some(Commands::Init(_) | Commands::Skill(_) | Commands::Update(_))
-    ) {
+    if !is_quiet()
+        && !matches!(
+            cli.command,
+            Some(Commands::Init(_) | Commands::Skill(_) | Commands::Update(_))
+        )
+    {
         print_skill_notice_if_available().await;
     }
 
@@ -568,6 +579,12 @@ fn version_flag_requested() -> bool {
     std::env::args_os()
         .skip(1)
         .any(|arg| arg == OsStr::new("--version") || arg == OsStr::new("-V"))
+}
+
+fn quiet_flag_requested() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == OsStr::new("--quiet") || arg == OsStr::new("-q"))
 }
 
 async fn print_update_notice_if_available_at_startup() {

@@ -114,8 +114,11 @@ pub struct Cli {
     /// Force operations, bypass safety guards
     #[arg(short = 'f', long, global = true)]
     pub force: bool,
+    /// Suppress progress and other non-essential output
+    #[arg(short = 'q', long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
     /// Enable verbose output
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
     /// Only publish nostr events to repository relays, not user or default
     /// relays
@@ -1727,6 +1730,30 @@ mod tests {
             assert!(
                 Cli::try_parse_from(args).unwrap().json,
                 "failed for {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quiet_is_global_and_conflicts_with_verbose() {
+        for args in [
+            ["ngit", "--quiet", "issue", "list"].as_slice(),
+            ["ngit", "issue", "-q", "list"].as_slice(),
+            ["ngit", "issue", "list", "--quiet"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).unwrap().quiet,
+                "failed for {args:?}"
+            );
+        }
+
+        for args in [
+            ["ngit", "--quiet", "--verbose", "issue", "list"].as_slice(),
+            ["ngit", "issue", "list", "-q", "-v"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "quiet and verbose both parsed for {args:?}"
             );
         }
     }
