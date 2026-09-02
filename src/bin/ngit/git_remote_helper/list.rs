@@ -219,13 +219,15 @@ async fn get_open_and_draft_proposals_state(
         }
     }
 
-    // we cannot use commit_id in the latest patch in a proposal because:
-    // 1) the `commit` tag is optional
-    // 2) if the commit tag is wrong, it will cause errors which stop clone from
-    //    working
-
-    // without trusting commit_id we must apply each patch which requires the oid of
-    // the parent so we much do a fetch
+    // In v2 this reconstruction ran for every open patch proposal during clone, so
+    // a malformed proposal could abort the whole clone. In v3 automatic proposal
+    // branches default to disabled: this path is reached only for a locally
+    // selected `pr/` branch (normally created by `ngit pr checkout`) or when
+    // the user opts in with `nostr.auto-pr-branches=true`.
+    //
+    // Even on those narrower paths we cannot trust the latest patch's `commit` tag:
+    // it is optional and may be wrong. Apply every patch to derive the actual tip,
+    // which first requires fetching its parent OID.
 
     for (git_server_url, (oids_from_git_servers, is_grasp_server)) in remote_states {
         if repo_ref.private {

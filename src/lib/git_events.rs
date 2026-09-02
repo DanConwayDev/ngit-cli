@@ -21,13 +21,16 @@ use crate::{
 };
 
 pub fn tag_value(event: &Event, tag_name: &str) -> Result<String> {
-    Ok(event
+    let tag = event
         .tags
         .iter()
-        .find(|t| !t.as_slice().is_empty() && t.as_slice()[0].eq(tag_name))
-        .context(format!("tag '{tag_name}'not present"))?
-        .as_slice()[1]
-        .clone())
+        .find(|tag| tag.as_slice().first().is_some_and(|name| name.eq(tag_name)))
+        .context(format!("tag '{tag_name}' not present"))?;
+
+    tag.as_slice()
+        .get(1)
+        .cloned()
+        .context(format!("tag '{tag_name}' has no value"))
 }
 
 /// Extract submitter-provided git-server URLs from a PR-event's `clone` tags.
@@ -59,10 +62,18 @@ pub fn get_commit_id_from_patch(event: &Event) -> Result<String> {
     } else if [KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE].contains(&event.kind) {
         // PR and PR-update events store the tip commit in the "c" tag
         tag_value(event, "c").context("PR event missing 'c' (tip commit) tag")
-    } else if event.content.starts_with("From ") && event.content.len().gt(&45) {
-        Ok(event.content[5..45].to_string())
     } else {
-        bail!("event is not a patch")
+        let first_line = event
+            .content
+            .lines()
+            .next()
+            .context("event is not a patch")?;
+        let commit_id = first_line
+            .strip_prefix("From ")
+            .and_then(|line| line.split_whitespace().next())
+            .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .context("patch mbox envelope does not contain a valid commit id")?;
+        Ok(commit_id.to_string())
     }
 }
 
@@ -90,20 +101,20 @@ pub fn get_parent_commit_from_patch(event: &Event, git_repo: Option<&Repo>) -> R
 }
 
 pub fn get_event_root(event: &nostr::prelude::Event) -> Result<EventId> {
-    Ok(EventId::parse(
-        event
-            .tags
-            .iter()
-            .find(|t| {
-                Nip10Tag::parse(t.as_slice())
-                    .ok()
-                    .is_some_and(|n| n.is_root())
-            })
-            .context("no thread root in event")?
-            .as_slice()
-            .get(1)
-            .unwrap(),
-    )?)
+    let root_tag = event
+        .tags
+        .iter()
+        .find(|tag| {
+            Nip10Tag::parse(tag.as_slice())
+                .ok()
+                .is_some_and(|nip10_tag| nip10_tag.is_root())
+        })
+        .context("no thread root in event")?;
+    let root_id = root_tag
+        .as_slice()
+        .get(1)
+        .context("thread root tag has no event id")?;
+    Ok(EventId::parse(root_id)?)
 }
 
 pub fn status_kinds() -> Vec<Kind> {
@@ -920,22 +931,22 @@ pub fn commit_msg_from_patch(patch: &nostr::prelude::Event) -> Result<String> {
     if let Ok(msg) = tag_value(patch, "description") {
         Ok(msg)
     } else {
-        let start_index = patch
+        let (_, commit_msg) = patch
             .content
-            .find("] ")
-            .context("event is not formatted as a patch or cover letter")?
-            + 2;
-        let end_index = patch.content[start_index..]
-            .find("\ndiff --git")
-            .unwrap_or(patch.content.len());
-        Ok(patch.content[start_index..end_index].to_string())
+            .split_once("] ")
+            .context("event is not formatted as a patch or cover letter")?;
+        let commit_msg = commit_msg
+            .split_once("\ndiff --git")
+            .map_or(commit_msg, |(message, _)| message);
+        Ok(commit_msg.to_string())
     }
 }
 
 pub fn commit_msg_from_patch_oneliner(patch: &nostr::prelude::Event) -> Result<String> {
     Ok(commit_msg_from_patch(patch)?
         .split('\n')
-        .collect::<Vec<&str>>()[0]
+        .next()
+        .unwrap_or_default()
         .to_string())
 }
 
@@ -944,17 +955,17 @@ pub fn event_to_cover_letter(event: &nostr::prelude::Event) -> Result<CoverLette
         bail!("event is not a patch set root event (root patch or cover letter)")
     }
 
-    let title = if event.kind.eq(&KIND_PULL_REQUEST) {
-        tag_value(event, "subject").unwrap_or("untitled".to_owned())
+    let (title, description) = if event.kind.eq(&KIND_PULL_REQUEST) {
+        (
+            tag_value(event, "subject").unwrap_or("untitled".to_owned()),
+            event.content.clone(),
+        )
     } else {
-        commit_msg_from_patch_oneliner(event)?
-    };
-    let description = if event.kind.eq(&KIND_PULL_REQUEST) {
-        event.content.clone()
-    } else {
-        commit_msg_from_patch(event)?[title.len()..]
-            .trim()
-            .to_string()
+        let commit_msg = commit_msg_from_patch(event)?;
+        let (title, description) = commit_msg
+            .split_once('\n')
+            .unwrap_or((commit_msg.as_str(), ""));
+        (title.to_string(), description.trim().to_string())
     };
 
     Ok(CoverLetter {
@@ -1447,6 +1458,54 @@ mod tests {
             );
             Ok(())
         }
+
+        #[test]
+        fn rejects_mbox_id_with_invalid_utf8_boundary() -> Result<()> {
+            let patch = nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                format!("From {}💣 Mon Sep 17 00:00:00 2001\n", "a".repeat(39)),
+            )
+            .finalize(&nostr::prelude::Keys::generate())?;
+
+            assert!(get_commit_id_from_patch(&patch).is_err());
+            Ok(())
+        }
+    }
+
+    mod commit_msg_from_patch {
+        use super::*;
+
+        #[test]
+        fn extracts_short_message_after_long_header() -> Result<()> {
+            let patch = nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                concat!(
+                    "From 9f8e7d6c5b4a39281706f5e4d3c2b1a099887766 Mon Sep 17 00:00:00 2001\n",
+                    "From: A Contributor <contributor@example.com>\n",
+                    "Date: Mon, 1 Sep 2026 12:00:00 +0000\n",
+                    "Subject: [PATCH 3/46] Add Ditto social client\n",
+                    "\n",
+                    "diff --git a/apps.toml b/apps.toml\n",
+                ),
+            )
+            .finalize(&nostr::prelude::Keys::generate())?;
+
+            assert_eq!(commit_msg_from_patch(&patch)?, "Add Ditto social client\n");
+            Ok(())
+        }
+
+        #[test]
+        fn ignores_description_tag_without_value() -> Result<()> {
+            let patch = nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                "Subject: [PATCH] safe fallback\n",
+            )
+            .tags([Tag::parse(["description"])?])
+            .finalize(&nostr::prelude::Keys::generate())?;
+
+            assert_eq!(commit_msg_from_patch(&patch)?, "safe fallback\n");
+            Ok(())
+        }
     }
 
     mod event_to_cover_letter {
@@ -1529,6 +1588,19 @@ mod tests {
                 .description,
                 "with new line\n\ndescription here\n\nmore here\nmore",
             );
+            Ok(())
+        }
+
+        #[test]
+        fn malformed_root_returns_error() -> Result<()> {
+            let patch = nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                "malformed patch content",
+            )
+            .tags([Tag::hashtag("root")])
+            .finalize(&nostr::prelude::Keys::generate())?;
+
+            assert!(event_to_cover_letter(&patch).is_err());
             Ok(())
         }
 

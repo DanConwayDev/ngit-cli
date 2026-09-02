@@ -1046,13 +1046,12 @@ impl RepoActions for Repo {
             &[&parent_commit],
         )?;
 
+        let commit_content = commit_buff
+            .as_str()
+            .context("generated commit content is not valid UTF-8")?;
         let mut applied_oid = self
             .git_repo
-            .commit_signed(
-                commit_buff.as_str().unwrap(),
-                pgp_sig.as_deref().unwrap_or(""),
-                None,
-            )
+            .commit_signed(commit_content, pgp_sig.as_deref().unwrap_or(""), None)
             .context("failed to create signed commit")?;
 
         // I beleive this was added to address a bug where commit author / committer
