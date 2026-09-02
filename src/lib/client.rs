@@ -3766,8 +3766,14 @@ async fn fetching_with_report_from_repository_relays_with_outcome(
     #[cfg(not(test))] client: &Client,
     selected_maintainer_coordinate: &Nip19Coordinate,
 ) -> Result<FetchOutcome> {
-    fetching_with_report_policy_outcome(git_repo_path, client, selected_maintainer_coordinate, true)
-        .await
+    fetching_with_report_policy_outcome(
+        git_repo_path,
+        client,
+        selected_maintainer_coordinate,
+        true,
+        true,
+    )
+    .await
 }
 
 /// Fetch with private discovery hints, probing only those repository relays
@@ -3865,6 +3871,29 @@ async fn fetching_with_report_policy(
         client,
         selected_maintainer_coordinate,
         repository_relays_only,
+        true,
+    )
+    .await?
+    .report)
+}
+
+/// Fetch repository data while leaving the terminal summary to the caller.
+///
+/// Relay progress and diagnostics are still completed normally. This is for
+/// internal consistency refreshes within a command which already reported its
+/// initial fetch to the user.
+pub async fn fetching_without_summary(
+    git_repo_path: &Path,
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    selected_maintainer_coordinate: &Nip19Coordinate,
+) -> Result<FetchReport> {
+    Ok(fetching_with_report_policy_outcome(
+        git_repo_path,
+        client,
+        selected_maintainer_coordinate,
+        false,
+        false,
     )
     .await?
     .report)
@@ -3876,6 +3905,7 @@ async fn fetching_with_report_policy_outcome(
     #[cfg(not(test))] client: &Client,
     selected_maintainer_coordinate: &Nip19Coordinate,
     repository_relays_only: bool,
+    print_summary: bool,
 ) -> Result<FetchOutcome> {
     let (relay_reports, progress_reporter) = client
         .fetch_all(
@@ -3892,11 +3922,13 @@ async fn fetching_with_report_policy_outcome(
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
     // stdout.
-    let term = console::Term::stderr();
-    if outcome.report.to_string().is_empty() {
-        write_progress_line(&term, "no updates")?;
-    } else {
-        write_progress_line(&term, &format!("updates: {}", outcome.report))?;
+    if print_summary {
+        let term = console::Term::stderr();
+        if outcome.report.to_string().is_empty() {
+            write_progress_line(&term, "no updates")?;
+        } else {
+            write_progress_line(&term, &format!("updates: {}", outcome.report))?;
+        }
     }
     Ok(outcome)
 }

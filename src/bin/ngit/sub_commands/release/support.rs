@@ -9,7 +9,8 @@ use ngit::{
     NgitSigner,
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
-        get_events_from_local_cache, get_repo_ref_from_cache, send_events,
+        fetching_without_summary, get_events_from_local_cache, get_repo_ref_from_cache,
+        send_events,
     },
     event_ordering::latest_event,
     git::{Repo, RepoActions},
@@ -344,7 +345,7 @@ impl ReleaseContext {
     }
 
     pub(super) async fn refresh_repository(&mut self) -> Result<()> {
-        fetching_with_report(
+        fetching_without_summary(
             self.git_repo_path()?,
             &self.client,
             &self.selected_coordinate,
@@ -641,17 +642,30 @@ impl ReleaseContext {
                 ));
             }
             if !failed.is_empty() {
-                self.warnings.push(
-                    WarningJson::new(
-                        "relay_discovery_incomplete",
-                        "some relays could not be queried; results may be incomplete",
-                    )
-                    .with_details(json!({ "relays": failed })),
-                );
+                self.warnings
+                    .push(relay_discovery_incomplete_warning(&failed, results.len()));
             }
         }
         get_events_from_local_cache(self.git_repo_path()?, filters).await
     }
+}
+
+fn relay_discovery_incomplete_warning(failed: &[String], queried: usize) -> WarningJson {
+    let failed_count = failed.len();
+    let relay_label = if queried == 1 {
+        "repository relay"
+    } else {
+        "repository relays"
+    };
+    let message = format!(
+        "{failed_count}/{queried} {relay_label} ({}) could not be queried; results may be incomplete",
+        failed.join(", ")
+    );
+    WarningJson::new("relay_discovery_incomplete", message).with_details(json!({
+        "relays": failed,
+        "failed": failed_count,
+        "queried": queried,
+    }))
 }
 
 fn optional_login<T>(login: Result<T>, explicit_signer: bool) -> Result<Option<T>> {
@@ -1175,7 +1189,7 @@ mod tests {
     use super::{
         AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, ZAPSTORE_RELAY_URL,
         add_zapstore_publication_relay, optional_login, publication_failure_message,
-        publication_json, publication_recovery,
+        publication_json, publication_recovery, relay_discovery_incomplete_warning,
     };
 
     #[test]
@@ -1201,6 +1215,33 @@ mod tests {
         let mut relays = vec![existing.clone()];
         add_zapstore_publication_relay(&mut relays, None);
         assert_eq!(relays, [existing]);
+    }
+
+    #[test]
+    fn incomplete_relay_warning_names_failures_and_query_coverage() {
+        let warning = relay_discovery_incomplete_warning(
+            &[
+                "wss://relay.ngit.dev".to_owned(),
+                "wss://gitnostr.com".to_owned(),
+            ],
+            4,
+        );
+
+        assert_eq!(warning.code, "relay_discovery_incomplete");
+        assert_eq!(
+            warning.message,
+            "2/4 repository relays (wss://relay.ngit.dev, wss://gitnostr.com) could not be queried; results may be incomplete"
+        );
+        assert_eq!(warning.details["relays"].as_array().map(Vec::len), Some(2));
+        assert_eq!(warning.details["failed"], 2);
+        assert_eq!(warning.details["queried"], 4);
+    }
+
+    #[test]
+    fn incomplete_relay_warning_uses_singular_for_one_query_route() {
+        let warning = relay_discovery_incomplete_warning(&["wss://relay.ngit.dev".to_owned()], 1);
+
+        assert!(warning.message.starts_with("1/1 repository relay ("));
     }
 
     #[test]

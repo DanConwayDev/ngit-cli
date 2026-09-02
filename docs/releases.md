@@ -17,12 +17,14 @@ ngit release publish "$VERSION" \
   --json
 ```
 
-The file is snapshotted once, confirmed on every selected Blossom server, and
-represented by one asset event with two `f` platform tags. Ngit skips exact
-copies and directly uploads missing ones with bounded retries and post-upload
-verification before it signs the event. On a repository with no existing
-NIP-82 events, the same command creates and publishes the linked application,
-asset, and release in dependency order.
+The file is snapshotted once and placement is attempted on every selected
+Blossom server. Ngit skips exact copies and directly uploads missing ones with
+bounded retries and post-upload verification. It proceeds once the blob is
+confirmed on at least one server, warning when the requested replication is
+incomplete, and represents the bytes with one asset event carrying two `f`
+platform tags. On a repository with no existing NIP-82 events, the same command
+creates and publishes the linked application, asset, and release in dependency
+order.
 
 For an existing application, a `main` release must cover every application
 platform. If the release intentionally introduces a new main-channel platform,
@@ -154,9 +156,10 @@ For `icon` and `images`, an HTTP(S) URL is retained exactly as supplied and is
 never downloaded or re-uploaded. Any other value is a repository-relative
 local file: it must be tracked by Git, resolve inside the repository, have an
 image MIME type, and be no larger than 20 MiB. Local images are snapshotted and
-confirmed on every selected Blossom server before any NIP-82 event is signed;
-the application event uses the first server's returned URL. Thus local media is
-Blossom-first while existing CDN or Blossom URLs remain usable as references.
+attempted on every selected Blossom server before any NIP-82 event is signed;
+each image must be confirmed on at least one server. The application event uses
+the first confirmed server's URL. Thus local media is Blossom-first while
+existing CDN or Blossom URLs remain usable as references.
 
 `notes` and `release_notes` are mutually exclusive. For `release_notes`, ngit
 selects the level-two section matching the exact positional VERSION, allowing
@@ -172,8 +175,9 @@ CLI `--notes` and `--notes-file` take precedence over either manifest field.
 
 The optional `publication` block supports:
 
-- `blossom_servers`: ordered required placements; the first supplies the asset
-  event URL and every missing copy is uploaded directly;
+- `blossom_servers`: ordered replication targets; every missing copy is
+  attempted directly and the first confirmed server supplies the asset event
+  URL;
 - `relays`: additional discovery and publication relays;
 - `zapstore_relay`: add `wss://relay.zapstore.dev` as a publication-only
   target;
@@ -190,11 +194,23 @@ the policy is enabled. Version, signer credentials, `--released-at`, `--tag`,
 `--edit`, and output format remain runtime inputs so a committed manifest
 cannot supply secrets, silently replace an event, or freeze per-release data.
 
-All local application media and release assets share one placement batch plan.
-Human output shows a byte progress bar for each authorization batch and labels
-presence checks, the current upload or verification, and retries. `--verbose`
-also retains each per-server outcome and failure message. `--json` keeps stdout
-machine-readable and does not draw progress bars.
+All local application media and release assets share one placement plan.
+For compatibility with deployed Blossom servers, release authorization and
+upload proceed one file at a time; the missing server placements for that file
+run concurrently. Human output therefore labels `upload file N/M` and draws a
+separate live line for each server. A line changes from byte transfer to
+`awaiting server response`, `verifying stored blob`, or `waiting to retry` as
+the HTTP operation advances, so a fully sent small request is not presented as
+an upload which is still transferring. Headings and server lines include their
+elapsed time. Ngit clears this display before invoking a signer and after each
+file. Before each per-file authorization it detaches the complete Blossom
+progress draw target, then reattaches only after signing returns, so an
+interactive signer never competes with a live progress renderer.
+An upload attempt can take up to 30 minutes while bytes continue moving, but
+fails after 30 seconds without body progress or a server response. Presence and
+post-upload verification requests use 15-second attempts with bounded retries.
+`--verbose` also retains each per-server outcome and failure message. `--json`
+keeps stdout machine-readable and does not draw progress bars.
 
 Each asset has exactly one source:
 

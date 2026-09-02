@@ -48,7 +48,8 @@ const AUTHORIZATION_SIGNING_ALLOWANCE: Duration = Duration::from_secs(2 * 60 * 6
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const PLACEMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const PRESENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const UPLOAD_REQUEST_TIMEOUT: Duration = TOTAL_TIMEOUT;
 const PLACEMENT_MAX_ATTEMPTS: usize = 3;
 const PLACEMENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
@@ -56,6 +57,42 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 const MAX_PRESENCE_REDIRECTS: usize = 5;
 pub const DEFAULT_AUTHORIZATION_BATCH_SIZE: usize = 20;
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
+
+#[derive(Clone, Copy, Debug)]
+enum AuthorizationEncodingPreference {
+    Bud11,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementRequirement {
+    EveryServer,
+    OneServerPerBlob,
+}
+
+#[derive(Clone, Copy)]
+struct BatchAuthorizationOptions {
+    batch_size: usize,
+    encoding_preference: AuthorizationEncodingPreference,
+    placement_requirement: PlacementRequirement,
+}
+
+impl BatchAuthorizationOptions {
+    const DEFAULT: Self = Self {
+        batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
+        encoding_preference: AuthorizationEncodingPreference::Bud11,
+        placement_requirement: PlacementRequirement::EveryServer,
+    };
+
+    // Release assets must interoperate with deployed servers which accept only
+    // one `x` tag and padded standard Base64. The same signed per-blob event is
+    // still reused across every selected server.
+    const LEGACY_PER_BLOB: Self = Self {
+        batch_size: 1,
+        encoding_preference: AuthorizationEncodingPreference::Legacy,
+        placement_requirement: PlacementRequirement::OneServerPerBlob,
+    };
+}
 
 /// Observable milestones emitted by the Blossom batch placement engine.
 ///
@@ -77,12 +114,16 @@ pub enum BlossomProgressEvent {
         batch: usize,
         batches: usize,
         blobs: usize,
+        filenames: Vec<String>,
     },
     UploadBatchStarted {
         batch: usize,
         batches: usize,
         blobs: usize,
+        filenames: Vec<String>,
         placements: usize,
+        confirmed: usize,
+        unavailable: usize,
         bytes: u64,
     },
     UploadRequestStarted {
@@ -92,11 +133,23 @@ pub enum BlossomProgressEvent {
         server: Url,
         attempt: usize,
         max_attempts: usize,
+        total_bytes: u64,
         additional_bytes: u64,
     },
     UploadedBytes {
         batch: usize,
+        filename: String,
+        server: Url,
         bytes: u64,
+    },
+    UploadBodyFinished {
+        batch: usize,
+        batches: usize,
+        filename: String,
+        server: Url,
+        attempt: usize,
+        max_attempts: usize,
+        idle_timeout_secs: u64,
     },
     VerificationStarted {
         batch: usize,
@@ -105,6 +158,7 @@ pub enum BlossomProgressEvent {
         server: Url,
         attempt: usize,
         max_attempts: usize,
+        timeout_secs: u64,
     },
     RetryScheduled {
         batch: usize,
@@ -244,13 +298,14 @@ pub struct PossibleOrphanBlob {
     pub url: Option<Url>,
 }
 
-/// Successful result of confirming one blob on every selected server.
+/// Successful result of confirming one blob on one or more selected servers.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MultiServerUpload {
-    /// A descriptor for the first server, whose URL is suitable for a NIP-82
-    /// `url` tag. When a strict HEAD proves the blob was already present, ngit
-    /// synthesizes this descriptor from the verified metadata and uses
-    /// `uploaded: 0` because HEAD does not expose the original upload time.
+    /// A descriptor for the first confirmed server, whose URL is suitable for
+    /// a NIP-82 `url` tag. When a strict HEAD proves the blob was already
+    /// present, ngit synthesizes this descriptor from the verified metadata
+    /// and uses `uploaded: 0` because HEAD does not expose the original upload
+    /// time.
     pub primary: BlobDescriptor,
     pub servers: Vec<BlossomServerOutcome>,
 }
@@ -263,14 +318,14 @@ pub struct MultiServerUploadError {
     pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
-/// Per-blob output from a batch which places every blob on every server.
+/// Per-blob output from a batch which attempts every selected server.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BatchBlobUploadOutcome {
     pub sha256: String,
     pub servers: Vec<BlossomServerOutcome>,
 }
 
-/// Successful all-blob, all-server upload result.
+/// Successful result satisfying the caller's placement requirement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BatchUploadResult {
     pub blobs: Vec<BatchBlobUploadOutcome>,
@@ -449,6 +504,7 @@ async fn upload_snapshot_with_authorization_inner(
                 server: progress.server.clone(),
                 attempt: progress.attempt,
                 max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                total_bytes: snapshot.size,
                 additional_bytes: if progress.preallocated {
                     0
                 } else {
@@ -456,19 +512,53 @@ async fn upload_snapshot_with_authorization_inner(
                 },
             });
     }
-    let transferred = Arc::new(AtomicU64::new(0));
-    let transferred_by_stream = transferred.clone();
     let progress_for_stream = progress.clone();
+    let streamed_filename = snapshot.filename.clone();
+    let streamed_size = snapshot.size;
+    let streamed = Arc::new(AtomicU64::new(0));
+    let streamed_for_progress = streamed.clone();
+    let (upload_activity, upload_activity_rx) = tokio::sync::mpsc::unbounded_channel();
+    if streamed_size == 0 {
+        if let Some(progress) = &progress {
+            progress
+                .reporter
+                .update(&BlossomProgressEvent::UploadBodyFinished {
+                    batch: progress.batch,
+                    batches: progress.batches,
+                    filename: streamed_filename.clone(),
+                    server: progress.server.clone(),
+                    attempt: progress.attempt,
+                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                    idle_timeout_secs: IDLE_TIMEOUT.as_secs(),
+                });
+        }
+    }
     let body_stream = ReaderStream::new(tokio::fs::File::from_std(file)).inspect(move |chunk| {
         if let (Some(progress), Ok(bytes)) = (&progress_for_stream, chunk) {
             let bytes = bytes.len().try_into().unwrap_or(u64::MAX);
-            transferred_by_stream.fetch_add(bytes, Ordering::Relaxed);
+            let previous = streamed_for_progress.fetch_add(bytes, Ordering::Relaxed);
+            let _ = upload_activity.send(previous.saturating_add(bytes));
             progress
                 .reporter
                 .update(&BlossomProgressEvent::UploadedBytes {
                     batch: progress.batch,
+                    filename: streamed_filename.clone(),
+                    server: progress.server.clone(),
                     bytes,
                 });
+            if previous < streamed_size && previous.saturating_add(bytes) >= streamed_size {
+                progress
+                    .reporter
+                    .update(&BlossomProgressEvent::UploadBodyFinished {
+                        batch: progress.batch,
+                        batches: progress.batches,
+                        filename: streamed_filename.clone(),
+                        server: progress.server.clone(),
+                        attempt: progress.attempt,
+                        max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                        idle_timeout_secs: IDLE_TIMEOUT.as_secs(),
+                    });
+            }
         }
     });
     let body = reqwest::Body::wrap_stream(body_stream);
@@ -481,28 +571,62 @@ async fn upload_snapshot_with_authorization_inner(
         .header(AUTHORIZATION, authorization)
         .body(body);
 
-    let response = tokio::time::timeout_at(deadline, request.send())
-        .await
-        .map_err(|_| {
-            BlobRequestError::unknown(anyhow!("Blossom upload exceeded its total timeout"), true)
-        })
-        .and_then(|result| result.map_err(|error| classify_send_error(error, "upload", true)));
-    if let Some(progress) = &progress {
-        let remaining = snapshot
-            .size
-            .saturating_sub(transferred.load(Ordering::Relaxed));
-        if remaining != 0 {
-            progress
-                .reporter
-                .update(&BlossomProgressEvent::UploadedBytes {
-                    batch: progress.batch,
-                    bytes: remaining,
-                });
+    let response = send_upload_request_with_progress_timeout(
+        request,
+        upload_activity_rx,
+        deadline,
+        IDLE_TIMEOUT,
+        snapshot.size,
+    )
+    .await?;
+
+    let response_deadline = deadline.min(tokio::time::Instant::now() + IDLE_TIMEOUT);
+    read_store_response(response, snapshot, response_deadline, "upload").await
+}
+
+async fn send_upload_request_with_progress_timeout(
+    request: reqwest::RequestBuilder,
+    mut activity: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    deadline: tokio::time::Instant,
+    idle_timeout: Duration,
+    total_bytes: u64,
+) -> std::result::Result<reqwest::Response, BlobRequestError> {
+    let request = request.send();
+    tokio::pin!(request);
+    let total_timer = tokio::time::sleep_until(deadline);
+    tokio::pin!(total_timer);
+    let idle_timer = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle_timer);
+    let mut activity_open = true;
+    let mut uploaded_bytes = 0;
+
+    loop {
+        tokio::select! {
+            response = &mut request => {
+                return response.map_err(|error| classify_send_error(error, "upload", true));
+            }
+            _ = &mut total_timer => {
+                return Err(BlobRequestError::unknown(
+                    anyhow!("Blossom upload exceeded its 30 minute total timeout after sending {uploaded_bytes}/{total_bytes} bytes"),
+                    true,
+                ));
+            }
+            _ = &mut idle_timer => {
+                return Err(BlobRequestError::unknown(
+                    anyhow!("Blossom upload made no progress for 30 seconds after sending {uploaded_bytes}/{total_bytes} bytes"),
+                    true,
+                ));
+            }
+            next = activity.recv(), if activity_open => {
+                if let Some(bytes) = next {
+                    uploaded_bytes = uploaded_bytes.max(bytes);
+                    idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                } else {
+                    activity_open = false;
+                }
+            }
         }
     }
-    let response = response?;
-
-    read_store_response(response, snapshot, deadline, "upload").await
 }
 
 async fn upload_snapshot_with_compatible_authorization(
@@ -513,24 +637,25 @@ async fn upload_snapshot_with_compatible_authorization(
     deadline: tokio::time::Instant,
     progress: UploadProgressContext,
 ) -> std::result::Result<BlobUpload, BlobRequestError> {
+    let (primary_authorization, fallback_authorization) = match authorization.encoding_preference {
+        AuthorizationEncodingPreference::Bud11 => (&authorization.bud11, &authorization.legacy),
+        AuthorizationEncodingPreference::Legacy => (&authorization.legacy, &authorization.bud11),
+    };
     let primary = upload_snapshot_with_authorization_inner(
         client,
         server_url,
         snapshot,
-        authorization.bud11.clone(),
+        primary_authorization.clone(),
         deadline,
         Some(progress.clone()),
     )
     .await;
-    if primary
-        .as_ref()
-        .is_err_and(|error| error.status == Some(StatusCode::UNAUTHORIZED))
-    {
+    if primary.as_ref().is_err_and(auth_encoding_may_be_rejected) {
         return upload_snapshot_with_authorization_inner(
             client,
             server_url,
             snapshot,
-            authorization.legacy.clone(),
+            fallback_authorization.clone(),
             deadline,
             Some(UploadProgressContext {
                 preallocated: false,
@@ -540,6 +665,13 @@ async fn upload_snapshot_with_compatible_authorization(
         .await;
     }
     primary
+}
+
+fn auth_encoding_may_be_rejected(error: &BlobRequestError) -> bool {
+    matches!(
+        error.status,
+        Some(StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND)
+    )
 }
 
 enum BatchStoreConfirmation {
@@ -558,7 +690,7 @@ async fn upload_snapshot_with_confirmation(
 ) -> std::result::Result<BatchStoreConfirmation, BlobRequestError> {
     let mut last_error = None;
     for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
-        let deadline = tokio::time::Instant::now() + PLACEMENT_REQUEST_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + UPLOAD_REQUEST_TIMEOUT;
         match upload_snapshot_with_compatible_authorization(
             client,
             server.as_str(),
@@ -577,15 +709,11 @@ async fn upload_snapshot_with_confirmation(
         .await
         {
             Ok(upload) => {
-                progress.update(&BlossomProgressEvent::VerificationStarted {
-                    batch,
-                    batches,
-                    filename: snapshot.filename.clone(),
-                    server: server.clone(),
-                    attempt: attempt + 1,
-                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
-                });
-                match snapshot_is_present_with_retry(client, server, snapshot).await {
+                match snapshot_is_present_with_retry_and_progress(
+                    client, server, snapshot, &progress, batch, batches,
+                )
+                .await
+                {
                     Ok(true) => return Ok(BatchStoreConfirmation::Response(upload)),
                     Ok(false) => {
                         last_error = Some(BlobRequestError::unknown(
@@ -611,15 +739,10 @@ async fn upload_snapshot_with_confirmation(
             }
             Err(error) => {
                 if error.possible_orphan {
-                    progress.update(&BlossomProgressEvent::VerificationStarted {
-                        batch,
-                        batches,
-                        filename: snapshot.filename.clone(),
-                        server: server.clone(),
-                        attempt: attempt + 1,
-                        max_attempts: PLACEMENT_MAX_ATTEMPTS,
-                    });
-                    if let Ok(true) = snapshot_is_present_with_retry(client, server, snapshot).await
+                    if let Ok(true) = snapshot_is_present_with_retry_and_progress(
+                        client, server, snapshot, &progress, batch, batches,
+                    )
+                    .await
                     {
                         return Ok(BatchStoreConfirmation::Presence);
                     }
@@ -683,6 +806,47 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
     concurrency: usize,
     progress: Arc<dyn BlossomProgress>,
 ) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::DEFAULT,
+    )
+    .await
+}
+
+/// Batch placement for software releases which attempts every selected server
+/// while requiring one confirmed copy of every blob. It retains compatibility
+/// with deployed servers that require padded Base64 and exactly one `x`
+/// authorization tag.
+pub async fn upload_release_snapshot_batch_to_servers_with_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::LEGACY_PER_BLOB,
+    )
+    .await
+}
+
+async fn upload_snapshot_batch_to_servers_with_options_and_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+    authorization_options: BatchAuthorizationOptions,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
     if servers.is_empty() {
         return Err(empty_batch_error("at least one Blossom server is required"));
     }
@@ -722,7 +886,7 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
                 .collect(),
         })
         .collect::<Vec<_>>();
-    let client = blossom_http_client().map_err(|error| BatchUploadError {
+    let client = blossom_streaming_http_client().map_err(|error| BatchUploadError {
         message: format!("failed to prepare Blossom batch client: {error:#}"),
         blobs: blobs.clone(),
         possible_orphan_blobs: Vec::new(),
@@ -792,7 +956,9 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
     progress.update(&BlossomProgressEvent::PresenceChecksFinished {
         missing: missing.len(),
     });
-    if presence_failed {
+    if presence_failed
+        && authorization_options.placement_requirement == PlacementRequirement::EveryServer
+    {
         return Err(BatchUploadError {
             message:
                 "one or more Blossom presence checks failed; no upload authorization was signed"
@@ -802,7 +968,11 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
         });
     }
     if missing.is_empty() {
-        return Ok(BatchUploadResult { blobs });
+        return finish_batch_for_requirement(
+            blobs,
+            authorization_options.placement_requirement,
+            Vec::new(),
+        );
     }
 
     let missing_blob_indices = missing
@@ -815,15 +985,25 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
         .collect::<Vec<_>>();
     let authorization_batches = missing_hashes
         .len()
-        .div_ceil(DEFAULT_AUTHORIZATION_BATCH_SIZE);
+        .div_ceil(authorization_options.batch_size);
     let mut upload_failed = false;
     let mut uncertain = Vec::new();
     for (batch_index, hashes) in missing_hashes
-        .chunks(DEFAULT_AUTHORIZATION_BATCH_SIZE)
+        .chunks(authorization_options.batch_size)
         .enumerate()
     {
         let batch = batch_index + 1;
         let hashes_in_chunk = hashes.iter().copied().collect::<HashSet<_>>();
+        let chunk_blob_indices = snapshots
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot)| hashes_in_chunk.contains(snapshot.sha256.as_str()))
+            .map(|(blob_index, _)| blob_index)
+            .collect::<Vec<_>>();
+        let filenames = chunk_blob_indices
+            .iter()
+            .map(|blob_index| snapshots[*blob_index].filename.clone())
+            .collect::<Vec<_>>();
         let uploads = missing
             .iter()
             .copied()
@@ -857,6 +1037,7 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
             batch,
             batches: authorization_batches,
             blobs: hashes.len(),
+            filenames: filenames.clone(),
         });
         let (event, expires) =
             upload_authorization_with_lifetime(hashes, servers, signer, authorization_lifetime)
@@ -874,20 +1055,34 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
                 &blobs,
             ));
         }
-        let authorization = compatible_authorization_headers(&event).map_err(|error| {
-            batch_progress_error(
-                format!("failed to encode Blossom batch authorization: {error:#}"),
-                &blobs,
-            )
-        })?;
+        let authorization =
+            compatible_authorization_headers(&event, authorization_options.encoding_preference)
+                .map_err(|error| {
+                    batch_progress_error(
+                        format!("failed to encode Blossom batch authorization: {error:#}"),
+                        &blobs,
+                    )
+                })?;
         let upload_bytes = uploads.iter().fold(0_u64, |total, (blob_index, _)| {
             total.saturating_add(snapshots[*blob_index].size)
         });
+        let total_placements = chunk_blob_indices.len().saturating_mul(servers.len());
+        let confirmed = chunk_blob_indices
+            .iter()
+            .flat_map(|blob_index| blobs[*blob_index].servers.iter())
+            .filter(|outcome| server_outcome_is_confirmed(outcome))
+            .count();
+        let unavailable = total_placements
+            .saturating_sub(confirmed)
+            .saturating_sub(uploads.len());
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch,
             batches: authorization_batches,
             blobs: hashes.len(),
+            filenames,
             placements: uploads.len(),
+            confirmed,
+            unavailable,
             bytes: upload_bytes,
         });
         let upload_results = stream::iter(uploads)
@@ -956,7 +1151,9 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
             batch,
             batches: authorization_batches,
         });
-        if chunk_failed {
+        if chunk_failed
+            && authorization_options.placement_requirement == PlacementRequirement::EveryServer
+        {
             upload_failed = true;
             break;
         }
@@ -972,7 +1169,58 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
         });
     }
 
+    finish_batch_for_requirement(
+        blobs,
+        authorization_options.placement_requirement,
+        uncertain,
+    )
+}
+
+fn finish_batch_for_requirement(
+    blobs: Vec<BatchBlobUploadOutcome>,
+    requirement: PlacementRequirement,
+    uncertain: Vec<PossibleOrphanBlob>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    let unavailable = blobs
+        .iter()
+        .filter(|blob| !blob.servers.iter().any(server_outcome_is_confirmed))
+        .count();
+    if unavailable != 0 {
+        let mut possible_orphan_blobs = stored_batch_blobs(&blobs);
+        possible_orphan_blobs.extend(uncertain);
+        return Err(BatchUploadError {
+            message: format!(
+                "{unavailable}/{} Blossom blobs were not confirmed on any selected server; no publication event was signed",
+                blobs.len()
+            ),
+            blobs,
+            possible_orphan_blobs,
+        });
+    }
+    if requirement == PlacementRequirement::EveryServer
+        && blobs.iter().any(|blob| {
+            blob.servers
+                .iter()
+                .any(|outcome| !server_outcome_is_confirmed(outcome))
+        })
+    {
+        let mut possible_orphan_blobs = stored_batch_blobs(&blobs);
+        possible_orphan_blobs.extend(uncertain);
+        return Err(BatchUploadError {
+            message: "one or more Blossom placements failed; no publication event was signed"
+                .to_owned(),
+            blobs,
+            possible_orphan_blobs,
+        });
+    }
     Ok(BatchUploadResult { blobs })
+}
+
+fn server_outcome_is_confirmed(outcome: &BlossomServerOutcome) -> bool {
+    matches!(
+        outcome.status,
+        BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+    )
 }
 
 fn empty_batch_error(message: &str) -> BatchUploadError {
@@ -994,11 +1242,17 @@ fn batch_upload_window(operation_count: usize, concurrency: usize) -> Result<Dur
     // Each upload attempt has one PUT window followed by up to `attempts`
     // verification HEAD windows. Keep the authorization valid for every
     // bounded operation even though normal successful uploads use only two.
-    let request_windows = attempts
-        .checked_mul(attempts.saturating_add(1))
+    let upload_window = UPLOAD_REQUEST_TIMEOUT
+        .checked_mul(attempts)
+        .context("Blossom upload window overflowed")?;
+    let presence_windows = attempts
+        .checked_mul(attempts)
         .context("Blossom upload request window count overflowed")?;
-    let operation_window = PLACEMENT_REQUEST_TIMEOUT
-        .checked_mul(request_windows)
+    let presence_window = PRESENCE_REQUEST_TIMEOUT
+        .checked_mul(presence_windows)
+        .context("Blossom presence-check window overflowed")?;
+    let operation_window = upload_window
+        .checked_add(presence_window)
         .context("Blossom upload operation window overflowed")?;
     operation_window
         .checked_mul(u32::try_from(waves).context("Blossom upload wave count is too large")?)
@@ -1044,7 +1298,7 @@ async fn snapshot_is_present(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
-    snapshot_is_present_once(client, server, snapshot, PLACEMENT_REQUEST_TIMEOUT).await
+    snapshot_is_present_once(client, server, snapshot, PRESENCE_REQUEST_TIMEOUT).await
 }
 
 async fn snapshot_is_present_with_retry(
@@ -1052,8 +1306,40 @@ async fn snapshot_is_present_with_retry(
     server: &Url,
     snapshot: &FileSnapshot,
 ) -> std::result::Result<bool, BlobRequestError> {
+    snapshot_is_present_with_retry_notifying(client, server, snapshot, |_| {}).await
+}
+
+async fn snapshot_is_present_with_retry_and_progress(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    progress: &Arc<dyn BlossomProgress>,
+    batch: usize,
+    batches: usize,
+) -> std::result::Result<bool, BlobRequestError> {
+    snapshot_is_present_with_retry_notifying(client, server, snapshot, |attempt| {
+        progress.update(&BlossomProgressEvent::VerificationStarted {
+            batch,
+            batches,
+            filename: snapshot.filename.clone(),
+            server: server.clone(),
+            attempt,
+            max_attempts: PLACEMENT_MAX_ATTEMPTS,
+            timeout_secs: PRESENCE_REQUEST_TIMEOUT.as_secs(),
+        });
+    })
+    .await
+}
+
+async fn snapshot_is_present_with_retry_notifying(
+    client: &reqwest::Client,
+    server: &Url,
+    snapshot: &FileSnapshot,
+    mut notify_attempt: impl FnMut(usize),
+) -> std::result::Result<bool, BlobRequestError> {
     let mut last_error = None;
     for attempt in 0..PLACEMENT_MAX_ATTEMPTS {
+        notify_attempt(attempt + 1);
         match snapshot_is_present(client, server, snapshot).await {
             Ok(present) => return Ok(present),
             Err(error) if error.retryable => last_error = Some(error),
@@ -1211,24 +1497,27 @@ pub fn multi_server_upload_from_batch_outcome(
     snapshot: &FileSnapshot,
     blob: &BatchBlobUploadOutcome,
 ) -> std::result::Result<MultiServerUpload, MultiServerUploadError> {
-    let Some(first) = blob.servers.first() else {
+    let Some(primary_outcome) = blob
+        .servers
+        .iter()
+        .find(|outcome| server_outcome_is_confirmed(outcome))
+    else {
         return Err(MultiServerUploadError {
-            message: "Blossom placement returned no server outcome".to_owned(),
+            message: "Blossom placement returned no confirmed server outcome".to_owned(),
             servers: blob.servers.clone(),
             possible_orphan_blobs: Vec::new(),
         });
     };
-    let primary = if let Some(descriptor) = first.descriptor.clone() {
+    let primary = if let Some(descriptor) = primary_outcome.descriptor.clone() {
         descriptor
     } else {
-        let url =
-            blossom_endpoint_url(first.server.as_str(), &snapshot.sha256).map_err(|error| {
-                MultiServerUploadError {
-                    message: format!("failed to construct verified Blossom blob URL: {error:#}"),
-                    servers: blob.servers.clone(),
-                    possible_orphan_blobs: stored_batch_blobs(std::slice::from_ref(blob)),
-                }
-            })?;
+        let url = blossom_endpoint_url(primary_outcome.server.as_str(), &snapshot.sha256).map_err(
+            |error| MultiServerUploadError {
+                message: format!("failed to construct verified Blossom blob URL: {error:#}"),
+                servers: blob.servers.clone(),
+                possible_orphan_blobs: stored_batch_blobs(std::slice::from_ref(blob)),
+            },
+        )?;
         BlobDescriptor {
             url,
             sha256: snapshot.sha256.clone(),
@@ -1465,6 +1754,14 @@ fn blossom_http_client() -> Result<reqwest::Client> {
         .context("failed to create the Blossom HTTP client")
 }
 
+fn blossom_streaming_http_client() -> Result<reqwest::Client> {
+    crate::tls::http_client_builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to create the streaming Blossom HTTP client")
+}
+
 async fn read_store_response(
     mut response: reqwest::Response,
     snapshot: &FileSnapshot,
@@ -1685,9 +1982,13 @@ fn authorization_header(event: &Event) -> Result<HeaderValue> {
 struct CompatibleAuthorization {
     bud11: HeaderValue,
     legacy: HeaderValue,
+    encoding_preference: AuthorizationEncodingPreference,
 }
 
-fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthorization> {
+fn compatible_authorization_headers(
+    event: &Event,
+    encoding_preference: AuthorizationEncodingPreference,
+) -> Result<CompatibleAuthorization> {
     let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
     let header = |encoded: String| {
         HeaderValue::from_str(&format!("Nostr {encoded}"))
@@ -1696,6 +1997,7 @@ fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthoriza
     Ok(CompatibleAuthorization {
         bud11: header(URL_SAFE_NO_PAD.encode(&event))?,
         legacy: header(STANDARD.encode(event))?,
+        encoding_preference,
     })
 }
 
@@ -2167,7 +2469,7 @@ mod tests {
             let primary = read_request(&mut primary_stream).await?;
             primary_stream
                 .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 29\r\nConnection: close\r\n\r\ninvalid base64 for auth event",
                 )
                 .await?;
 
@@ -2407,7 +2709,8 @@ mod tests {
         let keys = Keys::generate();
         let event = server_list_event(&keys, 1, "compatibility", []);
         let event_json = serde_json::to_vec(&event)?;
-        let headers = compatible_authorization_headers(&event)?;
+        let headers =
+            compatible_authorization_headers(&event, AuthorizationEncodingPreference::Bud11)?;
         let bud11 = headers
             .bud11
             .to_str()?
@@ -2496,6 +2799,86 @@ mod tests {
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_batch_succeeds_when_each_blob_has_one_confirmed_server() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"resilient release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (confirmed_url, confirmed_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let servers = [Url::parse(&failed_url)?, Url::parse(&confirmed_url)?];
+
+        let result = upload_release_snapshot_batch_to_servers_with_progress(
+            &servers,
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            2,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await?;
+        completed_request(failed_server).await?;
+        tokio::time::timeout(SERVER_TIMEOUT, confirmed_server)
+            .await
+            .context("timed out waiting for confirmed release placement")???;
+
+        assert_eq!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [BlossomServerStatus::Failed, BlossomServerStatus::Stored]
+        );
+        let upload = multi_server_upload_from_batch_outcome(&snapshot, &result.blobs[0])?;
+        assert!(
+            upload.primary.url.as_str().starts_with(&confirmed_url),
+            "the first confirmed server must supply the published URL"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn release_batch_fails_when_a_blob_has_no_confirmed_server() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"unavailable release")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+
+        let error = upload_release_snapshot_batch_to_servers_with_progress(
+            &[Url::parse(&failed_url)?],
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            1,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await
+        .unwrap_err();
+        completed_request(failed_server).await?;
+
+        assert!(
+            error
+                .message
+                .contains("1/1 Blossom blobs were not confirmed on any selected server")
+        );
+        assert!(error.possible_orphan_blobs.is_empty());
         Ok(())
     }
 
@@ -2614,6 +2997,31 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn authorization_encoding_fallback_covers_deployed_rejection_statuses() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+        ] {
+            let error = BlobRequestError::http(
+                anyhow!("authorization rejected"),
+                status,
+                RequestFailureKind::Definite,
+                false,
+            );
+            assert!(auth_encoding_may_be_rejected(&error));
+        }
+
+        let error = BlobRequestError::http(
+            anyhow!("upload too large"),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            RequestFailureKind::Definite,
+            false,
+        );
+        assert!(!auth_encoding_may_be_rejected(&error));
+    }
+
     #[tokio::test]
     async fn batch_progress_counts_compatible_upload_fallback_bytes() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
@@ -2650,6 +3058,7 @@ mod tests {
                     blobs: 1,
                     placements: 1,
                     bytes,
+                    ..
                 } if *bytes == snapshot.size
             )
         }));
@@ -2671,6 +3080,31 @@ mod tests {
             })
             .sum::<u64>();
         assert_eq!(uploaded_bytes, snapshot.size * 2);
+        let completed_bodies = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    BlossomProgressEvent::UploadBodyFinished {
+                        filename,
+                        server,
+                        ..
+                    } if filename == &snapshot.filename && server == &server_url
+                )
+            })
+            .count();
+        assert_eq!(completed_bodies, 2);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                BlossomProgressEvent::VerificationStarted {
+                    attempt: 1,
+                    max_attempts: PLACEMENT_MAX_ATTEMPTS,
+                    timeout_secs: 15,
+                    ..
+                }
+            )
+        }));
         assert!(matches!(
             events.last(),
             Some(BlossomProgressEvent::UploadBatchFinished {
@@ -2873,10 +3307,49 @@ mod tests {
     #[test]
     fn batch_authorization_window_covers_every_bounded_upload_wave() -> Result<()> {
         let attempts = PLACEMENT_MAX_ATTEMPTS as u32;
-        let operation_window = PLACEMENT_REQUEST_TIMEOUT * (attempts * (attempts + 1));
+        let operation_window =
+            UPLOAD_REQUEST_TIMEOUT * attempts + PRESENCE_REQUEST_TIMEOUT * (attempts * attempts);
         assert_eq!(batch_upload_window(1, 4)?, operation_window);
         assert_eq!(batch_upload_window(8, 4)?, operation_window * 2);
         assert_eq!(batch_upload_window(9, 4)?, operation_window * 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn steadily_progressing_upload_can_outlive_the_idle_timeout() -> Result<()> {
+        let (server_url, server) = spawn_one_shot_server(|_| TestResponse {
+            status: "200 OK",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let chunk_count = 5_u64;
+        let body = stream::unfold((0_u64, activity_tx), move |(chunk, activity)| async move {
+            if chunk == chunk_count {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let sent = chunk + 1;
+            let _ = activity.send(sent);
+            Some((Ok::<Vec<u8>, std::io::Error>(vec![b'x']), (sent, activity)))
+        });
+        let request = blossom_streaming_http_client()?
+            .put(format!("{server_url}/upload"))
+            .header(CONTENT_LENGTH, chunk_count)
+            .body(reqwest::Body::wrap_stream(body));
+
+        send_upload_request_with_progress_timeout(
+            request,
+            activity_rx,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            Duration::from_millis(80),
+            chunk_count,
+        )
+        .await?;
+
+        let request = completed_request(server).await?;
+        assert_eq!(request.body, vec![b'x'; chunk_count as usize]);
         Ok(())
     }
 
