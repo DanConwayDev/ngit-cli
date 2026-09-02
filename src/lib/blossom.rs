@@ -1476,7 +1476,7 @@ fn validate_presence_metadata(response: &reqwest::Response, snapshot: &FileSnaps
         .to_str()
         .context("Blossom presence response returned a non-text Content-Type")?;
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    if !media_type.eq_ignore_ascii_case(&snapshot.mime_type) {
+    if !snapshot_media_type_matches(snapshot, media_type) {
         bail!(
             "Blossom presence response Content-Type {content_type:?} does not match snapshot MIME type {:?}",
             snapshot.mime_type
@@ -2071,10 +2071,51 @@ fn validate_descriptor(descriptor: &BlobDescriptor, snapshot: &FileSnapshot) -> 
     if descriptor.size != snapshot.size {
         bail!("Blossom descriptor size does not match the uploaded bytes");
     }
-    if descriptor.mime_type != snapshot.mime_type {
+    if !snapshot_media_type_matches(snapshot, &descriptor.mime_type) {
         bail!("Blossom descriptor MIME type does not match the upload");
     }
     validate_blob_url(&descriptor.url, &snapshot.sha256)
+}
+
+fn snapshot_media_type_matches(snapshot: &FileSnapshot, actual: &str) -> bool {
+    let expected = snapshot.mime_type.as_str();
+    if actual.eq_ignore_ascii_case(expected) {
+        return true;
+    }
+    let filename = snapshot.filename.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    let actual = actual.to_ascii_lowercase();
+    match filename.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("map") => {
+            expected == "application/json"
+                && matches!(actual.as_str(), "application/json" | "text/plain")
+        }
+        Some("js" | "mjs") => {
+            matches!(
+                expected.as_str(),
+                "application/javascript" | "text/javascript"
+            ) && matches!(
+                actual.as_str(),
+                "application/javascript" | "text/javascript"
+            )
+        }
+        Some("webmanifest") => {
+            matches!(
+                expected.as_str(),
+                "application/manifest+json" | "application/json"
+            ) && matches!(
+                actual.as_str(),
+                "application/manifest+json" | "application/json"
+            )
+        }
+        Some("ico") => {
+            matches!(
+                expected.as_str(),
+                "image/vnd.microsoft.icon" | "image/x-icon"
+            ) && matches!(actual.as_str(), "image/vnd.microsoft.icon" | "image/x-icon")
+        }
+        _ => false,
+    }
 }
 
 fn validate_blob_url(url: &Url, sha256: &str) -> Result<()> {
@@ -3335,6 +3376,39 @@ mod tests {
             assert!(error.message.contains(expected_message));
             completed_request(server).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_asset_mime_aliases_are_filename_scoped() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static asset")?;
+        let mut snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+
+        for (filename, expected, actual) in [
+            ("app.js.map", "application/json", "text/plain"),
+            ("app.js", "text/javascript", "application/javascript"),
+            (
+                "manifest.webmanifest",
+                "application/manifest+json",
+                "application/json",
+            ),
+            ("favicon.ico", "image/vnd.microsoft.icon", "image/x-icon"),
+        ] {
+            snapshot.filename = filename.to_owned();
+            snapshot.mime_type = expected.to_owned();
+            assert!(snapshot_media_type_matches(&snapshot, actual));
+        }
+
+        snapshot.filename = "site.css".to_owned();
+        snapshot.mime_type = "text/css".to_owned();
+        assert!(!snapshot_media_type_matches(&snapshot, "text/plain"));
+        snapshot.filename = "ngit.bin".to_owned();
+        snapshot.mime_type = "application/octet-stream".to_owned();
+        assert!(!snapshot_media_type_matches(
+            &snapshot,
+            "application/x-pie-executable"
+        ));
         Ok(())
     }
 
