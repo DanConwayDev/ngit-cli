@@ -22,11 +22,29 @@ hosting path and provides both a Git server and a Nostr relay:
 ngit init --name "My Project" --grasp-server grasp.example.com --defaults --json
 ```
 
-Additional infrastructure is explicit and is empty by default:
+Without `--grasp-server`, `--defaults` uses the account's preferred grasp
+servers and falls back to ngit's defaults. Additional infrastructure is
+explicit, is empty by default, and supplements the grasp hosting rather than
+replacing it:
 
 ```bash
 ngit init \
   --name "My Project" \
+  --additional-relay wss://relay.example.com \
+  --additional-clone https://git.example.com/my-project.git \
+  --defaults \
+  --json
+```
+
+Hosting a repository without any grasp server has to be stated explicitly with
+an empty `--grasp-server` value. It then needs both an additional relay and an
+additional clone URL of its own, because an announcement with an empty relay or
+clone field is refused:
+
+```bash
+ngit init \
+  --name "My Project" \
+  --grasp-server "" \
   --additional-relay wss://relay.example.com \
   --additional-clone https://git.example.com/my-project.git \
   --defaults \
@@ -74,8 +92,14 @@ clones = grasp-derived clones + additional clones
 
 A grasp-derived entry cannot be removed as an additional entry. Remove its
 grasp server instead; ngit then removes the paired relay and clone together.
-An edit that would leave no announcement relay or no Git server fails before
-publication.
+
+Every announcement must name at least one relay and at least one Git server.
+`ngit init` and `ngit repo edit` both refuse to publish otherwise, naming
+`--grasp-server`, `--additional-relay`, and `--additional-clone` as the ways to
+supply the missing half. This also applies to an edit that changes only
+metadata: an announcement that already lacks a relay or a Git server has to be
+repaired in the same command, for example
+`ngit repo edit --name "New name" --add-grasp-server grasp.example.com`.
 
 Every successful edit publishes a fresh announcement. When the repository has
 Nostr state, ngit also republishes that state once, giving newly added relays

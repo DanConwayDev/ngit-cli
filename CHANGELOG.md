@@ -128,6 +128,22 @@ publication.
   supported when the command runs from the worktree that owns the target
   branch; if another worktree owns it, ngit refuses before changing either
   worktree or the shared target ref.
+- `ngit init --defaults` no longer drops grasp hosting when `--additional-clone`
+  or `--additional-relay` is supplied. Additional infrastructure supplements the
+  account's preferred grasp servers (or ngit's defaults) instead of silently
+  replacing them, so the announcement keeps its grasp-derived clone URLs and
+  relays. Publishing without any grasp server is now stated explicitly with an
+  empty value, `--grasp-server ""`, which also requires an additional relay and
+  clone URL of its own. Republishing an announcement that genuinely declares no
+  grasp servers no longer grafts the defaults onto it.
+- `ngit init` and `ngit repo edit` refuse to publish a repository announcement
+  whose relay or clone field would be empty, naming `--grasp-server`,
+  `--additional-relay` and `--additional-clone` as the ways to supply the
+  missing half. The check runs on the resolved announcement before anything is
+  signed, so it covers every flag shape and repository configuration, including
+  a metadata-only edit of an announcement that already lacks hosting — which
+  previously republished the unusable announcement and then failed while
+  pushing git data with no git server to connect to.
 - Prevent TLS client initialization from panicking after Reqwest 0.13 selected
   AWS-LC alongside rust-nostr's Ring provider. Reqwest remains
   provider-neutral while ngit explicitly installs Ring before constructing

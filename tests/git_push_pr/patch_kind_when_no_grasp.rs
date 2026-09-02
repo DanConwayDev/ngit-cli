@@ -20,8 +20,9 @@
 //!
 //! 1. Harness: one vanilla relay (`"default"`) + one vanilla git server
 //!    (`"git"`) — **no GRASP server**.
-//! 2. Publisher manually runs `ngit init --additional-relay <relay_url>
-//!    --additional-clone <git_url> -d --identifier ... --name ...` to publish a
+//! 2. Publisher manually runs `ngit init --grasp-server "" --additional-relay
+//!    <relay_url> --additional-clone <git_url> -d --identifier ... --name ...`
+//!    — the empty `--grasp-server` value is the explicit opt-out — to publish a
 //!    kind-30617 announcement whose `clone` tag contains only the vanilla git
 //!    server URL (no GRASP URL). Pushes via the nostr:// remote to graduate the
 //!    announcement and seed the bare git repo.
@@ -153,11 +154,14 @@ async fn capture_snapshot() -> Result<Snapshot> {
 
     // --- 2. Publisher: manual setup (publish_repo requires a GRASP) --------
     //
-    // We use ngit init --additional-relay + --additional-clone (without
-    // --grasp-server) so the
-    // kind-30617 announcement carries only the vanilla git server URL in its
-    // `clone` tag. That makes `repo_ref.grasp_servers()` return an empty list
-    // and `repo_has_grasp_server = false` in push.rs:648.
+    // We use ngit init --additional-relay + --additional-clone with the
+    // explicit `--grasp-server ""` opt-out, so the kind-30617 announcement
+    // carries only the vanilla git server URL in its `clone` tag. That makes
+    // `repo_ref.grasp_servers()` return an empty list and
+    // `repo_has_grasp_server = false` in push.rs:648. Without the opt-out ngit
+    // would supplement the additional infrastructure with its default grasp
+    // servers, which this harness happens not to provide — the opt-out keeps
+    // the scenario independent of that.
     let publisher = harness.fresh_repo()?;
 
     let init_out = publisher
@@ -192,12 +196,13 @@ async fn capture_snapshot() -> Result<Snapshot> {
         )
         .await?;
 
-    // Run ngit init with additional relay and clone but NO --grasp-server.
-    // `has_both_relays_and_clone_url` (init.rs:265) suppresses the
-    // "missing grasp server" prompt so this runs non-interactively via -d.
+    // Run ngit init with additional relay and clone, opting out of grasp
+    // hosting explicitly.
     let init_out = publisher
         .ngit([
             "init",
+            "--grasp-server",
+            "",
             "--additional-relay",
             &relay_url,
             "--additional-clone",

@@ -782,30 +782,12 @@ pub async fn launch(
         init::validate_hashtag,
     )?;
 
-    let hosting_mutation =
-        grasp_servers.is_some() || additional_relays.is_some() || additional_clones.is_some();
-    if hosting_mutation {
-        let final_additional_relays = additional_relays
-            .as_deref()
-            .unwrap_or(current_additional_relays.as_slice());
-        let final_additional_clones = additional_clones
-            .as_deref()
-            .unwrap_or(current_additional_clones.as_slice());
-        if resulting_grasp_servers.is_empty() && final_additional_relays.is_empty() {
-            return Err(cli_error(
-                "this edit would leave the repository without an announcement relay",
-                &[],
-                &["add a grasp server or an additional relay in the same command"],
-            ));
-        }
-        if resulting_grasp_servers.is_empty() && final_additional_clones.is_empty() {
-            return Err(cli_error(
-                "this edit would leave the repository without a git server",
-                &[],
-                &["add a grasp server or an additional clone in the same command"],
-            ));
-        }
-    }
+    // Hosting is not validated here: every edit publishes through
+    // `init::launch_repo_edit`, whose publisher enforces
+    // `init::validate_announcement_hosting` on the resolved announcement
+    // fields. That covers hosting mutations and metadata-only edits on an
+    // announcement that already lacks a relay or a git server alike, without
+    // this command having to model the resulting announcement a second time.
 
     let acknowledgement = if let Some(value) = &args.acknowledge_maintainer_change {
         let target = parse_pubkey("--acknowledge-maintainer-change", value)?;

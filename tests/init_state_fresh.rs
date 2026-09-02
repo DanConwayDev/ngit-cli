@@ -548,8 +548,8 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 ///    string.
 /// 3. ngit takes `--additional-clone + --additional-relay` together as
 ///    satisfying `validate_fresh`'s server-infra requirement (no
-///    `--grasp-server` needed; init.rs:362-370), accepts the vanilla URL, and
-///    emits it **verbatim** in the announcement's `clone` tag — without the
+///    `--grasp-server` needed), accepts the vanilla URL, and emits it
+///    **verbatim** in the announcement's `clone` tag — without the
 ///    `<npub>/<identifier>.git` suffix synthesis that the grasp path applies
 ///    (cf. `clone_url_derived_from_grasp_server` above).
 ///
@@ -595,10 +595,11 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         String::from_utf8_lossy(&ls.stdout),
     );
 
-    // The additional clone + relay together satisfy validate_fresh's server-infra
-    // requirement (init.rs:362-370 `has_both_relays_and_clone_url`).
-    // No `--grasp-server`, so this exercises the non-grasp clone-URL
-    // arm exclusively.
+    // The additional clone + relay together satisfy validate_fresh's
+    // server-infra requirement (`has_both_relays_and_clone_url`). No
+    // `--grasp-server`, and this harness registers no grasp server, so the
+    // default set ngit would otherwise supplement with is empty — the
+    // announcement exercises the non-grasp clone-URL arm exclusively.
     let init_out = repo
         .ngit([
             "init",
