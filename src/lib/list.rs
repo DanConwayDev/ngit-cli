@@ -402,18 +402,17 @@ pub async fn list_from_remotes(
                             "success".to_string()
                         };
 
-                        let message_style = if status_msg == "empty repository" {
-                            console::style(&status_msg).for_stderr().red()
-                        } else if status_msg == "in sync" || status_msg == "success" {
+                        let message_style = if status_msg == "empty repository"
+                            || status_msg == "in sync"
+                            || status_msg == "success"
+                        {
                             console::style(&status_msg).for_stderr().green()
                         } else {
                             console::style(&status_msg).for_stderr().yellow()
                         };
 
-                        let is_success = status_msg != "empty repository";
-
                         if let Some(pb) = pb {
-                            pb.set_style(git_server_pb_after_style(is_success));
+                            pb.set_style(git_server_pb_after_style(true));
                             pb.set_prefix(
                                 console::style(format!("{: <server_column_width$}", server_name))
                                     .for_stderr()

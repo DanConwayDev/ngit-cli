@@ -529,11 +529,10 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 /// the non-grasp clone-URL arm — the `is_grasp_server_clone_url == false`
 /// branches throughout `init.rs` (e.g. line 274) and `repo_ref.rs`. The
 /// harness-managed [`VanillaGitServer`](test_harness::VanillaGitServer)
-/// stands in for "any plain git host"; under `NGITTEST=TRUE` the
-/// post-init `git push` (init.rs:1195) is suppressed, so the server's
-/// wire path is exercised only by the test's own liveness probe — but
-/// the URL still has to round-trip through ngit's clone-URL handling
-/// without being rewritten or rejected.
+/// stands in for "any plain git host". The URL must round-trip through
+/// ngit's clone-URL handling without being rewritten or rejected, and the
+/// initial push must treat the server's successful empty advertisement as a
+/// valid baseline without manufacturing private-repository authorization.
 ///
 /// Three things this pins:
 ///
@@ -552,6 +551,8 @@ async fn earliest_unique_commit_is_root(#[future] snapshot: Arc<Snapshot>) -> Re
 ///    **verbatim** in the announcement's `clone` tag — without the
 ///    `<npub>/<identifier>.git` suffix synthesis that the grasp path applies
 ///    (cf. `clone_url_derived_from_grasp_server` above).
+/// 4. The successful empty listing receives no NIP-98 authorization and the
+///    initial `main` branch is pushed to the mirror.
 ///
 /// Uses a fresh `#[tokio::test(flavor = "multi_thread")]` rather than
 /// joining the shared snapshot above because the snapshot is keyed on
@@ -645,7 +646,20 @@ async fn vanilla_clone_url_passes_through_to_announcement() -> Result<()> {
         clone_urls.iter().any(|u| u == &vanilla_url),
         "expected vanilla URL {vanilla_url:?} verbatim in announcement's \
          clone tag (no <npub>/<id>.git synthesis on the non-grasp path); \
-         got {clone_urls:?}",
+        got {clone_urls:?}",
+    );
+    assert_eq!(
+        harness
+            .vanilla_git_server("host")
+            .nostr_authorization_requests(),
+        0,
+        "a public mirror must not receive private-repository HTTP authorization",
+    );
+    let mirror = git2::Repository::open_bare(harness.vanilla_git_server("host").repo_path())?;
+    assert_eq!(
+        mirror.refname_to_id("refs/heads/main")?.to_string(),
+        state.head_oid,
+        "the initial branch must be pushed after an empty advertisement",
     );
     Ok(())
 }

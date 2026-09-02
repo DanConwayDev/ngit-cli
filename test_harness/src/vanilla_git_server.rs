@@ -72,7 +72,10 @@ use std::{
     convert::Infallible,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -109,6 +112,8 @@ pub struct VanillaGitServer {
     /// Bare repo on disk. Lives inside `_temp_dir` — exposed so tests
     /// can install hooks, inspect refs out-of-band, etc.
     repo_path: PathBuf,
+    /// Count of HTTP requests carrying ngit's NIP-98 authorization scheme.
+    nostr_authorization_requests: Arc<AtomicUsize>,
     /// Shutdown signal sender. `take()`n in `Drop` (and consumed by `stop`).
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Accept loop join handle. Awaited synchronously in `Drop`.
@@ -274,6 +279,8 @@ impl VanillaGitServer {
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let serve_repo = Arc::new(repo_path.clone());
+        let nostr_authorization_requests = Arc::new(AtomicUsize::new(0));
+        let serve_nostr_authorization_requests = Arc::clone(&nostr_authorization_requests);
 
         let handle: JoinHandle<()> = tokio::spawn(async move {
             loop {
@@ -282,11 +289,22 @@ impl VanillaGitServer {
                         match accept {
                             Ok((stream, _addr)) => {
                                 let repo = Arc::clone(&serve_repo);
+                                let nostr_authorization_requests =
+                                    Arc::clone(&serve_nostr_authorization_requests);
                                 let io = TokioIo::new(stream);
                                 tokio::spawn(async move {
                                     let service = service_fn(move |req| {
                                         let repo = Arc::clone(&repo);
-                                        async move { handle_request(req, &repo).await }
+                                        let nostr_authorization_requests =
+                                            Arc::clone(&nostr_authorization_requests);
+                                        async move {
+                                            handle_request(
+                                                req,
+                                                &repo,
+                                                &nostr_authorization_requests,
+                                            )
+                                            .await
+                                        }
                                     });
                                     if let Err(e) = http1::Builder::new()
                                         .serve_connection(io, service)
@@ -346,6 +364,7 @@ impl VanillaGitServer {
             url,
             port,
             repo_path,
+            nostr_authorization_requests,
             shutdown_tx: Some(shutdown_tx),
             handle: Some(handle),
             _temp_dir: temp_dir,
@@ -370,6 +389,13 @@ impl VanillaGitServer {
     /// of a push without going back over HTTP.
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Number of requests that carried an `Authorization: Nostr ...` header.
+    /// Public Git-host tests use this to prove ngit did not manufacture
+    /// private-repository credentials for a public mirror.
+    pub fn nostr_authorization_requests(&self) -> usize {
+        self.nostr_authorization_requests.load(Ordering::SeqCst)
     }
 
     /// Read the OID that `refs/nostr/<event_id_hex>` resolves to inside this
@@ -456,7 +482,17 @@ impl Drop for VanillaGitServer {
 async fn handle_request(
     req: Request<Incoming>,
     repo_path: &Path,
+    nostr_authorization_requests: &AtomicUsize,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    if req
+        .headers()
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_whitespace().next())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Nostr"))
+    {
+        nostr_authorization_requests.fetch_add(1, Ordering::SeqCst);
+    }
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let method = req.method().clone();

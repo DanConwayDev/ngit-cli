@@ -2392,6 +2392,7 @@ async fn push_initial_branch(
     let term = Term::stderr();
     let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
     let refspecs = vec![refspec.clone()];
+    let private_signer = repo_ref.private.then_some(signer);
 
     // Git-server reality must come from a same-invocation listing; local
     // remote-tracking refs are only written after a successful push.
@@ -2401,7 +2402,7 @@ async fn push_initial_branch(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
-        Some(signer),
+        private_signer,
     )
     .await;
 
@@ -2595,6 +2596,7 @@ async fn republish_cached_state(
     require_complete_state: bool,
 ) -> Result<Event> {
     let term = Term::stderr();
+    let private_signer = repo_ref.private.then_some(signer);
 
     let cached_state = get_state_from_cache(Some(git_repo.get_path()?), repo_ref)
         .await
@@ -2634,7 +2636,7 @@ async fn republish_cached_state(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
-        Some(signer),
+        private_signer,
     )
     .await;
     if remote_states.is_empty() {
@@ -2651,7 +2653,7 @@ async fn republish_cached_state(
         &candidate,
         &remote_states,
         nostr_url_decoded,
-        Some(signer),
+        private_signer,
     )
     .await?;
     if require_complete_state && !missing_refs.is_empty() {
@@ -2751,6 +2753,7 @@ async fn publish_origin_state(
     mut origin_state: HashMap<String, String>,
 ) -> Result<()> {
     let term = Term::stderr();
+    let private_signer = repo_ref.private.then_some(signer);
 
     // The origin is the only server guaranteed to hold the objects its
     // listing advertised. Fetch the missing ones by ref name before
@@ -2808,7 +2811,7 @@ async fn publish_origin_state(
         &repo_ref.git_server,
         nostr_url_decoded,
         None,
-        Some(signer),
+        private_signer,
     )
     .await;
 
@@ -2819,7 +2822,7 @@ async fn publish_origin_state(
         &candidate,
         &remote_states,
         nostr_url_decoded,
-        Some(signer),
+        private_signer,
     )
     .await?;
 
