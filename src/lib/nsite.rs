@@ -12,7 +12,10 @@ use bitcoin_hashes::{HashEngine as _, sha256};
 use nostr::prelude::{Event, EventBuilder, Kind, RelayUrl, Tag, Url};
 use serde::Deserialize;
 
-use crate::blossom::{FileSnapshot, LocalFileRequest, snapshot_local_file};
+use crate::{
+    blossom::{FileSnapshot, LocalFileRequest, snapshot_local_file},
+    release_download::mime_type_from_filename,
+};
 
 pub const NSITE_ROOT_KIND: Kind = Kind::Custom(15_128);
 pub const NSITE_NAMED_KIND: Kind = Kind::Custom(35_128);
@@ -124,8 +127,8 @@ pub async fn snapshot_nsite_directory(root: &Path) -> Result<Vec<NsiteFileSnapsh
     let mut snapshots = Vec::with_capacity(files.len());
     for (source_path, public_path) in files {
         let mut request = LocalFileRequest::new(&source_path);
-        request.mime_type = mime_guess::from_path(&public_path)
-            .first_raw()
+        request.mime_type = mime_type_from_filename(&public_path)
+            .or_else(|| mime_guess::from_path(&public_path).first_raw())
             .map(str::to_owned);
         let snapshot = snapshot_local_file(request)
             .await
@@ -438,6 +441,20 @@ mod tests {
 
         assert_eq!(files[0].snapshot.mime_type, "text/markdown");
         assert!(files[0].snapshot.warnings.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshots_prefer_canonical_static_asset_mime_types() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::write(directory.path().join("app.js.map"), "{}")?;
+        fs::write(directory.path().join("favicon.ico"), "icon")?;
+
+        let files = snapshot_nsite_directory(directory.path()).await?;
+
+        assert_eq!(files[0].snapshot.mime_type, "application/json");
+        assert_eq!(files[1].snapshot.mime_type, "image/vnd.microsoft.icon");
+        assert!(files.iter().all(|file| file.snapshot.warnings.is_empty()));
         Ok(())
     }
 

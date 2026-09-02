@@ -92,6 +92,12 @@ impl BatchAuthorizationOptions {
         encoding_preference: AuthorizationEncodingPreference::Legacy,
         placement_requirement: PlacementRequirement::OneServerPerBlob,
     };
+
+    const RESILIENT: Self = Self {
+        batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
+        encoding_preference: AuthorizationEncodingPreference::Bud11,
+        placement_requirement: PlacementRequirement::OneServerPerBlob,
+    };
 }
 
 /// Observable milestones emitted by the Blossom batch placement engine.
@@ -106,6 +112,13 @@ pub enum BlossomProgressEvent {
         blobs: usize,
         servers: usize,
         checks: usize,
+    },
+    PresenceCheckFinished {
+        checked: usize,
+        checks: usize,
+        confirmed: usize,
+        missing: usize,
+        unavailable: usize,
     },
     PresenceChecksFinished {
         missing: usize,
@@ -817,6 +830,27 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
     .await
 }
 
+/// Batch placement which attempts every selected server while requiring one
+/// confirmed copy of every blob. Standard multi-hash BUD-11 authorizations
+/// retain signer batching while failed replicas remain visible in the result.
+pub async fn upload_resilient_snapshot_batch_to_servers_with_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::RESILIENT,
+    )
+    .await
+}
+
 /// Batch placement for software releases which attempts every selected server
 /// while requiring one confirmed copy of every blob. It retains compatibility
 /// with deployed servers that require padded Base64 and exactly one `x`
@@ -906,7 +940,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 .enumerate()
                 .map(move |(server_index, server)| (blob_index, server_index, *snapshot, server))
         });
-    let presence_results = stream::iter(presence_checks)
+    let mut presence_results = stream::iter(presence_checks)
         .map(|(blob_index, server_index, snapshot, server)| {
             let client = client.clone();
             async move {
@@ -917,15 +951,17 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 )
             }
         })
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+        .buffer_unordered(concurrency);
 
     let mut presence_failed = false;
     let mut missing = Vec::new();
-    for (blob_index, server_index, result) in presence_results {
+    let mut checked = 0_usize;
+    let mut confirmed = 0_usize;
+    let mut unavailable = 0_usize;
+    while let Some((blob_index, server_index, result)) = presence_results.next().await {
         match result {
             Ok(true) => {
+                confirmed += 1;
                 blobs[blob_index].servers[server_index].status =
                     BlossomServerStatus::AlreadyPresent;
                 progress.update(&BlossomProgressEvent::PlacementFinished {
@@ -937,6 +973,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             }
             Ok(false) => missing.push((blob_index, server_index)),
             Err(error) => {
+                unavailable += 1;
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
                 outcome.status = match error.kind {
@@ -952,6 +989,14 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 });
             }
         }
+        checked += 1;
+        progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            checked,
+            checks: snapshots.len().saturating_mul(servers.len()),
+            confirmed,
+            missing: missing.len(),
+            unavailable,
+        });
     }
     progress.update(&BlossomProgressEvent::PresenceChecksFinished {
         missing: missing.len(),
@@ -1085,7 +1130,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             unavailable,
             bytes: upload_bytes,
         });
-        let upload_results = stream::iter(uploads)
+        let mut upload_results = stream::iter(uploads)
             .map(|(blob_index, server_index)| {
                 let client = client.clone();
                 let authorization = authorization.clone();
@@ -1109,12 +1154,10 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     )
                 }
             })
-            .buffer_unordered(concurrency)
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(concurrency);
 
         let mut chunk_failed = false;
-        for (blob_index, server_index, result) in upload_results {
+        while let Some((blob_index, server_index, result)) = upload_results.next().await {
             let sha256 = blobs[blob_index].sha256.clone();
             let outcome = &mut blobs[blob_index].servers[server_index];
             match result {
@@ -1431,7 +1474,7 @@ fn validate_presence_metadata(response: &reqwest::Response, snapshot: &FileSnaps
         .to_str()
         .context("Blossom presence response returned a non-text Content-Type")?;
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    if !media_type.eq_ignore_ascii_case(&snapshot.mime_type) {
+    if !snapshot_media_type_matches(snapshot, media_type) {
         bail!(
             "Blossom presence response Content-Type {content_type:?} does not match snapshot MIME type {:?}",
             snapshot.mime_type
@@ -2026,10 +2069,51 @@ fn validate_descriptor(descriptor: &BlobDescriptor, snapshot: &FileSnapshot) -> 
     if descriptor.size != snapshot.size {
         bail!("Blossom descriptor size does not match the uploaded bytes");
     }
-    if descriptor.mime_type != snapshot.mime_type {
+    if !snapshot_media_type_matches(snapshot, &descriptor.mime_type) {
         bail!("Blossom descriptor MIME type does not match the upload");
     }
     validate_blob_url(&descriptor.url, &snapshot.sha256)
+}
+
+fn snapshot_media_type_matches(snapshot: &FileSnapshot, actual: &str) -> bool {
+    let expected = snapshot.mime_type.as_str();
+    if actual.eq_ignore_ascii_case(expected) {
+        return true;
+    }
+    let filename = snapshot.filename.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    let actual = actual.to_ascii_lowercase();
+    match filename.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("map") => {
+            expected == "application/json"
+                && matches!(actual.as_str(), "application/json" | "text/plain")
+        }
+        Some("js" | "mjs") => {
+            matches!(
+                expected.as_str(),
+                "application/javascript" | "text/javascript"
+            ) && matches!(
+                actual.as_str(),
+                "application/javascript" | "text/javascript"
+            )
+        }
+        Some("webmanifest") => {
+            matches!(
+                expected.as_str(),
+                "application/manifest+json" | "application/json"
+            ) && matches!(
+                actual.as_str(),
+                "application/manifest+json" | "application/json"
+            )
+        }
+        Some("ico") => {
+            matches!(
+                expected.as_str(),
+                "image/vnd.microsoft.icon" | "image/x-icon"
+            ) && matches!(actual.as_str(), "image/vnd.microsoft.icon" | "image/x-icon")
+        }
+        _ => false,
+    }
 }
 
 fn validate_blob_url(url: &Url, sha256: &str) -> Result<()> {
@@ -2275,6 +2359,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::{TcpListener, TcpStream},
+        sync::oneshot,
         task::JoinHandle,
     };
 
@@ -2303,6 +2388,28 @@ mod tests {
     impl BlossomProgress for RecordingBlossomProgress {
         fn update(&self, event: &BlossomProgressEvent) {
             self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    struct PlacementFinishedSignal {
+        server: Url,
+        signal: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl BlossomProgress for PlacementFinishedSignal {
+        fn update(&self, event: &BlossomProgressEvent) {
+            if matches!(
+                event,
+                BlossomProgressEvent::PlacementFinished {
+                    server,
+                    status: BlossomServerStatus::Stored,
+                    ..
+                } if server == &self.server
+            ) {
+                if let Some(signal) = self.signal.lock().unwrap().take() {
+                    let _ = signal.send(());
+                }
+            }
         }
     }
 
@@ -2432,6 +2539,63 @@ mod tests {
             Ok((head, upload, verify))
         });
         Ok((base_url, task))
+    }
+
+    async fn spawn_gated_presence_then_upload_server(
+        sha256: String,
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response_base = base_url.clone();
+        let (verification_started_tx, verification_started_rx) = oneshot::channel();
+        let (release_verification_tx, release_verification_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut head_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom presence check")??;
+            let head = read_header_only_request(&mut head_stream).await?;
+            head_stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut upload_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom upload")??;
+            let upload = read_request(&mut upload_stream).await?;
+            let body = descriptor_json(&response_base, &sha256, size, &mime_type);
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            upload_stream.write_all(response.as_bytes()).await?;
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let _ = verification_started_tx.send(());
+            let _ = release_verification_rx.await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((head, upload, verify))
+        });
+        Ok((
+            base_url,
+            task,
+            verification_started_rx,
+            release_verification_tx,
+        ))
     }
 
     async fn spawn_authorization_fallback_server(
@@ -2803,6 +2967,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_progress_finishes_each_placement_without_waiting_for_slow_peers() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"independent placement completion")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (fast_url, fast_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let (slow_url, slow_server, slow_verification_started, release_slow_verification) =
+            spawn_gated_presence_then_upload_server(
+                snapshot.sha256.clone(),
+                snapshot.size,
+                snapshot.mime_type.clone(),
+            )
+            .await?;
+        let fast_url = Url::parse(&fast_url)?;
+        let slow_url = Url::parse(&slow_url)?;
+        let (fast_finished_tx, fast_finished_rx) = oneshot::channel();
+        let progress = Arc::new(PlacementFinishedSignal {
+            server: fast_url.clone(),
+            signal: Mutex::new(Some(fast_finished_tx)),
+        });
+        let servers = [fast_url, slow_url];
+        let signer = NgitSigner::Keys(Keys::generate());
+        let snapshots = [&snapshot];
+        let upload = upload_snapshot_batch_to_servers_with_progress(
+            &servers, &snapshots, &signer, 2, progress,
+        );
+        let observe_independent_completion = async move {
+            slow_verification_started
+                .await
+                .context("slow Blossom placement never reached verification")?;
+            fast_finished_rx
+                .await
+                .context("fast Blossom placement stayed active behind its slow peer")?;
+            release_slow_verification
+                .send(())
+                .map_err(|_| anyhow!("slow Blossom placement stopped before release"))?;
+            Ok::<(), anyhow::Error>(())
+        };
+
+        let (result, observation) = tokio::time::timeout(SERVER_TIMEOUT, async {
+            tokio::join!(upload, observe_independent_completion)
+        })
+        .await
+        .context("fast Blossom placement did not finish independently")?;
+        observation?;
+        let result = result?;
+        tokio::time::timeout(SERVER_TIMEOUT, fast_server)
+            .await
+            .context("timed out waiting for fast Blossom server")???;
+        tokio::time::timeout(SERVER_TIMEOUT, slow_server)
+            .await
+            .context("timed out waiting for slow Blossom server")???;
+        assert!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .all(|outcome| outcome.status == BlossomServerStatus::Stored)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn release_batch_succeeds_when_each_blob_has_one_confirmed_server() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
         std::fs::write(file.path(), b"resilient release")?;
@@ -2846,6 +3076,49 @@ mod tests {
         assert!(
             upload.primary.url.as_str().starts_with(&confirmed_url),
             "the first confirmed server must supply the published URL"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resilient_batch_keeps_bud11_batching_when_one_server_fails() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"resilient static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (confirmed_url, confirmed_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let servers = [Url::parse(&failed_url)?, Url::parse(&confirmed_url)?];
+
+        let result = upload_resilient_snapshot_batch_to_servers_with_progress(
+            &servers,
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            2,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await?;
+        completed_request(failed_server).await?;
+        tokio::time::timeout(SERVER_TIMEOUT, confirmed_server)
+            .await
+            .context("timed out waiting for confirmed resilient placement")???;
+
+        assert_eq!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [BlossomServerStatus::Failed, BlossomServerStatus::Stored]
         );
         Ok(())
     }
@@ -3052,6 +3325,18 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
+                BlossomProgressEvent::PresenceCheckFinished {
+                    checked: 1,
+                    checks: 1,
+                    confirmed: 0,
+                    missing: 1,
+                    unavailable: 0,
+                }
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
                 BlossomProgressEvent::UploadBatchStarted {
                     batch: 1,
                     batches: 1,
@@ -3235,6 +3520,39 @@ mod tests {
             assert!(error.message.contains(expected_message));
             completed_request(server).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_asset_mime_aliases_are_filename_scoped() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"static asset")?;
+        let mut snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+
+        for (filename, expected, actual) in [
+            ("app.js.map", "application/json", "text/plain"),
+            ("app.js", "text/javascript", "application/javascript"),
+            (
+                "manifest.webmanifest",
+                "application/manifest+json",
+                "application/json",
+            ),
+            ("favicon.ico", "image/vnd.microsoft.icon", "image/x-icon"),
+        ] {
+            snapshot.filename = filename.to_owned();
+            snapshot.mime_type = expected.to_owned();
+            assert!(snapshot_media_type_matches(&snapshot, actual));
+        }
+
+        snapshot.filename = "site.css".to_owned();
+        snapshot.mime_type = "text/css".to_owned();
+        assert!(!snapshot_media_type_matches(&snapshot, "text/plain"));
+        snapshot.filename = "ngit.bin".to_owned();
+        snapshot.mime_type = "application/octet-stream".to_owned();
+        assert!(!snapshot_media_type_matches(
+            &snapshot,
+            "application/x-pie-executable"
+        ));
         Ok(())
     }
 

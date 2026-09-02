@@ -1,11 +1,15 @@
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use ngit::{
     blossom::{
         BatchUploadResult, BlossomServerStatus, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
-        upload_snapshot_batch_to_servers,
+        upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{send_public_events, sign_draft_event},
     event_ordering::{latest_event, wait_for_strictly_later_timestamp},
@@ -21,9 +25,12 @@ use nostr::prelude::{
 };
 use serde_json::{Value, json};
 
-use super::release::support::{
-    ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
-    repository_json,
+use super::release::{
+    support::{
+        ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
+        repository_json,
+    },
+    write::BlossomUploadProgress,
 };
 use crate::{
     cli::{NsiteCommands, NsitePublishArgs, NsiteSubCommandArgs, SignerParams},
@@ -169,20 +176,21 @@ async fn publish(
     let (_, aggregate) = manifest_event_builder(&files, &manifest_input)?;
 
     context.emit_human_warnings_before_signing(json_output);
-    if !json_output && !ngit::output_mode::is_quiet() {
-        eprintln!(
-            "confirming {} unique blob(s) across {} Blossom server(s)...",
-            blobs.len(),
-            servers.len()
-        );
-    }
-    let blossom =
-        upload_snapshot_batch_to_servers(&servers, &blobs, signer.as_ref(), args.concurrency)
-            .await
-            .map_err(|error| {
-                let details = serde_json::to_value(&error).unwrap_or_else(|_| json!({}));
-                coded_error_with_details("blossom_upload_failed", error.message, details)
-            })?;
+    let progress = BlossomUploadProgress::new(json_output)?;
+    let blossom = upload_resilient_snapshot_batch_to_servers_with_progress(
+        &servers,
+        &blobs,
+        signer.as_ref(),
+        args.concurrency,
+        progress,
+    )
+    .await
+    .map_err(|error| {
+        let details = serde_json::to_value(&error).unwrap_or_else(|_| json!({}));
+        coded_error_with_details("blossom_upload_failed", error.message, details)
+    })?;
+    append_blossom_replication_warning(&mut context, &blossom);
+    context.emit_human_warnings_before_signing(json_output);
 
     let current =
         load_current_manifest(&mut context, author, resolved.identifier.as_deref()).await?;
@@ -539,20 +547,101 @@ fn append_snapshot_warnings(
     context: &mut ReleaseContext,
     files: &[ngit::nsite::NsiteFileSnapshot],
 ) -> Result<()> {
+    context.warnings.extend(grouped_snapshot_warnings(files)?);
+    Ok(())
+}
+
+fn grouped_snapshot_warnings(files: &[ngit::nsite::NsiteFileSnapshot]) -> Result<Vec<WarningJson>> {
+    let mut records = Vec::new();
     for file in files {
         for warning in &file.snapshot.warnings {
             let code = serde_json::to_value(warning.code)?
                 .as_str()
                 .unwrap_or("nsite_snapshot_warning")
                 .to_owned();
-            context.warnings.push(WarningJson {
-                code,
-                message: warning.message.clone(),
-                details: json!({ "path": file.path }),
-            });
+            records.push((code, warning.message.clone(), file.path.clone()));
         }
     }
-    Ok(())
+    Ok(group_snapshot_warning_records(records))
+}
+
+fn group_snapshot_warning_records(records: Vec<(String, String, String)>) -> Vec<WarningJson> {
+    let mut grouped = BTreeMap::<(String, String), Vec<String>>::new();
+    for (code, message, path) in records {
+        grouped.entry((code, message)).or_default().push(path);
+    }
+    grouped
+        .into_iter()
+        .map(|((code, message), paths)| {
+            let count = paths.len();
+            let examples = paths.iter().take(5).collect::<Vec<_>>();
+            let omitted = count.saturating_sub(examples.len());
+            WarningJson {
+                code,
+                message: if count == 1 {
+                    message
+                } else {
+                    format!("{message} ({count} files)")
+                },
+                details: json!({
+                    "count": count,
+                    "paths": examples,
+                    "omitted": omitted,
+                }),
+            }
+        })
+        .collect()
+}
+
+fn append_blossom_replication_warning(context: &mut ReleaseContext, blossom: &BatchUploadResult) {
+    context
+        .warnings
+        .extend(blossom_replication_warning(blossom));
+}
+
+fn blossom_replication_warning(blossom: &BatchUploadResult) -> Option<WarningJson> {
+    let placements = blossom
+        .blobs
+        .iter()
+        .flat_map(|blob| blob.servers.iter())
+        .collect::<Vec<_>>();
+    let confirmed = placements
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.status,
+                BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+            )
+        })
+        .count();
+    if confirmed == placements.len() {
+        return None;
+    }
+    let servers = placements
+        .iter()
+        .filter(|outcome| {
+            !matches!(
+                outcome.status,
+                BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+            )
+        })
+        .map(|outcome| outcome.server.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    Some(WarningJson {
+        code: "blossom_replication_incomplete".to_owned(),
+        message: format!(
+            "Blossom replication incomplete: {confirmed}/{} placements confirmed; unconfirmed servers: {}; publication will proceed because every blob has at least one confirmed copy",
+            placements.len(),
+            servers.join(", ")
+        ),
+        details: json!({
+            "confirmed": confirmed,
+            "placements": placements.len(),
+            "servers": servers,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -686,6 +775,59 @@ mod tests {
             blossom_summary(&result)["blobs"][0]["servers"][0]["status"],
             "already_present"
         );
+    }
+
+    #[test]
+    fn snapshot_warnings_are_grouped_for_large_sites() {
+        let warnings = group_snapshot_warning_records(vec![
+            (
+                "mime_conflict".to_owned(),
+                "asset MIME hints disagree".to_owned(),
+                "/first.js".to_owned(),
+            ),
+            (
+                "mime_conflict".to_owned(),
+                "asset MIME hints disagree".to_owned(),
+                "/second.js".to_owned(),
+            ),
+        ]);
+        let warning = &warnings[0];
+        assert_eq!(warning.details["count"], 2);
+        assert_eq!(warning.details["paths"].as_array().map(Vec::len), Some(2));
+        assert_eq!(warning.details["omitted"], 0);
+    }
+
+    #[test]
+    fn incomplete_blossom_replication_identifies_unconfirmed_servers() {
+        let unavailable = Url::parse("https://unavailable.example").unwrap();
+        let confirmed = Url::parse("https://confirmed.example").unwrap();
+        let result = BatchUploadResult {
+            blobs: vec![ngit::blossom::BatchBlobUploadOutcome {
+                sha256: "b".repeat(64),
+                servers: vec![
+                    ngit::blossom::BlossomServerOutcome {
+                        server: unavailable.clone(),
+                        operation: ngit::blossom::BlossomServerOperation::Upload,
+                        status: BlossomServerStatus::Unknown,
+                        descriptor: None,
+                        message: Some("timed out".to_owned()),
+                    },
+                    ngit::blossom::BlossomServerOutcome {
+                        server: confirmed,
+                        operation: ngit::blossom::BlossomServerOperation::Upload,
+                        status: BlossomServerStatus::AlreadyPresent,
+                        descriptor: None,
+                        message: None,
+                    },
+                ],
+            }],
+        };
+        let warning = blossom_replication_warning(&result).unwrap();
+        assert_eq!(warning.code, "blossom_replication_incomplete");
+        assert_eq!(warning.details["confirmed"], 1);
+        assert_eq!(warning.details["placements"], 2);
+        assert_eq!(warning.details["servers"][0], unavailable.as_str());
+        assert!(warning.message.contains("publication will proceed"));
     }
 
     #[test]
