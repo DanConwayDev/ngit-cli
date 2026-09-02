@@ -1178,6 +1178,10 @@ pub struct MergeSubCommandArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
+    /// Refuse to merge unless the current CI result is a success whose
+    /// weakest run meets this trust floor
+    #[arg(long, value_name = "LEVEL", value_enum)]
+    pub require_ci_trust: Option<CiTrustFloor>,
     /// Omit the cover note / PR description from the merge commit body, leaving
     /// only the summary line and the PR nevent reference
     #[arg(long)]
@@ -1691,7 +1695,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AccountCommands, Cli, Commands, ContainerCommands, ReleaseAppCommands,
+        AccountCommands, CiTrustFloor, Cli, Commands, ContainerCommands, ReleaseAppCommands,
         ReleaseAssetCommands, ReleaseCommands, extract_signer_cli_arguments, read_nsec_file,
     };
 
@@ -1732,6 +1736,25 @@ mod tests {
                 "failed for {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn top_level_merge_accepts_ci_trust_gate() {
+        let cli = Cli::try_parse_from([
+            "ngit",
+            "merge",
+            "deadbeef",
+            "--require-ci-trust",
+            "maintainer-directed",
+        ])
+        .expect("top-level merge should accept a CI trust floor");
+        let Some(Commands::Merge(args)) = cli.command else {
+            panic!("expected merge command");
+        };
+        assert!(matches!(
+            args.require_ci_trust,
+            Some(CiTrustFloor::MaintainerDirected)
+        ));
     }
 
     #[test]

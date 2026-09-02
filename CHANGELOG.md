@@ -88,6 +88,7 @@ publication.
 
 ### Changed
 
+- `ngit merge` now accepts `--require-ci-trust`, matching `ngit pr merge`.
 - Repository hosting flags now distinguish grasp-derived infrastructure from
   deliberate additions. `ngit init` uses `--additional-relay` and
   `--additional-clone`; `ngit repo edit` replaces whole-list
