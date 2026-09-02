@@ -13,6 +13,13 @@
 //!   closes every accepted connection without a response. Failure-path tests
 //!   get prompt protocol errors without releasing a supposedly dead port that
 //!   another process could claim.
+//! - [`blossom::BlossomServer`] — loopback Blossom server speaking HTTP/1.1
+//!   over raw TCP, with an in-memory blob store by default and
+//!   [`blossom::BlossomRule`] overrides for definite HTTP failures, conflicting
+//!   presence metadata, abrupt connection closes, and stalls behind a
+//!   [`blossom::BlossomGate`]. Every request is captured for assertion; there
+//!   is no request budget, so tests assert on the log rather than on a served
+//!   count.
 //! - [`relay::VanillaRelay`] — `nostr-relay-builder` `LocalRelay` wrapped to
 //!   own its port and offer a `events(filter)` query helper. Used for user
 //!   metadata (kind 0), relay lists (kind 10002), signer-connect events —
@@ -56,6 +63,7 @@
 //! - [`snapshot::RepoSnapshot`] — `HEAD` + refs only for now; grows as migrated
 //!   tests demand.
 
+pub mod blossom;
 pub mod buzz;
 pub mod ci;
 pub mod grasp;
@@ -70,6 +78,10 @@ pub mod scenarios;
 pub mod snapshot;
 pub mod vanilla_git_server;
 
+pub use blossom::{
+    BlossomGate, BlossomRequest, BlossomRequestKind, BlossomRule, BlossomServer, presence_requests,
+    upload_requests,
+};
 pub use buzz::BuzzServer;
 pub use ci::{
     CiJob, CiProgress, CiProvenance, CiRunEvents, CiRunSpec, CiTrigger, build_ci_run,
