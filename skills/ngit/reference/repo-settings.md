@@ -22,11 +22,28 @@ hosting path and provides both a Git server and a Nostr relay:
 ngit init --name "My Project" --grasp-server grasp.example.com --defaults --json
 ```
 
-Additional infrastructure is explicit and is empty by default:
+Without `--grasp-server`, `--defaults` uses the account's preferred grasp
+servers and falls back to ngit's defaults. Additional infrastructure is
+explicit, is empty by default, and supplements the grasp hosting rather than
+replacing it:
 
 ```bash
 ngit init \
   --name "My Project" \
+  --additional-relay wss://relay.example.com \
+  --additional-clone https://git.example.com/my-project.git \
+  --defaults \
+  --json
+```
+
+Hosting a repository without any grasp server has to be stated explicitly with
+an empty `--grasp-server` value. It then needs both an additional relay and an
+additional clone URL of its own:
+
+```bash
+ngit init \
+  --name "My Project" \
+  --grasp-server "" \
   --additional-relay wss://relay.example.com \
   --additional-clone https://git.example.com/my-project.git \
   --defaults \

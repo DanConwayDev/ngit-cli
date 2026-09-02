@@ -120,6 +120,14 @@ publication.
 
 ### Fixed
 
+- `ngit init --defaults` no longer drops grasp hosting when `--additional-clone`
+  or `--additional-relay` is supplied. Additional infrastructure supplements the
+  account's preferred grasp servers (or ngit's defaults) instead of silently
+  replacing them, so the announcement keeps its grasp-derived clone URLs and
+  relays. Publishing without any grasp server is now stated explicitly with an
+  empty value, `--grasp-server ""`, which also requires an additional relay and
+  clone URL of its own. Republishing an announcement that genuinely declares no
+  grasp servers no longer grafts the defaults onto it.
 - Prevent TLS client initialization from panicking after Reqwest 0.13 selected
   AWS-LC alongside rust-nostr's Ring provider. Reqwest remains
   provider-neutral while ngit explicitly installs Ring before constructing

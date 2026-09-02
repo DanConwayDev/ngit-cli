@@ -454,6 +454,92 @@ fn resolve_hashtags(
     Ok(vec![])
 }
 
+/// How `--grasp-server` was supplied.
+///
+/// clap collapses "flag absent" and "flag supplied with only empty values"
+/// into the same `Vec<String>`, so the distinction is drawn here. Hosting a
+/// repository on no grasp server at all has to be stated
+/// (`--grasp-server ""`); it is never a side effect of which other flags
+/// happened to be passed.
+#[derive(Debug, Eq, PartialEq)]
+enum GraspServerArgs {
+    /// The flag was not supplied: preferences and defaults apply.
+    Unspecified,
+    /// The flag was supplied. An empty list is an explicit opt-out.
+    Explicit(Vec<String>),
+}
+
+impl GraspServerArgs {
+    /// Whether the user named at least one grasp server.
+    fn names_servers(&self) -> bool {
+        matches!(self, Self::Explicit(servers) if !servers.is_empty())
+    }
+
+    /// Whether the user explicitly asked for no grasp servers.
+    fn opts_out(&self) -> bool {
+        matches!(self, Self::Explicit(servers) if servers.is_empty())
+    }
+}
+
+/// Interpret the repeated `--grasp-server` values. Blank values carry no URL,
+/// so a flag supplied with only blanks is an explicit opt-out.
+fn interpret_grasp_server_args(values: &[String]) -> GraspServerArgs {
+    if values.is_empty() {
+        return GraspServerArgs::Unspecified;
+    }
+    GraspServerArgs::Explicit(
+        values
+            .iter()
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The grasp servers that follow from what the user stated and from what the
+/// repository already declares, without consulting preferences or system
+/// defaults.
+///
+/// `None` means nothing has been stated yet, so the caller should fall back to
+/// the user's preferred grasp servers or the system defaults. Note the
+/// difference between the two empty results: `Some(vec![])` is a decision (an
+/// explicit opt-out, or an existing announcement of mine that declares its own
+/// non-grasp hosting), while `None` is the absence of one.
+fn grasp_servers_before_fallback(
+    selection: &GraspServerArgs,
+    my_ref: Option<&RepoRef>,
+    args_relays: &[String],
+    args_clones: &[String],
+    identifier: &str,
+) -> Option<Vec<String>> {
+    if let GraspServerArgs::Explicit(servers) = selection {
+        return Some(servers.clone());
+    }
+
+    // My announcement's own grasp servers, then any implied by the URLs
+    // supplied on this invocation. Detected separately so that supplying
+    // `--additional-clone` doesn't hide the servers my announcement already
+    // declares.
+    let mut detected = detect_existing_grasp_servers(my_ref, &[], &[], identifier);
+    for server in detect_existing_grasp_servers(None, args_relays, args_clones, identifier) {
+        if !detected.contains(&server) {
+            detected.push(server);
+        }
+    }
+    if !detected.is_empty() {
+        return Some(detected);
+    }
+
+    // An announcement of mine that carries no grasp servers states its own
+    // hosting; republishing it must not graft defaults onto it. Defaulting is
+    // for repositories that have yet to say anything.
+    if my_ref.is_some() {
+        return Some(vec![]);
+    }
+
+    None
+}
+
 /// Resolve which grasp servers to use. Handles flag overrides, detection from
 /// existing URLs, user grasp list / system fallbacks, and interactive
 /// prompting.
@@ -466,37 +552,27 @@ fn resolve_grasp_servers(
     identifier: &str,
     interactive: bool,
 ) -> Result<Vec<String>> {
-    if args.replace_grasp_servers || !args.grasp_server.is_empty() {
+    if args.replace_grasp_servers {
         return Ok(args.grasp_server.clone());
-    }
-
-    let has_both_relays_and_clone_url =
-        !args.additional_relay.is_empty() && !args.additional_clone.is_empty();
-    if has_both_relays_and_clone_url {
-        return Ok(vec![]);
     }
 
     // Use my own announcement (not the consolidated union) for grasp detection.
     // Infrastructure is personal — each maintainer has their own servers.
     let my_ref = state.my_repo_ref(&user_ref.public_key);
 
-    if !args.additional_clone.is_empty() {
-        return Ok(detect_existing_grasp_servers(
-            my_ref.as_ref(),
-            &args.additional_relay,
-            &args.additional_clone,
-            identifier,
-        ));
+    if let Some(servers) = grasp_servers_before_fallback(
+        &interpret_grasp_server_args(&args.grasp_server),
+        my_ref.as_ref(),
+        &args.additional_relay,
+        &args.additional_clone,
+        identifier,
+    ) {
+        return Ok(servers);
     }
 
     if !interactive || cli.defaults || state.has_coordinate() || cli.force {
-        // Prefer grasp servers from my existing announcement, then user's grasp
-        // list (or selected maintainer's servers as fallback), then system defaults
-        let existing =
-            detect_existing_grasp_servers(my_ref.as_ref(), &args.additional_relay, &[], identifier);
-        if !existing.is_empty() {
-            return Ok(existing);
-        }
+        // Nothing stated and nothing to detect: use the user's grasp list (or
+        // the selected maintainer's servers as fallback), then system defaults.
         // For co-maintainer state, pass the repo_ref so the selected
         // maintainer's grasp servers can be used as a fallback.
         let selected_maintainer_repo_ref = if matches!(state, InitState::CoMaintainer { .. }) {
@@ -511,22 +587,17 @@ fn resolve_grasp_servers(
         ));
     }
 
-    // Interactive prompt
-    let mut options: Vec<String> = detect_existing_grasp_servers(
-        my_ref.as_ref(),
-        &args.additional_relay,
-        &args.additional_clone,
-        identifier,
-    );
-    let mut selections: Vec<bool> = vec![true; options.len()];
-    let empty = options.is_empty();
+    // Interactive prompt. `grasp_servers_before_fallback` found nothing to
+    // detect, so the options are the user's grasp list and the system defaults.
+    let mut options: Vec<String> = vec![];
+    let mut selections: Vec<bool> = vec![];
     for user_grasp_option in &user_ref.grasp_list.urls {
         if !options
             .iter()
             .any(|option| option.contains(user_grasp_option.as_str()))
         {
             options.push(user_grasp_option.to_string());
-            selections.push(empty);
+            selections.push(true);
         }
     }
     let empty = options.is_empty();
@@ -554,6 +625,28 @@ fn resolve_grasp_servers(
 
 /// Validation for State A (Fresh): no existing coordinate.
 fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -> Result<()> {
+    let grasp_selection = interpret_grasp_server_args(&args.grasp_server);
+    let has_both_relays_and_clone_url =
+        !args.additional_relay.is_empty() && !args.additional_clone.is_empty();
+
+    // Opting out of grasp hosting leaves the announcement with whatever the
+    // additional flags supply, so both halves have to be there. Checked ahead
+    // of the `-d` short-circuits below because there is no default that could
+    // fill this gap — that is the point of the opt-out.
+    if grasp_selection.opts_out() && !has_both_relays_and_clone_url {
+        return Err(cli_error(
+            "an empty --grasp-server opts out of grasp hosting, so this repository needs a relay and a git server of its own",
+            &[
+                (
+                    "--additional-relay <URL>",
+                    "where your nostr data is hosted",
+                ),
+                ("--additional-clone <URL>", "where your git data is hosted"),
+            ],
+            &["ngit init --grasp-server \"\" --additional-relay <URL> --additional-clone <URL>"],
+        ));
+    }
+
     // -d or -f with no substantive flags: proceed with all defaults
     if !args.has_substantive_flags(cli.repo_relay_only) && (cli.defaults || cli.force) {
         return Ok(());
@@ -572,12 +665,7 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
         missing.push(("--name <NAME>", "repository name or identifier"));
     }
 
-    let has_grasp_servers = !args.grasp_server.is_empty();
-    let has_both_relays_and_clone_url =
-        !args.additional_relay.is_empty() && !args.additional_clone.is_empty();
-    let missing_servers =
-        !has_grasp_servers && !user_has_grasp_list && !has_both_relays_and_clone_url;
-    if missing_servers {
+    if !grasp_selection.names_servers() && !user_has_grasp_list && !has_both_relays_and_clone_url {
         missing.push((
             "--grasp-server <URL>...",
             "where your git+nostr data is hosted",
@@ -626,7 +714,8 @@ pub struct SubCommandArgs {
     /// optional description
     pub(crate) description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
-    /// where your git+nostr data is hosted
+    /// where your git+nostr data is hosted; defaults apply when omitted, pass
+    /// an empty value (--grasp-server "") to host without a grasp server
     pub(crate) grasp_server: Vec<String>,
     #[clap(long = "additional-relay", value_parser, num_args = 1..)]
     /// additional relays beyond grasp servers
@@ -2891,6 +2980,200 @@ fn object_exists_locally(git_repo: &Repo, oid: &str) -> bool {
         return true;
     };
     git_repo.git_repo.find_object(parsed, None).is_ok()
+}
+
+#[cfg(test)]
+mod grasp_server_defaulting_tests {
+    use nostr::prelude::Keys;
+
+    use super::*;
+
+    /// A `RepoRef` standing in for my own existing announcement.
+    fn my_announcement(git_server: Vec<String>, relays: Vec<&str>) -> RepoRef {
+        let me = Keys::generate().public_key();
+        RepoRef {
+            name: "test".to_string(),
+            description: String::new(),
+            identifier: "test-repo".to_string(),
+            root_commit: "5e664e5a7845cd1373c79f580ca4fe29ab5b34d2".to_string(),
+            git_server,
+            web: vec![],
+            upstream: vec![],
+            relays: relays
+                .iter()
+                .map(|relay| RelayUrl::parse(relay).unwrap())
+                .collect(),
+            blossoms: vec![],
+            hashtags: vec![],
+            private: false,
+            selected_maintainer: me,
+            maintainers: vec![me],
+            maintainers_without_annoucnement: None,
+            events: HashMap::new(),
+            nostr_git_url: None,
+            extra_tags: vec![],
+            role_tags: vec![],
+            moderators: vec![],
+            lead: None,
+        }
+    }
+
+    /// The grasp-format clone URL an announcement carries for `npub`.
+    fn grasp_clone_url(server: &str, npub: &str, identifier: &str) -> String {
+        format!("https://{server}/{npub}/{identifier}.git")
+    }
+
+    #[test]
+    fn an_absent_flag_is_unspecified() {
+        assert_eq!(
+            interpret_grasp_server_args(&[]),
+            GraspServerArgs::Unspecified,
+        );
+    }
+
+    #[test]
+    fn an_empty_value_is_an_explicit_opt_out() {
+        for values in [
+            vec![String::new()],
+            vec!["   ".to_string()],
+            vec![String::new(), " ".to_string()],
+        ] {
+            let selection = interpret_grasp_server_args(&values);
+            assert_eq!(selection, GraspServerArgs::Explicit(vec![]));
+            assert!(selection.opts_out());
+            assert!(!selection.names_servers());
+        }
+    }
+
+    #[test]
+    fn named_servers_survive_a_stray_empty_value() {
+        let selection = interpret_grasp_server_args(&[
+            "grasp.example.com".to_string(),
+            String::new(),
+            "other.example.com".to_string(),
+        ]);
+        assert_eq!(
+            selection,
+            GraspServerArgs::Explicit(vec![
+                "grasp.example.com".to_string(),
+                "other.example.com".to_string(),
+            ]),
+        );
+        assert!(selection.names_servers());
+        assert!(!selection.opts_out());
+    }
+
+    /// The reported bug: a fresh repository given only an additional clone URL
+    /// must still fall back to the preferred/default grasp servers.
+    #[test]
+    fn additional_urls_alone_do_not_decide_grasp_hosting() {
+        for (relays, clones) in [
+            (vec![], vec!["https://github.com/x/y.git".to_string()]),
+            (
+                vec!["wss://relay.example.com".to_string()],
+                vec!["https://github.com/x/y.git".to_string()],
+            ),
+            (vec!["wss://relay.example.com".to_string()], vec![]),
+        ] {
+            assert_eq!(
+                grasp_servers_before_fallback(
+                    &GraspServerArgs::Unspecified,
+                    None,
+                    &relays,
+                    &clones,
+                    "test-repo",
+                ),
+                None,
+                "relays {relays:?} and clones {clones:?} should leave the \
+                 fallback in charge",
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_opt_out_wins_over_the_fallback() {
+        assert_eq!(
+            grasp_servers_before_fallback(
+                &GraspServerArgs::Explicit(vec![]),
+                None,
+                &["wss://relay.example.com".to_string()],
+                &["https://github.com/x/y.git".to_string()],
+                "test-repo",
+            ),
+            Some(vec![]),
+        );
+    }
+
+    #[test]
+    fn named_servers_are_used_verbatim() {
+        assert_eq!(
+            grasp_servers_before_fallback(
+                &GraspServerArgs::Explicit(vec!["grasp.example.com".to_string()]),
+                None,
+                &[],
+                &[],
+                "test-repo",
+            ),
+            Some(vec!["grasp.example.com".to_string()]),
+        );
+    }
+
+    #[test]
+    fn grasp_urls_supplied_as_additional_clones_are_detected() {
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        assert_eq!(
+            grasp_servers_before_fallback(
+                &GraspServerArgs::Unspecified,
+                None,
+                &["wss://grasp.example.com".to_string()],
+                &[grasp_clone_url("grasp.example.com", &npub, "test-repo")],
+                "test-repo",
+            ),
+            Some(vec!["grasp.example.com".to_string()]),
+        );
+    }
+
+    /// A republish must keep the grasp servers my announcement already
+    /// declares, even when this invocation also supplies an unrelated
+    /// additional clone URL.
+    #[test]
+    fn my_existing_grasp_servers_survive_an_additional_clone() {
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        let existing = my_announcement(
+            vec![grasp_clone_url("grasp.example.com", &npub, "test-repo")],
+            vec!["wss://grasp.example.com"],
+        );
+        assert_eq!(
+            grasp_servers_before_fallback(
+                &GraspServerArgs::Unspecified,
+                Some(&existing),
+                &[],
+                &["https://github.com/x/y.git".to_string()],
+                "test-repo",
+            ),
+            Some(vec!["grasp.example.com".to_string()]),
+        );
+    }
+
+    /// An announcement that genuinely has no grasp servers states its own
+    /// hosting; a republish must not graft defaults onto it.
+    #[test]
+    fn an_existing_announcement_without_grasp_servers_is_not_defaulted() {
+        let existing = my_announcement(
+            vec!["https://github.com/x/y.git".to_string()],
+            vec!["wss://relay.example.com"],
+        );
+        assert_eq!(
+            grasp_servers_before_fallback(
+                &GraspServerArgs::Unspecified,
+                Some(&existing),
+                &[],
+                &[],
+                "test-repo",
+            ),
+            Some(vec![]),
+        );
+    }
 }
 
 #[cfg(test)]
