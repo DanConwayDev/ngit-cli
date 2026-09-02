@@ -1,6 +1,6 @@
 //! End-to-end coverage for OCI layout publication.
 
-use std::{collections::BTreeMap, fs, time::Duration};
+use std::{collections::BTreeMap, fs};
 
 use anyhow::{Context, Result, bail, ensure};
 use bitcoin_hashes::sha256;
@@ -8,11 +8,9 @@ use ngit::oci::{CONTAINER_REPOSITORY_KIND, ContainerRepository, ContainerTag, OC
 use nostr::event::FinalizeEvent;
 use nostr_sdk::prelude::{Client, Coordinate, Event, EventBuilder, Filter, Kind, Tag, Url};
 use serde_json::{Value, json};
-use test_harness::{Harness, LocalRelayBuilderNip42, PublishRepoOpts};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-    task::JoinHandle,
+use test_harness::{
+    BlossomRequest, BlossomServer, Harness, LocalRelayBuilderNip42, PublishRepoOpts,
+    presence_requests, upload_requests,
 };
 
 #[tokio::test]
@@ -34,7 +32,7 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
         })
         .await?;
     let (tag_digest, expected_blobs) = write_layout(repo.dir())?;
-    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom = BlossomServer::start().await?;
     let blossom_root = format!("{}/", blossom.base_url());
     let repository_coordinate = Coordinate::new(
         Kind::GitRepoAnnouncement,
@@ -80,24 +78,14 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
     );
 
     let requests = blossom.finish().await?;
-    ensure!(
-        requests
-            .iter()
-            .filter(|request| request.head.starts_with("HEAD /"))
-            .count()
-            == expected_blobs.len() * 2
-    );
-    let uploads = upload_requests(&requests);
-    ensure!(uploads.len() == expected_blobs.len());
-    for request in uploads {
-        ensure!(request.head.starts_with("PUT /upload HTTP/1.1\r\n"));
+    assert_blob_placements(&requests, &expected_blobs)?;
+    for request in upload_requests(&requests) {
         ensure!(
-            request_header(&request.head, "authorization")
+            request
+                .header("authorization")
                 .is_some_and(|value| value.starts_with("Nostr "))
         );
-        ensure!(request_header(&request.head, "content-type") == Some("application/octet-stream"));
-        let digest = sha256::Hash::hash(&request.body).to_string();
-        ensure!(expected_blobs.get(&digest) == Some(&request.body));
+        ensure!(request.header("content-type") == Some("application/octet-stream"));
     }
 
     let events = harness
@@ -151,7 +139,7 @@ async fn publishes_from_the_default_container_manifest() -> Result<()> {
         .await?;
     let layout = repo.dir().join("artifacts/my-app");
     let (tag_digest, expected_blobs) = write_layout(&layout)?;
-    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom = BlossomServer::start().await?;
     fs::create_dir_all(repo.dir().join(".ngit"))?;
     fs::write(
         repo.dir().join(".ngit/containers.yaml"),
@@ -191,7 +179,7 @@ containers:
                 .to_string_lossy()
                 .as_ref()
     );
-    blossom.finish().await?;
+    assert_blob_placements(&blossom.finish().await?, &expected_blobs)?;
 
     let events = harness
         .relay("default")
@@ -231,7 +219,7 @@ async fn authenticates_container_preflight_reads_on_repository_relays() -> Resul
         })
         .await?;
     let (_, expected_blobs) = write_layout(repo.dir())?;
-    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom = BlossomServer::start().await?;
 
     let output = repo
         .ngit([
@@ -262,8 +250,7 @@ async fn authenticates_container_preflight_reads_on_repository_relays() -> Resul
             .any(|result| result["url"] == relay && result["accepted"] == true)
     );
 
-    let requests = blossom.finish().await?;
-    ensure!(upload_requests(&requests).len() == expected_blobs.len());
+    assert_blob_placements(&blossom.finish().await?, &expected_blobs)?;
     Ok(())
 }
 
@@ -286,7 +273,7 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
         })
         .await?;
     let (_, expected_blobs) = write_layout(repo.dir())?;
-    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom = BlossomServer::start().await?;
     let blossom_root = format!("{}/", blossom.base_url());
     let server_list = EventBuilder::new(Kind::Custom(10_063), "")
         .tags([Tag::parse(["server", blossom.base_url()])?])
@@ -310,8 +297,7 @@ async fn discovers_the_publishers_blossom_server_list() -> Result<()> {
         "container publish failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let requests = blossom.finish().await?;
-    ensure!(upload_requests(&requests).len() == expected_blobs.len());
+    assert_blob_placements(&blossom.finish().await?, &expected_blobs)?;
 
     let events = harness
         .relay("default")
@@ -355,7 +341,7 @@ async fn merges_state_when_one_repository_relay_is_unavailable() -> Result<()> {
         })
         .await?;
     let (_, expected_blobs) = write_layout(repo.dir())?;
-    let blossom = BlossomServer::spawn(expected_blobs.len()).await?;
+    let blossom = BlossomServer::start().await?;
     let server_list = EventBuilder::new(Kind::Custom(10_063), "")
         .tags([Tag::parse(["server", blossom.base_url()])?])
         .finalize(&published.maintainer_keys)?;
@@ -401,7 +387,7 @@ async fn merges_state_when_one_repository_relay_is_unavailable() -> Result<()> {
         "container publish failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    blossom.finish().await?;
+    assert_blob_placements(&blossom.finish().await?, &expected_blobs)?;
 
     let events = harness
         .relay("default")
@@ -479,160 +465,30 @@ fn write_blob(
     Ok(digest)
 }
 
-struct CapturedRequest {
-    head: String,
-    body: Vec<u8>,
-}
-
-struct BlossomServer {
-    base_url: String,
-    task: Option<JoinHandle<Result<Vec<CapturedRequest>>>>,
-}
-
-impl BlossomServer {
-    async fn spawn(expected_requests: usize) -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind Blossom fixture")?;
-        let address = listener.local_addr()?;
-        let base_url = format!("http://{address}");
-        let response_root = base_url.clone();
-        let task = tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(expected_requests * 3);
-            let mut stored = BTreeMap::<String, (usize, String)>::new();
-            for _ in 0..expected_requests * 3 {
-                let (mut stream, _) =
-                    tokio::time::timeout(Duration::from_secs(10), listener.accept())
-                        .await
-                        .context("timed out waiting for a Blossom upload")??;
-                let request = read_request(&mut stream).await?;
-                let response = if request.head.starts_with("HEAD /") {
-                    let digest = request
-                        .head
-                        .lines()
-                        .next()
-                        .and_then(|line| line.split_whitespace().nth(1))
-                        .and_then(|path| path.strip_prefix('/'))
-                        .context("presence request omitted a blob digest")?;
-                    stored.get(digest).map_or_else(
-                        || {
-                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                                .to_owned()
-                        },
-                        |(size, mime)| {
-                            format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
-                            )
-                        },
-                    )
-                } else {
-                    let digest = request_header(&request.head, "x-sha-256")
-                        .context("upload omitted X-SHA-256")?;
-                    let mime = request_header(&request.head, "content-type")
-                        .context("upload omitted Content-Type")?
-                        .to_owned();
-                    let response_body = json!({
-                        "url": format!("{response_root}/{digest}"),
-                        "sha256": digest,
-                        "size": request.body.len(),
-                        "type": mime,
-                        "uploaded": 1,
-                    })
-                    .to_string();
-                    stored.insert(digest.to_owned(), (request.body.len(), mime));
-                    format!(
-                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                        response_body.len()
-                    )
-                };
-                stream.write_all(response.as_bytes()).await?;
-                stream.shutdown().await?;
-                requests.push(request);
-            }
-            Ok(requests)
-        });
-        Ok(Self {
-            base_url,
-            task: Some(task),
-        })
-    }
-
-    fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    async fn finish(mut self) -> Result<Vec<CapturedRequest>> {
-        let task = self.task.take().context("Blossom fixture task missing")?;
-        tokio::time::timeout(Duration::from_secs(10), task)
-            .await
-            .context("Blossom fixture did not finish")??
-    }
-}
-
-impl Drop for BlossomServer {
-    fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
-    }
-}
-
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<CapturedRequest> {
-    const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-    let mut bytes = Vec::new();
-    let header_end = loop {
-        if let Some(offset) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            break offset + 4;
-        }
-        ensure!(
-            bytes.len() < MAX_REQUEST_BYTES,
-            "request headers were too large"
-        );
-        let mut chunk = [0_u8; 8192];
-        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
-            .await
-            .context("timed out reading Blossom request headers")??;
-        ensure!(read != 0, "client closed before request headers completed");
-        bytes.extend_from_slice(&chunk[..read]);
-    };
-    let head = String::from_utf8(bytes[..header_end].to_vec())?;
-    let content_length = request_header(&head, "content-length")
-        .map(str::parse::<usize>)
-        .transpose()?
-        .unwrap_or(0);
-    let request_length = header_end
-        .checked_add(content_length)
-        .context("request length overflowed")?;
+/// Every layout blob is placed on the single Blossom server exactly once:
+/// a `404` presence check, a `PUT /upload` carrying the blob, and the
+/// post-upload `200` verification.
+///
+/// The shared fixture serves requests until it is finished rather than
+/// budgeting them, so these counts are asserted explicitly.
+fn assert_blob_placements(
+    requests: &[BlossomRequest],
+    expected_blobs: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
     ensure!(
-        request_length <= MAX_REQUEST_BYTES,
-        "request body was too large"
+        requests.len() == expected_blobs.len() * 3,
+        "expected three Blossom requests per blob, found {}",
+        requests.len()
     );
-    while bytes.len() < request_length {
-        let mut chunk = [0_u8; 8192];
-        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
-            .await
-            .context("timed out reading Blossom request body")??;
-        ensure!(read != 0, "client closed before request body completed");
-        bytes.extend_from_slice(&chunk[..read]);
+    ensure!(presence_requests(requests).len() == expected_blobs.len() * 2);
+    let uploads = upload_requests(requests);
+    ensure!(uploads.len() == expected_blobs.len());
+    for request in uploads {
+        let digest = sha256::Hash::hash(&request.body).to_string();
+        ensure!(request.hash() == Some(digest.as_str()));
+        ensure!(expected_blobs.get(&digest) == Some(&request.body));
     }
-    Ok(CapturedRequest {
-        head,
-        body: bytes[header_end..request_length].to_vec(),
-    })
-}
-
-fn request_header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
-    head.lines().skip(1).find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case(wanted).then(|| value.trim())
-    })
-}
-
-fn upload_requests(requests: &[CapturedRequest]) -> Vec<&CapturedRequest> {
-    requests
-        .iter()
-        .filter(|request| request.head.starts_with("PUT /upload HTTP/1.1\r\n"))
-        .collect()
+    Ok(())
 }
 
 fn tag_value<'a>(event: &'a nostr_sdk::prelude::Event, name: &str) -> Option<&'a str> {
