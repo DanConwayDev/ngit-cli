@@ -1160,15 +1160,18 @@ async fn presence_failure_on_one_server_publishes_from_a_confirmed_replica() -> 
     ensure!(blossom["servers"][0]["status"] == "stored");
     ensure!(blossom["servers"][1]["server"] == mirror_root);
     ensure!(blossom["servers"][1]["status"] == "failed");
-    let warning = output["warnings"]
-        .as_array()
-        .context("release warnings were not an array")?
-        .iter()
-        .find(|warning| warning["code"] == "blossom_replication_incomplete")
-        .context("release omitted the incomplete Blossom replication warning")?;
-    ensure!(warning["details"]["confirmed"] == 1);
-    ensure!(warning["details"]["placements"] == 2);
-    ensure!(warning["details"]["servers"][0] == mirror_root);
+    // A server whose presence check never completed is a presence-only
+    // diagnostic: no storage operation was attempted there, so it cannot prove
+    // a replica is missing and is deliberately kept out of the replication
+    // warning. The per-server outcome above is where it is reported.
+    ensure!(
+        !output["warnings"]
+            .as_array()
+            .context("release warnings were not an array")?
+            .iter()
+            .any(|warning| warning["code"] == "blossom_replication_incomplete"),
+        "a presence-only failure must not raise a replication warning"
+    );
 
     let release_events = harness
         .relay("default")
