@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     fs,
     path::PathBuf,
 };
@@ -9,7 +9,7 @@ use ngit::{
     blossom::{
         BatchUploadResult, BlossomServerStatus, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
-        upload_resilient_snapshot_batch_to_servers_with_progress,
+        summarize_blossom_replication, upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{send_public_events, sign_draft_event},
     event_ordering::{latest_event, wait_for_strictly_later_timestamp},
@@ -592,46 +592,27 @@ fn append_blossom_replication_warning(context: &mut ReleaseContext, blossom: &Ba
 }
 
 fn blossom_replication_warning(blossom: &BatchUploadResult) -> Option<WarningJson> {
-    let placements = blossom
-        .blobs
+    let summary =
+        summarize_blossom_replication(blossom.blobs.iter().map(|blob| blob.servers.as_slice()));
+    let message = summary.incomplete_message()?;
+    let incomplete_servers = summary
+        .servers
         .iter()
-        .flat_map(|blob| blob.servers.iter())
-        .collect::<Vec<_>>();
-    let confirmed = placements
-        .iter()
-        .filter(|outcome| {
-            matches!(
-                outcome.status,
-                BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
-            )
-        })
-        .count();
-    if confirmed == placements.len() {
-        return None;
-    }
-    let servers = placements
-        .iter()
-        .filter(|outcome| {
-            !matches!(
-                outcome.status,
-                BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
-            )
-        })
-        .map(|outcome| outcome.server.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .filter(|server| server.available != server.expected)
+        .map(|server| server.server.to_string())
         .collect::<Vec<_>>();
     Some(WarningJson {
         code: "blossom_replication_incomplete".to_owned(),
-        message: format!(
-            "Blossom replication incomplete: {confirmed}/{} placements confirmed; unconfirmed servers: {}; publication will proceed because every blob has at least one confirmed copy",
-            placements.len(),
-            servers.join(", ")
-        ),
+        message,
         details: json!({
-            "confirmed": confirmed,
-            "placements": placements.len(),
-            "servers": servers,
+            "confirmed": summary.available_copies,
+            "placements": summary.expected_copies,
+            "servers": incomplete_servers,
+            "blobs": {
+                "available": summary.available_blobs,
+                "total": summary.blobs,
+            },
+            "copies_by_server": summary.servers,
         }),
     })
 }
@@ -758,6 +739,7 @@ mod tests {
                     status: BlossomServerStatus::AlreadyPresent,
                     descriptor: None,
                     message: None,
+                    presence_check_only: false,
                 }],
             }],
         };
@@ -803,6 +785,7 @@ mod tests {
                         status: BlossomServerStatus::Unknown,
                         descriptor: None,
                         message: Some("timed out".to_owned()),
+                        presence_check_only: false,
                     },
                     ngit::blossom::BlossomServerOutcome {
                         server: confirmed,
@@ -810,6 +793,7 @@ mod tests {
                         status: BlossomServerStatus::AlreadyPresent,
                         descriptor: None,
                         message: None,
+                        presence_check_only: false,
                     },
                 ],
             }],
@@ -819,7 +803,11 @@ mod tests {
         assert_eq!(warning.details["confirmed"], 1);
         assert_eq!(warning.details["placements"], 2);
         assert_eq!(warning.details["servers"][0], unavailable.as_str());
-        assert!(warning.message.contains("publication will proceed"));
+        assert!(warning.message.contains("1/1 blobs are available"));
+        assert!(warning.message.contains("1 already stored"));
+        assert!(warning.message.contains("1 uncertain"));
+        assert_eq!(warning.details["blobs"]["available"], 1);
+        assert_eq!(warning.details["copies_by_server"][1]["already_stored"], 1);
     }
 
     #[test]
