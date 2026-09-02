@@ -2657,6 +2657,10 @@ struct BlossomPublication {
     possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
+const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}";
+const BLOSSOM_PHASE_ROW_TEMPLATE: &str = "   {spinner} [{elapsed_precise}] {prefix} — {msg}";
+const BLOSSOM_FINISHED_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix} — {msg}";
+
 pub(crate) struct BlossomUploadProgress {
     multi: MultiProgress,
     heading: ProgressBar,
@@ -2870,15 +2874,11 @@ impl BlossomUploadProgress {
             "      {prefix:28} [{bar:18.cyan/blue}] {pos}/{len} {msg}",
         )?
         .progress_chars("##-");
-        let upload_style = ProgressStyle::with_template(
-            "   [{elapsed_precise}] {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}",
-        )?
-        .progress_chars("##-");
+        let upload_style =
+            ProgressStyle::with_template(BLOSSOM_UPLOAD_ROW_TEMPLATE)?.progress_chars("##-");
         let phase_style =
-            ProgressStyle::with_template("   {spinner} [{elapsed_precise}] {prefix} — {msg}")?
-                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
-        let finished_style =
-            ProgressStyle::with_template("   [{elapsed_precise}] {prefix} — {msg}")?;
+            ProgressStyle::with_template(BLOSSOM_PHASE_ROW_TEMPLATE)?.tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let finished_style = ProgressStyle::with_template(BLOSSOM_FINISHED_ROW_TEMPLATE)?;
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
             multi,
@@ -4808,6 +4808,25 @@ assets:
         assert_eq!(warning.details["blobs"]["available"], 1);
         assert_eq!(warning.details["copies_by_server"][0]["uploaded_now"], 1);
         Ok(())
+    }
+
+    #[test]
+    fn blossom_batch_rows_reserve_the_spinner_column() {
+        let rendered_bracket_column = |template: &str| {
+            template
+                .replace("{spinner}", "x")
+                .find('[')
+                .expect("Blossom row template should render elapsed time")
+        };
+
+        assert_eq!(
+            rendered_bracket_column(BLOSSOM_UPLOAD_ROW_TEMPLATE),
+            rendered_bracket_column(BLOSSOM_PHASE_ROW_TEMPLATE)
+        );
+        assert_eq!(
+            rendered_bracket_column(BLOSSOM_FINISHED_ROW_TEMPLATE),
+            rendered_bracket_column(BLOSSOM_PHASE_ROW_TEMPLATE)
+        );
     }
 
     #[test]
