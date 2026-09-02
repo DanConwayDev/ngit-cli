@@ -5,7 +5,7 @@ use ngit::{
     blossom::{
         BatchUploadResult, BlossomServerStatus, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
-        upload_snapshot_batch_to_servers,
+        upload_snapshot_batch_to_servers_with_progress,
     },
     client::{send_public_events, sign_draft_event},
     event_ordering::{latest_event, wait_for_strictly_later_timestamp},
@@ -21,9 +21,12 @@ use nostr::prelude::{
 };
 use serde_json::{Value, json};
 
-use super::release::support::{
-    ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
-    repository_json,
+use super::release::{
+    support::{
+        ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
+        repository_json,
+    },
+    write::BlossomUploadProgress,
 };
 use crate::{
     cli::{NsiteCommands, NsitePublishArgs, NsiteSubCommandArgs, SignerParams},
@@ -169,20 +172,19 @@ async fn publish(
     let (_, aggregate) = manifest_event_builder(&files, &manifest_input)?;
 
     context.emit_human_warnings_before_signing(json_output);
-    if !json_output && !ngit::output_mode::is_quiet() {
-        eprintln!(
-            "confirming {} unique blob(s) across {} Blossom server(s)...",
-            blobs.len(),
-            servers.len()
-        );
-    }
-    let blossom =
-        upload_snapshot_batch_to_servers(&servers, &blobs, signer.as_ref(), args.concurrency)
-            .await
-            .map_err(|error| {
-                let details = serde_json::to_value(&error).unwrap_or_else(|_| json!({}));
-                coded_error_with_details("blossom_upload_failed", error.message, details)
-            })?;
+    let progress = BlossomUploadProgress::new(json_output)?;
+    let blossom = upload_snapshot_batch_to_servers_with_progress(
+        &servers,
+        &blobs,
+        signer.as_ref(),
+        args.concurrency,
+        progress,
+    )
+    .await
+    .map_err(|error| {
+        let details = serde_json::to_value(&error).unwrap_or_else(|_| json!({}));
+        coded_error_with_details("blossom_upload_failed", error.message, details)
+    })?;
 
     let current =
         load_current_manifest(&mut context, author, resolved.identifier.as_deref()).await?;

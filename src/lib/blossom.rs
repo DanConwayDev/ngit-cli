@@ -107,6 +107,13 @@ pub enum BlossomProgressEvent {
         servers: usize,
         checks: usize,
     },
+    PresenceCheckFinished {
+        checked: usize,
+        checks: usize,
+        confirmed: usize,
+        missing: usize,
+        unavailable: usize,
+    },
     PresenceChecksFinished {
         missing: usize,
     },
@@ -906,7 +913,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 .enumerate()
                 .map(move |(server_index, server)| (blob_index, server_index, *snapshot, server))
         });
-    let presence_results = stream::iter(presence_checks)
+    let mut presence_results = stream::iter(presence_checks)
         .map(|(blob_index, server_index, snapshot, server)| {
             let client = client.clone();
             async move {
@@ -917,15 +924,17 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 )
             }
         })
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+        .buffer_unordered(concurrency);
 
     let mut presence_failed = false;
     let mut missing = Vec::new();
-    for (blob_index, server_index, result) in presence_results {
+    let mut checked = 0_usize;
+    let mut confirmed = 0_usize;
+    let mut unavailable = 0_usize;
+    while let Some((blob_index, server_index, result)) = presence_results.next().await {
         match result {
             Ok(true) => {
+                confirmed += 1;
                 blobs[blob_index].servers[server_index].status =
                     BlossomServerStatus::AlreadyPresent;
                 progress.update(&BlossomProgressEvent::PlacementFinished {
@@ -937,6 +946,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             }
             Ok(false) => missing.push((blob_index, server_index)),
             Err(error) => {
+                unavailable += 1;
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
                 outcome.status = match error.kind {
@@ -952,6 +962,14 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 });
             }
         }
+        checked += 1;
+        progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            checked,
+            checks: snapshots.len().saturating_mul(servers.len()),
+            confirmed,
+            missing: missing.len(),
+            unavailable,
+        });
     }
     progress.update(&BlossomProgressEvent::PresenceChecksFinished {
         missing: missing.len(),
@@ -3049,6 +3067,18 @@ mod tests {
             .context("timed out waiting for authorization fallback server")???;
 
         let events = progress.events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                BlossomProgressEvent::PresenceCheckFinished {
+                    checked: 1,
+                    checks: 1,
+                    confirmed: 0,
+                    missing: 1,
+                    unavailable: 0,
+                }
+            )
+        }));
         assert!(events.iter().any(|event| {
             matches!(
                 event,

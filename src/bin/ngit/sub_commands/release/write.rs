@@ -2656,13 +2656,14 @@ struct BlossomPublication {
     possible_orphan_blobs: Vec<PossibleOrphanBlob>,
 }
 
-struct ReleaseBlossomProgress {
+pub(crate) struct BlossomUploadProgress {
     multi: MultiProgress,
     heading: ProgressBar,
     render_to_stderr: bool,
     draw_target_attached: AtomicBool,
     verbose: bool,
     heading_style: ProgressStyle,
+    presence_style: ProgressStyle,
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
     finished_style: ProgressStyle,
@@ -2796,8 +2797,8 @@ impl ReleaseBlossomActivity {
     }
 }
 
-impl ReleaseBlossomProgress {
-    fn new(json_output: bool) -> Result<Arc<Self>> {
+impl BlossomUploadProgress {
+    pub(crate) fn new(json_output: bool) -> Result<Arc<Self>> {
         let visible = !json_output && !is_quiet();
         let draw_target = if visible {
             ProgressDrawTarget::stderr()
@@ -2815,6 +2816,10 @@ impl ReleaseBlossomProgress {
         let multi = MultiProgress::with_draw_target(draw_target);
         let heading_style = ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {msg}")?
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let presence_style = ProgressStyle::with_template(
+            "   [{elapsed_precise}] Blossom presence [{bar:22.cyan/blue}] {pos}/{len} {msg}",
+        )?
+        .progress_chars("##-");
         let upload_style = ProgressStyle::with_template(
             "   [{elapsed_precise}] {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}",
         )?
@@ -2832,6 +2837,7 @@ impl ReleaseBlossomProgress {
             draw_target_attached: AtomicBool::new(render_to_stderr),
             verbose,
             heading_style,
+            presence_style,
             upload_style,
             phase_style,
             finished_style,
@@ -2839,15 +2845,30 @@ impl ReleaseBlossomProgress {
         }))
     }
 
-    fn start_spinner(&self, message: String) {
+    fn start_presence_checks(&self, blobs: usize, servers: usize, checks: usize) {
         self.restore_draw_target();
         self.clear_placement_bars();
         self.heading.reset();
-        self.heading.unset_length();
-        self.heading.set_style(self.heading_style.clone());
-        self.heading.set_message(message);
-        self.heading.enable_steady_tick(Duration::from_millis(100));
+        self.heading.set_length(checks as u64);
+        self.heading.set_position(0);
+        self.heading.set_style(self.presence_style.clone());
+        self.heading.set_message(format!(
+            "0 confirmed; 0 need upload; 0 unavailable — {blobs} file(s), {servers} server(s)"
+        ));
         self.heading.force_draw();
+    }
+
+    fn advance_presence_checks(
+        &self,
+        checked: usize,
+        confirmed: usize,
+        missing: usize,
+        unavailable: usize,
+    ) {
+        self.heading.set_position(checked as u64);
+        self.heading.set_message(format!(
+            "{confirmed} confirmed; {missing} need upload; {unavailable} unavailable"
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3143,16 +3164,21 @@ fn blossom_timed_attempt_message(
     }
 }
 
-impl BlossomProgress for ReleaseBlossomProgress {
+impl BlossomProgress for BlossomUploadProgress {
     fn update(&self, event: &BlossomProgressEvent) {
         match event {
             BlossomProgressEvent::PresenceChecksStarted {
                 blobs,
                 servers,
                 checks,
-            } => self.start_spinner(format!(
-                "Blossom presence: checking {blobs} file(s) across {servers} server(s) ({checks} placement(s))"
-            )),
+            } => self.start_presence_checks(*blobs, *servers, *checks),
+            BlossomProgressEvent::PresenceCheckFinished {
+                checked,
+                confirmed,
+                missing,
+                unavailable,
+                ..
+            } => self.advance_presence_checks(*checked, *confirmed, *missing, *unavailable),
             BlossomProgressEvent::PresenceChecksFinished { .. } => {
                 self.heading.finish_and_clear();
             }
@@ -3182,13 +3208,7 @@ impl BlossomProgress for ReleaseBlossomProgress {
                 max_attempts,
                 total_bytes,
                 ..
-            } => self.start_upload_request(
-                filename,
-                server,
-                *attempt,
-                *max_attempts,
-                *total_bytes,
-            ),
+            } => self.start_upload_request(filename, server, *attempt, *max_attempts, *total_bytes),
             BlossomProgressEvent::UploadedBytes {
                 filename,
                 server,
@@ -3216,13 +3236,9 @@ impl BlossomProgress for ReleaseBlossomProgress {
                 max_attempts,
                 timeout_secs,
                 ..
-            } => self.verification_started(
-                filename,
-                server,
-                *attempt,
-                *max_attempts,
-                *timeout_secs,
-            ),
+            } => {
+                self.verification_started(filename, server, *attempt, *max_attempts, *timeout_secs);
+            }
             BlossomProgressEvent::RetryScheduled {
                 filename,
                 server,
@@ -3246,7 +3262,7 @@ impl BlossomProgress for ReleaseBlossomProgress {
     }
 }
 
-impl Drop for ReleaseBlossomProgress {
+impl Drop for BlossomUploadProgress {
     fn drop(&mut self) {
         self.heading.finish_and_clear();
         self.clear_placement_bars();
@@ -3367,7 +3383,7 @@ async fn upload_prepared_files(
 ) -> Result<BlossomPublication> {
     let snapshots = prepared_upload_snapshots(prepared_application.as_deref(), prepared_assets)?;
 
-    let progress = ReleaseBlossomProgress::new(json_output)?;
+    let progress = BlossomUploadProgress::new(json_output)?;
     let batch = upload_release_snapshot_batch_to_servers_with_progress(
         &selection.servers,
         &snapshots,
@@ -4663,7 +4679,7 @@ assets:
 
     #[test]
     fn blossom_progress_distinguishes_body_transfer_from_waiting_for_response() -> Result<()> {
-        let progress = ReleaseBlossomProgress::new(true)?;
+        let progress = BlossomUploadProgress::new(true)?;
         let server = Url::parse("https://blossom.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch: 1,
@@ -4747,14 +4763,26 @@ assets:
     #[test]
     fn blossom_progress_stops_rendering_while_authorization_is_signed() -> Result<()> {
         let progress =
-            ReleaseBlossomProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
             servers: 2,
             checks: 2,
         });
         assert!(!progress.heading.is_finished());
+        assert_eq!(progress.heading.length(), Some(2));
+        assert_eq!(progress.heading.position(), 0);
         assert!(progress.draw_target_attached.load(Ordering::Acquire));
+
+        progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            checked: 1,
+            checks: 2,
+            confirmed: 0,
+            missing: 1,
+            unavailable: 0,
+        });
+        assert_eq!(progress.heading.position(), 1);
+        assert!(progress.heading.message().contains("1 need upload"));
 
         progress.update(&BlossomProgressEvent::AuthorizationStarted {
             batch: 1,
@@ -4789,7 +4817,7 @@ assets:
 
     #[test]
     fn blossom_progress_combines_concurrent_placement_activity() -> Result<()> {
-        let progress = ReleaseBlossomProgress::new(true)?;
+        let progress = BlossomUploadProgress::new(true)?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {

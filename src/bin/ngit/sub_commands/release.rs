@@ -1,6 +1,6 @@
 mod read;
 pub(crate) mod support;
-mod write;
+pub(crate) mod write;
 mod write_app;
 
 use anyhow::Result;
