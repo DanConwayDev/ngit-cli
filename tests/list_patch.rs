@@ -22,7 +22,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use nostr::prelude::EventId;
+use nostr::{
+    event::FinalizeEvent,
+    prelude::{Event, EventBuilder, EventId, Keys, Kind, Tag},
+};
+use nostr_sdk::prelude::Client;
 use test_harness::{
     CloneLogin, Harness, PublishRepoOpts, PublishedPatchSeries, PublishedRepo, Repo,
 };
@@ -132,6 +136,29 @@ where
     Ok(())
 }
 
+async fn publish_to_repo_grasp(harness: &Harness, event: &Event) -> Result<()> {
+    let relay_url = harness.grasp("repo").relay_url();
+    let client = Client::default();
+    client
+        .add_relay(&relay_url)
+        .await
+        .with_context(|| format!("failed to add repository relay {relay_url}"))?;
+    client.connect().await;
+    let output = client
+        .send_event(event)
+        .to([relay_url.as_str()])
+        .await
+        .with_context(|| format!("failed to publish malformed patch to {relay_url}"))?;
+    client.disconnect().await;
+    anyhow::ensure!(
+        output.failed.is_empty(),
+        "repository relay rejected malformed patch {}: {:?}",
+        event.id,
+        output.failed,
+    );
+    Ok(())
+}
+
 /// Patch-kind counterpart of
 /// `tests/list_pr.
 /// rs::enabling_auto_pr_branches_lists_open_prs_under_pr_namespaces`.
@@ -181,6 +208,92 @@ async fn enabling_auto_pr_branches_lists_open_patch_proposals() -> Result<()> {
         ls.refs.get("refs/heads/main").map(String::as_str),
         Some(published.initial_oid.as_str()),
         "main should still be listed alongside the patch-series PR namespaces",
+    );
+
+    Ok(())
+}
+
+// This exercises v3's explicit compatibility opt-in. A default fresh clone has
+// no selected `pr/` branch and returns before parsing proposal patches.
+#[tokio::test]
+async fn malformed_patch_events_do_not_break_passive_ref_listing() -> Result<()> {
+    let (harness, published, series) = setup().await?;
+    let test_repo = harness
+        .clone_published_repo(&published, CloneLogin::None)
+        .await?;
+    let template = series[0]
+        .cover_letter_event
+        .as_ref()
+        .context("patch-series fixture should include a cover letter")?;
+
+    let mut malformed_description_tags = template.tags.clone().to_vec();
+    malformed_description_tags
+        .retain(|tag| tag.as_slice().first().map(String::as_str) != Some("branch-name"));
+    malformed_description_tags.push(Tag::custom(
+        "branch-name",
+        vec!["malformed-description".to_string()],
+    ));
+    malformed_description_tags.push(Tag::parse(["description"])?);
+    let malformed_description = EventBuilder::new(Kind::GitPatch, template.content.clone())
+        .tags(malformed_description_tags)
+        .finalize(&Keys::generate())?;
+    publish_to_repo_grasp(&harness, &malformed_description).await?;
+
+    let mut malformed_envelope_tags: Vec<Tag> = template
+        .tags
+        .iter()
+        .filter(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) != Some("branch-name")
+                && !(values.first().map(String::as_str) == Some("t")
+                    && values.get(1).map(String::as_str) == Some("cover-letter"))
+        })
+        .cloned()
+        .collect();
+    malformed_envelope_tags.extend([
+        Tag::custom("branch-name", vec!["malformed-envelope".to_string()]),
+        Tag::custom("description", vec!["malformed envelope".to_string()]),
+        Tag::custom("parent-commit", vec![published.initial_oid.clone()]),
+    ]);
+    let malformed_envelope = EventBuilder::new(
+        Kind::GitPatch,
+        format!(
+            "From {}💣 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] malformed envelope\n",
+            "a".repeat(39),
+        ),
+    )
+    .tags(malformed_envelope_tags)
+    .finalize(&Keys::generate())?;
+    publish_to_repo_grasp(&harness, &malformed_envelope).await?;
+
+    git_ok(
+        &test_repo,
+        ["config", "--local", "nostr.auto-pr-branches", "true"],
+        "enable automatic PR branches",
+    )
+    .await?;
+    let ls = ls_remote(&test_repo, "origin").await?;
+
+    assert_eq!(
+        ls.refs.get("refs/heads/main").map(String::as_str),
+        Some(published.initial_oid.as_str()),
+        "malformed proposals must not suppress ordinary repository refs",
+    );
+    for valid in &series {
+        assert_eq!(
+            ls.refs
+                .get(&format!("refs/heads/{}", expected_long_branch(valid)?))
+                .map(String::as_str),
+            Some(valid.tip.as_str()),
+            "malformed proposals must not suppress valid proposal refs",
+        );
+    }
+    assert!(
+        ls.refs.keys().all(|name| {
+            !name.contains("malformed-description") && !name.contains("malformed-envelope")
+        }),
+        "malformed proposals must not be advertised: {:#?}",
+        ls.refs,
     );
 
     Ok(())
