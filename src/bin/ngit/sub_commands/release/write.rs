@@ -12,7 +12,7 @@ use ngit::{
         BlossomServerOutcome, BlossomServerStatus, DEFAULT_UPLOAD_CONCURRENCY, FileSnapshot,
         LocalFileRequest, MultiServerUpload, PossibleOrphanBlob, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
-        multi_server_upload_from_batch_outcome, snapshot_local_file, summarize_blossom_replication,
+        multi_server_upload_from_batch_outcome, snapshot_local_file,
         upload_release_snapshot_batch_to_servers_with_progress,
     },
     client::{sign_draft_event, sign_event},
@@ -47,7 +47,10 @@ use crate::{
         ReleaseAppInitArgs, ReleaseAppLinkArgs, ReleaseAssetAddArgs, ReleasePublishArgs,
         SignerParams,
     },
-    sub_commands::{id_resolver::parse_event_id, publication::BlossomUploadProgress},
+    sub_commands::{
+        id_resolver::parse_event_id,
+        publication::{BlossomUploadProgress, blossom_replication_warning},
+    },
 };
 
 const BLOSSOM_RETRY_RECOVERY: &str = "Blossom blobs are content-addressed. Correct the server list and rerun the command; no NIP-82 event was signed or published.";
@@ -2664,26 +2667,7 @@ impl BlossomPublication {
     }
 
     fn incomplete_replication_warning(&self) -> Option<WarningJson> {
-        let summary = summarize_blossom_replication(self.outcomes.iter().map(Vec::as_slice));
-        let message = summary.incomplete_message()?;
-        let incomplete_servers = summary
-            .servers
-            .iter()
-            .filter(|server| server.available != server.expected)
-            .map(|server| server.server.to_string())
-            .collect::<Vec<_>>();
-        Some(
-            WarningJson::new("blossom_replication_incomplete", message).with_details(json!({
-                "confirmed": summary.available_copies,
-                "placements": summary.expected_copies,
-                "servers": incomplete_servers,
-                "blobs": {
-                    "available": summary.available_blobs,
-                    "total": summary.blobs,
-                },
-                "copies_by_server": summary.servers,
-            })),
-        )
+        blossom_replication_warning(self.outcomes.iter().map(Vec::as_slice))
     }
 }
 

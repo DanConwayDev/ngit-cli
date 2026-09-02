@@ -1,90 +1,112 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use anyhow::{Context, Result, ensure};
-use futures::future::join_all;
 use ngit::{
-    NgitSigner,
     blossom::{
-        LocalFileRequest, MultiServerUpload, blossom_server_list_filter,
-        blossom_server_list_from_events, canonicalize_blossom_server_root,
-        confirm_snapshot_on_servers, snapshot_local_file,
+        BatchBlobUploadOutcome, BatchUploadError, BlossomServerStatus, DEFAULT_UPLOAD_CONCURRENCY,
+        LocalFileRequest, PossibleOrphanBlob, blossom_server_list_filter,
+        blossom_server_list_from_events, canonicalize_blossom_server_root, snapshot_local_file,
+        upload_resilient_snapshot_batch_to_servers_with_progress,
     },
-    client::{
-        Connect, Params, RelayProgressReporter, fetching_with_report, get_repo_ref_from_cache,
-        send_events, sign_draft_event,
-    },
+    client::{Connect, send_events, sign_draft_event},
     container_manifest::{load_container_manifest, resolve_container_manifest_path},
     event_ordering::{finalize_ordered_unsigned, latest_event},
     git::{Repo, RepoActions},
-    login,
     oci::{
         CONTAINER_REPOSITORY_KIND, ContainerRepository, OciBlob, OciLayout,
         is_valid_repository_name,
     },
-    repo_ref::get_resolved_repo_coordinate_when_remote_unknown,
 };
 use nostr::prelude::{
     Coordinate, Event, Filter, PublicKey, RelayUrl, ToBech32, Url, nip19::Nip19Coordinate,
 };
 use serde_json::{Value, json};
 
+use super::publication::{
+    BlossomUploadProgress, PublicationContext, PublicationError, WarningJson,
+    blossom_replication_warning, coded_error_with_details,
+};
 use crate::{
     cli::{ContainerPublishArgs, SignerParams},
-    client::Client,
+    cli_interactor::CliError,
+    output,
 };
 
-pub async fn publish(
+pub async fn launch(
+    args: &ContainerPublishArgs,
+    signer_params: SignerParams<'_>,
+    json_output: bool,
+) -> Result<()> {
+    let result = publish(args, signer_params, json_output).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if json_output => {
+            let (code, message, details) = error.downcast_ref::<PublicationError>().map_or_else(
+                || {
+                    (
+                        "operation_failed",
+                        format!("{error:#}"),
+                        Value::Object(serde_json::Map::new()),
+                    )
+                },
+                |error| (error.code, error.message.clone(), error.details.clone()),
+            );
+            output::set_value(json!({
+                "format_version": 1,
+                "ok": false,
+                "command": "container.publish",
+                "warnings": [],
+                "result": null,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "details": details,
+                }
+            }));
+            Err(CliError::already_handled())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn publish(
     args: &ContainerPublishArgs,
     signer_params: SignerParams<'_>,
     json_output: bool,
 ) -> Result<()> {
     let PreparedContainerPublish {
-        git_repo,
         resolved,
         explicit_servers,
         source,
         layout,
     } = prepare_container_publish(args)?;
 
-    let git_repo_ref = Some(&git_repo);
-    let mut client = Client::new(Params::with_git_config_relay_defaults(&git_repo_ref));
-    let (signer, user, _) = login::login_or_signup(
-        &git_repo_ref,
-        signer_params.info,
-        signer_params.password,
-        Some(&client),
-        false,
-    )
-    .await?;
-    client.set_signer(Arc::clone(&signer)).await;
-
-    let public_key = signer
-        .get_public_key()
-        .await
+    let mut context = PublicationContext::load_for_write(&resolved.relays, signer_params).await?;
+    let public_key = context
+        .current_signer()
         .context("failed to read the container publisher public key")?;
     ensure!(
-        public_key == user.public_key,
-        "active signer does not match the loaded Nostr account"
+        context
+            .repo_ref
+            .confirmed_maintainers()
+            .contains(&public_key),
+        "only a confirmed repository maintainer can publish related containers"
     );
-    let (repository_coordinate, repository_relays) =
-        resolve_repository_context(&git_repo, &mut client, public_key, &resolved.relays).await?;
-    client.nip42_register_publish_relays(repository_relays.clone());
-    let servers = if explicit_servers.is_empty() {
-        discover_blossom_servers(&client, &repository_relays, public_key).await?
-    } else {
-        explicit_servers
-    };
-    let existing = fetch_current_repository(
-        &client,
-        &repository_relays,
-        public_key,
-        &resolved.repository,
-    )
-    .await?;
+    let signer = context
+        .signer
+        .as_ref()
+        .context("nostr signer was not initialized")?
+        .clone();
+    let repository_coordinate = context.selected_coordinate.coordinate.clone();
+    let repository_relays = repository_relays(context.repo_ref.relays.clone(), &resolved.relays)?;
+    context
+        .client
+        .nip42_register_publish_relays(repository_relays.clone());
+    let servers = resolve_blossom_servers(&mut context, public_key, explicit_servers).await?;
+    let existing = load_current_repository(&mut context, public_key, &resolved.repository).await?;
     let repository = merged_repository(
         &resolved,
         &repository_coordinate,
@@ -97,17 +119,18 @@ pub async fn publish(
         .event_builder()
         .context("failed to construct the container repository event")?;
 
+    context.emit_human_warnings_before_signing(json_output);
     let uploads = upload_layout(&layout, &servers, &signer, json_output).await?;
+    context.warnings.extend(blossom_replication_warning(
+        uploads.iter().map(|(_, upload)| upload.servers.as_slice()),
+    ));
+    context.emit_human_warnings_before_signing(json_output);
 
-    let rechecked = fetch_current_repository(
-        &client,
-        &repository_relays,
-        public_key,
-        &resolved.repository,
-    )
-    .await
-    .context("failed to re-check the container repository after uploading blobs")?;
+    let rechecked = load_current_repository(&mut context, public_key, &resolved.repository)
+        .await
+        .context("failed to re-check the container repository after uploading blobs")?;
     ensure_unchanged(existing.as_ref(), rechecked.as_ref())?;
+    context.emit_human_warnings_before_signing(json_output);
 
     let unsigned = finalize_ordered_unsigned(event_builder, public_key, existing.as_ref())
         .context("failed to order the container repository update after uploading blobs")?;
@@ -115,7 +138,7 @@ pub async fn publish(
         .await
         .context("failed to sign the container repository event; uploaded blobs are reusable")?;
     let relay_results = send_events(
-        &client,
+        &context.client,
         None,
         vec![event.clone()],
         repository_relays.iter().map(ToString::to_string).collect(),
@@ -140,16 +163,16 @@ pub async fn publish(
             layout: &layout,
             uploads: &uploads,
             relay_results: &relay_results,
+            warnings: &context.warnings,
         },
         json_output,
     )?;
 
-    client.disconnect().await?;
+    context.client.disconnect().await?;
     Ok(())
 }
 
 struct PreparedContainerPublish {
-    git_repo: Repo,
     resolved: ResolvedContainerPublish,
     explicit_servers: Vec<Url>,
     source: Option<Url>,
@@ -174,32 +197,11 @@ fn prepare_container_publish(args: &ContainerPublishArgs) -> Result<PreparedCont
         )
     })?;
     Ok(PreparedContainerPublish {
-        git_repo,
         resolved,
         explicit_servers,
         source,
         layout,
     })
-}
-
-async fn resolve_repository_context(
-    git_repo: &Repo,
-    client: &mut Client,
-    public_key: PublicKey,
-    explicit_relays: &[String],
-) -> Result<(Coordinate, Vec<RelayUrl>)> {
-    let selected = get_resolved_repo_coordinate_when_remote_unknown(git_repo, client).await?;
-    let git_repo_path = git_repo.get_path()?;
-    fetching_with_report(git_repo_path, client, &selected.coordinate).await?;
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
-    ensure!(
-        repo_ref.confirmed_maintainers().contains(&public_key),
-        "only a confirmed repository maintainer can publish related containers"
-    );
-    Ok((
-        selected.coordinate.coordinate,
-        repository_relays(repo_ref.relays, explicit_relays)?,
-    ))
 }
 
 struct PublishSuccess<'a> {
@@ -209,8 +211,9 @@ struct PublishSuccess<'a> {
     event: &'a Event,
     repository: &'a ContainerRepository,
     layout: &'a OciLayout,
-    uploads: &'a [(OciBlob, MultiServerUpload)],
+    uploads: &'a [(OciBlob, BatchBlobUploadOutcome)],
     relay_results: &'a [(String, bool)],
+    warnings: &'a [WarningJson],
 }
 
 fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()> {
@@ -227,6 +230,7 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
             "format_version": 1,
             "ok": true,
             "command": "container.publish",
+            "warnings": success.warnings,
             "result": {
                 "repository": success.settings.repository,
                 "manifest_path": success.settings.manifest_path,
@@ -478,63 +482,18 @@ fn parse_blossom_servers(values: &[String]) -> Result<Vec<Url>> {
     Ok(servers)
 }
 
-async fn discover_blossom_servers(
-    client: &Client,
-    relays: &[RelayUrl],
+async fn resolve_blossom_servers(
+    context: &mut PublicationContext,
     author: PublicKey,
+    explicit_servers: Vec<Url>,
 ) -> Result<Vec<Url>> {
-    let progress = RelayProgressReporter::hidden();
-    let filters = vec![blossom_server_list_filter(author)];
-    let progress_handle = progress.handle();
-    let results = join_all(relays.iter().cloned().map(|relay| {
-        let filters = filters.clone();
-        let progress = progress_handle.clone();
-        async move {
-            let result = async {
-                let mut relay_results = client
-                    .get_events_per_relay(vec![relay.clone()], filters, progress)
-                    .await
-                    .with_context(|| format!("failed to query Blossom relay {relay}"))?;
-                ensure!(
-                    relay_results.len() == 1,
-                    "relay {relay} did not produce exactly one Blossom query result (got {})",
-                    relay_results.len()
-                );
-                relay_results
-                    .pop()
-                    .context("Blossom relay result disappeared after its length was checked")?
-                    .with_context(|| format!("failed to fetch Blossom events from {relay}"))
-            }
-            .await;
-            (relay, result)
-        }
-    }))
-    .await;
-    progress.finish(
-        results.iter().any(|(_, result)| result.is_err()),
-        results.iter().all(|(_, result)| result.is_err()),
-        None,
-    )?;
-
-    let mut events = Vec::new();
-    let mut failed = Vec::new();
-    for (relay, result) in results {
-        match result {
-            Ok(mut relay_events) => events.append(&mut relay_events),
-            Err(error) => failed.push(format!("{relay}: {error:#}")),
-        }
+    if !explicit_servers.is_empty() {
+        return Ok(explicit_servers);
     }
-    ensure!(
-        failed.len() < relays.len(),
-        "Blossom server discovery did not complete on any relay: {}; provide --blossom-server or retry",
-        failed.join("; ")
-    );
-    if !failed.is_empty() {
-        eprintln!(
-            "warning: Blossom server discovery was incomplete on: {}",
-            failed.join("; ")
-        );
-    }
+    context.add_author_relays(author).await?;
+    let events = context
+        .query_with_required_discovery_route(vec![blossom_server_list_filter(author)])
+        .await?;
     blossom_server_list_from_events(author, &events)
         .map(|list| list.servers)
         .context("failed to discover the publisher's Blossom servers; provide --blossom-server to override discovery")
@@ -576,73 +535,20 @@ fn repository_relays(announced: Vec<RelayUrl>, explicit: &[String]) -> Result<Ve
     Ok(relays)
 }
 
-async fn fetch_current_repository(
-    client: &Client,
-    relays: &[RelayUrl],
+async fn load_current_repository(
+    context: &mut PublicationContext,
     author: PublicKey,
     repository: &str,
 ) -> Result<Option<Event>> {
-    let progress = RelayProgressReporter::hidden();
     let filters = vec![
         Filter::new()
             .author(author)
             .kind(CONTAINER_REPOSITORY_KIND)
             .identifier(repository),
     ];
-    let progress_handle = progress.handle();
-    let results = join_all(relays.iter().cloned().map(|relay| {
-        let filters = filters.clone();
-        let progress = progress_handle.clone();
-        async move {
-            let result = async {
-                let mut relay_results = client
-                    .get_events_per_relay(vec![relay.clone()], filters, progress)
-                    .await
-                    .with_context(|| format!("failed to query container relay {relay}"))?;
-                ensure!(
-                    relay_results.len() == 1,
-                    "relay {relay} did not produce exactly one container query result (got {})",
-                    relay_results.len()
-                );
-                relay_results
-                    .pop()
-                    .context("container relay result disappeared after its length was checked")?
-                    .with_context(|| format!("failed to fetch container events from {relay}"))
-            }
-            .await;
-            (relay, result)
-        }
-    }))
-    .await;
-    progress.finish(
-        results.iter().any(|(_, result)| result.is_err()),
-        results.iter().all(|(_, result)| result.is_err()),
-        None,
-    )?;
-
-    let mut events = Vec::new();
-    let mut failed = Vec::new();
-    let mut completed = 0_usize;
-    for (relay, result) in results {
-        match result {
-            Ok(mut relay_events) => {
-                completed += 1;
-                events.append(&mut relay_events);
-            }
-            Err(error) => failed.push(format!("{relay}: {error:#}")),
-        }
-    }
-    ensure!(
-        completed > 0,
-        "container publication preflight did not complete on any repository relay: {}",
-        failed.join("; ")
-    );
-    if !failed.is_empty() {
-        eprintln!(
-            "warning: container repository preflight was incomplete on: {}",
-            failed.join("; ")
-        );
-    }
+    let events = context
+        .query_repository_publication_preflight(filters)
+        .await?;
     Ok(latest_event(events.iter()).cloned())
 }
 
@@ -659,20 +565,13 @@ fn ensure_unchanged(before: Option<&Event>, after: Option<&Event>) -> Result<()>
 async fn upload_layout(
     layout: &OciLayout,
     servers: &[Url],
-    signer: &Arc<NgitSigner>,
+    signer: &ngit::NgitSigner,
     json_output: bool,
-) -> Result<Vec<(OciBlob, MultiServerUpload)>> {
+) -> Result<Vec<(OciBlob, BatchBlobUploadOutcome)>> {
     let mut uploads = Vec::with_capacity(layout.blobs.len());
+    let mut completed_outcomes = Vec::with_capacity(layout.blobs.len());
+    let progress = BlossomUploadProgress::new(json_output)?;
     for (index, blob) in layout.blobs.iter().enumerate() {
-        if !json_output {
-            eprintln!(
-                "uploading blob {}/{}: sha256:{} ({} bytes)",
-                index + 1,
-                layout.blobs.len(),
-                blob.digest,
-                blob.size
-            );
-        }
         let mut request = LocalFileRequest::new(&blob.path);
         request.filename = Some(blob.digest.clone());
         request.mime_type = Some("application/octet-stream".to_owned());
@@ -685,16 +584,88 @@ async fn upload_layout(
             "OCI blob {} changed after layout validation; no container event was published",
             blob.digest
         );
-        let upload = confirm_snapshot_on_servers(servers, &snapshot, signer)
-            .await
-            .map_err(anyhow::Error::new)
-            .with_context(|| format!("failed to store OCI blob {} on Blossom", blob.digest))?;
-        uploads.push((blob.clone(), upload));
+        progress.set_sequential_file(
+            index + 1,
+            layout.blobs.len(),
+            format!("sha256:{}", &blob.digest[..12]),
+        );
+        let batch = upload_resilient_snapshot_batch_to_servers_with_progress(
+            servers,
+            &[&snapshot],
+            signer,
+            DEFAULT_UPLOAD_CONCURRENCY,
+            progress.clone(),
+        )
+        .await;
+        let mut batch = match batch {
+            Ok(batch) => batch,
+            Err(error) => {
+                return Err(container_blossom_failure(blob, &completed_outcomes, error));
+            }
+        };
+        let outcome = batch
+            .blobs
+            .pop()
+            .context("Blossom placement omitted the requested OCI blob")?;
+        ensure!(
+            batch.blobs.is_empty() && outcome.sha256 == blob.digest,
+            "Blossom placement returned the wrong OCI blob outcome"
+        );
+        completed_outcomes.push(outcome.clone());
+        uploads.push((blob.clone(), outcome));
     }
     Ok(uploads)
 }
 
-fn upload_json((blob, upload): &(OciBlob, MultiServerUpload)) -> Value {
+fn container_blossom_failure(
+    blob: &OciBlob,
+    completed: &[BatchBlobUploadOutcome],
+    error: BatchUploadError,
+) -> anyhow::Error {
+    let BatchUploadError {
+        message,
+        blobs,
+        possible_orphan_blobs,
+    } = error;
+    let mut all_blobs = completed.to_vec();
+    all_blobs.extend(blobs);
+    let mut all_orphans = possible_orphans_from_completed(completed);
+    all_orphans.extend(possible_orphan_blobs);
+    coded_error_with_details(
+        "blossom_upload_failed",
+        format!(
+            "failed to store OCI blob {} on Blossom: {message}",
+            blob.digest
+        ),
+        serde_json::to_value(BatchUploadError {
+            message,
+            blobs: all_blobs,
+            possible_orphan_blobs: all_orphans,
+        })
+        .unwrap_or_else(|_| json!({})),
+    )
+}
+
+fn possible_orphans_from_completed(blobs: &[BatchBlobUploadOutcome]) -> Vec<PossibleOrphanBlob> {
+    blobs
+        .iter()
+        .flat_map(|blob| {
+            blob.servers
+                .iter()
+                .filter(|outcome| outcome.status == BlossomServerStatus::Stored)
+                .map(|outcome| PossibleOrphanBlob {
+                    server: outcome.server.clone(),
+                    sha256: blob.sha256.clone(),
+                    url: outcome
+                        .descriptor
+                        .as_ref()
+                        .map(|descriptor| descriptor.url.clone()),
+                })
+        })
+        .collect()
+}
+
+fn upload_json((blob, upload): &(OciBlob, BatchBlobUploadOutcome)) -> Value {
     json!({
         "sha256": blob.digest,
         "size": blob.size,

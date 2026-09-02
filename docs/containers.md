@@ -86,8 +86,10 @@ Before asking the active account to sign, ngit checks every reachable blob on
 every selected server with exact size-and-MIME `HEAD` requests. It skips
 confirmed copies. Missing copies use BUD-11-compatible authorizations and
 direct streaming uploads with bounded concurrency and retries, followed by
-another strict `HEAD`. Every placement must be confirmed before ngit signs the
-kind-30624 repository event.
+another strict `HEAD`. Ngit attempts every selected server but signs the
+kind-30624 repository event once every blob has at least one confirmed copy.
+If another server is unavailable, the final warning reports available,
+already-stored, newly-uploaded, failed, and uncertain copies per server.
 
 By default, publishing behaves like adding tags to a registry:
 
@@ -109,7 +111,9 @@ docker pull ncontainer.io/<your-npub>/myimage:latest
 
 Use `--json` for a stable result containing the event ID, `naddr`, final tag
 map, loaded manifest path, uploaded blob outcomes, Blossom servers, and
-per-relay acknowledgements.
+per-relay acknowledgements. Success documents also contain a top-level
+`warnings` array. Typed failures use `ok: false` with an `error` object; a
+Blossom failure retains per-server outcomes and possible orphan blobs.
 
 ## Validation and update safety
 

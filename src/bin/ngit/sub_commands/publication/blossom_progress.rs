@@ -31,8 +31,16 @@ pub(crate) struct BlossomUploadProgress {
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
     finished_style: ProgressStyle,
+    sequential_file: Mutex<Option<SequentialFileScope>>,
     presence: Mutex<BlossomPresenceActivity>,
     activity: Mutex<BlossomActivity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SequentialFileScope {
+    index: usize,
+    total: usize,
+    filename: String,
 }
 
 #[derive(Default)]
@@ -253,9 +261,39 @@ impl BlossomUploadProgress {
             upload_style,
             phase_style,
             finished_style,
+            sequential_file: Mutex::new(None),
             presence: Mutex::new(BlossomPresenceActivity::default()),
             activity: Mutex::new(BlossomActivity::default()),
         }))
+    }
+
+    /// Present repeated single-file engine calls as one sequential workflow.
+    ///
+    /// OCI publication deliberately snapshots one potentially large blob at a
+    /// time. Without this outer scope every inner placement would misleadingly
+    /// render as `file 1/1` even though the shared engine is processing a
+    /// larger image.
+    pub(crate) fn set_sequential_file(
+        &self,
+        index: usize,
+        total: usize,
+        filename: impl Into<String>,
+    ) {
+        *self
+            .sequential_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SequentialFileScope {
+            index,
+            total,
+            filename: filename.into(),
+        });
+    }
+
+    fn sequential_file_scope(&self) -> Option<SequentialFileScope> {
+        self.sequential_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn start_presence_checks(&self, blobs: usize, servers: &[Url], checks: usize) {
@@ -266,8 +304,16 @@ impl BlossomUploadProgress {
         self.heading.set_length(checks as u64);
         self.heading.set_position(0);
         self.heading.set_style(self.presence_style.clone());
+        let scope = self
+            .sequential_file_scope()
+            .map_or_else(String::new, |scope| {
+                format!(
+                    "file {}/{}: {} — ",
+                    scope.index, scope.total, scope.filename
+                )
+            });
         self.heading.set_message(format!(
-            "{blobs} blob(s) across {} server(s)",
+            "{scope}{blobs} blob(s) across {} server(s)",
             servers.len()
         ));
         let mut presence = self
@@ -712,15 +758,21 @@ impl BlossomProgress for BlossomUploadProgress {
                 confirmed,
                 unavailable,
                 ..
-            } => self.start_upload_group(
-                *batch,
-                *batches,
-                *blobs,
-                filenames.clone(),
-                *placements,
-                *confirmed,
-                *unavailable,
-            ),
+            } => {
+                let (batch, batches) = self
+                    .sequential_file_scope()
+                    .filter(|_| *batch == 1 && *batches == 1)
+                    .map_or((*batch, *batches), |scope| (scope.index, scope.total));
+                self.start_upload_group(
+                    batch,
+                    batches,
+                    *blobs,
+                    filenames.clone(),
+                    *placements,
+                    *confirmed,
+                    *unavailable,
+                );
+            }
             BlossomProgressEvent::UploadRequestStarted {
                 filename,
                 server,
@@ -812,6 +864,34 @@ mod tests {
             rendered_bracket_column(BLOSSOM_FINISHED_ROW_TEMPLATE),
             rendered_bracket_column(BLOSSOM_PHASE_ROW_TEMPLATE)
         );
+    }
+
+    #[test]
+    fn sequential_file_scope_preserves_outer_file_numbering() -> Result<()> {
+        let progress = BlossomUploadProgress::new(true)?;
+        progress.set_sequential_file(2, 5, "layer.tar");
+        progress.update(&BlossomProgressEvent::PresenceChecksStarted {
+            blobs: 1,
+            servers: vec![Url::parse("https://blossom.example/")?],
+            checks: 1,
+        });
+        assert!(progress.heading.message().contains("file 2/5: layer.tar"));
+
+        progress.update(&BlossomProgressEvent::UploadBatchStarted {
+            batch: 1,
+            batches: 1,
+            blobs: 1,
+            filenames: vec!["layer.tar".to_owned()],
+            placements: 1,
+            confirmed: 0,
+            unavailable: 0,
+            bytes: 10,
+        });
+        let activity = progress.activity.lock().unwrap();
+        assert_eq!(activity.batch, 2);
+        assert_eq!(activity.batches, 5);
+        assert!(activity.message().contains("file 2/5"));
+        Ok(())
     }
 
     #[test]

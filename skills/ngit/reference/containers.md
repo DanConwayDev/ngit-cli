@@ -83,8 +83,9 @@ Important behavior:
   Two or more servers are strongly recommended. Ngit checks every blob on
   every server, skips exact matches, uploads missing copies directly with
   BUD-11-compatible authorization and bounded retries, then verifies them
-  again. Every placement must be confirmed before it signs the repository
-  event.
+  again. It attempts every placement but may sign the repository event once
+  every blob has at least one confirmed copy. Incomplete replication is
+  reported with a per-server copy summary.
 - `--relay` extends the current Git repository's relays. Account read/write and
   configured default relays are not added.
 - ngit reads the repository relays before and after uploading. Each preflight
@@ -112,7 +113,7 @@ to `--title` or `NAME`. Because it can remove published tags and metadata, use
 ## Machine output
 
 Always use `--json`. A successful result has `command: "container.publish"`
-and includes:
+and includes a top-level `warnings` array plus:
 
 - `result.repository`, `git_repository`, `npub`, `name`, and `naddr`;
 - resolved `manifest_path`, or `null` when no manifest was loaded;
@@ -124,6 +125,9 @@ and includes:
 Do not infer complete relay replication from command success: publication
 succeeds when at least one selected relay accepts the event. Inspect every
 `result.relays[].accepted` value when full fanout matters.
+
+Typed failures use `ok: false` and an `error` object. Blossom failures retain
+per-blob/per-server outcomes and possible orphan blobs under `error.details`.
 
 ## Limits
 

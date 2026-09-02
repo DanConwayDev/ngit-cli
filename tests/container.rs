@@ -9,7 +9,7 @@ use nostr::event::FinalizeEvent;
 use nostr_sdk::prelude::{Client, Coordinate, Event, EventBuilder, Filter, Kind, Tag, Url};
 use serde_json::{Value, json};
 use test_harness::{
-    BlossomRequest, BlossomServer, Harness, LocalRelayBuilderNip42, PublishRepoOpts,
+    BlossomRequest, BlossomRule, BlossomServer, Harness, LocalRelayBuilderNip42, PublishRepoOpts,
     presence_requests, upload_requests,
 };
 
@@ -247,7 +247,10 @@ async fn authenticates_container_preflight_reads_on_repository_relays() -> Resul
             .as_array()
             .context("relay result was not an array")?
             .iter()
-            .any(|result| result["url"] == relay && result["accepted"] == true)
+            .any(|result| result["url"] == relay && result["accepted"] == true),
+        "authenticated relay did not accept the event: {}; stderr: {}",
+        result["result"]["relays"],
+        String::from_utf8_lossy(&output.stderr)
     );
 
     assert_blob_placements(&blossom.finish().await?, &expected_blobs)?;
@@ -408,6 +411,163 @@ async fn merges_state_when_one_repository_relay_is_unavailable() -> Result<()> {
     ensure!(latest.tags.iter().any(|tag| {
         matches!(tag.as_slice(), [name, tag, ..] if name == "tag" && tag == "latest")
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn publishes_when_each_blob_has_one_confirmed_blossom_copy() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("default").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("resilient-container-source".to_owned()),
+            extra_repo_relays: vec![relay],
+            ..Default::default()
+        })
+        .await?;
+    let (_, expected_blobs) = write_layout(repo.dir())?;
+    let unavailable = BlossomServer::start().await?;
+    unavailable.add_rule(BlossomRule::upload().respond_status(
+        400,
+        "Bad Request",
+        "fixture refuses uploads",
+    ));
+    let available = BlossomServer::start().await?;
+
+    let output = repo
+        .ngit([
+            "container",
+            "publish",
+            "resilient-app",
+            "--layout",
+            repo.dir().to_str().context("test path was not UTF-8")?,
+            "--blossom-server",
+            unavailable.base_url(),
+            "--blossom-server",
+            available.base_url(),
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to run resilient container publish")?;
+    ensure!(
+        output.status.success(),
+        "resilient container publish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(result["ok"] == true);
+    ensure!(result["warnings"].as_array().is_some_and(|warnings| {
+        warnings
+            .iter()
+            .any(|warning| warning["code"] == "blossom_replication_incomplete")
+    }));
+    let blobs = result["result"]["blobs"]
+        .as_array()
+        .context("container blobs were not an array")?;
+    ensure!(blobs.len() == expected_blobs.len());
+    for blob in blobs {
+        let servers = blob["servers"]
+            .as_array()
+            .context("container blob server outcomes were not an array")?;
+        ensure!(servers.iter().any(|server| server["status"] == "failed"));
+        ensure!(servers.iter().any(|server| server["status"] == "stored"));
+    }
+
+    let unavailable_requests = unavailable.finish().await?;
+    ensure!(
+        !upload_requests(&unavailable_requests).is_empty(),
+        "the unavailable server received no attempted upload"
+    );
+    assert_blob_placements(&available.finish().await?, &expected_blobs)?;
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(CONTAINER_REPOSITORY_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier("resilient-app"),
+        )
+        .await?;
+    ensure!(events.len() == 1, "container event was not published");
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_publish_when_a_blob_has_no_confirmed_blossom_copy() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("default").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("unavailable-container-source".to_owned()),
+            extra_repo_relays: vec![relay],
+            ..Default::default()
+        })
+        .await?;
+    write_layout(repo.dir())?;
+    let unavailable = BlossomServer::start().await?;
+    unavailable.add_rule(BlossomRule::upload().respond_status(
+        400,
+        "Bad Request",
+        "fixture refuses uploads",
+    ));
+
+    let output = repo
+        .ngit([
+            "container",
+            "publish",
+            "unavailable-app",
+            "--layout",
+            repo.dir().to_str().context("test path was not UTF-8")?,
+            "--blossom-server",
+            unavailable.base_url(),
+            "--json",
+        ])
+        .output()
+        .await
+        .context("failed to run unavailable container publish")?;
+    ensure!(
+        !output.status.success(),
+        "container publish unexpectedly succeeded"
+    );
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    ensure!(result["ok"] == false);
+    ensure!(result["error"]["code"] == "blossom_upload_failed");
+    ensure!(
+        result["error"]["details"]["blobs"]
+            .as_array()
+            .is_some_and(|blobs| blobs.len() == 1),
+        "the failed blob outcome was not retained"
+    );
+    ensure!(!upload_requests(&unavailable.finish().await?).is_empty());
+
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(CONTAINER_REPOSITORY_KIND)
+                .author(published.maintainer_keys.public_key())
+                .identifier("unavailable-app"),
+        )
+        .await?;
+    ensure!(
+        events.is_empty(),
+        "a container event was published after Blossom failure"
+    );
     Ok(())
 }
 

@@ -534,7 +534,7 @@ async fn main() {
             }
             Commands::Container(args) => match &args.container_command {
                 ContainerCommands::Publish(args) => {
-                    sub_commands::container::publish(args, signer_params, cli.json).await
+                    sub_commands::container::launch(args, signer_params, cli.json).await
                 }
             },
             Commands::Sync(args) => sub_commands::sync::launch(args, signer_params).await,

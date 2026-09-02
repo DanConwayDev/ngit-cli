@@ -9,7 +9,7 @@ use ngit::{
     blossom::{
         BatchUploadResult, BlossomServerStatus, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
-        summarize_blossom_replication, upload_resilient_snapshot_batch_to_servers_with_progress,
+        upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{send_public_events, sign_draft_event},
     event_ordering::{latest_event, wait_for_strictly_later_timestamp},
@@ -26,8 +26,8 @@ use nostr::prelude::{
 use serde_json::{Value, json};
 
 use super::publication::{
-    BlossomUploadProgress, PublicationContext, PublicationError, WarningJson, coded_error,
-    coded_error_with_details, repository_json,
+    BlossomUploadProgress, PublicationContext, PublicationError, WarningJson,
+    blossom_replication_warning, coded_error, coded_error_with_details, repository_json,
 };
 use crate::{
     cli::{NsiteCommands, NsitePublishArgs, NsiteSubCommandArgs, SignerParams},
@@ -585,35 +585,9 @@ fn append_blossom_replication_warning(
     context: &mut PublicationContext,
     blossom: &BatchUploadResult,
 ) {
-    context
-        .warnings
-        .extend(blossom_replication_warning(blossom));
-}
-
-fn blossom_replication_warning(blossom: &BatchUploadResult) -> Option<WarningJson> {
-    let summary =
-        summarize_blossom_replication(blossom.blobs.iter().map(|blob| blob.servers.as_slice()));
-    let message = summary.incomplete_message()?;
-    let incomplete_servers = summary
-        .servers
-        .iter()
-        .filter(|server| server.available != server.expected)
-        .map(|server| server.server.to_string())
-        .collect::<Vec<_>>();
-    Some(WarningJson {
-        code: "blossom_replication_incomplete".to_owned(),
-        message,
-        details: json!({
-            "confirmed": summary.available_copies,
-            "placements": summary.expected_copies,
-            "servers": incomplete_servers,
-            "blobs": {
-                "available": summary.available_blobs,
-                "total": summary.blobs,
-            },
-            "copies_by_server": summary.servers,
-        }),
-    })
+    context.warnings.extend(blossom_replication_warning(
+        blossom.blobs.iter().map(|blob| blob.servers.as_slice()),
+    ));
 }
 
 #[cfg(test)]
@@ -797,7 +771,9 @@ mod tests {
                 ],
             }],
         };
-        let warning = blossom_replication_warning(&result).unwrap();
+        let warning =
+            blossom_replication_warning(result.blobs.iter().map(|blob| blob.servers.as_slice()))
+                .unwrap();
         assert_eq!(warning.code, "blossom_replication_incomplete");
         assert_eq!(warning.details["confirmed"], 1);
         assert_eq!(warning.details["placements"], 2);

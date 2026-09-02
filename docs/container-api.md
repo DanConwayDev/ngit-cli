@@ -24,7 +24,8 @@ The canonical command group is `ngit container`; `ngit oci` is a visible alias.
 The v1 API:
 
 - validates all OCI blobs reachable from tagged roots in an image layout;
-- uploads each reachable blob to an ordered set of Blossom servers;
+- attempts each reachable blob on an ordered set of Blossom servers and
+  requires at least one confirmed copy of every blob;
 - publishes or updates one signed container repository event;
 - preserves existing repository state unless exact replacement is requested;
 - exposes deterministic success output for automation.
@@ -215,9 +216,9 @@ fails closed rather than being merged or overwritten.
 
 For each stable snapshot, ngit first checks every selected server with bounded
 parallel `HEAD /<sha256>` requests. A present response must report the exact
-snapshot length and MIME type. Hash-preserving BUD-01 redirects are accepted;
-other redirects or ambiguous metadata fail closed before upload authorization
-is signed.
+snapshot length and MIME type. Hash-preserving BUD-01 redirects are accepted.
+An unavailable check or conflicting metadata makes that server unconfirmed;
+it does not prevent another selected server from satisfying the blob.
 
 Missing copies receive direct streaming `PUT /upload` requests. The kind-24242
 authorization follows BUD-11, scopes the hash to every selected server domain,
@@ -225,8 +226,12 @@ and is reused across those servers. Ngit sends URL-safe unpadded encoding
 first, retrying a `401` once with legacy padded encoding of the same signed
 event. Transient checks and uploads use bounded retries. Every accepted or
 uncertain upload must pass another exact `HEAD` before ngit signs a repository
-event. Container snapshots remain one-at-a-time, bounding temporary disk use
-to approximately the largest reachable blob.
+event. Publication proceeds when every blob has at least one confirmed copy;
+other failed or uncertain placements remain visible in the result and produce
+a per-server replication warning. Container snapshots remain one-at-a-time,
+bounding temporary disk use to approximately the largest reachable blob. The
+shared progress display retains the outer file number across those sequential
+snapshots and distinguishes upload, response-waiting, and verification phases.
 
 Before uploading, ngit queries each current repository relay independently for
 the exact author, kind, and `d` identifier. At least one repository-relay query
@@ -274,6 +279,7 @@ upload progress remain on stderr. A successful publication has this shape:
   "format_version": 1,
   "ok": true,
   "command": "container.publish",
+  "warnings": [],
   "result": {
     "repository": "myimage",
     "manifest_path": "/workspace/project/.ngit/containers.yaml",
@@ -312,25 +318,42 @@ upload progress remain on stderr. A successful publication has this shape:
 ```
 
 `tags` is the final published tag map; `updated_tags` contains only tags read
-from this layout. Each selected server has operation `upload` and, on
-successful command completion, status `stored` or `already_present`.
+from this layout. Each selected server has operation `upload`; successful
+command completion guarantees that every blob has at least one `stored` or
+`already_present` outcome, while other outcomes may be `failed`, `unknown`, or
+`not_attempted`. Incomplete replication adds a structured warning with a
+per-server copy summary.
 `event_id` is raw hexadecimal; `naddr` is the portable container repository
 address; `git_repository` is the exact coordinate emitted in the `a` tag.
 `manifest_path` is the resolved path of the loaded configuration, or `null`
 when no manifest was loaded.
 
-Before a success document is installed, failures use ngit's generic nonzero
-JSON error shape:
+Failures use the shared publication error envelope:
 
 ```json
-{ "status": "error", "error": "context: cause" }
+{
+  "format_version": 1,
+  "ok": false,
+  "command": "container.publish",
+  "warnings": [],
+  "result": null,
+  "error": {
+    "code": "blossom_upload_failed",
+    "message": "failed to store OCI blob ...",
+    "details": {
+      "blobs": [],
+      "possible_orphan_blobs": []
+    }
+  }
+}
 ```
 
 Uploaded blobs may exist after a failure. Failures after all uploads explicitly
-identify them as reusable; an upload failure can leave only a partial
-set and the generic JSON error does not enumerate it. Content addressing makes
-a retry safe after resolving the reported relay, signer, layout, or Blossom
-condition.
+identify them as reusable; a Blossom error retains the completed and failed
+per-blob/per-server outcomes plus possible orphan blobs. Content addressing
+makes a retry safe after resolving the reported relay, signer, layout, or
+Blossom condition. Failures outside the typed publication phases use
+`operation_failed` with an empty details object.
 
 ## Gateway pull API
 
