@@ -428,7 +428,9 @@ async fn load_current_manifest(
     if let Some(identifier) = identifier {
         filter = filter.identifier(identifier);
     }
-    let events = context.query(vec![filter], true).await?;
+    let events = context
+        .query_account_publication_preflight(vec![filter])
+        .await?;
     Ok(latest_event(events.iter().filter(|event| {
         event.pubkey == author
             && event.kind
@@ -454,12 +456,8 @@ async fn publish_manifest(
     event: &Event,
     json_output: bool,
 ) -> Result<Value> {
-    let (user_write, repository_relays) = context.publication_relays();
-    let additional_relays = manifest_additional_relays(
-        context.repo_ref.private,
-        repository_relays,
-        &context.explicit_relays,
-    );
+    let (user_write, _) = context.publication_relays();
+    let additional_relays = manifest_additional_relays(&context.explicit_relays);
     let results = send_public_events(
         &context.client,
         Some(context.git_repo_path()?),
@@ -493,15 +491,9 @@ async fn publish_manifest(
 }
 
 fn manifest_additional_relays(
-    private_repository: bool,
-    repository_relays: Vec<nostr::prelude::RelayUrl>,
     explicit_relays: &[nostr::prelude::RelayUrl],
 ) -> Vec<nostr::prelude::RelayUrl> {
-    if private_repository {
-        explicit_relays.to_vec()
-    } else {
-        repository_relays
-    }
+    explicit_relays.to_vec()
 }
 
 fn event_id_bech32(event: &Event) -> Option<String> {
@@ -831,21 +823,12 @@ mod tests {
     }
 
     #[test]
-    fn private_repositories_do_not_route_public_manifests_to_repo_relays() {
-        let private = RelayUrl::parse("wss://private.example").unwrap();
+    fn nsite_manifests_only_use_explicit_additional_relays() {
         let explicit = RelayUrl::parse("wss://public.example").unwrap();
 
         assert_eq!(
-            manifest_additional_relays(
-                true,
-                vec![private.clone()],
-                std::slice::from_ref(&explicit),
-            ),
-            vec![explicit.clone()]
-        );
-        assert_eq!(
-            manifest_additional_relays(false, vec![private.clone()], &[explicit]),
-            vec![private]
+            manifest_additional_relays(std::slice::from_ref(&explicit)),
+            vec![explicit]
         );
     }
 
