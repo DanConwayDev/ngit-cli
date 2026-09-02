@@ -25,12 +25,9 @@ use nostr::prelude::{
 };
 use serde_json::{Value, json};
 
-use super::release::{
-    support::{
-        ReleaseContext, ReleaseError, WarningJson, coded_error, coded_error_with_details,
-        repository_json,
-    },
-    write::BlossomUploadProgress,
+use super::publication::{
+    BlossomUploadProgress, PublicationContext, PublicationError, WarningJson, coded_error,
+    coded_error_with_details, repository_json,
 };
 use crate::{
     cli::{NsiteCommands, NsitePublishArgs, NsiteSubCommandArgs, SignerParams},
@@ -86,7 +83,7 @@ pub(crate) async fn launch(
             Ok(())
         }
         Err(error) if json_output => {
-            let (code, message, details) = error.downcast_ref::<ReleaseError>().map_or_else(
+            let (code, message, details) = error.downcast_ref::<PublicationError>().map_or_else(
                 || {
                     (
                         "operation_failed",
@@ -126,8 +123,7 @@ async fn publish(
     if let Some(identifier) = resolved.identifier.as_deref() {
         validate_named_site_identifier(identifier)?;
     }
-    let mut context =
-        ReleaseContext::load_for_write(&resolved.relays, false, signer_params).await?;
+    let mut context = PublicationContext::load_for_write(&resolved.relays, signer_params).await?;
     for option in &resolved.unsupported_config_publications {
         context.warnings.push(WarningJson {
             code: "unsupported_nsite_config_option".to_owned(),
@@ -384,7 +380,7 @@ fn resolve_description(args: &NsitePublishArgs) -> Result<Option<String>> {
 }
 
 async fn resolve_servers(
-    context: &mut ReleaseContext,
+    context: &mut PublicationContext,
     author: PublicKey,
     explicit: &[String],
 ) -> Result<Vec<Url>> {
@@ -416,7 +412,7 @@ async fn resolve_servers(
 }
 
 async fn load_current_manifest(
-    context: &mut ReleaseContext,
+    context: &mut PublicationContext,
     author: PublicKey,
     identifier: Option<&str>,
 ) -> Result<Option<Event>> {
@@ -452,7 +448,7 @@ fn manifest_identifier(event: &Event) -> Option<&str> {
 }
 
 async fn publish_manifest(
-    context: &ReleaseContext,
+    context: &PublicationContext,
     event: &Event,
     json_output: bool,
 ) -> Result<Value> {
@@ -536,7 +532,7 @@ fn blossom_summary(result: &BatchUploadResult) -> Value {
 }
 
 fn append_snapshot_warnings(
-    context: &mut ReleaseContext,
+    context: &mut PublicationContext,
     files: &[ngit::nsite::NsiteFileSnapshot],
 ) -> Result<()> {
     context.warnings.extend(grouped_snapshot_warnings(files)?);
@@ -585,7 +581,10 @@ fn group_snapshot_warning_records(records: Vec<(String, String, String)>) -> Vec
         .collect()
 }
 
-fn append_blossom_replication_warning(context: &mut ReleaseContext, blossom: &BatchUploadResult) {
+fn append_blossom_replication_warning(
+    context: &mut PublicationContext,
+    blossom: &BatchUploadResult,
+) {
     context
         .warnings
         .extend(blossom_replication_warning(blossom));
