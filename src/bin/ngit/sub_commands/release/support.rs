@@ -44,6 +44,16 @@ enum QueryPolicy {
     Discovery,
     AtLeastOneDiscoveryRoute,
     PublicationPreflight,
+    AccountPublicationPreflight,
+}
+
+impl QueryPolicy {
+    fn is_publication_preflight(self) -> bool {
+        matches!(
+            self,
+            Self::PublicationPreflight | Self::AccountPublicationPreflight
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -551,31 +561,41 @@ impl ReleaseContext {
     }
 
     fn publication_query_groups(&self) -> Result<Vec<RelayThresholdGroup>> {
-        let mut repository_relays = self.repo_ref.relays.clone();
-        dedup_relays(&mut repository_relays);
+        let mut groups = self.configured_publication_query_groups(true)?;
+        self.add_fallback_query_group(&mut groups)?;
+        Ok(groups)
+    }
 
-        let mut account_write_relays = match &self.user_ref {
+    fn account_publication_query_groups(&self) -> Result<Vec<RelayThresholdGroup>> {
+        self.configured_publication_query_groups(false)
+    }
+
+    fn configured_publication_query_groups(
+        &self,
+        include_repository_relays: bool,
+    ) -> Result<Vec<RelayThresholdGroup>> {
+        let account_write_relays = match &self.user_ref {
             Some(user) => parse_relays(&user.relays.write())?,
             None => Vec::new(),
         };
-        dedup_relays(&mut account_write_relays);
-
         let mut explicit_relays = self.explicit_relays.clone();
         add_zapstore_publication_relay(&mut explicit_relays, self.zapstore_relay.as_ref());
-        dedup_relays(&mut explicit_relays);
+        Ok(publication_query_groups_for_scope(
+            self.repo_ref.relays.clone(),
+            account_write_relays,
+            explicit_relays,
+            include_repository_relays,
+        ))
+    }
 
-        let mut groups = relay_threshold_groups([
-            ("repository relays", repository_relays),
-            ("account write relays", account_write_relays),
-            ("explicit publication relays", explicit_relays),
-        ]);
+    fn add_fallback_query_group(&self, groups: &mut Vec<RelayThresholdGroup>) -> Result<()> {
         if groups.is_empty() {
-            groups = relay_threshold_groups([(
+            groups.extend(relay_threshold_groups([(
                 "fallback relays",
                 parse_relays(self.client.get_relay_default_set())?,
-            )]);
+            )]));
         }
-        Ok(groups)
+        Ok(())
     }
 
     pub(super) async fn publish_batch(
@@ -632,6 +652,14 @@ impl ReleaseContext {
         self.query_with_policy(filters, policy).await
     }
 
+    pub(crate) async fn query_account_publication_preflight(
+        &mut self,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Event>> {
+        self.query_with_policy(filters, QueryPolicy::AccountPublicationPreflight)
+            .await
+    }
+
     pub(crate) async fn query_with_required_discovery_route(
         &mut self,
         filters: Vec<Filter>,
@@ -646,9 +674,15 @@ impl ReleaseContext {
         policy: QueryPolicy,
     ) -> Result<Vec<Event>> {
         if !self.offline {
-            let threshold_groups = (policy == QueryPolicy::PublicationPreflight)
-                .then(|| self.publication_query_groups())
-                .transpose()?;
+            let threshold_groups = match policy {
+                QueryPolicy::PublicationPreflight => Some(self.publication_query_groups()?),
+                QueryPolicy::AccountPublicationPreflight => {
+                    let mut groups = self.account_publication_query_groups()?;
+                    self.add_fallback_query_group(&mut groups)?;
+                    Some(groups)
+                }
+                QueryPolicy::Discovery | QueryPolicy::AtLeastOneDiscoveryRoute => None,
+            };
             let relays = threshold_groups.as_ref().map_or_else(
                 || self.discovery_relays.clone(),
                 |groups| relay_threshold_union(groups),
@@ -702,7 +736,7 @@ impl ReleaseContext {
                     json!({ "relays": failed }),
                 ));
             }
-            if policy != QueryPolicy::PublicationPreflight && !failed.is_empty() {
+            if !policy.is_publication_preflight() && !failed.is_empty() {
                 self.warnings
                     .push(relay_discovery_incomplete_warning(&failed, results.len()));
             }
@@ -725,6 +759,26 @@ fn relay_threshold_groups<const N: usize>(
             })
         })
         .collect()
+}
+
+fn publication_query_groups_for_scope(
+    repository_relays: Vec<RelayUrl>,
+    account_write_relays: Vec<RelayUrl>,
+    explicit_relays: Vec<RelayUrl>,
+    include_repository_relays: bool,
+) -> Vec<RelayThresholdGroup> {
+    let mut groups = Vec::new();
+    if include_repository_relays {
+        groups.extend(relay_threshold_groups([(
+            "repository relays",
+            repository_relays,
+        )]));
+    }
+    groups.extend(relay_threshold_groups([
+        ("account write relays", account_write_relays),
+        ("explicit publication relays", explicit_relays),
+    ]));
+    groups
 }
 
 fn relay_threshold_union(groups: &[RelayThresholdGroup]) -> Vec<RelayUrl> {
@@ -1343,9 +1397,9 @@ mod tests {
     use super::{
         AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, ZAPSTORE_RELAY_URL,
         add_zapstore_publication_relay, optional_login, publication_failure_message,
-        publication_json, publication_recovery, relay_discovery_incomplete_warning,
-        relay_preflight_incomplete_warning, relay_threshold_groups, relay_threshold_statuses,
-        relay_threshold_union,
+        publication_json, publication_query_groups_for_scope, publication_recovery,
+        relay_discovery_incomplete_warning, relay_preflight_incomplete_warning,
+        relay_threshold_groups, relay_threshold_statuses, relay_threshold_union,
     };
 
     #[test]
@@ -1425,6 +1479,27 @@ mod tests {
         ]);
 
         assert_eq!(relay_threshold_union(&groups), [shared]);
+    }
+
+    #[test]
+    fn account_preflight_excludes_repository_relays() {
+        let repository = RelayUrl::parse("wss://repo.example").unwrap();
+        let account = RelayUrl::parse("wss://account.example").unwrap();
+        let explicit = RelayUrl::parse("wss://explicit.example").unwrap();
+
+        let groups = publication_query_groups_for_scope(
+            vec![repository.clone()],
+            vec![account.clone()],
+            vec![explicit.clone()],
+            false,
+        );
+
+        assert_eq!(
+            groups.iter().map(|group| group.label).collect::<Vec<_>>(),
+            ["account write relays", "explicit publication relays"]
+        );
+        assert_eq!(relay_threshold_union(&groups), [account, explicit]);
+        assert!(!relay_threshold_union(&groups).contains(&repository));
     }
 
     #[test]
