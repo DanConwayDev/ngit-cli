@@ -59,12 +59,6 @@ const MAX_PRESENCE_REDIRECTS: usize = 5;
 pub const DEFAULT_AUTHORIZATION_BATCH_SIZE: usize = 20;
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
-#[derive(Clone, Copy, Debug)]
-enum AuthorizationEncodingPreference {
-    Bud11,
-    Legacy,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlacementRequirement {
     EveryServer,
@@ -109,29 +103,17 @@ enum PresenceProbeResult {
 #[derive(Clone, Copy)]
 struct BatchAuthorizationOptions {
     batch_size: usize,
-    encoding_preference: AuthorizationEncodingPreference,
     placement_requirement: PlacementRequirement,
 }
 
 impl BatchAuthorizationOptions {
     const DEFAULT: Self = Self {
         batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
-        encoding_preference: AuthorizationEncodingPreference::Bud11,
         placement_requirement: PlacementRequirement::EveryServer,
-    };
-
-    // Release assets must interoperate with deployed servers which accept only
-    // one `x` tag and padded standard Base64. The same signed per-blob event is
-    // still reused across every selected server.
-    const LEGACY_PER_BLOB: Self = Self {
-        batch_size: 1,
-        encoding_preference: AuthorizationEncodingPreference::Legacy,
-        placement_requirement: PlacementRequirement::OneServerPerBlob,
     };
 
     const RESILIENT: Self = Self {
         batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
-        encoding_preference: AuthorizationEncodingPreference::Bud11,
         placement_requirement: PlacementRequirement::OneServerPerBlob,
     };
 }
@@ -838,10 +820,8 @@ async fn upload_snapshot_with_compatible_authorization(
     deadline: tokio::time::Instant,
     progress: UploadProgressContext,
 ) -> std::result::Result<BlobUpload, BlobRequestError> {
-    let (primary_authorization, fallback_authorization) = match authorization.encoding_preference {
-        AuthorizationEncodingPreference::Bud11 => (&authorization.bud11, &authorization.legacy),
-        AuthorizationEncodingPreference::Legacy => (&authorization.legacy, &authorization.bud11),
-    };
+    let primary_authorization = &authorization.bud11;
+    let fallback_authorization = &authorization.legacy;
     let primary = upload_snapshot_with_authorization_inner(
         client,
         server_url,
@@ -1035,28 +1015,6 @@ pub async fn upload_resilient_snapshot_batch_to_servers_with_progress(
         concurrency,
         progress,
         BatchAuthorizationOptions::RESILIENT,
-    )
-    .await
-}
-
-/// Batch placement for software releases which attempts every selected server
-/// while requiring one confirmed copy of every blob. It retains compatibility
-/// with deployed servers that require padded Base64 and exactly one `x`
-/// authorization tag.
-pub async fn upload_release_snapshot_batch_to_servers_with_progress(
-    servers: &[Url],
-    snapshots: &[&FileSnapshot],
-    signer: &NgitSigner,
-    concurrency: usize,
-    progress: Arc<dyn BlossomProgress>,
-) -> std::result::Result<BatchUploadResult, BatchUploadError> {
-    upload_snapshot_batch_to_servers_with_options_and_progress(
-        servers,
-        snapshots,
-        signer,
-        concurrency,
-        progress,
-        BatchAuthorizationOptions::LEGACY_PER_BLOB,
     )
     .await
 }
@@ -1339,14 +1297,12 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 &blobs,
             ));
         }
-        let authorization =
-            compatible_authorization_headers(&event, authorization_options.encoding_preference)
-                .map_err(|error| {
-                    batch_progress_error(
-                        format!("failed to encode Blossom batch authorization: {error:#}"),
-                        &blobs,
-                    )
-                })?;
+        let authorization = compatible_authorization_headers(&event).map_err(|error| {
+            batch_progress_error(
+                format!("failed to encode Blossom batch authorization: {error:#}"),
+                &blobs,
+            )
+        })?;
         let upload_bytes = uploads.iter().fold(0_u64, |total, (blob_index, _)| {
             total.saturating_add(snapshots[*blob_index].size)
         });
@@ -2289,13 +2245,9 @@ fn authorization_header(event: &Event) -> Result<HeaderValue> {
 struct CompatibleAuthorization {
     bud11: HeaderValue,
     legacy: HeaderValue,
-    encoding_preference: AuthorizationEncodingPreference,
 }
 
-fn compatible_authorization_headers(
-    event: &Event,
-    encoding_preference: AuthorizationEncodingPreference,
-) -> Result<CompatibleAuthorization> {
+fn compatible_authorization_headers(event: &Event) -> Result<CompatibleAuthorization> {
     let event = serde_json::to_vec(event).context("failed to encode Blossom authorization")?;
     let header = |encoded: String| {
         HeaderValue::from_str(&format!("Nostr {encoded}"))
@@ -2304,7 +2256,6 @@ fn compatible_authorization_headers(
     Ok(CompatibleAuthorization {
         bud11: header(URL_SAFE_NO_PAD.encode(&event))?,
         legacy: header(STANDARD.encode(event))?,
-        encoding_preference,
     })
 }
 
@@ -3166,8 +3117,7 @@ mod tests {
         let keys = Keys::generate();
         let event = server_list_event(&keys, 1, "compatibility", []);
         let event_json = serde_json::to_vec(&event)?;
-        let headers =
-            compatible_authorization_headers(&event, AuthorizationEncodingPreference::Bud11)?;
+        let headers = compatible_authorization_headers(&event)?;
         let bud11 = headers
             .bud11
             .to_str()?
@@ -3326,7 +3276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_batch_succeeds_when_each_blob_has_one_confirmed_server() -> Result<()> {
+    async fn resilient_batch_succeeds_when_each_blob_has_one_confirmed_server() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
         std::fs::write(file.path(), b"resilient release")?;
         let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
@@ -3344,7 +3294,7 @@ mod tests {
         .await?;
         let servers = [Url::parse(&failed_url)?, Url::parse(&confirmed_url)?];
 
-        let result = upload_release_snapshot_batch_to_servers_with_progress(
+        let result = upload_resilient_snapshot_batch_to_servers_with_progress(
             &servers,
             &[&snapshot],
             &NgitSigner::Keys(Keys::generate()),
@@ -3532,7 +3482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_batch_fails_when_a_blob_has_no_confirmed_server() -> Result<()> {
+    async fn resilient_batch_fails_when_a_blob_has_no_confirmed_server() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
         std::fs::write(file.path(), b"unavailable release")?;
         let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
@@ -3543,7 +3493,7 @@ mod tests {
         })
         .await?;
 
-        let error = upload_release_snapshot_batch_to_servers_with_progress(
+        let error = upload_resilient_snapshot_batch_to_servers_with_progress(
             &[Url::parse(&failed_url)?],
             &[&snapshot],
             &NgitSigner::Keys(Keys::generate()),

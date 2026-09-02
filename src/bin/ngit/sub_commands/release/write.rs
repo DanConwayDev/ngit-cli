@@ -13,7 +13,7 @@ use ngit::{
         LocalFileRequest, MultiServerUpload, PossibleOrphanBlob, blossom_server_list_filter,
         blossom_server_list_from_events, canonicalize_blossom_server_root,
         multi_server_upload_from_batch_outcome, snapshot_local_file,
-        upload_release_snapshot_batch_to_servers_with_progress,
+        upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
@@ -2728,7 +2728,7 @@ async fn upload_prepared_files(
     let snapshots = prepared_upload_snapshots(prepared_application.as_deref(), prepared_assets)?;
 
     let progress = BlossomUploadProgress::new(json_output)?;
-    let batch = upload_release_snapshot_batch_to_servers_with_progress(
+    let batch = upload_resilient_snapshot_batch_to_servers_with_progress(
         &selection.servers,
         &snapshots,
         signer,

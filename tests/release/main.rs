@@ -9,7 +9,10 @@
 use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
     AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -367,23 +370,28 @@ assets:
                 .context("batched Blossom upload omitted authorization")
         })
         .collect::<Result<Vec<_>>>()?;
-    ensure!(authorizations[0] != authorizations[1]);
-    for (request, authorization) in upload_requests.iter().zip(authorizations) {
-        let encoded = authorization
-            .strip_prefix("Nostr ")
-            .context("Blossom authorization omitted the Nostr scheme")?;
-        let event: Event = serde_json::from_slice(
-            &STANDARD
-                .decode(encoded)
-                .context("release authorization did not use padded standard Base64")?,
-        )?;
-        let authorized_hashes = tag_values(&event, "x");
-        ensure!(authorized_hashes.len() == 1);
+    ensure!(authorizations[0] == authorizations[1]);
+    let encoded = authorizations[0]
+        .strip_prefix("Nostr ")
+        .context("Blossom authorization omitted the Nostr scheme")?;
+    let event: Event = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(encoded)
+            .context("release authorization did not use BUD-11 Base64")?,
+    )?;
+    let mut authorized_hashes = tag_values(&event, "x");
+    authorized_hashes.sort();
+    let mut expected_hashes = vec![icon_hash.clone(), asset_hash.clone()];
+    expected_hashes.sort();
+    ensure!(authorized_hashes == expected_hashes);
+    for request in &upload_requests {
         ensure!(
-            authorized_hashes[0]
-                == request
+            authorized_hashes.contains(
+                &request
                     .header("x-sha-256")
                     .context("Blossom upload omitted X-SHA-256")?
+                    .to_owned()
+            )
         );
     }
     ensure!(output["result"]["application_operation"] == "created");
