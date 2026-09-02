@@ -92,6 +92,12 @@ impl BatchAuthorizationOptions {
         encoding_preference: AuthorizationEncodingPreference::Legacy,
         placement_requirement: PlacementRequirement::OneServerPerBlob,
     };
+
+    const RESILIENT: Self = Self {
+        batch_size: DEFAULT_AUTHORIZATION_BATCH_SIZE,
+        encoding_preference: AuthorizationEncodingPreference::Bud11,
+        placement_requirement: PlacementRequirement::OneServerPerBlob,
+    };
 }
 
 /// Observable milestones emitted by the Blossom batch placement engine.
@@ -820,6 +826,27 @@ pub async fn upload_snapshot_batch_to_servers_with_progress(
         concurrency,
         progress,
         BatchAuthorizationOptions::DEFAULT,
+    )
+    .await
+}
+
+/// Batch placement which attempts every selected server while requiring one
+/// confirmed copy of every blob. Standard multi-hash BUD-11 authorizations
+/// retain signer batching while failed replicas remain visible in the result.
+pub async fn upload_resilient_snapshot_batch_to_servers_with_progress(
+    servers: &[Url],
+    snapshots: &[&FileSnapshot],
+    signer: &NgitSigner,
+    concurrency: usize,
+    progress: Arc<dyn BlossomProgress>,
+) -> std::result::Result<BatchUploadResult, BatchUploadError> {
+    upload_snapshot_batch_to_servers_with_options_and_progress(
+        servers,
+        snapshots,
+        signer,
+        concurrency,
+        progress,
+        BatchAuthorizationOptions::RESILIENT,
     )
     .await
 }
@@ -2864,6 +2891,49 @@ mod tests {
         assert!(
             upload.primary.url.as_str().starts_with(&confirmed_url),
             "the first confirmed server must supply the published URL"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resilient_batch_keeps_bud11_batching_when_one_server_fails() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"resilient static site")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (failed_url, failed_server) = spawn_head_server(|_| TestResponse {
+            status: "403 Forbidden",
+            headers: Vec::new(),
+            body: String::new(),
+        })
+        .await?;
+        let (confirmed_url, confirmed_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let servers = [Url::parse(&failed_url)?, Url::parse(&confirmed_url)?];
+
+        let result = upload_resilient_snapshot_batch_to_servers_with_progress(
+            &servers,
+            &[&snapshot],
+            &NgitSigner::Keys(Keys::generate()),
+            2,
+            Arc::new(HiddenBlossomProgress),
+        )
+        .await?;
+        completed_request(failed_server).await?;
+        tokio::time::timeout(SERVER_TIMEOUT, confirmed_server)
+            .await
+            .context("timed out waiting for confirmed resilient placement")???;
+
+        assert_eq!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            [BlossomServerStatus::Failed, BlossomServerStatus::Stored]
         );
         Ok(())
     }
