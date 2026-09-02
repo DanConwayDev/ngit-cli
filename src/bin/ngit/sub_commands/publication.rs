@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use ngit::{
     NgitSigner,
+    blossom::{BlossomServerOutcome, summarize_blossom_replication},
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
         fetching_without_summary, get_events_from_local_cache, get_repo_ref_from_cache,
@@ -38,6 +39,7 @@ enum QueryPolicy {
     Discovery,
     AtLeastOneDiscoveryRoute,
     PublicationPreflight,
+    RepositoryPublicationPreflight,
     AccountPublicationPreflight,
 }
 
@@ -45,7 +47,9 @@ impl QueryPolicy {
     fn is_publication_preflight(self) -> bool {
         matches!(
             self,
-            Self::PublicationPreflight | Self::AccountPublicationPreflight
+            Self::PublicationPreflight
+                | Self::RepositoryPublicationPreflight
+                | Self::AccountPublicationPreflight
         )
     }
 }
@@ -157,10 +161,6 @@ impl PublicationContext {
         let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
         let selected =
             get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
-        if !offline {
-            fetching_with_report(git_repo_path, &client, &selected.coordinate).await?;
-        }
-        let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
 
         let login = match login_mode {
             LoginMode::Optional => optional_login(
@@ -194,6 +194,15 @@ impl PublicationContext {
         } else {
             (None, None)
         };
+
+        // Attach an explicitly selected signer before repository relays are
+        // contacted. A NIP-42 challenge is single-use; fetching anonymously
+        // first can consume it and leave a later publication racing a relay's
+        // replacement challenge.
+        if !offline {
+            fetching_with_report(git_repo_path, &client, &selected.coordinate).await?;
+        }
+        let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
 
         let explicit_relays = parse_relays(explicit_relays)?;
         let mut discovery_relays = repo_ref.relays.clone();
@@ -358,6 +367,21 @@ impl PublicationContext {
             .await
     }
 
+    /// Query the repository and explicit relay set as one redundant class.
+    ///
+    /// OCI repository events are published only to that combined set, unlike
+    /// releases and nsites which also target account write relays. Requiring
+    /// one completed query from the actual publication set preserves the
+    /// decentralized failure threshold without making unrelated account
+    /// relays a prerequisite.
+    pub(crate) async fn query_repository_publication_preflight(
+        &mut self,
+        filters: Vec<Filter>,
+    ) -> Result<Vec<Event>> {
+        self.query_with_policy(filters, QueryPolicy::RepositoryPublicationPreflight)
+            .await
+    }
+
     pub(crate) async fn query_with_required_discovery_route(
         &mut self,
         filters: Vec<Filter>,
@@ -374,6 +398,9 @@ impl PublicationContext {
         if !self.offline {
             let threshold_groups = match policy {
                 QueryPolicy::PublicationPreflight => Some(self.publication_query_groups()?),
+                QueryPolicy::RepositoryPublicationPreflight => {
+                    Some(self.repository_publication_query_groups()?)
+                }
                 QueryPolicy::AccountPublicationPreflight => {
                     let mut groups = self.account_publication_query_groups()?;
                     self.add_fallback_query_group(&mut groups)?;
@@ -443,6 +470,17 @@ impl PublicationContext {
     }
 }
 
+impl PublicationContext {
+    fn repository_publication_query_groups(&self) -> Result<Vec<RelayThresholdGroup>> {
+        let mut relays = self.repo_ref.relays.clone();
+        relays.extend(self.explicit_relays.iter().cloned());
+        relays.extend(self.additional_publication_relays.iter().cloned());
+        let mut groups = relay_threshold_groups([("repository relays", relays)]);
+        self.add_fallback_query_group(&mut groups)?;
+        Ok(groups)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RepositoryJson {
     pub selected_coordinate: String,
@@ -462,6 +500,31 @@ pub(crate) fn coordinate_key(coordinate: &Coordinate) -> String {
         coordinate.kind.as_u16(),
         coordinate.public_key.to_hex(),
         coordinate.identifier
+    )
+}
+
+pub(crate) fn blossom_replication_warning<'a>(
+    blobs: impl IntoIterator<Item = &'a [BlossomServerOutcome]>,
+) -> Option<WarningJson> {
+    let summary = summarize_blossom_replication(blobs);
+    let message = summary.incomplete_message()?;
+    let incomplete_servers = summary
+        .servers
+        .iter()
+        .filter(|server| server.available != server.expected)
+        .map(|server| server.server.to_string())
+        .collect::<Vec<_>>();
+    Some(
+        WarningJson::new("blossom_replication_incomplete", message).with_details(json!({
+            "confirmed": summary.available_copies,
+            "placements": summary.expected_copies,
+            "servers": incomplete_servers,
+            "blobs": {
+                "available": summary.available_blobs,
+                "total": summary.blobs,
+            },
+            "copies_by_server": summary.servers,
+        })),
     )
 }
 
