@@ -1,12 +1,107 @@
 //! Normal-path coverage for named repository relationship edits.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
+use futures::StreamExt;
+use ngit::login::user::PrivateGitRelayList;
+use nostr::nips::nip46::{NostrConnectEventBuilder, NostrConnectMessage, NostrConnectRequest};
+use nostr_connect::signer::{
+    NostrConnectKeys, NostrConnectRemoteSigner, NostrConnectSignerActions,
+};
 use nostr_sdk::prelude::*;
 use test_harness::{
     Harness, PublishRepoOpts, UnavailableTcpEndpoint, tag_value, tag_values, tag_values_multiple,
 };
+
+const SIGNER_READY_DEADLINE: Duration = Duration::from_secs(10);
+const SIGNER_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct SignerRequestCounts {
+    nip44_decrypt: AtomicUsize,
+}
+
+struct CountSignerRequests(Arc<SignerRequestCounts>);
+
+impl NostrConnectSignerActions for CountSignerRequests {
+    fn approve(&self, _public_key: &PublicKey, request: &NostrConnectRequest) -> bool {
+        if matches!(request, NostrConnectRequest::Nip44Decrypt { .. }) {
+            self.0.nip44_decrypt.fetch_add(1, Ordering::SeqCst);
+        }
+        true
+    }
+}
+
+async fn signer_relay_client(relay_url: &RelayUrl) -> Result<Client> {
+    let client = Client::default();
+    client.add_relay(relay_url.clone()).await?;
+    client.connect().await;
+    Ok(client)
+}
+
+async fn send_nip46_message(
+    client: &Client,
+    from: &Keys,
+    to: PublicKey,
+    message: NostrConnectMessage,
+) -> Result<()> {
+    let event = NostrConnectEventBuilder::new(to, message).finalize(from)?;
+    client.send_event(&event).await?;
+    Ok(())
+}
+
+/// Prove the remote signer's ephemeral subscription is live before spawning
+/// the command under test. Each probe waits on an observable pong and the
+/// whole loop has a bounded deadline.
+async fn wait_until_signer_ready(relay_url: &RelayUrl, signer_pubkey: PublicKey) -> Result<()> {
+    let probe_keys = Keys::generate();
+    let client = signer_relay_client(relay_url).await?;
+    client
+        .subscribe(
+            Filter::new()
+                .pubkey(probe_keys.public_key())
+                .kind(Kind::NostrConnect)
+                .limit(0),
+        )
+        .await?;
+    let mut notifications = client.notifications();
+    let deadline = tokio::time::Instant::now() + SIGNER_READY_DEADLINE;
+    loop {
+        send_nip46_message(
+            &client,
+            &probe_keys,
+            signer_pubkey,
+            NostrConnectMessage::request(&NostrConnectRequest::Ping),
+        )
+        .await?;
+        let pong = tokio::time::timeout(SIGNER_PROBE_INTERVAL, async {
+            while let Some(notification) = notifications.next().await {
+                if let ClientNotification::Event { event, .. } = notification {
+                    if event.kind == Kind::NostrConnect && event.pubkey == signer_pubkey {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await;
+        if matches!(pong, Ok(true)) {
+            client.disconnect().await;
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("remote signer did not answer a readiness probe before the deadline");
+        }
+    }
+}
 
 async fn latest_announcement(
     harness: &Harness,
@@ -162,6 +257,91 @@ async fn targeted_setting_actions_preserve_derived_and_untouched_values() -> Res
     assert_eq!(tag_values(&removed, "relays").len(), 1);
     assert!(tag_values_multiple(&removed, "t").is_empty());
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_metadata_edit_does_not_request_private_relay_list_decryption() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let relay_url = RelayUrl::parse(harness.relay("default").url())?;
+
+    // Publish a real account-private relay list so an unnecessary discovery
+    // attempt must ask the bunker to decrypt rather than quietly finding no
+    // kind-10318 event.
+    let local_signer = Arc::new(ngit::signer::NgitSigner::Keys(
+        published.maintainer_keys.clone(),
+    ));
+    let mut private_relays = PrivateGitRelayList::new(vec![relay_url.clone()])?;
+    let private_relay_event = private_relays.to_event(&local_signer).await?;
+    publish_to_relay(harness.relay("default").url(), &[&private_relay_event]).await?;
+
+    let app_keys = Keys::generate();
+    let remote_signer_keys = Keys::generate();
+    let remote_signer = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: remote_signer_keys.clone(),
+            user: published.maintainer_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let bunker_uri = remote_signer.bunker_uri().to_string();
+    let app_key = app_keys.secret_key().to_secret_hex();
+    let request_counts = Arc::new(SignerRequestCounts::default());
+    let signer_actions = CountSignerRequests(Arc::clone(&request_counts));
+    let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
+    wait_until_signer_ready(&relay_url, remote_signer_keys.public_key()).await?;
+
+    let mut edit = publisher.ngit([
+        "--bunker-uri",
+        &bunker_uri,
+        "--bunker-app-key",
+        &app_key,
+        "repo",
+        "edit",
+        "--description",
+        "edited without private discovery",
+    ]);
+    edit.kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(30), edit.output()).await;
+    signer_task.abort();
+    let output = output
+        .context("public repo edit did not finish before the remote-signer deadline")?
+        .context("failed to spawn public repo edit with remote signer")?;
+    if !output.status.success() {
+        bail!(
+            "public repo edit exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    assert_eq!(
+        request_counts.nip44_decrypt.load(Ordering::SeqCst),
+        0,
+        "a public repository with a cached announcement must not request private relay-list decryption",
+    );
+    let edited = latest_announcement(
+        &harness,
+        published.maintainer_keys.public_key(),
+        &published.identifier,
+    )
+    .await?;
+    assert_eq!(
+        tag_value(&edited, "description").as_deref(),
+        Some("edited without private discovery"),
+        "the metadata edit should still publish normally",
+    );
     Ok(())
 }
 

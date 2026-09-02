@@ -54,15 +54,14 @@ use crate::{
         create_rejected_refspecs_and_remotes_refspecs, generate_updated_state,
     },
     login,
-    login::user::{
-        PrivateGitRelayDiscovery, discover_private_git_relay_list, publish_private_git_relay_list,
-    },
+    login::user::{PrivateGitRelayDiscovery, publish_private_git_relay_list},
     push_bookkeeping::{record_accepted_push_refspecs, set_branch_upstream},
     repo_ref::{
         RepoCoordinateSource, RepoRef, ResolvedRepoCoordinate, get_repo_config_from_yaml,
         print_selected_repo, try_resolve_repo_coordinate,
     },
     state_transaction::{LiveOps, ServerForcePolicy, StateTransaction},
+    sub_commands::repository_fetch::prepare_account_for_repo_fetch,
 };
 
 // ---------------------------------------------------------------------------
@@ -2181,9 +2180,15 @@ async fn launch_with_mode(
 
     client.set_signer(signer.clone()).await;
     let resolved_repo_coordinate = try_resolve_repo_coordinate(&git_repo).await?;
-    let private_discovery = if resolved_repo_coordinate.is_some() {
-        discover_private_git_relay_list(&client, discovery_relays(&user_ref, &client), &signer)
-            .await
+    let private_discovery = if let Some(resolved) = &resolved_repo_coordinate {
+        prepare_account_for_repo_fetch(
+            &git_repo,
+            &mut client,
+            &resolved.coordinate,
+            &signer,
+            &user_ref,
+        )
+        .await
     } else {
         PrivateGitRelayDiscovery::Absent
     };
@@ -2343,19 +2348,6 @@ fn parse_relay_url(s: &str) -> Result<RelayUrl> {
         }
     }
     .context(format!("failed to parse relay url: {s}"))
-}
-
-fn discovery_relays(user_ref: &ngit::login::user::UserRef, client: &Client) -> Vec<String> {
-    let mut relays = user_ref.relays.read();
-    for relay in user_ref.relays.write() {
-        if !relays.contains(&relay) {
-            relays.push(relay);
-        }
-    }
-    if relays.is_empty() {
-        relays.extend(client.get_relay_default_set().iter().cloned());
-    }
-    relays
 }
 
 fn main_or_master_branch_name(git_repo: &Repo) -> Result<&'static str> {
