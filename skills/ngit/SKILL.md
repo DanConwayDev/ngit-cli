@@ -81,7 +81,7 @@ Detailed command references live in `reference/*.md` in this skill's directory. 
 | Repository settings and membership | `reference/repo-settings.md` |
 | Open, stack, review, merge PRs | `reference/prs.md` |
 | Create/view/comment/close issues | `reference/issues.md` |
-| Inspect CI workflows, runs, trust, failures | `reference/ci.md` |
+| Write CI workflows, install ngit in CI jobs, inspect runs, trust, failures | `reference/ci.md` |
 | Publish OCI containers through Blossom and Nostr | `reference/containers.md` |
 | Accounts, login, secrets | `reference/accounts.md` |
 | Sync, flags, git config | `reference/sync-config.md` |

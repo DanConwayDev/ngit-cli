@@ -1,7 +1,44 @@
 # Nostr CI
 
-Use this reference when checking whether CI ran, interpreting a result, or
-diagnosing why a failure was or was not reported.
+Use this reference when checking whether CI ran, interpreting a result,
+diagnosing why a failure was or was not reported, or writing workflows that
+run ngit inside a CI job.
+
+## Two workflow directories, one syntax
+
+Nostr CI (ngit-ci) executes workflows from `.ngit/act/workflows/` with
+[act](https://github.com/nektos/act), using GitHub Actions-compatible syntax
+in Linux containers. Repositories mirrored to GitHub may additionally keep
+workflows under `.github/workflows/`, which only GitHub Actions runs. The
+directories are independent: a workflow in one is never executed by the other
+system, so shared checks must exist in both directories (usually as identical
+files).
+
+- Put Linux-only jobs in `.ngit/act/workflows/`; ngit-ci cannot serve macOS or
+  Windows `runs-on` labels.
+- Keep macOS and Windows jobs in `.github/workflows/` only.
+- Job-level `uses:` (reusable workflows) is refused by ngit-ci; composite
+  actions in steps work in both systems.
+
+## Installing ngit in a CI job
+
+To run `ngit` or push/fetch `nostr://` remotes inside a job, install both
+binaries with the setup action. It works in GitHub Actions (Linux, macOS,
+Windows runners) and in `.ngit/act/workflows/` jobs, and verifies every
+download against a checksum-pinned manifest:
+
+```yaml
+- uses: danconwaydev/setup-ngit@v1        # installs ngit + git-remote-nostr
+- uses: danconwaydev/setup-ngit@v1
+  with:
+    version: 3.0.0-rc.5                    # optional exact version pin
+```
+
+`latest` resolves against the manifest pinned at the action ref, not a network
+lookup. Do not compile ngit from source in CI or pipe `install.sh` to bash in
+a job; the action is faster and hash-verified. Source:
+`nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/setup-ngit`
+(GitHub mirror `DanConwayDev/setup-ngit`).
 
 ## Locate the workflow
 
