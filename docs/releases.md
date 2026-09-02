@@ -212,9 +212,11 @@ post-upload verification requests use 15-second attempts with bounded retries.
 Initial presence checks have one progress row per server and share the global
 concurrency pool. After three consecutive transient failures from one server,
 ngit skips its queued initial checks while continuing healthy servers; a `404`
-still means that the blob needs uploading. The final replication warning gives
-available, already-stored, newly-uploaded, failed, uncertain, and not-attempted
-copy counts per server.
+still means that the blob needs uploading. Size or MIME differences and other
+initial-check diagnostics remain in live progress and JSON, but do not produce
+a final replication warning because no storage operation was attempted. A
+genuine upload or post-upload-verification shortfall produces the final
+per-server copy warning.
 
 `--verbose` also retains each per-server outcome and failure message. `--json`
 keeps stdout machine-readable and does not draw progress bars.

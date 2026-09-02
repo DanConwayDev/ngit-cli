@@ -146,6 +146,7 @@ impl BatchAuthorizationOptions {
 pub enum BlossomPresenceStatus {
     AlreadyStored,
     NeedsUpload,
+    MetadataDiffers,
     CheckFailed,
     Skipped,
 }
@@ -164,6 +165,7 @@ pub enum BlossomProgressEvent {
         checks: usize,
         confirmed: usize,
         missing: usize,
+        metadata_differences: usize,
         failed: usize,
         skipped: usize,
     },
@@ -348,6 +350,14 @@ pub struct BlossomServerOutcome {
     pub status: BlossomServerStatus,
     pub descriptor: Option<BlobDescriptor>,
     pub message: Option<String>,
+    /// The initial HEAD check was inconclusive and no storage operation was
+    /// attempted. This is diagnostic state, not proof that replication failed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub presence_check_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A blob which a failed workflow may have stored without publishing its event.
@@ -470,7 +480,11 @@ pub fn summarize_blossom_replication<'a>(
         .filter(|servers| servers.iter().any(server_outcome_is_confirmed))
         .count();
     let mut servers = Vec::<BlossomServerCopySummary>::new();
-    for outcome in blobs.iter().flat_map(|servers| servers.iter()) {
+    for outcome in blobs
+        .iter()
+        .flat_map(|servers| servers.iter())
+        .filter(|outcome| !outcome.presence_check_only)
+    {
         let summary = if let Some(summary) = servers
             .iter_mut()
             .find(|summary| summary.server == outcome.server)
@@ -544,6 +558,7 @@ struct BlobRequestError {
     possible_orphan: bool,
     status: Option<StatusCode>,
     retryable: bool,
+    presence_metadata_mismatch: bool,
 }
 
 impl BlobRequestError {
@@ -554,6 +569,7 @@ impl BlobRequestError {
             possible_orphan,
             status: None,
             retryable: false,
+            presence_metadata_mismatch: false,
         }
     }
 
@@ -564,6 +580,7 @@ impl BlobRequestError {
             possible_orphan,
             status: None,
             retryable: true,
+            presence_metadata_mismatch: false,
         }
     }
 
@@ -579,6 +596,7 @@ impl BlobRequestError {
             possible_orphan,
             status: Some(status),
             retryable: is_transient_status(status),
+            presence_metadata_mismatch: false,
         }
     }
 
@@ -593,7 +611,14 @@ impl BlobRequestError {
             possible_orphan,
             status: None,
             retryable: true,
+            presence_metadata_mismatch: false,
         }
+    }
+
+    fn presence_metadata(error: anyhow::Error) -> Self {
+        let mut request_error = Self::definite(error, false);
+        request_error.presence_metadata_mismatch = true;
+        request_error
     }
 }
 
@@ -1079,6 +1104,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     status: BlossomServerStatus::NotAttempted,
                     descriptor: None,
                     message: None,
+                    presence_check_only: false,
                 })
                 .collect(),
         })
@@ -1134,6 +1160,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
     let mut missing = Vec::new();
     let mut checked = 0_usize;
     let mut confirmed = 0_usize;
+    let mut metadata_differences = 0_usize;
     let mut failed = 0_usize;
     let mut skipped = 0_usize;
     while let Some((blob_index, server_index, result)) = presence_results.next().await {
@@ -1155,7 +1182,11 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                 BlossomPresenceStatus::NeedsUpload
             }
             PresenceProbeResult::Checked(Err(error)) => {
-                failed += 1;
+                if error.presence_metadata_mismatch {
+                    metadata_differences += 1;
+                } else {
+                    failed += 1;
+                }
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
                 outcome.status = match error.kind {
@@ -1163,18 +1194,24 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     RequestFailureKind::Unknown => BlossomServerStatus::Unknown,
                 };
                 outcome.message = Some(error.message);
+                outcome.presence_check_only = true;
                 progress.update(&BlossomProgressEvent::PlacementFinished {
                     filename: snapshots[blob_index].filename.clone(),
                     server: servers[server_index].clone(),
                     status: outcome.status,
                     message: outcome.message.clone(),
                 });
-                BlossomPresenceStatus::CheckFailed
+                if error.presence_metadata_mismatch {
+                    BlossomPresenceStatus::MetadataDiffers
+                } else {
+                    BlossomPresenceStatus::CheckFailed
+                }
             }
             PresenceProbeResult::Skipped => {
                 skipped += 1;
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
+                outcome.presence_check_only = true;
                 outcome.message = Some(format!(
                     "presence check skipped after {PRESENCE_CIRCUIT_FAILURE_THRESHOLD} consecutive transient failures on this server"
                 ));
@@ -1195,6 +1232,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             checks: snapshots.len().saturating_mul(servers.len()),
             confirmed,
             missing: missing.len(),
+            metadata_differences,
             failed,
             skipped,
         });
@@ -1647,7 +1685,7 @@ async fn snapshot_is_present_once(
         match response.status() {
             StatusCode::OK => {
                 validate_presence_metadata(&response, snapshot)
-                    .map_err(|error| BlobRequestError::definite(error, false))?;
+                    .map_err(BlobRequestError::presence_metadata)?;
                 return Ok(true);
             }
             StatusCode::NOT_FOUND => return Ok(false),
@@ -1841,6 +1879,7 @@ pub async fn upload_snapshot_to_servers(
             status: BlossomServerStatus::NotAttempted,
             descriptor: None,
             message: None,
+            presence_check_only: false,
         })
         .collect::<Vec<_>>();
     let Some(primary_server) = servers.first() else {
@@ -3458,6 +3497,40 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn presence_only_diagnostics_do_not_imply_incomplete_replication() -> Result<()> {
+        let inconclusive = Url::parse("https://inconclusive.example/")?;
+        let available = Url::parse("https://available.example/")?;
+        let outcomes = vec![
+            BlossomServerOutcome {
+                server: inconclusive,
+                operation: BlossomServerOperation::Upload,
+                status: BlossomServerStatus::Failed,
+                descriptor: None,
+                message: Some("presence metadata differs".to_owned()),
+                presence_check_only: true,
+            },
+            BlossomServerOutcome {
+                server: available.clone(),
+                operation: BlossomServerOperation::Upload,
+                status: BlossomServerStatus::AlreadyPresent,
+                descriptor: None,
+                message: None,
+                presence_check_only: false,
+            },
+        ];
+
+        let summary = summarize_blossom_replication([outcomes.as_slice()]);
+
+        assert!(summary.is_complete());
+        assert!(summary.incomplete_message().is_none());
+        assert_eq!(summary.expected_copies, 1);
+        assert_eq!(summary.available_copies, 1);
+        assert_eq!(summary.servers.len(), 1);
+        assert_eq!(summary.servers[0].server, available);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn release_batch_fails_when_a_blob_has_no_confirmed_server() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
@@ -3856,6 +3929,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.message.contains(expected_message));
+            assert!(error.presence_metadata_mismatch);
             completed_request(server).await?;
         }
         Ok(())

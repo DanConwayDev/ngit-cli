@@ -95,8 +95,10 @@ points at known-missing content.
 Presence checks share the global `--concurrency` limit. After three consecutive
 transient failures from one server, ngit skips that server's queued initial
 checks while continuing the others; `404` remains an ordinary upload
-candidate. Human progress and incomplete-replication warnings summarize copy
-state separately for each server.
+candidate. Human progress distinguishes metadata differences from failed
+checks. These initial-check diagnostics remain in JSON but do not produce a
+final replication warning because no storage operation was attempted; failed
+uploads and post-upload verification still warn per server.
 
 Rerun the same command after a failure. Content-addressed blobs already stored
 on a server are confirmed with `HEAD` and skipped, so continuation works at

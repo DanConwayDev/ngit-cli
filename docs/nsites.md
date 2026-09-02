@@ -116,13 +116,16 @@ replication is reported with copy counts for each server.
 
 The presence display has one row per server beneath the aggregate progress
 bar. Each row distinguishes copies already stored, blobs needing upload,
-failed checks, and checks skipped after a server became unavailable. Presence
-checks share the global `--concurrency` pool. After three consecutive transient
-failures from one server, ngit stops scheduling its remaining initial checks
-while continuing the other servers; an ordinary `404` is an upload candidate
-and does not count as a server failure. Exact post-upload verification keeps
-its bounded retries because it determines whether an attempted write is safe
-to publish.
+responses whose size or MIME metadata differs, failed checks, and checks
+skipped after a server became unavailable. Presence checks share the global
+`--concurrency` pool. After three consecutive transient failures from one
+server, ngit stops scheduling its remaining initial checks while continuing the
+other servers; an ordinary `404` is an upload candidate and does not count as a
+server failure. Initial-check diagnostics remain available in live progress and
+JSON but do not produce a final replication warning: no storage operation was
+attempted, so they do not prove a missing copy. Failed uploads and post-upload
+verification still warn. Exact post-upload verification keeps its bounded
+retries because it determines whether an attempted write is safe to publish.
 
 Missing hashes are grouped into BUD-11 kind-24242 authorization events of up
 to twenty hashes each. Each authorization is scoped to the selected server

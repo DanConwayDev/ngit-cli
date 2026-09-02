@@ -2686,6 +2686,7 @@ struct BlossomPresenceServerActivity {
     bar: ProgressBar,
     already_stored: usize,
     needs_upload: usize,
+    metadata_differences: usize,
     failed: usize,
     skipped: usize,
 }
@@ -2695,6 +2696,7 @@ struct BlossomPresenceCounts {
     checked: usize,
     confirmed: usize,
     missing: usize,
+    metadata_differences: usize,
     failed: usize,
     skipped: usize,
 }
@@ -2705,6 +2707,7 @@ impl BlossomPresenceServerActivity {
         for (count, label) in [
             (self.already_stored, "already stored"),
             (self.needs_upload, "need upload"),
+            (self.metadata_differences, "metadata differs"),
             (self.failed, "checks failed"),
             (self.skipped, "skipped"),
         ] {
@@ -2924,6 +2927,7 @@ impl BlossomUploadProgress {
                     bar,
                     already_stored: 0,
                     needs_upload: 0,
+                    metadata_differences: 0,
                     failed: 0,
                     skipped: 0,
                 },
@@ -2946,6 +2950,7 @@ impl BlossomUploadProgress {
             match status {
                 BlossomPresenceStatus::AlreadyStored => activity.already_stored += 1,
                 BlossomPresenceStatus::NeedsUpload => activity.needs_upload += 1,
+                BlossomPresenceStatus::MetadataDiffers => activity.metadata_differences += 1,
                 BlossomPresenceStatus::CheckFailed => activity.failed += 1,
                 BlossomPresenceStatus::Skipped => activity.skipped += 1,
             }
@@ -2964,6 +2969,7 @@ impl BlossomUploadProgress {
         let mut parts = vec![format!("{} already stored", counts.confirmed)];
         for (count, label) in [
             (counts.missing, "need upload"),
+            (counts.metadata_differences, "metadata differs"),
             (counts.failed, "checks failed"),
             (counts.skipped, "skipped"),
         ] {
@@ -3264,6 +3270,7 @@ impl BlossomUploadProgress {
                 checked,
                 confirmed,
                 missing,
+                metadata_differences,
                 failed,
                 skipped,
                 ..
@@ -3274,6 +3281,7 @@ impl BlossomUploadProgress {
                     checked: *checked,
                     confirmed: *confirmed,
                     missing: *missing,
+                    metadata_differences: *metadata_differences,
                     failed: *failed,
                     skipped: *skipped,
                 },
@@ -4655,6 +4663,7 @@ assets:
                 status: BlossomServerStatus::Stored,
                 descriptor: None,
                 message: None,
+                presence_check_only: false,
             }]],
             possible_orphan_blobs: vec![PossibleOrphanBlob {
                 server,
@@ -4710,6 +4719,7 @@ assets:
                 status: BlossomServerStatus::Failed,
                 descriptor: None,
                 message: Some("HTTP 413 Payload Too Large: quota exceeded".to_owned()),
+                presence_check_only: false,
             }]],
             None,
             &[],
@@ -4746,6 +4756,7 @@ assets:
                     status: BlossomServerStatus::Unknown,
                     descriptor: None,
                     message: Some("operation timed out".to_owned()),
+                    presence_check_only: false,
                 }],
                 vec![BlossomServerOutcome {
                     server: available,
@@ -4753,6 +4764,7 @@ assets:
                     status: BlossomServerStatus::AlreadyPresent,
                     descriptor: None,
                     message: None,
+                    presence_check_only: false,
                 }],
             ],
             Some(&labels),
@@ -4780,6 +4792,7 @@ assets:
                     status: BlossomServerStatus::Stored,
                     descriptor: None,
                     message: None,
+                    presence_check_only: false,
                 },
                 BlossomServerOutcome {
                     server: unavailable.clone(),
@@ -4787,6 +4800,7 @@ assets:
                     status: BlossomServerStatus::Unknown,
                     descriptor: None,
                     message: Some("connection timed out".to_owned()),
+                    presence_check_only: false,
                 },
             ]],
             possible_orphan_blobs: Vec::new(),
@@ -4917,9 +4931,10 @@ assets:
         let progress =
             BlossomUploadProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
         let first_server = Url::parse("https://one.example/")?;
+        let second_server = Url::parse("https://two.example/")?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
-            servers: vec![first_server.clone(), Url::parse("https://two.example/")?],
+            servers: vec![first_server.clone(), second_server.clone()],
             checks: 2,
         });
         assert!(!progress.heading.is_finished());
@@ -4934,6 +4949,7 @@ assets:
             checks: 2,
             confirmed: 0,
             missing: 1,
+            metadata_differences: 0,
             failed: 0,
             skipped: 0,
         });
@@ -4945,6 +4961,24 @@ assets:
         assert!(first.bar.message().contains("1 need upload"));
         assert!(first.bar.message().contains("done"));
         assert!(first.bar.is_finished());
+        drop(presence);
+
+        progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            server: second_server.clone(),
+            status: BlossomPresenceStatus::MetadataDiffers,
+            checked: 2,
+            checks: 2,
+            confirmed: 0,
+            missing: 1,
+            metadata_differences: 1,
+            failed: 0,
+            skipped: 0,
+        });
+        assert!(progress.heading.message().contains("1 metadata differs"));
+        let presence = progress.presence.lock().unwrap();
+        let second = &presence.servers[second_server.as_str()];
+        assert!(second.bar.message().contains("1 metadata differs"));
+        assert!(second.bar.is_finished());
         drop(presence);
 
         progress.update(&BlossomProgressEvent::AuthorizationStarted {

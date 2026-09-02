@@ -739,6 +739,7 @@ mod tests {
                     status: BlossomServerStatus::AlreadyPresent,
                     descriptor: None,
                     message: None,
+                    presence_check_only: false,
                 }],
             }],
         };
@@ -784,6 +785,7 @@ mod tests {
                         status: BlossomServerStatus::Unknown,
                         descriptor: None,
                         message: Some("timed out".to_owned()),
+                        presence_check_only: false,
                     },
                     ngit::blossom::BlossomServerOutcome {
                         server: confirmed,
@@ -791,6 +793,7 @@ mod tests {
                         status: BlossomServerStatus::AlreadyPresent,
                         descriptor: None,
                         message: None,
+                        presence_check_only: false,
                     },
                 ],
             }],
