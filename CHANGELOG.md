@@ -120,6 +120,13 @@ publication.
 
 ### Fixed
 
+- `ngit merge` now preserves staged, unstaged, and untracked changes across
+  the merge commit and branch switch, including the staged/unstaged boundary.
+  If those changes conflict with the merged target, ngit rolls the merge back
+  and restores the original branch and worktree. Linked worktrees are
+  supported when the command runs from the worktree that owns the target
+  branch; if another worktree owns it, ngit refuses before changing either
+  worktree or the shared target ref.
 - Prevent TLS client initialization from panicking after Reqwest 0.13 selected
   AWS-LC alongside rust-nostr's Ring provider. Reqwest remains
   provider-neutral while ngit explicitly installs Ring before constructing

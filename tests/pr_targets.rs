@@ -340,11 +340,51 @@ async fn merge_uses_advanced_state_target_when_tracking_ref_is_stale() -> Result
         "the regression requires a stale remote-tracking ref"
     );
 
-    ngit_ok(
-        &maintainer,
-        &["merge", &proposal.id.to_hex(), "--exclude-description"],
-    )
-    .await?;
+    maintainer
+        .git_ok(
+            ["branch", "release/2.x", "origin/release/2.x"],
+            "create stale local target branch",
+        )
+        .await?;
+    let linked_parent = tempfile::tempdir()?;
+    let linked = linked_parent.path().join("release-worktree");
+    let mut add_worktree = maintainer.git(["worktree", "add"]);
+    add_worktree.arg(&linked).arg("release/2.x");
+    let output = add_worktree.output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git worktree add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let mut merge = maintainer.ngit(["merge", &proposal.id.to_hex(), "--exclude-description"]);
+    merge.current_dir(&linked);
+    let output = merge.output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "ngit merge from linked target worktree failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let mut linked_branch = maintainer.git(["branch", "--show-current"]);
+    linked_branch.current_dir(&linked);
+    let output = linked_branch.output().await?;
+    anyhow::ensure!(output.status.success(), "git branch --show-current failed");
+    assert_eq!(String::from_utf8(output.stdout)?.trim(), "release/2.x");
+    assert_eq!(
+        String::from_utf8(
+            maintainer
+                .git(["branch", "--show-current"])
+                .output()
+                .await?
+                .stdout,
+        )?
+        .trim(),
+        "main",
+        "the primary worktree must remain on main",
+    );
 
     assert_eq!(
         maintainer.rev_parse("release/2.x^1").await?,
