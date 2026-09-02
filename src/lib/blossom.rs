@@ -1130,7 +1130,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
             unavailable,
             bytes: upload_bytes,
         });
-        let upload_results = stream::iter(uploads)
+        let mut upload_results = stream::iter(uploads)
             .map(|(blob_index, server_index)| {
                 let client = client.clone();
                 let authorization = authorization.clone();
@@ -1154,12 +1154,10 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     )
                 }
             })
-            .buffer_unordered(concurrency)
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(concurrency);
 
         let mut chunk_failed = false;
-        for (blob_index, server_index, result) in upload_results {
+        while let Some((blob_index, server_index, result)) = upload_results.next().await {
             let sha256 = blobs[blob_index].sha256.clone();
             let outcome = &mut blobs[blob_index].servers[server_index];
             match result {
@@ -2361,6 +2359,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::{TcpListener, TcpStream},
+        sync::oneshot,
         task::JoinHandle,
     };
 
@@ -2389,6 +2388,28 @@ mod tests {
     impl BlossomProgress for RecordingBlossomProgress {
         fn update(&self, event: &BlossomProgressEvent) {
             self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    struct PlacementFinishedSignal {
+        server: Url,
+        signal: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl BlossomProgress for PlacementFinishedSignal {
+        fn update(&self, event: &BlossomProgressEvent) {
+            if matches!(
+                event,
+                BlossomProgressEvent::PlacementFinished {
+                    server,
+                    status: BlossomServerStatus::Stored,
+                    ..
+                } if server == &self.server
+            ) {
+                if let Some(signal) = self.signal.lock().unwrap().take() {
+                    let _ = signal.send(());
+                }
+            }
         }
     }
 
@@ -2518,6 +2539,63 @@ mod tests {
             Ok((head, upload, verify))
         });
         Ok((base_url, task))
+    }
+
+    async fn spawn_gated_presence_then_upload_server(
+        sha256: String,
+        size: u64,
+        mime_type: String,
+    ) -> Result<(
+        String,
+        JoinHandle<Result<(CapturedRequest, CapturedRequest, CapturedRequest)>>,
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let response_base = base_url.clone();
+        let (verification_started_tx, verification_started_rx) = oneshot::channel();
+        let (release_verification_tx, release_verification_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut head_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom presence check")??;
+            let head = read_header_only_request(&mut head_stream).await?;
+            head_stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+
+            let (mut upload_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom upload")??;
+            let upload = read_request(&mut upload_stream).await?;
+            let body = descriptor_json(&response_base, &sha256, size, &mime_type);
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            upload_stream.write_all(response.as_bytes()).await?;
+
+            let (mut verify_stream, _) = tokio::time::timeout(SERVER_TIMEOUT, listener.accept())
+                .await
+                .context("timed out waiting for gated Blossom verification")??;
+            let verify = read_header_only_request(&mut verify_stream).await?;
+            let _ = verification_started_tx.send(());
+            let _ = release_verification_rx.await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: {mime_type}\r\nConnection: close\r\n\r\n"
+            );
+            verify_stream.write_all(response.as_bytes()).await?;
+            Ok((head, upload, verify))
+        });
+        Ok((
+            base_url,
+            task,
+            verification_started_rx,
+            release_verification_tx,
+        ))
     }
 
     async fn spawn_authorization_fallback_server(
@@ -2884,6 +2962,72 @@ mod tests {
         assert_eq!(
             result.blobs[0].servers[0].status,
             BlossomServerStatus::Stored
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_progress_finishes_each_placement_without_waiting_for_slow_peers() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"independent placement completion")?;
+        let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        let (fast_url, fast_server) = spawn_presence_then_upload_server(
+            snapshot.sha256.clone(),
+            snapshot.size,
+            snapshot.mime_type.clone(),
+        )
+        .await?;
+        let (slow_url, slow_server, slow_verification_started, release_slow_verification) =
+            spawn_gated_presence_then_upload_server(
+                snapshot.sha256.clone(),
+                snapshot.size,
+                snapshot.mime_type.clone(),
+            )
+            .await?;
+        let fast_url = Url::parse(&fast_url)?;
+        let slow_url = Url::parse(&slow_url)?;
+        let (fast_finished_tx, fast_finished_rx) = oneshot::channel();
+        let progress = Arc::new(PlacementFinishedSignal {
+            server: fast_url.clone(),
+            signal: Mutex::new(Some(fast_finished_tx)),
+        });
+        let servers = [fast_url, slow_url];
+        let signer = NgitSigner::Keys(Keys::generate());
+        let snapshots = [&snapshot];
+        let upload = upload_snapshot_batch_to_servers_with_progress(
+            &servers, &snapshots, &signer, 2, progress,
+        );
+        let observe_independent_completion = async move {
+            slow_verification_started
+                .await
+                .context("slow Blossom placement never reached verification")?;
+            fast_finished_rx
+                .await
+                .context("fast Blossom placement stayed active behind its slow peer")?;
+            release_slow_verification
+                .send(())
+                .map_err(|_| anyhow!("slow Blossom placement stopped before release"))?;
+            Ok::<(), anyhow::Error>(())
+        };
+
+        let (result, observation) = tokio::time::timeout(SERVER_TIMEOUT, async {
+            tokio::join!(upload, observe_independent_completion)
+        })
+        .await
+        .context("fast Blossom placement did not finish independently")?;
+        observation?;
+        let result = result?;
+        tokio::time::timeout(SERVER_TIMEOUT, fast_server)
+            .await
+            .context("timed out waiting for fast Blossom server")???;
+        tokio::time::timeout(SERVER_TIMEOUT, slow_server)
+            .await
+            .context("timed out waiting for slow Blossom server")???;
+        assert!(
+            result.blobs[0]
+                .servers
+                .iter()
+                .all(|outcome| outcome.status == BlossomServerStatus::Stored)
         );
         Ok(())
     }
