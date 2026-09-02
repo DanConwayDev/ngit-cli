@@ -547,6 +547,7 @@ async fn main() {
                 sub_commands::merge::launch(
                     args.id.as_deref(),
                     args.offline,
+                    args.require_ci_trust,
                     args.exclude_description,
                     signer_params,
                 )

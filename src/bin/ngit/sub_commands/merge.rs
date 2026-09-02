@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ngit::{
+    ci::trust::Coverage,
     client::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache, get_state_from_cache,
@@ -21,7 +22,8 @@ use ngit::{
 use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
 
 use crate::{
-    cli::SignerParams,
+    ci_projection::{ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage},
+    cli::{CiTrustFloor, SignerParams},
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -39,6 +41,7 @@ use crate::{
 pub async fn launch(
     id: Option<&str>,
     offline: bool,
+    require_ci_trust: Option<CiTrustFloor>,
     exclude_description: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
@@ -49,16 +52,20 @@ pub async fn launch(
     let mut repo_coordinates =
         get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
 
-    if !offline {
-        fetching_with_account(
-            &git_repo,
-            git_repo_path,
-            &mut client,
-            &mut repo_coordinates,
-            auth,
+    let fetch_report = if offline {
+        None
+    } else {
+        Some(
+            fetching_with_account(
+                &git_repo,
+                git_repo_path,
+                &mut client,
+                &mut repo_coordinates,
+                auth,
+            )
+            .await?,
         )
-        .await?;
-    }
+    };
 
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
@@ -83,6 +90,48 @@ pub async fn launch(
             event_id.to_hex()
         ))?
         .clone();
+
+    // Evaluate a requested gate before creating branches or touching HEAD,
+    // the index, or the working tree.
+    let gated_ci = if let Some(floor) = require_ci_trust {
+        let input_coverage = fetch_report.as_ref().map_or(Coverage::Complete, |report| {
+            relay_coverage(&repo_ref.relays, &report.state_per_relay)
+        });
+        let target = pull_request_target(git_repo_path, &repo_ref, proposal.id).await?;
+        let ci = build_report(
+            &git_repo,
+            git_repo_path,
+            &repo_ref,
+            &client,
+            &ProjectionRequest {
+                target: &target,
+                tier: if offline { Tier::Cache } else { Tier::Full },
+                include_outdated: false,
+                input_coverage,
+            },
+        )
+        .await?;
+        if ci.has_results() {
+            ci.print_checks();
+        }
+        if let Some(reason) = ci.gate_failure(floor) {
+            if crate::output::is_json() {
+                crate::output::set_value(super::pr_merge::merge_json(
+                    proposal.id,
+                    repo_ref.relays.first(),
+                    None,
+                    &ci,
+                    None,
+                    Some(&reason),
+                ));
+            }
+            println!("{}", console::style(&reason).red());
+            crate::output::finish_and_exit(1);
+        }
+        Some(ci)
+    } else {
+        None
+    };
 
     let cover_letter = event_to_cover_letter(&proposal).context("failed to extract PR details")?;
     // Canonical branch name created by `ngit pr checkout`:
@@ -426,6 +475,19 @@ pub async fn launch(
         ))
         .green()
     );
+
+    if crate::output::is_json() {
+        if let Some(ci) = &gated_ci {
+            crate::output::set_value(super::pr_merge::merge_json(
+                proposal.id,
+                repo_ref.relays.first(),
+                None,
+                ci,
+                None,
+                None,
+            ));
+        }
+    }
 
     Ok(())
 }

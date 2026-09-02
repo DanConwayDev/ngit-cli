@@ -1,5 +1,6 @@
-//! `ngit pr merge`'s CI gate: the blocked/allowed matrix for
-//! `--require-ci-trust`, and the non-blocking warning without it.
+//! CI gating for both merge commands: the blocked/allowed matrix for
+//! `--require-ci-trust`, plus `ngit pr merge`'s non-blocking warning without
+//! it.
 //!
 //! The gate reads the same projection `ngit ci status` and `ngit pr view`
 //! render, so these tests assert on what a merge *did*: the exit status, the
@@ -221,6 +222,31 @@ async fn pr_merge(repo: &Repo, id: &str, extra: &[&str]) -> Result<(std::process
     Ok((out, json))
 }
 
+/// Run top-level `ngit merge <id> [extra…] --json` and parse stdout.
+async fn top_level_merge(
+    repo: &Repo,
+    id: &str,
+    extra: &[&str],
+) -> Result<(std::process::Output, Value)> {
+    let mut argv: Vec<&str> = vec!["merge", id];
+    argv.extend_from_slice(extra);
+    argv.push("--json");
+    let out = repo
+        .ngit(&argv)
+        .output()
+        .await
+        .context("failed to spawn top-level `ngit merge`")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let json = serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "`ngit {}` stdout is not valid JSON:\n{stdout}\nstderr: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr),
+        )
+    })?;
+    Ok((out, json))
+}
+
 /// The applied (kind-1631) status events on the repository relay naming
 /// `proposal` — what a completed `ngit pr merge` publishes.
 async fn applied_status_events(harness: &Harness, pr: &PublishedPr) -> Result<Vec<Event>> {
@@ -284,6 +310,82 @@ async fn assert_merged(arranged: &Arranged, pr: &PublishedPr, main_before: &str)
         1,
         "a completed merge publishes exactly one applied status event",
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn top_level_merge_gate_refuses_without_changing_user_context() -> Result<()> {
+    let arranged = arrange("top-level-merge-gate").await?;
+    let request = arranged.service_request().await?;
+    let failing = arranged.open_pr("top-level-failing").await?;
+    arranged
+        .publish_run(
+            &arranged.coordinator,
+            &arranged
+                .run_spec(&failing, "run-top-level-failing", "failure")
+                .provenance(CiProvenance::service_request(&request)),
+        )
+        .await?;
+
+    std::fs::write(
+        arranged.publisher.dir().join("README.md"),
+        "staged change\n",
+    )?;
+    arranged
+        .publisher
+        .git_ok(["add", "README.md"], "stage local context")
+        .await?;
+    std::fs::write(
+        arranged.publisher.dir().join("README.md"),
+        "staged change\nunstaged change\n",
+    )?;
+    std::fs::write(
+        arranged.publisher.dir().join("untracked.md"),
+        "untracked change\n",
+    )?;
+
+    let main_before = arranged.publisher.rev_parse("main").await?;
+    let head_before = std::fs::read(arranged.publisher.dir().join(".git/HEAD"))?;
+    let index_before = std::fs::read(arranged.publisher.dir().join(".git/index"))?;
+    let readme_before = std::fs::read(arranged.publisher.dir().join("README.md"))?;
+    let untracked_before = std::fs::read(arranged.publisher.dir().join("untracked.md"))?;
+
+    let (out, json) = top_level_merge(
+        &arranged.publisher,
+        &failing.event_id.to_hex(),
+        &["--require-ci-trust", "operationally-associated"],
+    )
+    .await?;
+
+    assert!(
+        !out.status.success(),
+        "the failing CI result must refuse: {json}"
+    );
+    assert_eq!(json["status"], "error", "{json}");
+    assert_eq!(json["action"], "refused", "{json}");
+    assert_eq!(json["ci"]["conclusion"], "failure", "{json}");
+    assert_not_merged(&arranged, &failing, &main_before).await?;
+    assert_eq!(
+        std::fs::read(arranged.publisher.dir().join(".git/HEAD"))?,
+        head_before,
+        "the gate must not switch branches",
+    );
+    assert_eq!(
+        std::fs::read(arranged.publisher.dir().join(".git/index"))?,
+        index_before,
+        "the gate must preserve the staged index",
+    );
+    assert_eq!(
+        std::fs::read(arranged.publisher.dir().join("README.md"))?,
+        readme_before,
+        "the gate must preserve staged and unstaged content",
+    );
+    assert_eq!(
+        std::fs::read(arranged.publisher.dir().join("untracked.md"))?,
+        untracked_before,
+        "the gate must preserve untracked content",
+    );
+
     Ok(())
 }
 

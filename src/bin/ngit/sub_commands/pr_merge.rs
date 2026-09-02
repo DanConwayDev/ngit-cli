@@ -326,7 +326,7 @@ pub async fn launch(
     Ok(())
 }
 
-/// The document `ngit pr merge --json` emits, merged or refused.
+/// The document a CI-aware merge emits, merged or refused.
 ///
 /// It carries the `ci` object every CI surface shares, plus `ci_warning`: the
 /// non-blocking caveat the human output prints, as a field rather than as
@@ -337,7 +337,7 @@ pub async fn launch(
 ///
 /// A refusal is the one outcome with an `error` and no `event`, so `status`
 /// and `action` are derived from it rather than passed in beside it.
-fn merge_json(
+pub(super) fn merge_json(
     proposal_id: nostr::prelude::EventId,
     relay: Option<&nostr::prelude::RelayUrl>,
     applied_event: Option<nostr::prelude::EventId>,
