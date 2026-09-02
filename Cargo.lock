@@ -3679,6 +3679,8 @@ dependencies = [
  "hyper-util",
  "nostr",
  "nostr-sdk",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
