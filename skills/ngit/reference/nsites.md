@@ -86,10 +86,17 @@ credentials. Do not establish a fresh bunker pairing on each CI run.
 
 Ngit snapshots the directory before network work and deduplicates identical
 content. It checks every blob on every selected server, signs BUD-11 upload
-authorization in batches of at most twenty missing hashes, and signs the
-manifest only after all placements are confirmed with matching size and MIME
-type. A failed deployment therefore cannot replace the live manifest with one
-that points at known-missing content.
+authorization in batches of at most twenty missing hashes, and attempts to
+replicate each blob to every selected server. It signs the manifest only after
+every blob has at least one copy confirmed with matching size and MIME type. A
+failed deployment therefore cannot replace the live manifest with one that
+points at known-missing content.
+
+Presence checks share the global `--concurrency` limit. After three consecutive
+transient failures from one server, ngit skips that server's queued initial
+checks while continuing the others; `404` remains an ordinary upload
+candidate. Human progress and incomplete-replication warnings summarize copy
+state separately for each server.
 
 Rerun the same command after a failure. Content-addressed blobs already stored
 on a server are confirmed with `HEAD` and skipped, so continuation works at
@@ -117,5 +124,5 @@ inspect:
 
 On a Blossom failure, inspect `error.details.blobs` and
 `error.details.possible_orphan_blobs`, then rerun after correcting the server
-or signer problem. At least one relay must acknowledge the manifest, but every
-selected Blossom server must confirm every unique blob.
+or signer problem. At least one relay must acknowledge the manifest, and every
+unique blob must be confirmed on at least one selected Blossom server.

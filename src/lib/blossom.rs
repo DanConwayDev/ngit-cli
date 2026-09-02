@@ -142,19 +142,30 @@ impl BatchAuthorizationOptions {
 /// authorization fallback extends the total before its replacement PUT starts.
 /// This keeps aggregate progress monotonic even when several placements run
 /// concurrently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlossomPresenceStatus {
+    AlreadyStored,
+    NeedsUpload,
+    CheckFailed,
+    Skipped,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlossomProgressEvent {
     PresenceChecksStarted {
         blobs: usize,
-        servers: usize,
+        servers: Vec<Url>,
         checks: usize,
     },
     PresenceCheckFinished {
+        server: Url,
+        status: BlossomPresenceStatus,
         checked: usize,
         checks: usize,
         confirmed: usize,
         missing: usize,
-        unavailable: usize,
+        failed: usize,
+        skipped: usize,
     },
     PresenceChecksFinished {
         missing: usize,
@@ -386,6 +397,122 @@ pub struct BatchUploadError {
     pub message: String,
     pub blobs: Vec<BatchBlobUploadOutcome>,
     pub possible_orphan_blobs: Vec<PossibleOrphanBlob>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BlossomServerCopySummary {
+    pub server: Url,
+    pub expected: usize,
+    pub available: usize,
+    pub already_stored: usize,
+    pub uploaded_now: usize,
+    pub failed: usize,
+    pub uncertain: usize,
+    pub not_attempted: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BlossomReplicationSummary {
+    pub blobs: usize,
+    pub available_blobs: usize,
+    pub expected_copies: usize,
+    pub available_copies: usize,
+    pub servers: Vec<BlossomServerCopySummary>,
+}
+
+impl BlossomReplicationSummary {
+    pub fn is_complete(&self) -> bool {
+        self.available_copies == self.expected_copies
+    }
+
+    pub fn incomplete_message(&self) -> Option<String> {
+        if self.is_complete() {
+            return None;
+        }
+        let mut lines = Vec::with_capacity(self.servers.len() + 1);
+        lines.push(format!(
+            "Blossom replication is incomplete, but {}/{} blobs are available on at least one server:",
+            self.available_blobs, self.blobs
+        ));
+        for server in &self.servers {
+            let mut details = Vec::new();
+            for (count, label) in [
+                (server.already_stored, "already stored"),
+                (server.uploaded_now, "uploaded now"),
+                (server.failed, "failed"),
+                (server.uncertain, "uncertain"),
+                (server.not_attempted, "not attempted"),
+            ] {
+                if count != 0 {
+                    details.push(format!("{count} {label}"));
+                }
+            }
+            let details = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join("; "))
+            };
+            lines.push(format!(
+                "  {}: {}/{} copies available{details}",
+                server.server, server.available, server.expected
+            ));
+        }
+        Some(lines.join("\n"))
+    }
+}
+
+pub fn summarize_blossom_replication<'a>(
+    blobs: impl IntoIterator<Item = &'a [BlossomServerOutcome]>,
+) -> BlossomReplicationSummary {
+    let blobs = blobs.into_iter().collect::<Vec<_>>();
+    let available_blobs = blobs
+        .iter()
+        .filter(|servers| servers.iter().any(server_outcome_is_confirmed))
+        .count();
+    let mut servers = Vec::<BlossomServerCopySummary>::new();
+    for outcome in blobs.iter().flat_map(|servers| servers.iter()) {
+        let summary = if let Some(summary) = servers
+            .iter_mut()
+            .find(|summary| summary.server == outcome.server)
+        {
+            summary
+        } else {
+            servers.push(BlossomServerCopySummary {
+                server: outcome.server.clone(),
+                expected: 0,
+                available: 0,
+                already_stored: 0,
+                uploaded_now: 0,
+                failed: 0,
+                uncertain: 0,
+                not_attempted: 0,
+            });
+            servers.last_mut().expect("a server summary was just added")
+        };
+        summary.expected += 1;
+        match outcome.status {
+            BlossomServerStatus::Stored => {
+                summary.available += 1;
+                summary.uploaded_now += 1;
+            }
+            BlossomServerStatus::AlreadyPresent => {
+                summary.available += 1;
+                summary.already_stored += 1;
+            }
+            BlossomServerStatus::Failed => summary.failed += 1,
+            BlossomServerStatus::Unknown => summary.uncertain += 1,
+            BlossomServerStatus::NotAttempted => summary.not_attempted += 1,
+        }
+    }
+    let expected_copies = servers.iter().map(|server| server.expected).sum();
+    let available_copies = servers.iter().map(|server| server.available).sum();
+    BlossomReplicationSummary {
+        blobs: blobs.len(),
+        available_blobs,
+        expected_copies,
+        available_copies,
+        servers,
+    }
 }
 
 impl std::fmt::Display for BatchUploadError {
@@ -964,7 +1091,7 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
 
     progress.update(&BlossomProgressEvent::PresenceChecksStarted {
         blobs: snapshots.len(),
-        servers: servers.len(),
+        servers: servers.to_vec(),
         checks: snapshots.len().saturating_mul(servers.len()),
     });
     let presence_circuits = servers
@@ -1007,9 +1134,10 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
     let mut missing = Vec::new();
     let mut checked = 0_usize;
     let mut confirmed = 0_usize;
-    let mut unavailable = 0_usize;
+    let mut failed = 0_usize;
+    let mut skipped = 0_usize;
     while let Some((blob_index, server_index, result)) = presence_results.next().await {
-        match result {
+        let status = match result {
             PresenceProbeResult::Checked(Ok(true)) => {
                 confirmed += 1;
                 blobs[blob_index].servers[server_index].status =
@@ -1020,12 +1148,14 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     status: BlossomServerStatus::AlreadyPresent,
                     message: None,
                 });
+                BlossomPresenceStatus::AlreadyStored
             }
             PresenceProbeResult::Checked(Ok(false)) => {
                 missing.push((blob_index, server_index));
+                BlossomPresenceStatus::NeedsUpload
             }
             PresenceProbeResult::Checked(Err(error)) => {
-                unavailable += 1;
+                failed += 1;
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
                 outcome.status = match error.kind {
@@ -1039,9 +1169,10 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     status: outcome.status,
                     message: outcome.message.clone(),
                 });
+                BlossomPresenceStatus::CheckFailed
             }
             PresenceProbeResult::Skipped => {
-                unavailable += 1;
+                skipped += 1;
                 presence_failed = true;
                 let outcome = &mut blobs[blob_index].servers[server_index];
                 outcome.message = Some(format!(
@@ -1053,15 +1184,19 @@ async fn upload_snapshot_batch_to_servers_with_options_and_progress(
                     status: outcome.status,
                     message: outcome.message.clone(),
                 });
+                BlossomPresenceStatus::Skipped
             }
-        }
+        };
         checked += 1;
         progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            server: servers[server_index].clone(),
+            status,
             checked,
             checks: snapshots.len().saturating_mul(servers.len()),
             confirmed,
             missing: missing.len(),
-            unavailable,
+            failed,
+            skipped,
         });
     }
     progress.update(&BlossomProgressEvent::PresenceChecksFinished {
@@ -3526,11 +3661,14 @@ mod tests {
             matches!(
                 event,
                 BlossomProgressEvent::PresenceCheckFinished {
+                    status: BlossomPresenceStatus::NeedsUpload,
                     checked: 1,
                     checks: 1,
                     confirmed: 0,
                     missing: 1,
-                    unavailable: 0,
+                    failed: 0,
+                    skipped: 0,
+                    ..
                 }
             )
         }));

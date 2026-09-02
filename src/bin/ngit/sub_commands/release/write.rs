@@ -14,12 +14,13 @@ use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, Prog
 use ngit::{
     apk::{APK_MIME_TYPE, ApkInspection, ApkPlatformInference, inspect_apk},
     blossom::{
-        BatchUploadError, BatchUploadResult, BlossomProgress, BlossomProgressEvent,
-        BlossomServerList, BlossomServerOperation, BlossomServerOutcome, BlossomServerStatus,
-        DEFAULT_UPLOAD_CONCURRENCY, FileSnapshot, LocalFileRequest, MultiServerUpload,
-        PossibleOrphanBlob, blossom_server_list_filter, blossom_server_list_from_events,
-        canonicalize_blossom_server_root, multi_server_upload_from_batch_outcome,
-        snapshot_local_file, upload_release_snapshot_batch_to_servers_with_progress,
+        BatchUploadError, BatchUploadResult, BlossomPresenceStatus, BlossomProgress,
+        BlossomProgressEvent, BlossomServerList, BlossomServerOperation, BlossomServerOutcome,
+        BlossomServerStatus, DEFAULT_UPLOAD_CONCURRENCY, FileSnapshot, LocalFileRequest,
+        MultiServerUpload, PossibleOrphanBlob, blossom_server_list_filter,
+        blossom_server_list_from_events, canonicalize_blossom_server_root,
+        multi_server_upload_from_batch_outcome, snapshot_local_file, summarize_blossom_replication,
+        upload_release_snapshot_batch_to_servers_with_progress,
     },
     client::{sign_draft_event, sign_event},
     event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
@@ -2664,10 +2665,55 @@ pub(crate) struct BlossomUploadProgress {
     verbose: bool,
     heading_style: ProgressStyle,
     presence_style: ProgressStyle,
+    presence_server_style: ProgressStyle,
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
     finished_style: ProgressStyle,
+    presence: Mutex<BlossomPresenceActivity>,
     activity: Mutex<ReleaseBlossomActivity>,
+}
+
+#[derive(Default)]
+struct BlossomPresenceActivity {
+    servers: HashMap<String, BlossomPresenceServerActivity>,
+}
+
+struct BlossomPresenceServerActivity {
+    bar: ProgressBar,
+    already_stored: usize,
+    needs_upload: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BlossomPresenceCounts {
+    checked: usize,
+    confirmed: usize,
+    missing: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+impl BlossomPresenceServerActivity {
+    fn message(&self) -> String {
+        let mut parts = Vec::new();
+        for (count, label) in [
+            (self.already_stored, "already stored"),
+            (self.needs_upload, "need upload"),
+            (self.failed, "checks failed"),
+            (self.skipped, "skipped"),
+        ] {
+            if count != 0 {
+                parts.push(format!("{count} {label}"));
+            }
+        }
+        if parts.is_empty() {
+            "checking".to_owned()
+        } else {
+            parts.join("; ")
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2817,7 +2863,11 @@ impl BlossomUploadProgress {
         let heading_style = ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {msg}")?
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let presence_style = ProgressStyle::with_template(
-            "   [{elapsed_precise}] Blossom presence [{bar:22.cyan/blue}] {pos}/{len} {msg}",
+            "   [{elapsed_precise}] Checking existing Blossom copies [{bar:22.cyan/blue}] {pos}/{len} {msg}",
+        )?
+        .progress_chars("##-");
+        let presence_server_style = ProgressStyle::with_template(
+            "      {prefix:28} [{bar:18.cyan/blue}] {pos}/{len} {msg}",
         )?
         .progress_chars("##-");
         let upload_style = ProgressStyle::with_template(
@@ -2838,37 +2888,106 @@ impl BlossomUploadProgress {
             verbose,
             heading_style,
             presence_style,
+            presence_server_style,
             upload_style,
             phase_style,
             finished_style,
+            presence: Mutex::new(BlossomPresenceActivity::default()),
             activity: Mutex::new(ReleaseBlossomActivity::default()),
         }))
     }
 
-    fn start_presence_checks(&self, blobs: usize, servers: usize, checks: usize) {
+    fn start_presence_checks(&self, blobs: usize, servers: &[Url], checks: usize) {
         self.restore_draw_target();
+        self.clear_presence_bars();
         self.clear_placement_bars();
         self.heading.reset();
         self.heading.set_length(checks as u64);
         self.heading.set_position(0);
         self.heading.set_style(self.presence_style.clone());
         self.heading.set_message(format!(
-            "0 confirmed; 0 need upload; 0 unavailable — {blobs} file(s), {servers} server(s)"
+            "{blobs} blob(s) across {} server(s)",
+            servers.len()
         ));
+        let mut presence = self
+            .presence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for server in servers {
+            let bar = self.multi.add(ProgressBar::new(blobs as u64));
+            bar.set_style(self.presence_server_style.clone());
+            bar.set_prefix(blossom_server_label(server));
+            bar.set_message("checking");
+            presence.servers.insert(
+                server.to_string(),
+                BlossomPresenceServerActivity {
+                    bar,
+                    already_stored: 0,
+                    needs_upload: 0,
+                    failed: 0,
+                    skipped: 0,
+                },
+            );
+        }
         self.heading.force_draw();
     }
 
     fn advance_presence_checks(
         &self,
-        checked: usize,
-        confirmed: usize,
-        missing: usize,
-        unavailable: usize,
+        server: &Url,
+        status: BlossomPresenceStatus,
+        counts: BlossomPresenceCounts,
     ) {
-        self.heading.set_position(checked as u64);
-        self.heading.set_message(format!(
-            "{confirmed} confirmed; {missing} need upload; {unavailable} unavailable"
-        ));
+        let mut presence = self
+            .presence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(activity) = presence.servers.get_mut(server.as_str()) {
+            match status {
+                BlossomPresenceStatus::AlreadyStored => activity.already_stored += 1,
+                BlossomPresenceStatus::NeedsUpload => activity.needs_upload += 1,
+                BlossomPresenceStatus::CheckFailed => activity.failed += 1,
+                BlossomPresenceStatus::Skipped => activity.skipped += 1,
+            }
+            activity.bar.inc(1);
+            let message = activity.message();
+            if activity.bar.position() == activity.bar.length().unwrap_or_default() {
+                activity
+                    .bar
+                    .finish_with_message(format!("{message} — done"));
+            } else {
+                activity.bar.set_message(message);
+            }
+        }
+        drop(presence);
+        self.heading.set_position(counts.checked as u64);
+        let mut parts = vec![format!("{} already stored", counts.confirmed)];
+        for (count, label) in [
+            (counts.missing, "need upload"),
+            (counts.failed, "checks failed"),
+            (counts.skipped, "skipped"),
+        ] {
+            if count != 0 {
+                parts.push(format!("{count} {label}"));
+            }
+        }
+        self.heading.set_message(parts.join("; "));
+    }
+
+    fn finish_presence_checks(&self) {
+        self.heading
+            .finish_with_message("existing Blossom copy checks complete");
+    }
+
+    fn clear_presence_bars(&self) {
+        let mut presence = self
+            .presence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for activity in presence.servers.values() {
+            activity.bar.finish_and_clear();
+        }
+        presence.servers.clear();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3032,6 +3151,7 @@ impl BlossomUploadProgress {
         // a retained target can otherwise redraw while the signer owns the
         // terminal. UploadBatchStarted reattaches after signing completes.
         self.heading.finish_and_clear();
+        self.clear_presence_bars();
         self.clear_placement_bars();
         let _ = self.multi.clear();
         self.multi.set_draw_target(ProgressDrawTarget::hidden());
@@ -3130,6 +3250,40 @@ impl BlossomUploadProgress {
             self.print_placement(filename, server, status, message);
         }
     }
+
+    fn update_presence_progress(&self, event: &BlossomProgressEvent) {
+        match event {
+            BlossomProgressEvent::PresenceChecksStarted {
+                blobs,
+                servers,
+                checks,
+            } => self.start_presence_checks(*blobs, servers, *checks),
+            BlossomProgressEvent::PresenceCheckFinished {
+                server,
+                status,
+                checked,
+                confirmed,
+                missing,
+                failed,
+                skipped,
+                ..
+            } => self.advance_presence_checks(
+                server,
+                *status,
+                BlossomPresenceCounts {
+                    checked: *checked,
+                    confirmed: *confirmed,
+                    missing: *missing,
+                    failed: *failed,
+                    skipped: *skipped,
+                },
+            ),
+            BlossomProgressEvent::PresenceChecksFinished { .. } => {
+                self.finish_presence_checks();
+            }
+            _ => unreachable!("only presence events are delegated here"),
+        }
+    }
 }
 
 fn blossom_server_label(server: &Url) -> String {
@@ -3167,20 +3321,10 @@ fn blossom_timed_attempt_message(
 impl BlossomProgress for BlossomUploadProgress {
     fn update(&self, event: &BlossomProgressEvent) {
         match event {
-            BlossomProgressEvent::PresenceChecksStarted {
-                blobs,
-                servers,
-                checks,
-            } => self.start_presence_checks(*blobs, *servers, *checks),
-            BlossomProgressEvent::PresenceCheckFinished {
-                checked,
-                confirmed,
-                missing,
-                unavailable,
-                ..
-            } => self.advance_presence_checks(*checked, *confirmed, *missing, *unavailable),
-            BlossomProgressEvent::PresenceChecksFinished { .. } => {
-                self.heading.finish_and_clear();
+            BlossomProgressEvent::PresenceChecksStarted { .. }
+            | BlossomProgressEvent::PresenceCheckFinished { .. }
+            | BlossomProgressEvent::PresenceChecksFinished { .. } => {
+                self.update_presence_progress(event);
             }
             BlossomProgressEvent::AuthorizationStarted { .. } => self.prepare_for_authorization(),
             BlossomProgressEvent::UploadBatchStarted {
@@ -3265,6 +3409,7 @@ impl BlossomProgress for BlossomUploadProgress {
 impl Drop for BlossomUploadProgress {
     fn drop(&mut self) {
         self.heading.finish_and_clear();
+        self.clear_presence_bars();
         self.clear_placement_bars();
         let _ = self.multi.clear();
     }
@@ -3287,41 +3432,24 @@ impl BlossomPublication {
     }
 
     fn incomplete_replication_warning(&self) -> Option<WarningJson> {
-        let placements = self.outcomes.iter().flatten().collect::<Vec<_>>();
-        let confirmed = placements
+        let summary = summarize_blossom_replication(self.outcomes.iter().map(Vec::as_slice));
+        let message = summary.incomplete_message()?;
+        let incomplete_servers = summary
+            .servers
             .iter()
-            .filter(|outcome| {
-                matches!(
-                    outcome.status,
-                    BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
-                )
-            })
-            .count();
-        if confirmed == placements.len() {
-            return None;
-        }
-        let incomplete_servers = placements
-            .iter()
-            .filter(|outcome| {
-                !matches!(
-                    outcome.status,
-                    BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
-                )
-            })
-            .map(|outcome| outcome.server.to_string())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+            .filter(|server| server.available != server.expected)
+            .map(|server| server.server.to_string())
             .collect::<Vec<_>>();
-        let message = format!(
-            "Blossom replication incomplete: {confirmed}/{} placements confirmed; unconfirmed servers: {}; publication will proceed because every blob has at least one confirmed copy",
-            placements.len(),
-            incomplete_servers.join(", ")
-        );
         Some(
             WarningJson::new("blossom_replication_incomplete", message).with_details(json!({
-                "confirmed": confirmed,
-                "placements": placements.len(),
+                "confirmed": summary.available_copies,
+                "placements": summary.expected_copies,
                 "servers": incomplete_servers,
+                "blobs": {
+                    "available": summary.available_blobs,
+                    "total": summary.blobs,
+                },
+                "copies_by_server": summary.servers,
             })),
         )
     }
@@ -4668,12 +4796,17 @@ assets:
             .incomplete_replication_warning()
             .context("partial placement should produce a warning")?;
         assert_eq!(warning.code, "blossom_replication_incomplete");
-        assert!(warning.message.contains("1/2 placements confirmed"));
+        assert!(warning.message.contains("1/1 blobs are available"));
+        assert!(warning.message.contains("1/1 copies available"));
+        assert!(warning.message.contains("1 uploaded now"));
+        assert!(warning.message.contains("0/1 copies available"));
+        assert!(warning.message.contains("1 uncertain"));
         assert!(warning.message.contains(unavailable.as_str()));
-        assert!(warning.message.contains("publication will proceed"));
         assert_eq!(warning.details["confirmed"], 1);
         assert_eq!(warning.details["placements"], 2);
         assert_eq!(warning.details["servers"][0], unavailable.as_str());
+        assert_eq!(warning.details["blobs"]["available"], 1);
+        assert_eq!(warning.details["copies_by_server"][0]["uploaded_now"], 1);
         Ok(())
     }
 
@@ -4764,9 +4897,10 @@ assets:
     fn blossom_progress_stops_rendering_while_authorization_is_signed() -> Result<()> {
         let progress =
             BlossomUploadProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
+        let first_server = Url::parse("https://one.example/")?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
-            servers: 2,
+            servers: vec![first_server.clone(), Url::parse("https://two.example/")?],
             checks: 2,
         });
         assert!(!progress.heading.is_finished());
@@ -4775,14 +4909,24 @@ assets:
         assert!(progress.draw_target_attached.load(Ordering::Acquire));
 
         progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            server: first_server.clone(),
+            status: BlossomPresenceStatus::NeedsUpload,
             checked: 1,
             checks: 2,
             confirmed: 0,
             missing: 1,
-            unavailable: 0,
+            failed: 0,
+            skipped: 0,
         });
         assert_eq!(progress.heading.position(), 1);
         assert!(progress.heading.message().contains("1 need upload"));
+        let presence = progress.presence.lock().unwrap();
+        let first = &presence.servers[first_server.as_str()];
+        assert_eq!(first.bar.position(), 1);
+        assert!(first.bar.message().contains("1 need upload"));
+        assert!(first.bar.message().contains("done"));
+        assert!(first.bar.is_finished());
+        drop(presence);
 
         progress.update(&BlossomProgressEvent::AuthorizationStarted {
             batch: 1,

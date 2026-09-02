@@ -110,8 +110,19 @@ Before uploading, ngit sends bounded parallel `HEAD /<sha256>` checks to every
 selected Blossom server. A present response must report the snapshot's exact
 content length and MIME type. BUD-01 `307` and `308` redirects are followed
 only when each target retains the requested hash. Only missing blobs are
-uploaded, but every unique blob must be confirmed on every server before the
-manifest is signed.
+uploaded. Ngit attempts replication to every selected server but signs the
+manifest once every unique blob has at least one confirmed copy. Incomplete
+replication is reported with copy counts for each server.
+
+The presence display has one row per server beneath the aggregate progress
+bar. Each row distinguishes copies already stored, blobs needing upload,
+failed checks, and checks skipped after a server became unavailable. Presence
+checks share the global `--concurrency` pool. After three consecutive transient
+failures from one server, ngit stops scheduling its remaining initial checks
+while continuing the other servers; an ordinary `404` is an upload candidate
+and does not count as a server failure. Exact post-upload verification keeps
+its bounded retries because it determines whether an attempted write is safe
+to publish.
 
 Missing hashes are grouped into BUD-11 kind-24242 authorization events of up
 to twenty hashes each. Each authorization is scoped to the selected server
