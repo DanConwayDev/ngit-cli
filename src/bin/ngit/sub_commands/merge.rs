@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use ngit::{
     client::{
@@ -42,16 +44,6 @@ pub async fn launch(
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
-
-    // Refuse to operate on a dirty tree. We are about to switch to the default
-    // branch and create a merge commit there; carrying (un)staged or untracked
-    // changes across that switch cannot be done safely in the general case, so
-    // we abort and let the user stash or commit first.
-    if git_repo.has_outstanding_changes()? {
-        bail!(
-            "working directory has uncommitted changes (staged, unstaged or untracked). Commit or stash them before merging."
-        );
-    }
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     let mut repo_coordinates =
@@ -190,7 +182,7 @@ pub async fn launch(
             .context("could not determine the repository's default branch (e.g. main or master)")?
     };
 
-    if explicit_target.is_some() {
+    let target_tip_to_install = if explicit_target.is_some() {
         // Unlike a default-branch merge, a maintainer may never have checked
         // out this release or maintenance branch. Its remote-tracking ref can
         // therefore be stale even though the online event refresh above has
@@ -234,7 +226,7 @@ pub async fn launch(
             false,
             Some(state_target_tip),
         )?;
-        git_repo.create_branch_at_commit(&target_branch, &target_tip.to_string())?;
+        Some(target_tip.to_string())
     } else if !git_repo
         .get_local_branch_names()
         .context("failed to get local branch names")?
@@ -244,11 +236,31 @@ pub async fn launch(
         bail!(
             "default branch '{target_branch}' does not exist locally; check it out before merging"
         );
-    }
+    } else {
+        None
+    };
 
-    git_repo.checkout(&target_branch).context(format!(
-        "failed to check out target branch '{target_branch}'"
-    ))?;
+    // A local branch belongs to at most one linked worktree. Refuse before
+    // saving user changes or refreshing an explicit target ref: libgit2 will
+    // reject the later checkout, but by then those mutations may already have
+    // happened. Merging from the worktree that currently owns the target is
+    // safe and remains supported.
+    ensure_target_available_in_current_worktree(&git_repo, &target_branch)?;
+
+    // Remember the target ref before an explicit-target merge refreshes it.
+    // This lets us put the repository back exactly as it was if the user's
+    // saved work cannot be reapplied to the completed merge.
+    let original_target_tip = git_repo
+        .get_local_branch_names()
+        .context("failed to get local branch names")?
+        .iter()
+        .any(|name| name == &target_branch)
+        .then(|| {
+            git_repo
+                .get_tip_of_branch(&target_branch)
+                .map(|tip| tip.to_string())
+        })
+        .transpose()?;
 
     // Resolve the effective (latest edited) title via the #subject label
     // override, falling back to the root proposal's title.
@@ -320,25 +332,55 @@ pub async fn launch(
         }
     }
 
-    let output = std::process::Command::new("git")
-        .current_dir(git_repo_path)
-        .args(["merge", "--no-ff", "-m", &message, &merge_branch])
-        .output()
-        .context("failed to run git merge")?;
+    // Stash only after all network and cache work is complete, but before any
+    // branch ref or checkout is changed. `--include-untracked` captures the
+    // same set of changes `has_outstanding_changes` reports; reapplying with
+    // `--index` below restores the staged/unstaged distinction.
+    let saved_worktree = SavedWorktree::capture(&git_repo)?;
 
-    if !output.status.success() {
-        // A `git merge` that stops on conflicts leaves the merge in progress:
-        // `.git/MERGE_HEAD` is written, the index carries the unmerged stages
-        // and the working tree has conflict markers. Git does *not* honour the
-        // `-m` message in this case — it writes its own generic MERGE_MSG that
-        // the user's eventual `git commit` would pick up, silently discarding
-        // the nostr provenance ngit composed (subject, nevent, PR-Author
-        // trailer, cover note). When we detect the conflict path we therefore
-        // overwrite MERGE_MSG with our message and hand the resolution back to
-        // the user rather than treating it as a hard error.
-        if git_repo.merge_in_progress()? {
-            write_prepared_merge_message(&git_repo, &message)
-                .context("failed to record the prepared merge commit message")?;
+    let merge_result = perform_merge(
+        &git_repo,
+        &target_branch,
+        target_tip_to_install.as_deref(),
+        &merge_branch,
+        &message,
+    );
+
+    match merge_result {
+        Ok(MergeResult::Created) => {
+            if let Some(saved) = &saved_worktree {
+                if let Err(apply_error) = saved.apply() {
+                    return match saved.rollback(
+                        &git_repo,
+                        &target_branch,
+                        original_target_tip.as_deref(),
+                    ) {
+                        Ok(()) => Err(apply_error.context(
+                            "the merge was rolled back because the saved working-directory changes conflict with the merged tree; the original branch and changes were restored",
+                        )),
+                        Err(rollback_error) => bail!(
+                            "the merge commit was created, but the saved working-directory changes could not be restored ({apply_error}). Automatic rollback also failed ({rollback_error}). The changes remain backed up as stash commit {}; recover them with `git stash apply --index {}`.",
+                            saved.stash_oid,
+                            saved.stash_oid,
+                        ),
+                    };
+                }
+                saved.drop_stash_with_warning();
+            }
+        }
+        Ok(MergeResult::Conflicted) => {
+            if let Some(saved) = &saved_worktree {
+                match saved.rollback(&git_repo, &target_branch, original_target_tip.as_deref()) {
+                    Ok(()) => bail!(
+                        "the PR has merge conflicts. Because the working directory also had uncommitted changes, the merge was rolled back and the original branch and changes were restored. Commit or stash them before retrying if you want to resolve the PR conflicts manually."
+                    ),
+                    Err(rollback_error) => bail!(
+                        "the PR has merge conflicts and the saved working-directory changes could not be restored automatically ({rollback_error}). They remain backed up as stash commit {}; recover them with `git stash apply --index {}` after resolving or aborting the merge.",
+                        saved.stash_oid,
+                        saved.stash_oid,
+                    ),
+                }
+            }
 
             println!(
                 "{}",
@@ -356,10 +398,25 @@ pub async fn launch(
             println!("to abandon the merge, run `git merge --abort`.");
             return Ok(());
         }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!("git merge failed:\n{stdout}{stderr}");
+        Err(merge_error) => {
+            if let Some(saved) = &saved_worktree {
+                return match saved.rollback(
+                    &git_repo,
+                    &target_branch,
+                    original_target_tip.as_deref(),
+                ) {
+                    Ok(()) => Err(merge_error.context(
+                        "the merge failed; the original branch and working-directory changes were restored",
+                    )),
+                    Err(rollback_error) => bail!(
+                        "the merge failed ({merge_error}) and the saved working-directory changes could not be restored automatically ({rollback_error}). They remain backed up as stash commit {}; recover them with `git stash apply --index {}`.",
+                        saved.stash_oid,
+                        saved.stash_oid,
+                    ),
+                };
+            }
+            return Err(merge_error);
+        }
     }
 
     println!(
@@ -371,6 +428,352 @@ pub async fn launch(
     );
 
     Ok(())
+}
+
+enum MergeResult {
+    Created,
+    Conflicted,
+}
+
+fn ensure_target_available_in_current_worktree(git_repo: &Repo, target_branch: &str) -> Result<()> {
+    if git_repo.get_local_head_branch_name()?.as_deref() == Some(target_branch) {
+        return Ok(());
+    }
+
+    let repo_path = git_repo.get_path()?;
+    let worktrees = run_git_stdout(
+        repo_path,
+        &["worktree", "list", "--porcelain"],
+        "list linked worktrees",
+    )?;
+    let target_ref = format!("refs/heads/{target_branch}");
+
+    for entry in worktrees.split("\n\n") {
+        let branch = entry.lines().find_map(|line| line.strip_prefix("branch "));
+        if branch != Some(target_ref.as_str()) {
+            continue;
+        }
+
+        let path = entry
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree "))
+            .unwrap_or("an unknown path");
+        bail!(
+            "target branch '{target_branch}' is checked out in another worktree at '{path}'. Run `ngit merge` from that worktree, or check out a different branch there first."
+        );
+    }
+
+    Ok(())
+}
+
+/// Create the merge after all fallible asynchronous preparation is complete.
+/// Keeping this phase synchronous makes it possible for the caller to restore
+/// a saved worktree on every error path.
+fn perform_merge(
+    git_repo: &Repo,
+    target_branch: &str,
+    target_tip_to_install: Option<&str>,
+    merge_branch: &str,
+    message: &str,
+) -> Result<MergeResult> {
+    if let Some(target_tip) = target_tip_to_install {
+        if git_repo.get_local_head_branch_name()?.as_deref() == Some(target_branch) {
+            run_git_checked(
+                git_repo.get_path()?,
+                &["reset", "--hard", target_tip],
+                "update the checked-out target branch to its authoritative tip",
+            )?;
+        } else {
+            git_repo.create_branch_at_commit(target_branch, target_tip)?;
+        }
+    }
+
+    git_repo
+        .checkout(target_branch)
+        .with_context(|| format!("failed to check out target branch '{target_branch}'"))?;
+
+    let output = std::process::Command::new("git")
+        .current_dir(git_repo.get_path()?)
+        .args(["merge", "--no-ff", "-m", message, merge_branch])
+        .output()
+        .context("failed to run git merge")?;
+
+    if output.status.success() {
+        return Ok(MergeResult::Created);
+    }
+
+    // A `git merge` that stops on conflicts leaves the merge in progress:
+    // `.git/MERGE_HEAD` is written, the index carries the unmerged stages and
+    // the working tree has conflict markers. Git does *not* honour the `-m`
+    // message in this case, so preserve ngit's prepared provenance for the
+    // user's eventual `git commit`.
+    if git_repo.merge_in_progress()? {
+        write_prepared_merge_message(git_repo, message)
+            .context("failed to record the prepared merge commit message")?;
+        return Ok(MergeResult::Conflicted);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    bail!("git merge failed:\n{stdout}{stderr}")
+}
+
+/// A recoverable snapshot of the user's staged, unstaged, and untracked work.
+///
+/// The stash entry is addressed by its commit OID rather than assuming it
+/// remains `stash@{0}`. That keeps an existing user stash stack intact and
+/// lets recovery instructions remain valid if cleanup cannot complete.
+struct SavedWorktree {
+    repo_path: std::path::PathBuf,
+    original_branch: Option<String>,
+    original_head: String,
+    stash_oid: String,
+}
+
+impl SavedWorktree {
+    fn capture(git_repo: &Repo) -> Result<Option<Self>> {
+        if !git_repo.has_outstanding_changes()? {
+            return Ok(None);
+        }
+
+        let repo_path = git_repo.get_path()?.to_path_buf();
+        let original_branch = git_repo.get_local_head_branch_name()?;
+        let original_head = git_repo.get_head_commit()?.to_string();
+        let message = format!("ngit merge automatic backup ({})", std::process::id());
+        let previous_stash_oid = git_ref_oid(&repo_path, "refs/stash")?;
+        run_git_checked(
+            &repo_path,
+            &[
+                "stash",
+                "push",
+                "--include-untracked",
+                "--message",
+                &message,
+            ],
+            "save working-directory changes before merging",
+        )?;
+
+        let stash_oid = git_ref_oid(&repo_path, "refs/stash")?
+            .filter(|oid| Some(oid) != previous_stash_oid.as_ref())
+            .context("git stash did not create an automatic backup")?;
+        let saved = Self {
+            repo_path,
+            original_branch,
+            original_head,
+            stash_oid,
+        };
+
+        // Some dirty states (notably changes inside submodules) cannot be
+        // captured by `git stash`. Restore what was captured and refuse before
+        // changing branches instead of proceeding with an incomplete backup.
+        if git_repo.has_outstanding_changes()? {
+            saved.apply().context(
+                "git stash did not capture every working-directory change; the captured changes remain in the automatic stash",
+            )?;
+            saved.drop_stash_with_warning();
+            bail!(
+                "not every working-directory change could be saved before merging (changes inside submodules are not supported)"
+            );
+        }
+
+        Ok(Some(saved))
+    }
+
+    fn apply(&self) -> Result<()> {
+        run_git_checked(
+            &self.repo_path,
+            &["stash", "apply", "--index", &self.stash_oid],
+            "restore staged, unstaged, and untracked changes",
+        )
+    }
+
+    fn rollback(
+        &self,
+        git_repo: &Repo,
+        target_branch: &str,
+        original_target_tip: Option<&str>,
+    ) -> Result<()> {
+        if git_repo.merge_in_progress()? {
+            run_git_checked(
+                &self.repo_path,
+                &["merge", "--abort"],
+                "abort the unsuccessful merge",
+            )?;
+        } else {
+            run_git_checked(
+                &self.repo_path,
+                &["reset", "--hard", "HEAD"],
+                "discard the partially restored automatic stash",
+            )?;
+        }
+
+        // `stash apply` may have recreated some of its untracked files before
+        // discovering a conflict. They are all represented in the stash, so
+        // clear them before returning to the source branch and applying the
+        // complete snapshot there.
+        run_git_checked(
+            &self.repo_path,
+            &["clean", "-fd"],
+            "clear partially restored untracked files",
+        )?;
+
+        let current_branch = git_repo.get_local_head_branch_name()?;
+        match &self.original_branch {
+            Some(branch)
+                if branch == target_branch && current_branch.as_deref() == Some(target_branch) =>
+            {
+                run_git_checked(
+                    &self.repo_path,
+                    &["reset", "--hard", &self.original_head],
+                    "restore the original target branch tip",
+                )?;
+            }
+            Some(branch) if branch == target_branch => {
+                restore_target_ref(&self.repo_path, target_branch, original_target_tip)?;
+                run_git_checked(
+                    &self.repo_path,
+                    &["checkout", "--force", branch],
+                    "restore the original branch",
+                )?;
+            }
+            Some(branch) => {
+                run_git_checked(
+                    &self.repo_path,
+                    &["checkout", "--force", branch],
+                    "restore the original branch",
+                )?;
+                restore_target_ref(&self.repo_path, target_branch, original_target_tip)?;
+            }
+            None => {
+                run_git_checked(
+                    &self.repo_path,
+                    &["checkout", "--detach", "--force", &self.original_head],
+                    "restore the original detached HEAD",
+                )?;
+                restore_target_ref(&self.repo_path, target_branch, original_target_tip)?;
+            }
+        }
+
+        self.apply()?;
+        self.drop_stash_with_warning();
+        Ok(())
+    }
+
+    fn drop_stash_with_warning(&self) {
+        if let Err(error) = self.drop_stash() {
+            eprintln!(
+                "warning: your changes were restored, but ngit could not remove its automatic backup: {error}"
+            );
+        }
+    }
+
+    fn drop_stash(&self) -> Result<()> {
+        let entries = run_git_stdout(
+            &self.repo_path,
+            &["stash", "list", "--format=%H%x09%gd"],
+            "list stashes while removing the automatic backup",
+        )?;
+        let selector = entries.lines().find_map(|line| {
+            let (oid, selector) = line.split_once('\t')?;
+            (oid == self.stash_oid).then_some(selector)
+        });
+        let selector = selector.context(
+            "the automatic backup was restored but its entry was not found in the stash list",
+        )?;
+        run_git_checked(
+            &self.repo_path,
+            &["stash", "drop", "--quiet", selector],
+            "remove the restored automatic stash",
+        )
+    }
+}
+
+fn restore_target_ref(
+    repo_path: &Path,
+    target_branch: &str,
+    original_target_tip: Option<&str>,
+) -> Result<()> {
+    let target_ref = format!("refs/heads/{target_branch}");
+    if let Some(tip) = original_target_tip {
+        run_git_checked(
+            repo_path,
+            &["update-ref", &target_ref, tip],
+            "restore the original target branch tip",
+        )
+    } else if git_ref_exists(repo_path, &target_ref)? {
+        run_git_checked(
+            repo_path,
+            &["update-ref", "-d", &target_ref],
+            "remove the target branch created by the unsuccessful merge",
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn git_ref_oid(repo_path: &Path, reference: &str) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(["rev-parse", "--verify", "--quiet", reference])
+        .output()
+        .context("failed to resolve a Git ref")?;
+    match output.status.code() {
+        Some(0) => {
+            let oid = String::from_utf8(output.stdout)
+                .context("git rev-parse returned a non-UTF-8 object ID")?;
+            Ok(Some(oid.trim().to_string()))
+        }
+        Some(1) => Ok(None),
+        _ => bail!(
+            "git rev-parse failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+fn git_ref_exists(repo_path: &Path, reference: &str) -> Result<bool> {
+    let status = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(["show-ref", "--verify", "--quiet", reference])
+        .status()
+        .context("failed to check whether a Git ref exists")?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git show-ref failed with status {status}"),
+    }
+}
+
+fn run_git_checked(repo_path: &Path, args: &[&str], action: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to {action}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to {action}:\n{stdout}{stderr}")
+    }
+}
+
+fn run_git_stdout(repo_path: &Path, args: &[&str], action: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to {action}"))?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to {action}:\n{stdout}{stderr}");
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("failed to read output while trying to {action}"))?;
+    Ok(stdout.trim_end().to_string())
 }
 
 /// Overwrite the in-progress merge's prepared commit message

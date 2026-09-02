@@ -6,7 +6,10 @@
 //! when the author's kind-0 metadata is cached), plus (unless
 //! `--exclude-description`) the latest cover note or PR description in the
 //! merge-commit body, leaves the default branch checked out, and does **not**
-//! push anything (neither git data nor a nostr status event).
+//! push anything (neither git data nor a nostr status event). Existing staged,
+//! unstaged, and untracked work is preserved across the merge and checkout.
+//! Linked worktrees may merge when they own the target branch; another
+//! worktree owning that branch causes a refusal before either tree is changed.
 //!
 //! ## Scenario shape (shared by every test)
 //!
@@ -19,6 +22,8 @@
 //!
 //! Assertions are on observable side-effects (refs/commits on disk, exit
 //! status), never on literal stdout, per the harness boundary rules.
+
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use nostr::nips::nip19::ToBech32;
@@ -71,8 +76,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let out = repo
-        .git(args)
+    git_ok_at(repo, repo.dir(), args, label).await
+}
+
+async fn git_ok_at<I, S>(repo: &Repo, dir: &Path, args: I, label: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = repo.git(args);
+    command.current_dir(dir);
+    let out = command
         .output()
         .await
         .with_context(|| format!("failed to spawn {label}"))?;
@@ -86,9 +100,87 @@ where
     Ok(())
 }
 
+async fn git_stdout_at(repo: &Repo, dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>> {
+    let mut command = repo.git(args.iter().copied());
+    command.current_dir(dir);
+    let out = command
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn {label}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{label} exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(out.stdout)
+}
+
+#[derive(Debug, PartialEq)]
+struct DirtyWorktreeState {
+    status: Vec<u8>,
+    staged_diff: Vec<u8>,
+    unstaged_diff: Vec<u8>,
+    readme: Vec<u8>,
+    untracked: Vec<u8>,
+    stashes: Vec<u8>,
+}
+
+async fn dirty_worktree_state(repo: &Repo) -> Result<DirtyWorktreeState> {
+    dirty_worktree_state_at(repo, repo.dir()).await
+}
+
+async fn dirty_worktree_state_at(repo: &Repo, dir: &Path) -> Result<DirtyWorktreeState> {
+    Ok(DirtyWorktreeState {
+        status: git_stdout_at(repo, dir, &["status", "--porcelain=v1"], "git status").await?,
+        staged_diff: git_stdout_at(
+            repo,
+            dir,
+            &["diff", "--cached", "--binary", "--no-ext-diff"],
+            "git diff --cached",
+        )
+        .await?,
+        unstaged_diff: git_stdout_at(
+            repo,
+            dir,
+            &["diff", "--binary", "--no-ext-diff"],
+            "git diff",
+        )
+        .await?,
+        readme: std::fs::read(dir.join("README.md")).context("read README.md")?,
+        untracked: std::fs::read(dir.join("dirty.md")).context("read dirty.md")?,
+        stashes: git_stdout_at(
+            repo,
+            dir,
+            &["stash", "list", "--format=%H%x09%gs"],
+            "git stash list",
+        )
+        .await?,
+    })
+}
+
+async fn make_worktree_staged_unstaged_and_untracked(repo: &Repo) -> Result<()> {
+    make_worktree_staged_unstaged_and_untracked_at(repo, repo.dir()).await
+}
+
+async fn make_worktree_staged_unstaged_and_untracked_at(repo: &Repo, dir: &Path) -> Result<()> {
+    std::fs::write(dir.join("README.md"), "staged change\n").context("write staged README.md")?;
+    git_ok_at(repo, dir, ["add", "README.md"], "git add README.md").await?;
+    std::fs::write(dir.join("README.md"), "staged change\nunstaged change\n")
+        .context("write unstaged README.md")?;
+    std::fs::write(dir.join("dirty.md"), "untracked change\n").context("write dirty.md")?;
+    Ok(())
+}
+
 async fn rev_parse(repo: &Repo, rev: &str) -> Result<String> {
-    let out = repo
-        .git(["rev-parse", rev])
+    rev_parse_at(repo, repo.dir(), rev).await
+}
+
+async fn rev_parse_at(repo: &Repo, dir: &Path, rev: &str) -> Result<String> {
+    let mut command = repo.git(["rev-parse", rev]);
+    command.current_dir(dir);
+    let out = command
         .output()
         .await
         .with_context(|| format!("failed to spawn git rev-parse {rev}"))?;
@@ -105,8 +197,13 @@ async fn rev_parse(repo: &Repo, rev: &str) -> Result<String> {
 }
 
 async fn current_branch(repo: &Repo) -> Result<String> {
-    let out = repo
-        .git(["symbolic-ref", "--short", "HEAD"])
+    current_branch_at(repo, repo.dir()).await
+}
+
+async fn current_branch_at(repo: &Repo, dir: &Path) -> Result<String> {
+    let mut command = repo.git(["symbolic-ref", "--short", "HEAD"]);
+    command.current_dir(dir);
+    let out = command
         .output()
         .await
         .context("failed to spawn git symbolic-ref HEAD")?;
@@ -154,12 +251,32 @@ async fn parent_count(repo: &Repo, rev: &str) -> Result<usize> {
 }
 
 async fn run_merge(repo: &Repo, args: &[&str]) -> Result<std::process::Output> {
+    run_merge_at(repo, repo.dir(), args).await
+}
+
+async fn run_merge_at(repo: &Repo, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
     let mut argv = vec!["merge"];
     argv.extend_from_slice(args);
-    repo.ngit(argv)
+    let mut command = repo.ngit(argv);
+    command.current_dir(dir);
+    command.output().await.context("failed to spawn ngit merge")
+}
+
+async fn add_linked_worktree(repo: &Repo, dir: &Path, branch: &str) -> Result<()> {
+    let mut command = repo.git(["worktree", "add"]);
+    command.arg(dir).arg(branch);
+    let out = command
         .output()
         .await
-        .context("failed to spawn ngit merge")
+        .context("failed to spawn git worktree add")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git worktree add exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +376,8 @@ async fn merge_by_id_creates_no_ff_merge_on_default_branch() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 2. `ngit merge` without id while on the pr/ branch infers the PR.
+// 2. `ngit merge` without id while on the pr/ branch infers the PR and carries
+//    staged, unstaged, and untracked work across the branch switch.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -288,6 +406,25 @@ async fn merge_without_id_infers_pr_from_current_branch() -> Result<()> {
     let branch = expected_branch_name(pr);
     assert_eq!(current_branch(&publisher).await?, branch);
 
+    // An automatic backup must not disturb an existing user stash.
+    std::fs::write(publisher.dir().join("prior-stash.md"), "keep me\n")
+        .context("write prior-stash.md")?;
+    git_ok(
+        &publisher,
+        [
+            "stash",
+            "push",
+            "--include-untracked",
+            "--message",
+            "existing user stash",
+        ],
+        "git stash push",
+    )
+    .await?;
+
+    make_worktree_staged_unstaged_and_untracked(&publisher).await?;
+    let dirty_before = dirty_worktree_state(&publisher).await?;
+
     // merge with no id — should infer the PR from the checked-out branch
     let out = run_merge(&publisher, &[]).await?;
     anyhow::ensure!(
@@ -308,16 +445,21 @@ async fn merge_without_id_infers_pr_from_current_branch() -> Result<()> {
         2,
         "no-ff merge should produce a 2-parent merge commit",
     );
+    assert_eq!(
+        dirty_worktree_state(&publisher).await?,
+        dirty_before,
+        "the branch switch and merge must preserve the exact staged, unstaged, untracked, and stash state",
+    );
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// 3. dirty working tree aborts the merge.
+// 3. `ngit merge <id>` also preserves a dirty target-branch worktree.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn dirty_working_tree_aborts_merge() -> Result<()> {
+async fn dirty_target_worktree_is_preserved_after_merge() -> Result<()> {
     let Setup {
         harness: _h,
         _published: _,
@@ -328,20 +470,223 @@ async fn dirty_working_tree_aborts_merge() -> Result<()> {
 
     let main_before = rev_parse(&publisher, "main").await?;
 
-    // create an untracked file so the tree is dirty
-    std::fs::write(publisher.dir().join("dirty.md"), "uncommitted\n").context("write dirty.md")?;
+    make_worktree_staged_unstaged_and_untracked(&publisher).await?;
+    let dirty_before = dirty_worktree_state(&publisher).await?;
+
+    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_ne!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main should advance to the merge commit",
+    );
+    assert_eq!(
+        dirty_worktree_state(&publisher).await?,
+        dirty_before,
+        "the merge must preserve the exact staged, unstaged, untracked, and stash state",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3a. A linked worktree can merge while it owns the target branch, preserving
+//     the dirty state in that worktree and leaving the primary worktree alone.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn linked_target_worktree_preserves_dirty_state_after_merge() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = publisher
+        .ngit(["pr", "checkout", &pr.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    git_ok(&publisher, ["checkout", "main"], "git checkout main").await?;
+    git_ok(
+        &publisher,
+        ["checkout", "-b", "primary-parking"],
+        "git checkout -b primary-parking",
+    )
+    .await?;
+
+    let linked_parent = tempfile::tempdir().context("create linked-worktree parent")?;
+    let linked = linked_parent.path().join("target-worktree");
+    add_linked_worktree(&publisher, &linked, "main").await?;
+    let main_before = rev_parse_at(&publisher, &linked, "main").await?;
+
+    make_worktree_staged_unstaged_and_untracked_at(&publisher, &linked).await?;
+    let dirty_before = dirty_worktree_state_at(&publisher, &linked).await?;
+
+    let out = run_merge_at(&publisher, &linked, &[&pr.event_id.to_hex()]).await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit merge from linked target worktree exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(current_branch_at(&publisher, &linked).await?, "main");
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "primary-parking",
+        "the primary worktree branch must not change",
+    );
+    assert_ne!(
+        rev_parse_at(&publisher, &linked, "main").await?,
+        main_before,
+        "main should advance to the merge commit",
+    );
+    assert_eq!(
+        dirty_worktree_state_at(&publisher, &linked).await?,
+        dirty_before,
+        "the linked worktree must retain its exact dirty state",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3b. If another worktree owns the target branch, merging from a PR worktree
+//     must refuse before touching either worktree or the shared target ref.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn linked_source_worktree_refuses_when_target_is_checked_out_elsewhere() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+
+    let out = publisher
+        .ngit(["pr", "checkout", &pr.event_id.to_hex()])
+        .output()
+        .await
+        .context("failed to spawn ngit pr checkout")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ngit pr checkout exited {:?}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let pr_branch = expected_branch_name(pr);
+    git_ok(&publisher, ["checkout", "main"], "git checkout main").await?;
+
+    let linked_parent = tempfile::tempdir().context("create linked-worktree parent")?;
+    let linked = linked_parent.path().join("source-worktree");
+    add_linked_worktree(&publisher, &linked, &pr_branch).await?;
+    let main_before = rev_parse(&publisher, "main").await?;
+    make_worktree_staged_unstaged_and_untracked_at(&publisher, &linked).await?;
+    let dirty_before = dirty_worktree_state_at(&publisher, &linked).await?;
+
+    let out = run_merge_at(&publisher, &linked, &[]).await?;
+    assert!(
+        !out.status.success(),
+        "ngit merge must refuse when the target branch is checked out in another worktree",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("main") && stderr.contains("another worktree"),
+        "the error should identify the target and other worktree, got:\n{stderr}",
+    );
+
+    assert_eq!(
+        rev_parse(&publisher, "main").await?,
+        main_before,
+        "main must not advance",
+    );
+    assert_eq!(current_branch(&publisher).await?, "main");
+    assert_eq!(current_branch_at(&publisher, &linked).await?, pr_branch);
+    assert_eq!(
+        dirty_worktree_state_at(&publisher, &linked).await?,
+        dirty_before,
+        "the refused merge must leave the linked worktree untouched",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3c. If the saved changes cannot apply to the merged target, the merge is
+//     rolled back and the source branch plus its exact dirty state are
+//     restored.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn conflicting_saved_worktree_rolls_back_merge_and_restores_source() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let pr = &prs[0];
+    let main_before = rev_parse(&publisher, "main").await?;
+
+    git_ok(
+        &publisher,
+        ["checkout", "-b", "local-work"],
+        "git checkout -b local-work",
+    )
+    .await?;
+    std::fs::write(publisher.dir().join("README.md"), "local branch base\n")
+        .context("write local branch README.md")?;
+    git_ok(&publisher, ["add", "README.md"], "git add README.md").await?;
+    git_ok(
+        &publisher,
+        ["commit", "-m", "local branch base", "--no-gpg-sign"],
+        "git commit local branch base",
+    )
+    .await?;
+
+    make_worktree_staged_unstaged_and_untracked(&publisher).await?;
+    let dirty_before = dirty_worktree_state(&publisher).await?;
 
     let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
     assert!(
         !out.status.success(),
-        "ngit merge should abort when the working tree is dirty",
+        "ngit merge must fail when the saved work cannot apply cleanly to the merged target",
     );
-
-    // main untouched
+    assert_eq!(
+        current_branch(&publisher).await?,
+        "local-work",
+        "rollback should restore the source branch",
+    );
     assert_eq!(
         rev_parse(&publisher, "main").await?,
         main_before,
-        "main must not advance when the merge is aborted",
+        "rollback must remove the merge commit from main",
+    );
+    assert_eq!(
+        dirty_worktree_state(&publisher).await?,
+        dirty_before,
+        "rollback must restore the exact staged, unstaged, untracked, and stash state",
     );
 
     Ok(())
