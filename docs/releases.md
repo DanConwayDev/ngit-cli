@@ -195,15 +195,15 @@ the policy is enabled. Version, signer credentials, `--released-at`, `--tag`,
 cannot supply secrets, silently replace an event, or freeze per-release data.
 
 All local application media and release assets share one placement plan.
-For compatibility with deployed Blossom servers, release authorization and
-upload proceed one file at a time; the missing server placements for that file
-run concurrently. Human output therefore labels `upload file N/M` and draws a
-separate live line for each server. A line changes from byte transfer to
+Missing blobs are authorized in BUD-11 batches of up to 20 hashes, and the
+missing server placements in each batch run concurrently. Human output labels
+the current upload batch and draws a separate live line for each server. A line
+changes from byte transfer to
 `awaiting server response`, `verifying stored blob`, or `waiting to retry` as
 the HTTP operation advances, so a fully sent small request is not presented as
 an upload which is still transferring. Headings and server lines include their
 elapsed time. Ngit clears this display before invoking a signer and after each
-file. Before each per-file authorization it detaches the complete Blossom
+batch. Before each batch authorization it detaches the complete Blossom
 progress draw target, then reattaches only after signing returns, so an
 interactive signer never competes with a live progress renderer.
 An upload attempt can take up to 30 minutes while bytes continue moving, but

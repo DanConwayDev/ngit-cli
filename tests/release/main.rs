@@ -9,7 +9,10 @@
 use std::{fs, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use bitcoin_hashes::sha256;
 use ngit::software_release::{
     AddressPointer, ApplicationInput, AssetInput, ReleaseAssetInput, ReleaseInput,
@@ -367,23 +370,28 @@ assets:
                 .context("batched Blossom upload omitted authorization")
         })
         .collect::<Result<Vec<_>>>()?;
-    ensure!(authorizations[0] != authorizations[1]);
-    for (request, authorization) in upload_requests.iter().zip(authorizations) {
-        let encoded = authorization
-            .strip_prefix("Nostr ")
-            .context("Blossom authorization omitted the Nostr scheme")?;
-        let event: Event = serde_json::from_slice(
-            &STANDARD
-                .decode(encoded)
-                .context("release authorization did not use padded standard Base64")?,
-        )?;
-        let authorized_hashes = tag_values(&event, "x");
-        ensure!(authorized_hashes.len() == 1);
+    ensure!(authorizations[0] == authorizations[1]);
+    let encoded = authorizations[0]
+        .strip_prefix("Nostr ")
+        .context("Blossom authorization omitted the Nostr scheme")?;
+    let event: Event = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(encoded)
+            .context("release authorization did not use BUD-11 Base64")?,
+    )?;
+    let mut authorized_hashes = tag_values(&event, "x");
+    authorized_hashes.sort();
+    let mut expected_hashes = vec![icon_hash.clone(), asset_hash.clone()];
+    expected_hashes.sort();
+    ensure!(authorized_hashes == expected_hashes);
+    for request in &upload_requests {
         ensure!(
-            authorized_hashes[0]
-                == request
+            authorized_hashes.contains(
+                &request
                     .header("x-sha-256")
                     .context("Blossom upload omitted X-SHA-256")?
+                    .to_owned()
+            )
         );
     }
     ensure!(output["result"]["application_operation"] == "created");
@@ -1139,6 +1147,165 @@ async fn presence_failure_on_one_server_publishes_from_a_confirmed_replica() -> 
         release_events.len() == 2,
         "asset and release were not published"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_asset_release_batches_bud11_and_reuses_stored_blobs() -> Result<()> {
+    const SECOND_VERSION: &str = "1.2.4";
+    const CHECKSUM_BYTES: &[u8] = b"large.tar.gz  generated release fixture\n";
+    const ICON_BYTES: &[u8] = b"release fixture icon\n";
+
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let large_bytes = vec![0x5a; 12 * 1024 * 1024];
+    fs::write(publisher.dir().join("large.tar.gz"), &large_bytes)
+        .context("failed to write large release asset")?;
+    fs::write(publisher.dir().join("SHA256SUMS.txt"), CHECKSUM_BYTES)
+        .context("failed to write release checksums")?;
+    fs::write(publisher.dir().join("release-icon.png"), ICON_BYTES)
+        .context("failed to write release icon")?;
+
+    let healthy = BlossomServer::start().await?;
+    let failed_replica = BlossomServer::start().await?;
+    failed_replica.add_rule(BlossomRule::upload().respond_status(
+        422,
+        "Unprocessable Content",
+        "replica rejected upload",
+    ));
+    let large_file = "linux-x86_64=large.tar.gz";
+    let checksum_file = "linux-x86_64=SHA256SUMS.txt";
+    let icon_file = "linux-x86_64=release-icon.png";
+    let output = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--file",
+            large_file,
+            "--file",
+            checksum_file,
+            "--file",
+            icon_file,
+            "--blossom-server",
+            healthy.base_url(),
+            "--blossom-server",
+            failed_replica.base_url(),
+            "--notes",
+            "A deterministic multi-asset release",
+            "--json",
+        ],
+    )
+    .await?;
+
+    let healthy_first_run = healthy.requests();
+    let failed_first_run = failed_replica.requests();
+    let healthy_uploads = upload_requests(&healthy_first_run);
+    let failed_uploads = upload_requests(&failed_first_run);
+    ensure!(healthy_uploads.len() == 3);
+    ensure!(failed_uploads.len() == 3);
+    ensure!(
+        healthy_uploads
+            .iter()
+            .any(|request| request.body.len() == large_bytes.len()),
+        "the 12 MiB release asset was not uploaded"
+    );
+
+    let uploads = healthy_uploads
+        .iter()
+        .chain(failed_uploads.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let authorization = uploads[0]
+        .header("authorization")
+        .context("release upload omitted authorization")?;
+    ensure!(
+        uploads
+            .iter()
+            .all(|request| request.header("authorization") == Some(authorization)),
+        "one release batch used more than one signed authorization"
+    );
+    let event: Event = serde_json::from_slice(
+        &URL_SAFE_NO_PAD.decode(
+            authorization
+                .strip_prefix("Nostr ")
+                .context("release authorization omitted the Nostr scheme")?,
+        )?,
+    )?;
+    let mut authorized_hashes = tag_values(&event, "x");
+    authorized_hashes.sort();
+    let mut expected_hashes = vec![
+        sha256_hex(&large_bytes),
+        sha256_hex(CHECKSUM_BYTES),
+        sha256_hex(ICON_BYTES),
+    ];
+    expected_hashes.sort();
+    ensure!(authorized_hashes == expected_hashes);
+
+    let warning = output["warnings"]
+        .as_array()
+        .context("release warnings were not an array")?
+        .iter()
+        .find(|warning| warning["code"] == "blossom_replication_incomplete")
+        .context("failed replica did not produce a replication warning")?;
+    ensure!(warning["details"]["blobs"]["available"] == 3);
+    ensure!(warning["details"]["blobs"]["total"] == 3);
+    ensure!(warning["details"]["confirmed"] == 3);
+    ensure!(warning["details"]["placements"] == 6);
+
+    let release_events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kinds([SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND])
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(release_events.len() == 4);
+
+    let healthy_request_count = healthy.request_count();
+    let second = run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            SECOND_VERSION,
+            "--app",
+            APP_ID,
+            "--file",
+            large_file,
+            "--file",
+            checksum_file,
+            "--file",
+            icon_file,
+            "--blossom-server",
+            healthy.base_url(),
+            "--notes",
+            "The same blobs in a later release",
+            "--json",
+        ],
+    )
+    .await?;
+    let healthy_requests = healthy.finish().await?;
+    let second_run = &healthy_requests[healthy_request_count..];
+    ensure!(presence_requests(second_run).len() == 3);
+    ensure!(
+        upload_requests(second_run).is_empty(),
+        "already stored release blobs were uploaded again"
+    );
+    let second_uploads = second["result"]["blossom"]["uploads"]
+        .as_array()
+        .context("second release Blossom uploads were not an array")?;
+    ensure!(second_uploads.len() == 3);
+    ensure!(
+        second_uploads
+            .iter()
+            .all(|upload| { upload["servers"][0]["status"] == "already_present" })
+    );
+    failed_replica.finish().await?;
     Ok(())
 }
 

@@ -1216,13 +1216,13 @@ hash. A failed or ambiguous presence check marks that placement unavailable but
 does not prevent work on other servers. An exact match is recorded as
 `already_present` and skipped.
 
-When copies are missing, ngit signs one short-lived kind `24242` authorization
-per snapshot containing `t=upload`, one `x=<lowercase sha256>`, every selected
-server domain, and an expiration tag. It reuses that event across the missing
-servers. Release uploads first use padded standard Base64 for compatibility
-with deployed servers; an authorization-format rejection is retried once with
-BUD-11 URL-safe unpadded encoding of the same event. Authenticated PUT requests
-never follow redirects.
+When copies are missing, ngit groups up to 20 snapshots into each short-lived
+kind `24242` authorization. The event contains `t=upload`, one
+`x=<lowercase sha256>` for every snapshot in the batch, every selected server
+domain, and an expiration tag. It is encoded with BUD-11 URL-safe unpadded
+Base64 and reused across every missing placement in that batch. An
+authorization-format rejection is retried once with padded standard Base64 of
+the same signed event. Authenticated PUT requests never follow redirects.
 
 Each missing server receives `PUT /upload` with `Content-Length`,
 `Content-Type`, and `X-SHA-256` headers and the snapshot as its streaming body.
