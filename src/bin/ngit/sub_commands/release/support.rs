@@ -46,6 +46,28 @@ enum QueryPolicy {
     PublicationPreflight,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelayThresholdGroup {
+    label: &'static str,
+    relays: Vec<RelayUrl>,
+    required: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelayThresholdStatus {
+    label: &'static str,
+    completed: usize,
+    total: usize,
+    required: usize,
+    unavailable: Vec<String>,
+}
+
+impl RelayThresholdStatus {
+    fn met(&self) -> bool {
+        self.completed >= self.required
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WarningJson {
     pub code: String,
@@ -528,14 +550,32 @@ impl ReleaseContext {
         (user_write, repo)
     }
 
-    fn publication_query_relays(&self) -> Result<Vec<RelayUrl>> {
-        let (user_write, mut relays) = self.publication_relays();
-        relays.extend(parse_relays(&user_write)?);
-        if relays.is_empty() {
-            relays.extend(parse_relays(self.client.get_relay_default_set())?);
+    fn publication_query_groups(&self) -> Result<Vec<RelayThresholdGroup>> {
+        let mut repository_relays = self.repo_ref.relays.clone();
+        dedup_relays(&mut repository_relays);
+
+        let mut account_write_relays = match &self.user_ref {
+            Some(user) => parse_relays(&user.relays.write())?,
+            None => Vec::new(),
+        };
+        dedup_relays(&mut account_write_relays);
+
+        let mut explicit_relays = self.explicit_relays.clone();
+        add_zapstore_publication_relay(&mut explicit_relays, self.zapstore_relay.as_ref());
+        dedup_relays(&mut explicit_relays);
+
+        let mut groups = relay_threshold_groups([
+            ("repository relays", repository_relays),
+            ("account write relays", account_write_relays),
+            ("explicit publication relays", explicit_relays),
+        ]);
+        if groups.is_empty() {
+            groups = relay_threshold_groups([(
+                "fallback relays",
+                parse_relays(self.client.get_relay_default_set())?,
+            )]);
         }
-        dedup_relays(&mut relays);
-        Ok(relays)
+        Ok(groups)
     }
 
     pub(super) async fn publish_batch(
@@ -606,11 +646,13 @@ impl ReleaseContext {
         policy: QueryPolicy,
     ) -> Result<Vec<Event>> {
         if !self.offline {
-            let relays = if policy == QueryPolicy::PublicationPreflight {
-                self.publication_query_relays()?
-            } else {
-                self.discovery_relays.clone()
-            };
+            let threshold_groups = (policy == QueryPolicy::PublicationPreflight)
+                .then(|| self.publication_query_groups())
+                .transpose()?;
+            let relays = threshold_groups.as_ref().map_or_else(
+                || self.discovery_relays.clone(),
+                |groups| relay_threshold_union(groups),
+            );
             let results = fetch_filters_to_local_cache(
                 &self.client,
                 self.git_repo_path()?,
@@ -622,15 +664,34 @@ impl ReleaseContext {
                 .iter()
                 .filter_map(|(relay, result)| result.as_ref().err().map(|_| relay.to_string()))
                 .collect();
-            if policy == QueryPolicy::PublicationPreflight && !failed.is_empty() {
-                return Err(coded_error_with_details(
-                    "relay_preflight_incomplete",
-                    format!(
-                        "release preflight did not complete on: {}",
-                        failed.join(", ")
-                    ),
-                    json!({ "relays": failed }),
-                ));
+            if let Some(groups) = threshold_groups {
+                let completed = results
+                    .iter()
+                    .filter_map(|(relay, result)| result.is_ok().then_some(relay.clone()))
+                    .collect::<HashSet<_>>();
+                let statuses = relay_threshold_statuses(&groups, &completed);
+                let unmet = statuses
+                    .iter()
+                    .filter(|status| !status.met())
+                    .collect::<Vec<_>>();
+                if !unmet.is_empty() {
+                    return Err(coded_error_with_details(
+                        "relay_preflight_incomplete",
+                        format!(
+                            "publication preflight did not meet relay thresholds: {}",
+                            unmet
+                                .iter()
+                                .map(|status| relay_threshold_summary(status))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
+                        relay_threshold_details(&statuses),
+                    ));
+                }
+                if !failed.is_empty() {
+                    self.warnings
+                        .push(relay_preflight_incomplete_warning(&statuses));
+                }
             }
             if policy == QueryPolicy::AtLeastOneDiscoveryRoute
                 && (results.is_empty() || failed.len() == results.len())
@@ -641,13 +702,104 @@ impl ReleaseContext {
                     json!({ "relays": failed }),
                 ));
             }
-            if !failed.is_empty() {
+            if policy != QueryPolicy::PublicationPreflight && !failed.is_empty() {
                 self.warnings
                     .push(relay_discovery_incomplete_warning(&failed, results.len()));
             }
         }
         get_events_from_local_cache(self.git_repo_path()?, filters).await
     }
+}
+
+fn relay_threshold_groups<const N: usize>(
+    groups: [(&'static str, Vec<RelayUrl>); N],
+) -> Vec<RelayThresholdGroup> {
+    groups
+        .into_iter()
+        .filter_map(|(label, mut relays)| {
+            dedup_relays(&mut relays);
+            (!relays.is_empty()).then_some(RelayThresholdGroup {
+                label,
+                relays,
+                required: 1,
+            })
+        })
+        .collect()
+}
+
+fn relay_threshold_union(groups: &[RelayThresholdGroup]) -> Vec<RelayUrl> {
+    let mut relays = groups
+        .iter()
+        .flat_map(|group| group.relays.iter().cloned())
+        .collect::<Vec<_>>();
+    dedup_relays(&mut relays);
+    relays
+}
+
+fn relay_threshold_statuses(
+    groups: &[RelayThresholdGroup],
+    completed: &HashSet<RelayUrl>,
+) -> Vec<RelayThresholdStatus> {
+    groups
+        .iter()
+        .map(|group| {
+            let unavailable = group
+                .relays
+                .iter()
+                .filter(|relay| !completed.contains(*relay))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            RelayThresholdStatus {
+                label: group.label,
+                completed: group.relays.len() - unavailable.len(),
+                total: group.relays.len(),
+                required: group.required,
+                unavailable,
+            }
+        })
+        .collect()
+}
+
+fn relay_threshold_summary(status: &RelayThresholdStatus) -> String {
+    format!(
+        "{} {}/{} completed (requires at least {}; unavailable: {})",
+        status.label,
+        status.completed,
+        status.total,
+        status.required,
+        status.unavailable.join(", ")
+    )
+}
+
+fn relay_threshold_details(statuses: &[RelayThresholdStatus]) -> Value {
+    json!({
+        "groups": statuses.iter().map(|status| json!({
+            "type": status.label,
+            "completed": status.completed,
+            "total": status.total,
+            "required": status.required,
+            "unavailable": status.unavailable,
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn relay_preflight_incomplete_warning(statuses: &[RelayThresholdStatus]) -> WarningJson {
+    let incomplete = statuses
+        .iter()
+        .filter(|status| status.completed < status.total)
+        .collect::<Vec<_>>();
+    WarningJson::new(
+        "relay_preflight_incomplete",
+        format!(
+            "publication preflight was incomplete: {}; publication will proceed because every relay class met its threshold",
+            incomplete
+                .iter()
+                .map(|status| relay_threshold_summary(status))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    )
+    .with_details(relay_threshold_details(statuses))
 }
 
 fn relay_discovery_incomplete_warning(failed: &[String], queried: usize) -> WarningJson {
@@ -1184,12 +1336,16 @@ fn event_id_bech32(event: &Event) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use nostr::prelude::{EventId, RelayUrl};
 
     use super::{
         AssetReuseOption, OrderedPublicationEvent, PublicationBatchResult, ZAPSTORE_RELAY_URL,
         add_zapstore_publication_relay, optional_login, publication_failure_message,
         publication_json, publication_recovery, relay_discovery_incomplete_warning,
+        relay_preflight_incomplete_warning, relay_threshold_groups, relay_threshold_statuses,
+        relay_threshold_union,
     };
 
     #[test]
@@ -1215,6 +1371,60 @@ mod tests {
         let mut relays = vec![existing.clone()];
         add_zapstore_publication_relay(&mut relays, None);
         assert_eq!(relays, [existing]);
+    }
+
+    #[test]
+    fn publication_preflight_requires_one_completed_relay_per_class() {
+        let repository_one = RelayUrl::parse("wss://repo-one.example").unwrap();
+        let repository_two = RelayUrl::parse("wss://repo-two.example").unwrap();
+        let account = RelayUrl::parse("wss://account.example").unwrap();
+        let explicit = RelayUrl::parse("wss://explicit.example").unwrap();
+        let groups = relay_threshold_groups([
+            (
+                "repository relays",
+                vec![repository_one.clone(), repository_two.clone()],
+            ),
+            ("account write relays", vec![account.clone()]),
+            ("explicit publication relays", vec![explicit.clone()]),
+        ]);
+        let completed = HashSet::from([repository_two, account, explicit]);
+
+        let statuses = relay_threshold_statuses(&groups, &completed);
+
+        assert!(statuses.iter().all(|status| status.met()));
+        assert_eq!(statuses[0].completed, 1);
+        assert_eq!(statuses[0].total, 2);
+        assert_eq!(statuses[0].unavailable, [repository_one.to_string()]);
+        let warning = relay_preflight_incomplete_warning(&statuses);
+        assert_eq!(warning.code, "relay_preflight_incomplete");
+        assert!(warning.message.contains("repository relays 1/2 completed"));
+        assert!(warning.message.contains(repository_one.as_str()));
+    }
+
+    #[test]
+    fn publication_preflight_rejects_an_unavailable_relay_class() {
+        let repository = RelayUrl::parse("wss://repo.example").unwrap();
+        let account = RelayUrl::parse("wss://account.example").unwrap();
+        let groups = relay_threshold_groups([
+            ("repository relays", vec![repository.clone()]),
+            ("account write relays", vec![account]),
+        ]);
+
+        let statuses = relay_threshold_statuses(&groups, &HashSet::from([repository]));
+
+        assert!(statuses[0].met());
+        assert!(!statuses[1].met());
+    }
+
+    #[test]
+    fn publication_preflight_queries_shared_relays_once() {
+        let shared = RelayUrl::parse("wss://shared.example").unwrap();
+        let groups = relay_threshold_groups([
+            ("repository relays", vec![shared.clone()]),
+            ("explicit publication relays", vec![shared.clone()]),
+        ]);
+
+        assert_eq!(relay_threshold_union(&groups), [shared]);
     }
 
     #[test]
