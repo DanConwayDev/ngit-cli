@@ -925,10 +925,9 @@ pub fn commit_msg_from_patch(patch: &nostr::prelude::Event) -> Result<String> {
             .find("] ")
             .context("event is not formatted as a patch or cover letter")?
             + 2;
-        let end_index = patch.content[start_index..]
-            .find("\ndiff --git")
-            .unwrap_or(patch.content.len());
-        Ok(patch.content[start_index..end_index].to_string())
+        let commit_msg = &patch.content[start_index..];
+        let end_index = commit_msg.find("\ndiff --git").unwrap_or(commit_msg.len());
+        Ok(commit_msg[..end_index].to_string())
     }
 }
 
@@ -1445,6 +1444,29 @@ mod tests {
                 get_commit_id_from_patch(&make_pr_update_event(&commit)?)?,
                 commit,
             );
+            Ok(())
+        }
+    }
+
+    mod commit_msg_from_patch {
+        use super::*;
+
+        #[test]
+        fn extracts_short_message_after_long_header() -> Result<()> {
+            let patch = nostr::event::EventBuilder::new(
+                nostr::event::Kind::GitPatch,
+                concat!(
+                    "From 9f8e7d6c5b4a39281706f5e4d3c2b1a099887766 Mon Sep 17 00:00:00 2001\n",
+                    "From: A Contributor <contributor@example.com>\n",
+                    "Date: Mon, 1 Sep 2026 12:00:00 +0000\n",
+                    "Subject: [PATCH 3/46] Add Ditto social client\n",
+                    "\n",
+                    "diff --git a/apps.toml b/apps.toml\n",
+                ),
+            )
+            .finalize(&nostr::prelude::Keys::generate())?;
+
+            assert_eq!(commit_msg_from_patch(&patch)?, "Add Ditto social client\n");
             Ok(())
         }
     }
