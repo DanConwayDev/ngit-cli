@@ -108,6 +108,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         signer.password.as_ref(),
         alias.as_deref(),
         command_args.bunker_url.is_some(),
+        !Interactor::is_non_interactive(),
     )
     .await?;
     let login_alias = alias.as_deref().or(selected_alias.as_deref());
@@ -301,17 +302,16 @@ async fn resolve_login_selection(
     password: Option<&String>,
     alias: Option<&str>,
     has_bunker_url: bool,
+    interactive: bool,
 ) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
     // Positional and --signer selectors may fall back to cached profile names;
-    // --alias is strictly the alias namespace.
+    // --alias is strictly the alias namespace. In an explicitly interactive
+    // login it labels the fresh signer instead of reactivating an existing
+    // alias; positional ACCOUNT and --signer remain explicit selectors.
     let from_explicit_selector = matches!(signer_info, Some(SignerInfo::Selection { .. }));
-    let mut requested = signer_info.cloned().or_else(|| {
-        (!has_bunker_url).then(|| {
-            alias.map(|alias| SignerInfo::Selection {
-                selector: alias.to_string(),
-            })
-        })?
-    });
+    let mut requested = signer_info
+        .cloned()
+        .or_else(|| implicit_alias_selection(alias, has_bunker_url, interactive));
     if let Some(SignerInfo::Nsec {
         password: signer_password,
         ..
@@ -340,6 +340,19 @@ async fn resolve_login_selection(
         Some(resolved.npub),
         resolved.alias,
     ))
+}
+
+fn implicit_alias_selection(
+    alias: Option<&str>,
+    has_bunker_url: bool,
+    interactive: bool,
+) -> Option<SignerInfo> {
+    if has_bunker_url || interactive {
+        return None;
+    }
+    alias.map(|alias| SignerInfo::Selection {
+        selector: alias.to_string(),
+    })
 }
 
 /// return ( bool - logged out, bool - log in to local git locally)
@@ -503,5 +516,30 @@ pub fn format_items_as_list(items: &[&str]) -> String {
             let all_but_last = items[..items.len() - 1].join(", ");
             format!("{}, and {}", all_but_last, items[items.len() - 1])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ngit::login::SignerInfo;
+
+    use super::implicit_alias_selection;
+
+    #[test]
+    fn interactive_alias_labels_a_fresh_signer() {
+        assert!(implicit_alias_selection(Some("dcdev"), false, true).is_none());
+    }
+
+    #[test]
+    fn non_interactive_alias_reactivates_the_stored_signer() {
+        assert!(matches!(
+            implicit_alias_selection(Some("dcdev"), false, false),
+            Some(SignerInfo::Selection { selector }) if selector == "dcdev"
+        ));
+    }
+
+    #[test]
+    fn alias_labels_an_explicit_bunker_login() {
+        assert!(implicit_alias_selection(Some("dcdev"), true, false).is_none());
     }
 }

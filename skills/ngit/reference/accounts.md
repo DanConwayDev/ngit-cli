@@ -19,6 +19,7 @@ ngit account login --secret-storage git-config # explicitly allow plaintext git-
 ngit account login --nsec-file /private/key --alias alice # store a reusable alias
 ngit account login --nbunksec-file /private/connection --alias alice # store an established bunker session
 ngit account login --local --alias alice       # activate a retained alias for this repository
+ngit account login --local -i --alias alice    # pair a fresh signer and assign or replace this alias
 ngit account create --name "Alice" --json
 ngit account export-keys --json                # returns nsec or nbunksec for the selected account
 ngit account logout --json                    # removes login config, but preserves stored keys
@@ -56,7 +57,10 @@ one-shot behavior.
 `--local` to make it the global default. The older `ngit account login
 --signer <account>` spelling remains available.
 `ngit account login --local --alias <alias>` provides the same reactivation
-shorthand. A profile name (for example `--signer "DanConwayDev's Agent"`)
+shorthand. Add `-i` to pair a fresh signer under that alias instead; if the
+repository already uses it, choose the logout option and the new connection
+will replace the alias without replacing the identity's default connection.
+A profile name (for example `--signer "DanConwayDev's Agent"`)
 resolves against cached kind-0 profiles of accounts that hold stored
 credentials; it must match exactly one such account, and only the resolved
 npub is ever persisted. Explicit signer selection fails closed when the

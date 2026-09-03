@@ -71,6 +71,9 @@ npub) makes a signer the default for that Git-config scope. `ngit account login
 `git-config` secret storage was selected, the selected credential backend as
 well. After logout retains a stored signer, `ngit account login --local --alias
 fred` reactivates it without requiring the nsec or bunker URL again.
+`ngit account login --local -i --alias fred` instead starts a fresh interactive
+login and assigns the resulting connection to `fred`, replacing that alias's
+previous signer connection while leaving the bare-npub default intact.
 
 A bare npub continues to select the identity's default credential. Pairing a
 different remote-signer connection for an npub that already has a default is
