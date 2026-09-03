@@ -544,6 +544,13 @@ Examples:
 ["m", "<pubkey>", "300", "defer"]        # historical copy, not active
 ```
 
+An empty history means the start is unknown; it is not evidence that the role
+was literally assigned at the Unix epoch. For deterministic past-event
+authorization, however, an untimed active record covers the interval from `0`
+onward. If that record is later closed at `T`, its materialized history is
+`[0, T]`. History displays should continue to label the start as unknown rather
+than presenting `0` as an observed timestamp.
+
 The author is part of the fact. Alice's `m:Bob` is Alice's outgoing
 relationship to Bob. Bob's `m:Bob` is Bob's acknowledgement of his own role.
 The same subject in two events is not one shared record.
@@ -1382,7 +1389,10 @@ not silently reinterpret a working legacy graph.
   conflict.
 - Converting an untimed legacy edge never invents a historical timestamp.
   Effective history starts only from observed evidence and otherwise remains
-  unknown.
+  unknown. Operationally, each active untimed edge covers authorization from
+  `0` until an end is recorded. Reciprocal legacy listings therefore express
+  both an assignment and an acceptance covering the repository's full prior
+  event history, even when the two announcements were published later.
 
 The membership mutation that adopts indexed roles republishes the selected
 announcement with `M`, `m`, and any preserved `o` records. It also emits the
