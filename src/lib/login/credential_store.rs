@@ -45,6 +45,8 @@ pub enum Backend {
 const SIGNER_RECORD_VERSION: u8 = 1;
 const ALIAS_RECORD_VERSION: u8 = 1;
 const ALIAS_PREFIX: &str = "alias:";
+const ALIAS_CREDENTIAL_PREFIX: &str = "alias-credential:";
+const ALIAS_DEFAULT_CREDENTIAL: &str = "default";
 const SIGNER_PREFIX: &str = "signer:";
 const ALIAS_SIGNER_PREFIX: &str = "signer-alias:";
 
@@ -68,9 +70,9 @@ pub struct BunkerSigner {
 
 /// The identity and optional concrete signer credential selected by an alias.
 ///
-/// Legacy aliases contain only an npub and therefore select that identity's
-/// default credential. New aliases may bind one particular NIP-46 connection
-/// when several connections serve the same identity.
+/// Canonical alias entries contain only an npub for compatibility with older
+/// clients. A separate public companion entry may bind one particular NIP-46
+/// connection when several connections serve the same identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignerAlias {
     pub npub: String,
@@ -112,6 +114,8 @@ struct BunkerSignerRecord {
     client_nsec: String,
 }
 
+/// Read compatibility for builds that briefly wrote the signer binding into
+/// the alias value itself. New writes use a raw npub plus a companion entry.
 #[derive(Debug, Serialize, Deserialize)]
 struct SignerAliasRecord {
     version: u8,
@@ -273,6 +277,13 @@ pub fn is_bunker_signer_entry_name(name: &str) -> bool {
 
 pub fn alias_entry_name(alias: &str) -> Result<String> {
     Ok(format!("{ALIAS_PREFIX}{}", normalize_alias(alias)?))
+}
+
+fn alias_credential_entry_name(alias: &str) -> Result<String> {
+    Ok(format!(
+        "{ALIAS_CREDENTIAL_PREFIX}{}",
+        normalize_alias(alias)?
+    ))
 }
 
 /// Normalize an alias for both keyring and git-config use. Git variable names
@@ -456,6 +467,29 @@ pub fn retrieve_bunker_signer_named(
     parse_bunker_signer(name, &expected_npub, &serialized)
 }
 
+/// Alias-specific bunker credentials for one identity, with identical
+/// connections deduplicated. This supplies the npub fallback when no default
+/// credential exists, despite platform keyrings not supporting enumeration.
+pub fn alias_bunker_signers(npub: &str) -> Result<Vec<(String, BunkerSigner)>> {
+    let npub = canonical_npub(npub)?;
+    let mut signers = Vec::new();
+    for (alias, alias_npub) in inventory()?.aliases {
+        if alias_npub != npub {
+            continue;
+        }
+        let name = alias_signer_entry_name(&alias)?;
+        match retrieve_bunker_signer_named(&name, &npub) {
+            Ok(signer) if signers.iter().any(|(_, existing)| existing == &signer) => {}
+            Ok(signer) => signers.push((alias, signer)),
+            Err(LookupError::Missing(_)) => {}
+            Err(error @ (LookupError::Unavailable(_) | LookupError::Invalid(_))) => {
+                return Err(anyhow!(error));
+            }
+        }
+    }
+    Ok(signers)
+}
+
 fn retrieve_bunker_signer_named_from(
     name: &str,
     expected_npub: &str,
@@ -496,19 +530,17 @@ pub fn store_alias(
     ensure_alias_available(alias, npub)?;
     let name = alias_entry_name(alias)?;
     let npub = canonical_npub(npub)?;
-    let value = if let Some(credential) = credential {
+    let credential_name = alias_credential_entry_name(alias)?;
+    let credential = if let Some(credential) = credential {
         validate_alias_credential(alias, &npub, credential)?;
-        serde_json::to_string(&SignerAliasRecord {
-            version: ALIAS_RECORD_VERSION,
-            record_type: "alias".to_string(),
-            npub: npub.clone(),
-            credential: credential.to_string(),
-        })
-        .context("failed to serialize signer alias record")?
+        credential
     } else {
-        npub.clone()
+        ALIAS_DEFAULT_CREDENTIAL
     };
-    let stored = store_value(&name, &value, policy)?;
+    store_value(&credential_name, credential, policy)
+        .context("failed to store the signer alias credential binding")?;
+    // Keep this value as a raw npub: released clients parse it directly.
+    let stored = store_value(&name, &npub, policy)?;
     remember_alias_for_listing(alias, &npub);
     Ok(stored)
 }
@@ -549,7 +581,8 @@ pub fn retrieve_signer_alias(alias: &str) -> std::result::Result<SignerAlias, Lo
     let name = alias_entry_name(alias)
         .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
     let value = retrieve_value(&name)?;
-    parse_signer_alias(&name, &value)
+    let target = parse_signer_alias(&name, &value)?;
+    attach_alias_credential(alias, target)
 }
 
 pub fn retrieve_alias_from(
@@ -566,10 +599,39 @@ pub fn retrieve_signer_alias_from(
     let name = alias_entry_name(alias)
         .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
     let value = retrieve_value_from(&name, backend)?;
-    let target = parse_signer_alias(&name, &value)?;
+    let target = attach_alias_credential(alias, parse_signer_alias(&name, &value)?)?;
     if backend == Backend::Os {
         remember_account_for_listing(&target.npub);
         remember_alias_for_listing(alias, &target.npub);
+    }
+    Ok(target)
+}
+
+fn attach_alias_credential(
+    alias: &str,
+    mut target: SignerAlias,
+) -> std::result::Result<SignerAlias, LookupError> {
+    // Typed values emitted by the short-lived intermediate format already
+    // carry an exact binding. Reading them lets the next login migrate them.
+    if target.credential.is_some() {
+        return Ok(target);
+    }
+    let name = alias_credential_entry_name(alias)
+        .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
+    for backend in [Backend::Os, Backend::File] {
+        match retrieve_value_from(&name, backend) {
+            Ok(credential) if credential == ALIAS_DEFAULT_CREDENTIAL => break,
+            Ok(credential) => {
+                validate_alias_credential(alias, &target.npub, &credential)
+                    .map_err(|error| LookupError::Invalid(error.to_string()))?;
+                target.credential = Some(credential);
+                break;
+            }
+            // The companion is optional for aliases created by older clients.
+            // An unavailable OS store must not hide a usable file-store alias.
+            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(error @ LookupError::Invalid(_)) => return Err(error),
+        }
     }
     Ok(target)
 }
@@ -921,6 +983,19 @@ pub fn forget(name: &str) -> Result<bool> {
     if !valid_entry_name(name) {
         return Ok(false);
     }
+    let mut deleted = forget_from_backends(name)?;
+    if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
+        deleted |= forget_from_backends(&alias_credential_entry_name(alias)?)?;
+        if let Err(error) = account_registry::forget_alias(alias) {
+            eprintln!(
+                "warning: the signer alias was removed, but its account-list index entry could not be updated: {error:#}"
+            );
+        }
+    }
+    Ok(deleted)
+}
+
+fn forget_from_backends(name: &str) -> Result<bool> {
     let mut deleted = false;
     if !os_store_disabled() {
         match os_store::delete(name) {
@@ -934,13 +1009,6 @@ pub fn forget(name: &str) -> Result<bool> {
     if file_store::delete(name)? {
         deleted = true;
     }
-    if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
-        if let Err(error) = account_registry::forget_alias(alias) {
-            eprintln!(
-                "warning: the signer alias was removed, but its account-list index entry could not be updated: {error:#}"
-            );
-        }
-    }
     Ok(deleted)
 }
 
@@ -949,6 +1017,9 @@ pub fn valid_entry_name(name: &str) -> bool {
         || is_bunker_signer_entry_name(name)
         || name
             .strip_prefix(ALIAS_PREFIX)
+            .is_some_and(|alias| normalize_alias(alias).is_ok())
+        || name
+            .strip_prefix(ALIAS_CREDENTIAL_PREFIX)
             .is_some_and(|alias| normalize_alias(alias).is_ok())
 }
 
@@ -978,6 +1049,9 @@ pub fn config_pointers(
         {
             if let Ok(alias) = normalize_alias(&selector) {
                 if let Ok(target) = retrieve_signer_alias(&alias) {
+                    if let Ok(binding) = alias_credential_entry_name(&alias) {
+                        pointers.insert(binding);
+                    }
                     if let Some(credential) = target.credential {
                         pointers.insert(credential);
                         return pointers.into_iter().collect();
@@ -1693,13 +1767,7 @@ mod tests {
             client_nsec: Keys::generate().secret_key().to_bech32()?,
         })?;
         file_store::set_value_at(&path, &signer_name, &signer_value)?;
-        let alias_value = serde_json::to_string(&SignerAliasRecord {
-            version: ALIAS_RECORD_VERSION,
-            record_type: "alias".to_string(),
-            npub: npub.clone(),
-            credential: signer_name,
-        })?;
-        file_store::set_value_at(&path, "alias:remote", &alias_value)?;
+        file_store::set_value_at(&path, "alias:remote", &npub)?;
 
         let inventory = file_store::inventory_at(&path)?;
         assert_eq!(inventory.accounts, BTreeSet::from([npub.clone()]));
@@ -1736,6 +1804,10 @@ mod tests {
     fn alias_names_are_portable_and_namespaced() -> Result<()> {
         assert_eq!(normalize_alias("Fred-2")?, "fred-2");
         assert_eq!(alias_entry_name("Fred-2")?, "alias:fred-2");
+        assert_eq!(
+            alias_credential_entry_name("Fred-2")?,
+            "alias-credential:fred-2"
+        );
         assert_eq!(alias_signer_entry_name("Fred-2")?, "signer-alias:fred-2");
         for invalid in [
             "",
@@ -1754,7 +1826,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_alias_binds_one_remote_signer_for_an_identity() -> Result<()> {
+    fn intermediate_typed_alias_remains_readable_for_migration() -> Result<()> {
         let npub = Keys::generate().public_key().to_bech32()?;
         let credential = alias_signer_entry_name("dedicated")?;
         let value = serde_json::to_string(&SignerAliasRecord {

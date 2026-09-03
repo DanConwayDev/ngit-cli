@@ -399,8 +399,6 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         Some("dedicated"),
     )
     .await?;
-    first_task.abort();
-    second_task.abort();
     assert!(
         aliased.status.success(),
         "aliased same-npub login failed: {}",
@@ -414,13 +412,14 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
     assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
     assert!(stored.get("nostr/signer-alias:dedicated").is_some());
-    let alias: serde_json::Value = serde_json::from_str(
-        stored["nostr/alias:dedicated"]
-            .as_str()
-            .context("dedicated alias record missing")?,
-    )?;
-    assert_eq!(alias["npub"], npub);
-    assert_eq!(alias["credential"], "signer-alias:dedicated");
+    assert_eq!(stored["nostr/alias:dedicated"], npub);
+    assert_eq!(
+        stored["nostr/alias-credential:dedicated"],
+        "signer-alias:dedicated"
+    );
+
+    first_task.abort();
+    second_task.abort();
 
     let first_export = export_stored_signer(&first_repo, credentials.path()).await?;
     let aliased_export = export_stored_signer(&aliased_repo, credentials.path()).await?;
@@ -434,6 +433,127 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         aliased_export.client_key,
         second_client_keys.secret_key().to_secret_hex()
     );
+
+    let sole_credentials = NamedTempFile::new()?;
+    let mut sole_stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    sole_stored
+        .as_object_mut()
+        .context("credential store should be a JSON object")?
+        .remove(&format!("nostr/signer:{npub}"));
+    std::fs::write(sole_credentials.path(), serde_json::to_vec(&sole_stored)?)?;
+    let npub_repo = harness.fresh_repo()?;
+    let npub_login = npub_repo
+        .ngit([
+            "--signer",
+            &npub,
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", sole_credentials.path())
+        .output()
+        .await?;
+    assert!(
+        npub_login.status.success(),
+        "npub did not resolve its sole alias-specific signer: {}",
+        String::from_utf8_lossy(&npub_login.stderr)
+    );
+    let npub_export = export_stored_signer(&npub_repo, sole_credentials.path()).await?;
+    assert_eq!(npub_export.bunker_uri, second_uri);
+    assert_eq!(
+        npub_export.client_key,
+        second_client_keys.secret_key().to_secret_hex()
+    );
+    let alias_export = export_stored_signer(&aliased_repo, sole_credentials.path()).await?;
+    assert_eq!(alias_export.bunker_uri, second_uri);
+    assert_eq!(
+        alias_export.client_key,
+        second_client_keys.secret_key().to_secret_hex()
+    );
+
+    let ambiguous_credentials = NamedTempFile::new()?;
+    let mut ambiguous_stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    let values = ambiguous_stored
+        .as_object_mut()
+        .context("credential store should be a JSON object")?;
+    let default = values
+        .remove(&format!("nostr/signer:{npub}"))
+        .context("default signer record should exist")?;
+    values.insert("nostr/signer-alias:other".to_string(), default);
+    values.insert(
+        "nostr/alias:other".to_string(),
+        serde_json::Value::String(npub.clone()),
+    );
+    values.insert(
+        "nostr/alias-credential:other".to_string(),
+        serde_json::Value::String("signer-alias:other".to_string()),
+    );
+    std::fs::write(
+        ambiguous_credentials.path(),
+        serde_json::to_vec(&ambiguous_stored)?,
+    )?;
+    let ambiguous_repo = harness.fresh_repo()?;
+    let ambiguous_login = ambiguous_repo
+        .ngit([
+            "--signer",
+            &npub,
+            "account",
+            "login",
+            "--local",
+            "--offline",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", ambiguous_credentials.path())
+        .output()
+        .await?;
+    assert!(!ambiguous_login.status.success());
+    let stderr = String::from_utf8_lossy(&ambiguous_login.stderr);
+    assert!(
+        stderr.contains("multiple remote-signer connections")
+            && stderr.contains("--signer <alias>"),
+        "ambiguous bare-npub selection should require an alias: {stderr}"
+    );
+
+    let migration_credentials = NamedTempFile::new()?;
+    let mut migration_stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    migration_stored["nostr/alias:dedicated"] =
+        serde_json::Value::String(serde_json::to_string(&serde_json::json!({
+            "version": 1,
+            "type": "alias",
+            "npub": npub,
+            "credential": "signer-alias:dedicated",
+        }))?);
+    std::fs::write(
+        migration_credentials.path(),
+        serde_json::to_vec(&migration_stored)?,
+    )?;
+    let migration_repo = harness.fresh_repo()?;
+    let migration = migration_repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--alias",
+            "dedicated",
+        ])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", migration_credentials.path())
+        .output()
+        .await?;
+    assert!(
+        migration.status.success(),
+        "intermediate alias migration failed: {}",
+        String::from_utf8_lossy(&migration.stderr)
+    );
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(migration_credentials.path())?)?;
+    assert_eq!(migrated["nostr/alias:dedicated"], npub);
 
     let logout = aliased_repo
         .ngit(["account", "logout", "--forget"])
@@ -458,6 +578,12 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
             .get("nostr/signer-alias:dedicated")
             .is_none(),
         "forgetting an aliased session should remove only its bound credential"
+    );
+    assert!(
+        stored_after_logout
+            .get("nostr/alias-credential:dedicated")
+            .is_none(),
+        "forgetting an aliased session should remove its public binding"
     );
     Ok(())
 }

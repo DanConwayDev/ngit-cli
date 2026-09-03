@@ -131,6 +131,10 @@ publication.
   the same npub before failing to persist Git config. A bare npub retains its
   default signer, while `--alias <name>` stores and selects additional signer
   sessions independently for login, push, and `account export-keys`.
+  Credential-store alias values remain raw npubs so older ngit versions can
+  continue reading them. If only one session remains and it was stored for an
+  alias, either the npub or alias can still select it; multiple sessions with
+  no default require an alias.
 - `ngit repo edit` now refreshes the maintainer's current announcement from
   every NIP-65 write relay before deriving a replacement. A cold cache can no
   longer let a stale indexer announcement make a targeted `--add-*` edit drop

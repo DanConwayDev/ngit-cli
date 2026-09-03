@@ -57,10 +57,13 @@ any of these places:
 - `credentials.json`: `nostr/alias:fred` contains `npub1…`
 - git config: `nostr.signer-alias.fred = npub1…`
 
-The credential-store form may instead be a typed public alias record containing
-that npub plus a concrete bunker credential entry. This lets two aliases select
-different NIP-46 sessions for one npub without exposing either session's
-secret. Git config deliberately keeps only the portable alias-to-npub mapping.
+The credential-store alias value remains a raw npub so older ngit versions can
+continue reading it. New versions may also store a public
+`alias-credential:<alias>` companion naming one concrete bunker credential.
+This lets two aliases select different NIP-46 sessions for one npub without
+exposing either session's secret. Older versions ignore the companion and fall
+back to the identity's default signer. Git config likewise keeps only the
+portable alias-to-npub mapping.
 
 Aliases are resolved from the OS credential store first, then
 `credentials.json`, then local, global, and system Git config. The JSON store
@@ -75,14 +78,17 @@ fred` reactivates it without requiring the nsec or bunker URL again.
 login and assigns the resulting connection to `fred`, replacing that alias's
 previous signer connection while leaving the bare-npub default intact.
 
-A bare npub continues to select the identity's default credential. Pairing a
-different remote-signer connection for an npub that already has a default is
-refused before the stored connection is replaced. Supply a new alias, for
-example `ngit account login --local --nbunksec-file dedicated.nbunksec --alias
-dedicated`, to retain both sessions and bind that alias to the new one. An
-explicit `--secret-storage git-config` policy can still create a scoped
-plaintext override, but a credential collision never offers that as its
-automatic fallback.
+A bare npub selects the identity's default credential when one exists. If the
+default has been removed and exactly one alias-specific connection remains,
+the npub and that alias both select the remaining connection. More than one
+alias-specific connection without a default makes bare-npub selection
+ambiguous, so an alias is required. Pairing a different remote-signer
+connection for an npub that already has a default is refused before the stored
+connection is replaced. Supply a new alias, for example `ngit account login
+--local --nbunksec-file dedicated.nbunksec --alias dedicated`, to retain both
+sessions and bind that alias to the new one. An explicit `--secret-storage
+git-config` policy can still create a scoped plaintext override, but a
+credential collision never offers that as its automatic fallback.
 
 A cached profile name is a third selector form: `--signer DanConwayDev` or
 `--signer "DanConwayDev's Agent"`. Selector precedence is npub, then alias,
@@ -184,8 +190,8 @@ The service is `nostr`, not `ngit`, because these entries pair with `nostr.*`
 git config keys and are useful to other nostr applications. Namespaces keep
 record types distinct: bare `npub1…` for an identity nsec, `signer:npub1…` for
 the default typed bunker record, `signer-alias:<name>` for an additional bunker
-connection, and `alias:<name>` for an alias mapping or typed public credential
-binding.
+connection, `alias:<name>` for the raw npub alias mapping, and
+`alias-credential:<name>` for its optional public credential binding.
 
 The entry's secret is written as an **`nsec1…` bech32 string**, so the
 platform's own credential UI can display it and a user can recover the key

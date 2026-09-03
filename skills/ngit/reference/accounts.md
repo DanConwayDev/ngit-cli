@@ -74,6 +74,11 @@ an additional connection, then use that alias with `--signer`,
 connection. A collision does not offer plaintext Git config as a fallback;
 that storage mode remains available only when explicitly selected with
 `--secret-storage git-config`.
+Credential-store alias values remain raw npubs for compatibility with older
+ngit versions. Exact remote-session selection uses a separate public binding;
+older versions ignore it and select the identity's default signer.
+If no default remains, a sole alias-specific connection can also be selected
+by npub; multiple remaining connections require an alias.
 
 For remote signers, `nbunksec` is a portable established connection containing
 the remote-signer pubkey, client/app secret key, relays, and optional original

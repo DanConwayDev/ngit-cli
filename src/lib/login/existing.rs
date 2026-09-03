@@ -871,6 +871,28 @@ fn resolve_signer_for_npub(
         }));
     }
 
+    let alias_signers = credential_store::alias_bunker_signers(expected_npub)?;
+    match alias_signers.as_slice() {
+        [] => {}
+        [(_, record)] => {
+            return Ok(Some(SignerInfo::Bunker {
+                bunker_uri: record.bunker_uri.clone(),
+                bunker_app_key: record.client_nsec.clone(),
+                npub: Some(expected_npub.to_string()),
+            }));
+        }
+        signers => {
+            let aliases = signers
+                .iter()
+                .map(|(alias, _)| format!("'{alias}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "selected signer {expected_npub} has multiple remote-signer connections ({aliases}); select one with `--signer <alias>`"
+            );
+        }
+    }
+
     if let Some(error) = store_error.take() {
         return Err(error.context(format!(
             "failed to resolve bunker record for selected signer {expected_npub}"
