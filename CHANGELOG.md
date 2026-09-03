@@ -127,6 +127,10 @@ publication.
 
 ### Fixed
 
+- Remote-signer login no longer overwrites a different NIP-46 connection for
+  the same npub before failing to persist Git config. A bare npub retains its
+  default signer, while `--alias <name>` stores and selects additional signer
+  sessions independently for login, push, and `account export-keys`.
 - `ngit repo edit` now refreshes the maintainer's current announcement from
   every NIP-65 write relay before deriving a replacement. A cold cache can no
   longer let a stale indexer announcement make a targeted `--add-*` edit drop

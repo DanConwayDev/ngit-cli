@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -6,8 +7,12 @@ use std::{
     time::Duration,
 };
 
+use anyhow::{Context, Result};
 use futures::StreamExt;
-use ngit::{cli_interactor::Printer, login::fresh::listen_for_remote_signer};
+use ngit::{
+    cli_interactor::Printer,
+    login::{fresh::listen_for_remote_signer, nbunksec},
+};
 use nostr::{
     event::{EventBuilder, Kind},
     filter::Filter,
@@ -16,7 +21,7 @@ use nostr::{
         NostrConnectEventBuilder, NostrConnectMessage, NostrConnectRequest, NostrConnectResponse,
         NostrConnectUri, ResponseResult,
     },
-    prelude::event::FinalizeEvent,
+    prelude::{ToBech32, event::FinalizeEvent},
     types::RelayUrl,
 };
 use nostr_connect::signer::{
@@ -26,6 +31,8 @@ use nostr_sdk::{
     client::{Client, ClientNotification},
     local_relay::LocalRelayBuilder,
 };
+use tempfile::NamedTempFile;
+use test_harness::{Harness, repo::Repo};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 /// Upper bound on waiting for an observable condition on the local relay.
@@ -164,6 +171,57 @@ fn spawn_connect_response_resender(
     })
 }
 
+async fn run_nbunksec_login(
+    repo: &Repo,
+    encoded: &str,
+    credentials: &Path,
+    alias: Option<&str>,
+) -> Result<std::process::Output> {
+    let mut args = vec![
+        "account",
+        "login",
+        "--local",
+        "--offline",
+        "--nbunksec",
+        encoded,
+    ];
+    if let Some(alias) = alias {
+        args.extend(["--alias", alias]);
+    }
+    let mut command = repo.ngit(args);
+    command
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials);
+    command.kill_on_drop(true);
+    tokio::time::timeout(Duration::from_secs(30), command.output())
+        .await
+        .context("remote-signer login did not finish before its deadline")?
+        .context("failed to spawn remote-signer login")
+}
+
+async fn export_stored_signer(
+    repo: &Repo,
+    credentials: &Path,
+) -> Result<nbunksec::BunkerConnection> {
+    let output = repo
+        .ngit(["account", "export-keys", "--json"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials)
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "stored signer export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    nbunksec::decode(
+        document["nbunksec"]
+            .as_str()
+            .context("stored remote signer export omitted nbunksec")?,
+    )
+}
+
 async fn assert_login_persists_remote_signer_pubkey(connect_from_client_uri: bool) {
     let relay = LocalRelayBuilder::default().build();
     let relay_url = relay.url().await;
@@ -251,6 +309,157 @@ async fn nostrconnect_login_persists_remote_signer_pubkey() {
 #[tokio::test]
 async fn bunker_login_persists_remote_signer_pubkey() {
     assert_login_persists_remote_signer_pubkey(false).await;
+}
+
+#[tokio::test]
+async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Result<()> {
+    let relay = LocalRelayBuilder::default().build();
+    let relay_url = relay.url().await;
+    relay.run().await?;
+
+    let user_keys = Keys::generate();
+    let first_remote_keys = Keys::generate();
+    let second_remote_keys = Keys::generate();
+    let first_client_keys = Keys::generate();
+    let second_client_keys = Keys::generate();
+    let first_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: first_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let second_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: second_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let first_uri = first_remote.bunker_uri().to_string();
+    let second_uri = second_remote.bunker_uri().to_string();
+    let first_task = tokio::spawn(async move { first_remote.serve(ApproveAll).await });
+    let second_task = tokio::spawn(async move { second_remote.serve(ApproveAll).await });
+    wait_until_signer_ready(&relay_url, first_remote_keys.public_key()).await;
+    wait_until_signer_ready(&relay_url, second_remote_keys.public_key()).await;
+
+    let first_encoded =
+        nbunksec::encode(&first_uri, &first_client_keys.secret_key().to_secret_hex())?;
+    let second_encoded = nbunksec::encode(
+        &second_uri,
+        &second_client_keys.secret_key().to_secret_hex(),
+    )?;
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let first_repo = harness.fresh_repo()?;
+    let rejected_repo = harness.fresh_repo()?;
+    let aliased_repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+
+    let first = run_nbunksec_login(&first_repo, &first_encoded, credentials.path(), None).await?;
+    assert!(
+        first.status.success(),
+        "initial remote-signer login failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let npub = user_keys.public_key().to_bech32()?;
+    assert_eq!(
+        first_repo.config("nostr.signer").await?.as_deref(),
+        Some(npub.as_str()),
+        "credential-backed bunker login should persist its resolved npub"
+    );
+    let before_rejected_login = std::fs::read(credentials.path())?;
+
+    let rejected =
+        run_nbunksec_login(&rejected_repo, &second_encoded, credentials.path(), None).await?;
+    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        stderr.contains("different signer credential") && stderr.contains("--alias <name>"),
+        "same-npub replacement should explain the alias escape hatch: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(credentials.path())?,
+        before_rejected_login,
+        "a rejected same-npub login must not alter the original credential"
+    );
+
+    let aliased = run_nbunksec_login(
+        &aliased_repo,
+        &second_encoded,
+        credentials.path(),
+        Some("dedicated"),
+    )
+    .await?;
+    first_task.abort();
+    second_task.abort();
+    assert!(
+        aliased.status.success(),
+        "aliased same-npub login failed: {}",
+        String::from_utf8_lossy(&aliased.stderr)
+    );
+    assert_eq!(
+        aliased_repo.config("nostr.signer").await?.as_deref(),
+        Some("dedicated")
+    );
+
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
+    assert!(stored.get("nostr/signer-alias:dedicated").is_some());
+    let alias: serde_json::Value = serde_json::from_str(
+        stored["nostr/alias:dedicated"]
+            .as_str()
+            .context("dedicated alias record missing")?,
+    )?;
+    assert_eq!(alias["npub"], npub);
+    assert_eq!(alias["credential"], "signer-alias:dedicated");
+
+    let first_export = export_stored_signer(&first_repo, credentials.path()).await?;
+    let aliased_export = export_stored_signer(&aliased_repo, credentials.path()).await?;
+    assert_eq!(first_export.bunker_uri, first_uri);
+    assert_eq!(
+        first_export.client_key,
+        first_client_keys.secret_key().to_secret_hex()
+    );
+    assert_eq!(aliased_export.bunker_uri, second_uri);
+    assert_eq!(
+        aliased_export.client_key,
+        second_client_keys.secret_key().to_secret_hex()
+    );
+
+    let logout = aliased_repo
+        .ngit(["account", "logout", "--forget"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        logout.status.success(),
+        "aliased signer logout failed: {}",
+        String::from_utf8_lossy(&logout.stderr)
+    );
+    let stored_after_logout: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert!(
+        stored_after_logout
+            .get(format!("nostr/signer:{npub}"))
+            .is_some()
+    );
+    assert!(
+        stored_after_logout
+            .get("nostr/signer-alias:dedicated")
+            .is_none(),
+        "forgetting an aliased session should remove only its bound credential"
+    );
+    Ok(())
 }
 
 #[tokio::test]

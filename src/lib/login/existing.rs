@@ -551,21 +551,31 @@ pub async fn resolve_selection(
     allow_profile_name: bool,
 ) -> Result<ResolvedSelection> {
     match resolve_selector_npub(git_repo, selector) {
-        Ok(npub) => {
+        Ok(target) => {
             let alias = if selector.starts_with("npub1") {
                 None
             } else {
                 credential_store::normalize_alias(selector).ok()
             };
-            let signer_info =
-                resolve_signer_for_npub(git_repo, &npub, password)?.ok_or_else(|| {
+            let signer_info = if let Some(credential) = target.credential {
+                let signer =
+                    credential_store::retrieve_bunker_signer_named(&credential, &target.npub)?;
+                SignerInfo::Bunker {
+                    bunker_uri: signer.bunker_uri,
+                    bunker_app_key: signer.client_nsec,
+                    npub: Some(target.npub.clone()),
+                }
+            } else {
+                resolve_signer_for_npub(git_repo, &target.npub, password)?.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "selected signer {npub} is not available in the OS credential store, credentials.json, or git config"
+                        "selected signer {} is not available in the OS credential store, credentials.json, or git config",
+                        target.npub
                     )
-                })?;
+                })?
+            };
             Ok(ResolvedSelection {
                 signer_info,
-                npub,
+                npub: target.npub,
                 alias,
             })
         }
@@ -921,18 +931,32 @@ pub fn command_signer_public_key(
     }
 }
 
-fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<String> {
+struct SelectorTarget {
+    npub: String,
+    credential: Option<String>,
+}
+
+fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<SelectorTarget> {
     if selector.starts_with("npub1") {
-        return PublicKey::parse(selector)
+        let npub = PublicKey::parse(selector)
             .context("--signer contains an invalid npub")?
             .to_bech32()
-            .map_err(Into::into);
+            .map_err(anyhow::Error::from)?;
+        return Ok(SelectorTarget {
+            npub,
+            credential: None,
+        });
     }
     let alias = credential_store::normalize_alias(selector)?;
     let key = format!("nostr.signer-alias.{alias}");
     let mut store_error = None;
-    match credential_store::retrieve_alias_from(&alias, credential_store::Backend::Os) {
-        Ok(npub) => return Ok(npub),
+    match credential_store::retrieve_signer_alias_from(&alias, credential_store::Backend::Os) {
+        Ok(target) => {
+            return Ok(SelectorTarget {
+                npub: target.npub,
+                credential: target.credential,
+            });
+        }
         Err(credential_store::LookupError::Missing(_)) => {}
         Err(credential_store::LookupError::Unavailable(error)) => {
             store_error = Some(error);
@@ -941,8 +965,13 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Str
             return Err(anyhow::Error::new(error));
         }
     }
-    match credential_store::retrieve_alias_from(&alias, credential_store::Backend::File) {
-        Ok(npub) => return Ok(npub),
+    match credential_store::retrieve_signer_alias_from(&alias, credential_store::Backend::File) {
+        Ok(target) => {
+            return Ok(SelectorTarget {
+                npub: target.npub,
+                credential: target.credential,
+            });
+        }
         Err(credential_store::LookupError::Missing(_)) => {}
         Err(credential_store::LookupError::Unavailable(error)) => {
             store_error = Some(error);
@@ -953,7 +982,7 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Str
     }
     for scope in selection_scopes(git_repo) {
         if let Some(npub) = config_value(git_repo, scope, &key)? {
-            return PublicKey::parse(&npub)
+            let npub = PublicKey::parse(&npub)
                 .with_context(|| {
                     format!(
                         "{} git config maps alias '{alias}' to an invalid npub",
@@ -961,7 +990,11 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Str
                     )
                 })?
                 .to_bech32()
-                .map_err(Into::into);
+                .map_err(anyhow::Error::from)?;
+            return Ok(SelectorTarget {
+                npub,
+                credential: None,
+            });
         }
     }
     store_error.map_or_else(

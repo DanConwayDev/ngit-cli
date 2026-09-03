@@ -43,8 +43,10 @@ pub enum Backend {
 }
 
 const SIGNER_RECORD_VERSION: u8 = 1;
+const ALIAS_RECORD_VERSION: u8 = 1;
 const ALIAS_PREFIX: &str = "alias:";
 const SIGNER_PREFIX: &str = "signer:";
+const ALIAS_SIGNER_PREFIX: &str = "signer-alias:";
 
 /// Public identities and aliases known to the credential backends. No secret
 /// material is exposed through this inventory.
@@ -64,6 +66,42 @@ pub struct BunkerSigner {
     pub client_nsec: String,
 }
 
+/// The identity and optional concrete signer credential selected by an alias.
+///
+/// Legacy aliases contain only an npub and therefore select that identity's
+/// default credential. New aliases may bind one particular NIP-46 connection
+/// when several connections serve the same identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerAlias {
+    pub npub: String,
+    pub credential: Option<String>,
+}
+
+#[derive(Debug)]
+struct SignerCredentialConflict {
+    npub: String,
+}
+
+impl fmt::Display for SignerCredentialConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "a different signer credential is already stored for {}; refusing to replace it. Re-run with `--alias <name>` to store this remote signer connection separately",
+            self.npub
+        )
+    }
+}
+
+impl std::error::Error for SignerCredentialConflict {}
+
+/// Whether an error reports an intentional refusal to replace a stored signer.
+///
+/// Callers must not treat this as an unavailable credential backend and offer
+/// plaintext storage as a fallback.
+pub(crate) fn is_signer_credential_conflict(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SignerCredentialConflict>().is_some()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct BunkerSignerRecord {
     version: u8,
@@ -72,6 +110,15 @@ struct BunkerSignerRecord {
     npub: String,
     bunker_uri: String,
     client_nsec: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SignerAliasRecord {
+    version: u8,
+    #[serde(rename = "type")]
+    record_type: String,
+    npub: String,
+    credential: String,
 }
 
 static POLICY_OVERRIDE: OnceLock<SecretStorage> = OnceLock::new();
@@ -212,6 +259,18 @@ pub fn signer_entry_name(npub: &str) -> Result<String> {
     Ok(format!("{SIGNER_PREFIX}{}", canonical_npub(npub)?))
 }
 
+pub fn alias_signer_entry_name(alias: &str) -> Result<String> {
+    Ok(format!("{ALIAS_SIGNER_PREFIX}{}", normalize_alias(alias)?))
+}
+
+pub fn is_bunker_signer_entry_name(name: &str) -> bool {
+    name.strip_prefix(SIGNER_PREFIX)
+        .is_some_and(|npub| canonical_npub(npub).is_ok())
+        || name
+            .strip_prefix(ALIAS_SIGNER_PREFIX)
+            .is_some_and(|alias| normalize_alias(alias).is_ok())
+}
+
 pub fn alias_entry_name(alias: &str) -> Result<String> {
     Ok(format!("{ALIAS_PREFIX}{}", normalize_alias(alias)?))
 }
@@ -288,13 +347,16 @@ pub fn store(keys: &Keys, policy: SecretStorage) -> Result<(String, Backend)> {
     Ok((name, Backend::File))
 }
 
-/// Store a complete NIP-46 signer record under `signer:<user-npub>`.
+/// Store a complete NIP-46 signer record under `signer:<user-npub>` or an
+/// alias-specific entry when another credential already owns the identity's
+/// default slot.
 /// Any one-time pairing secret in the supplied bunker URI is deliberately
 /// removed before serialization.
 pub fn store_bunker_signer(
     npub: &str,
     bunker_uri: &str,
     client_keys: &Keys,
+    alias: Option<&str>,
     policy: SecretStorage,
 ) -> Result<(String, Backend)> {
     let npub = canonical_npub(npub)?;
@@ -309,10 +371,65 @@ pub fn store_bunker_signer(
     let serialized = Zeroizing::new(
         serde_json::to_string(&record).context("failed to serialize bunker signer record")?,
     );
-    let name = signer_entry_name(&npub)?;
+    let signer = parse_bunker_signer("new remote signer", &npub, serialized.as_str())?;
+    let name = bunker_signer_entry_for_store(&npub, alias, &signer)?;
     let stored = store_value(&name, serialized.as_str(), policy)?;
     remember_account_for_listing(&npub);
     Ok(stored)
+}
+
+fn bunker_signer_entry_for_store(
+    npub: &str,
+    alias: Option<&str>,
+    signer: &BunkerSigner,
+) -> Result<String> {
+    let default_name = signer_entry_name(npub)?;
+    let existing_nsec = signer_nsec_exists(npub)?;
+    let existing_default = bunker_signers_named(&default_name, npub)?;
+
+    let Some(alias) = alias else {
+        if existing_nsec || existing_default.iter().any(|stored| stored != signer) {
+            return Err(SignerCredentialConflict {
+                npub: npub.to_string(),
+            }
+            .into());
+        }
+        return Ok(default_name);
+    };
+
+    let alias_name = alias_signer_entry_name(alias)?;
+    if !bunker_signers_named(&alias_name, npub)?.is_empty() {
+        return Ok(alias_name);
+    }
+    if existing_nsec || existing_default.iter().any(|stored| stored != signer) {
+        Ok(alias_name)
+    } else {
+        Ok(default_name)
+    }
+}
+
+fn signer_nsec_exists(npub: &str) -> Result<bool> {
+    let mut found = false;
+    for backend in [Backend::Os, Backend::File] {
+        match retrieve_from(npub, backend) {
+            Ok(_) => found = true,
+            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(error @ LookupError::Invalid(_)) => return Err(anyhow!(error)),
+        }
+    }
+    Ok(found)
+}
+
+fn bunker_signers_named(name: &str, npub: &str) -> Result<Vec<BunkerSigner>> {
+    let mut signers = Vec::new();
+    for backend in [Backend::Os, Backend::File] {
+        match retrieve_bunker_signer_named_from(name, npub, backend) {
+            Ok(signer) => signers.push(signer),
+            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(error @ LookupError::Invalid(_)) => return Err(anyhow!(error)),
+        }
+    }
+    Ok(signers)
 }
 
 pub fn retrieve_bunker_signer(npub: &str) -> std::result::Result<BunkerSigner, LookupError> {
@@ -324,6 +441,37 @@ pub fn retrieve_bunker_signer(npub: &str) -> std::result::Result<BunkerSigner, L
     parse_bunker_signer(&name, &expected_npub, &serialized)
 }
 
+pub fn retrieve_bunker_signer_named(
+    name: &str,
+    expected_npub: &str,
+) -> std::result::Result<BunkerSigner, LookupError> {
+    let expected_npub = canonical_npub(expected_npub)
+        .map_err(|error| LookupError::Invalid(format!("invalid selected signer: {error:#}")))?;
+    if !valid_bunker_signer_entry_name(name, &expected_npub) {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' is not a signer entry for {expected_npub}"
+        )));
+    }
+    let serialized = retrieve_value(name)?;
+    parse_bunker_signer(name, &expected_npub, &serialized)
+}
+
+fn retrieve_bunker_signer_named_from(
+    name: &str,
+    expected_npub: &str,
+    backend: Backend,
+) -> std::result::Result<BunkerSigner, LookupError> {
+    let expected_npub = canonical_npub(expected_npub)
+        .map_err(|error| LookupError::Invalid(format!("invalid selected signer: {error:#}")))?;
+    if !valid_bunker_signer_entry_name(name, &expected_npub) {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' is not a signer entry for {expected_npub}"
+        )));
+    }
+    let serialized = retrieve_value_from(name, backend)?;
+    parse_bunker_signer(name, &expected_npub, &serialized)
+}
+
 pub fn retrieve_bunker_signer_from(
     npub: &str,
     backend: Backend,
@@ -332,19 +480,35 @@ pub fn retrieve_bunker_signer_from(
         .map_err(|error| LookupError::Invalid(format!("invalid selected signer: {error:#}")))?;
     let name = signer_entry_name(&expected_npub)
         .map_err(|error| LookupError::Invalid(error.to_string()))?;
-    let serialized = retrieve_value_from(&name, backend)?;
-    let signer = parse_bunker_signer(&name, &expected_npub, &serialized)?;
+    let signer = retrieve_bunker_signer_named_from(&name, &expected_npub, backend)?;
     if backend == Backend::Os {
         remember_account_for_listing(&expected_npub);
     }
     Ok(signer)
 }
 
-pub fn store_alias(alias: &str, npub: &str, policy: SecretStorage) -> Result<(String, Backend)> {
+pub fn store_alias(
+    alias: &str,
+    npub: &str,
+    credential: Option<&str>,
+    policy: SecretStorage,
+) -> Result<(String, Backend)> {
     ensure_alias_available(alias, npub)?;
     let name = alias_entry_name(alias)?;
     let npub = canonical_npub(npub)?;
-    let stored = store_value(&name, &npub, policy)?;
+    let value = if let Some(credential) = credential {
+        validate_alias_credential(alias, &npub, credential)?;
+        serde_json::to_string(&SignerAliasRecord {
+            version: ALIAS_RECORD_VERSION,
+            record_type: "alias".to_string(),
+            npub: npub.clone(),
+            credential: credential.to_string(),
+        })
+        .context("failed to serialize signer alias record")?
+    } else {
+        npub.clone()
+    };
+    let stored = store_value(&name, &value, policy)?;
     remember_alias_for_listing(alias, &npub);
     Ok(stored)
 }
@@ -356,11 +520,12 @@ pub fn ensure_alias_available(alias: &str, npub: &str) -> Result<()> {
     let alias = normalize_alias(alias)?;
     let npub = canonical_npub(npub)?;
     for backend in [Backend::Os, Backend::File] {
-        match retrieve_alias_from(&alias, backend) {
-            Ok(existing) if existing == npub => {}
+        match retrieve_signer_alias_from(&alias, backend) {
+            Ok(existing) if existing.npub == npub => {}
             Ok(existing) => {
                 bail!(
-                    "signer alias '{alias}' already identifies {existing} in the {} credential store; choose another alias or remove entry 'alias:{alias}' first",
+                    "signer alias '{alias}' already identifies {} in the {} credential store; choose another alias or remove entry 'alias:{alias}' first",
+                    existing.npub,
                     match backend {
                         Backend::Os => "OS",
                         Backend::File => "file",
@@ -377,25 +542,74 @@ pub fn ensure_alias_available(alias: &str, npub: &str) -> Result<()> {
 }
 
 pub fn retrieve_alias(alias: &str) -> std::result::Result<String, LookupError> {
+    retrieve_signer_alias(alias).map(|alias| alias.npub)
+}
+
+pub fn retrieve_signer_alias(alias: &str) -> std::result::Result<SignerAlias, LookupError> {
     let name = alias_entry_name(alias)
         .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
-    let npub = retrieve_value(&name)?;
-    canonical_alias_npub(&name, &npub)
+    let value = retrieve_value(&name)?;
+    parse_signer_alias(&name, &value)
 }
 
 pub fn retrieve_alias_from(
     alias: &str,
     backend: Backend,
 ) -> std::result::Result<String, LookupError> {
+    retrieve_signer_alias_from(alias, backend).map(|alias| alias.npub)
+}
+
+pub fn retrieve_signer_alias_from(
+    alias: &str,
+    backend: Backend,
+) -> std::result::Result<SignerAlias, LookupError> {
     let name = alias_entry_name(alias)
         .map_err(|error| LookupError::Invalid(format!("invalid signer alias: {error:#}")))?;
-    let npub = retrieve_value_from(&name, backend)?;
-    let npub = canonical_alias_npub(&name, &npub)?;
+    let value = retrieve_value_from(&name, backend)?;
+    let target = parse_signer_alias(&name, &value)?;
     if backend == Backend::Os {
-        remember_account_for_listing(&npub);
-        remember_alias_for_listing(alias, &npub);
+        remember_account_for_listing(&target.npub);
+        remember_alias_for_listing(alias, &target.npub);
     }
-    Ok(npub)
+    Ok(target)
+}
+
+fn parse_signer_alias(name: &str, value: &str) -> std::result::Result<SignerAlias, LookupError> {
+    if !value.trim_start().starts_with('{') {
+        return canonical_alias_npub(name, value).map(|npub| SignerAlias {
+            npub,
+            credential: None,
+        });
+    }
+    let record: SignerAliasRecord = serde_json::from_str(value).map_err(|error| {
+        LookupError::Invalid(format!(
+            "credential '{name}' is not a valid signer alias record: {error}"
+        ))
+    })?;
+    if record.version != ALIAS_RECORD_VERSION || record.record_type != "alias" {
+        return Err(LookupError::Invalid(format!(
+            "credential '{name}' uses an unsupported signer alias record type or version"
+        )));
+    }
+    let npub = canonical_alias_npub(name, &record.npub)?;
+    let alias = name.strip_prefix(ALIAS_PREFIX).ok_or_else(|| {
+        LookupError::Invalid(format!("credential '{name}' is not a signer alias"))
+    })?;
+    validate_alias_credential(alias, &npub, &record.credential)
+        .map_err(|error| LookupError::Invalid(error.to_string()))?;
+    Ok(SignerAlias {
+        npub,
+        credential: Some(record.credential),
+    })
+}
+
+fn validate_alias_credential(alias: &str, npub: &str, credential: &str) -> Result<()> {
+    let default = signer_entry_name(npub)?;
+    let dedicated = alias_signer_entry_name(alias)?;
+    if credential != default && credential != dedicated {
+        bail!("signer alias '{alias}' points to invalid credential entry '{credential}'");
+    }
+    Ok(())
 }
 
 fn canonical_alias_npub(name: &str, npub: &str) -> std::result::Result<String, LookupError> {
@@ -469,6 +683,13 @@ fn parse_bunker_signer(
             LookupError::Invalid(format!("failed to encode client nsec: {error}"))
         })?,
     })
+}
+
+fn valid_bunker_signer_entry_name(name: &str, expected_npub: &str) -> bool {
+    signer_entry_name(expected_npub).is_ok_and(|expected| expected == name)
+        || name
+            .strip_prefix(ALIAS_SIGNER_PREFIX)
+            .is_some_and(|alias| normalize_alias(alias).is_ok())
 }
 
 fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String, Backend)> {
@@ -725,9 +946,7 @@ pub fn forget(name: &str) -> Result<bool> {
 
 pub fn valid_entry_name(name: &str) -> bool {
     parse_pointer(name).is_some()
-        || name
-            .strip_prefix(SIGNER_PREFIX)
-            .is_some_and(|npub| canonical_npub(npub).is_ok())
+        || is_bunker_signer_entry_name(name)
         || name
             .strip_prefix(ALIAS_PREFIX)
             .is_some_and(|alias| normalize_alias(alias).is_ok())
@@ -757,6 +976,14 @@ pub fn config_pointers(
             .ok()
             .flatten()
         {
+            if let Ok(alias) = normalize_alias(&selector) {
+                if let Ok(target) = retrieve_signer_alias(&alias) {
+                    if let Some(credential) = target.credential {
+                        pointers.insert(credential);
+                        return pointers.into_iter().collect();
+                    }
+                }
+            }
             let npub = if let Some(npub) = resolved_npub {
                 Some(npub.to_string())
             } else if selector.starts_with("npub1") && PublicKey::parse(&selector).is_ok() {
@@ -1063,8 +1290,8 @@ mod file_store {
     use tempfile::NamedTempFile;
 
     use super::{
-        ALIAS_PREFIX, CredentialInventory, SERVICE, SIGNER_PREFIX, canonical_npub, normalize_alias,
-        parse_pointer,
+        ALIAS_PREFIX, ALIAS_SIGNER_PREFIX, BunkerSignerRecord, CredentialInventory, SERVICE,
+        SIGNER_PREFIX, canonical_npub, normalize_alias, parse_pointer, parse_signer_alias,
     };
 
     pub fn path() -> Result<PathBuf> {
@@ -1115,10 +1342,19 @@ mod file_store {
             };
             if let Some(npub) = parse_pointer(name) {
                 accounts.insert(canonical_npub(npub)?);
+            } else if name.strip_prefix(ALIAS_SIGNER_PREFIX).is_some() {
+                let record: BunkerSignerRecord = serde_json::from_str(&value)
+                    .with_context(|| format!("credential '{name}' is not a valid signer record"))?;
+                accounts.insert(canonical_npub(&record.npub)?);
             } else if let Some(npub) = name.strip_prefix(SIGNER_PREFIX) {
                 accounts.insert(canonical_npub(npub)?);
             } else if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
-                aliases.insert(normalize_alias(alias)?, canonical_npub(&value)?);
+                aliases.insert(
+                    normalize_alias(alias)?,
+                    parse_signer_alias(name, &value)
+                        .map_err(anyhow::Error::new)?
+                        .npub,
+                );
             }
         }
         Ok(CredentialInventory { accounts, aliases })
@@ -1445,12 +1681,34 @@ mod tests {
         let npub = keys.public_key().to_bech32()?;
         file_store::set_at(&path, &npub, &keys)?;
         file_store::set_value_at(&path, "alias:dcdev", &npub)?;
+        let signer_name = alias_signer_entry_name("remote")?;
+        let signer_value = serde_json::to_string(&BunkerSignerRecord {
+            version: SIGNER_RECORD_VERSION,
+            record_type: "bunker".to_string(),
+            npub: npub.clone(),
+            bunker_uri: format!(
+                "bunker://{}?relay=wss%3A%2F%2Frelay.example.com",
+                Keys::generate().public_key()
+            ),
+            client_nsec: Keys::generate().secret_key().to_bech32()?,
+        })?;
+        file_store::set_value_at(&path, &signer_name, &signer_value)?;
+        let alias_value = serde_json::to_string(&SignerAliasRecord {
+            version: ALIAS_RECORD_VERSION,
+            record_type: "alias".to_string(),
+            npub: npub.clone(),
+            credential: signer_name,
+        })?;
+        file_store::set_value_at(&path, "alias:remote", &alias_value)?;
 
         let inventory = file_store::inventory_at(&path)?;
         assert_eq!(inventory.accounts, BTreeSet::from([npub.clone()]));
         assert_eq!(
             inventory.aliases,
-            BTreeMap::from([("dcdev".to_string(), npub)])
+            BTreeMap::from([
+                ("dcdev".to_string(), npub.clone()),
+                ("remote".to_string(), npub),
+            ])
         );
         Ok(())
     }
@@ -1478,6 +1736,7 @@ mod tests {
     fn alias_names_are_portable_and_namespaced() -> Result<()> {
         assert_eq!(normalize_alias("Fred-2")?, "fred-2");
         assert_eq!(alias_entry_name("Fred-2")?, "alias:fred-2");
+        assert_eq!(alias_signer_entry_name("Fred-2")?, "signer-alias:fred-2");
         for invalid in [
             "",
             "-fred",
@@ -1492,6 +1751,47 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn typed_alias_binds_one_remote_signer_for_an_identity() -> Result<()> {
+        let npub = Keys::generate().public_key().to_bech32()?;
+        let credential = alias_signer_entry_name("dedicated")?;
+        let value = serde_json::to_string(&SignerAliasRecord {
+            version: ALIAS_RECORD_VERSION,
+            record_type: "alias".to_string(),
+            npub: npub.clone(),
+            credential: credential.clone(),
+        })?;
+
+        assert_eq!(
+            parse_signer_alias("alias:dedicated", &value)?,
+            SignerAlias {
+                npub: npub.clone(),
+                credential: Some(credential),
+            }
+        );
+        assert_eq!(
+            parse_signer_alias("alias:legacy", &npub)?,
+            SignerAlias {
+                npub,
+                credential: None,
+            }
+        );
+        assert!(parse_signer_alias("alias:other", &value).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn signer_credential_conflicts_remain_distinguishable_from_backend_failures() {
+        let error = anyhow::Error::new(SignerCredentialConflict {
+            npub: "npub1example".to_string(),
+        });
+
+        assert!(is_signer_credential_conflict(&error));
+        assert!(!is_signer_credential_conflict(&anyhow!(
+            "credential backend unavailable"
+        )));
     }
 
     #[test]

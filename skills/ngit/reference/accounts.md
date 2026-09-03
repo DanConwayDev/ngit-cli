@@ -62,6 +62,15 @@ credentials; it must match exactly one such account, and only the resolved
 npub is ever persisted. Explicit signer selection fails closed when the
 selector is missing, ambiguous, or backed by invalid credentials.
 
+An npub may have more than one NIP-46 connection. The first connection remains
+the default selected by the bare npub; ngit refuses to replace it with a
+different unaliased connection. Add `--alias <name>` while logging in to retain
+an additional connection, then use that alias with `--signer`,
+`git -c nostr.signer=...`, or `account export-keys` to select that exact
+connection. A collision does not offer plaintext Git config as a fallback;
+that storage mode remains available only when explicitly selected with
+`--secret-storage git-config`.
+
 For remote signers, `nbunksec` is a portable established connection containing
 the remote-signer pubkey, client/app secret key, relays, and optional original
 pairing secret. It does not contain the user's npub, so one-shot use resolves

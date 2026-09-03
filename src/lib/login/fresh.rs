@@ -123,17 +123,29 @@ pub async fn fresh_login_or_signup(
         // library callers may still supply one. Persist the separately
         // resolved npub so an alias can never be copied into `nostr.npub`.
         if let Some(alias) = alias {
-            save_signer_alias_into(git_repo, alias, &npub, !save_local, &mut receipts)?;
+            save_signer_alias_into(git_repo, alias, &npub, None, !save_local, &mut receipts)?;
         } else {
             save_signer_selection(git_repo, selector, &npub, !save_local)?;
         }
     } else {
         saved_source =
-            save_to_git_config(git_repo, &signer_info, !save_local, &mut receipts).await?;
+            save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
         if saved_source != SignerInfoSource::CommandLineArguments {
             let saved_globally = saved_source == SignerInfoSource::GitGlobal;
             if let Some(alias) = alias {
-                save_signer_alias_into(git_repo, alias, &npub, saved_globally, &mut receipts)?;
+                let credential = receipts
+                    .secret
+                    .as_ref()
+                    .filter(|receipt| credential_store::is_bunker_signer_entry_name(&receipt.entry))
+                    .map(|receipt| receipt.entry.clone());
+                save_signer_alias_into(
+                    git_repo,
+                    alias,
+                    &npub,
+                    credential.as_deref(),
+                    saved_globally,
+                    &mut receipts,
+                )?;
             } else if let Some(selector) = selected_by {
                 save_signer_selection(git_repo, selector, &npub, saved_globally)?;
             }
@@ -196,13 +208,20 @@ pub async fn login_with_bunker_url(
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
     let mut receipts = CredentialStorageReceipts::default();
-    let source = save_to_git_config(git_repo, &signer_info, !save_local, &mut receipts).await?;
+    let source =
+        save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
     if source != SignerInfoSource::CommandLineArguments {
         if let Some(alias) = alias {
+            let credential = receipts
+                .secret
+                .as_ref()
+                .filter(|receipt| credential_store::is_bunker_signer_entry_name(&receipt.entry))
+                .map(|receipt| receipt.entry.clone());
             save_signer_alias_into(
                 git_repo,
                 alias,
                 &npub,
+                credential.as_deref(),
                 source == SignerInfoSource::GitGlobal,
                 &mut receipts,
             )?;
@@ -866,9 +885,10 @@ async fn save_to_git_config(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
     global: bool,
+    alias: Option<&str>,
     receipts: &mut CredentialStorageReceipts,
 ) -> Result<SignerInfoSource> {
-    let signer_info = protect_secrets(git_repo, signer_info, receipts)?;
+    let signer_info = protect_secrets(git_repo, signer_info, alias, receipts)?;
     let signer_info = &signer_info;
     let global = if std::env::var("NGITTEST").is_ok() {
         false
@@ -880,7 +900,7 @@ async fn save_to_git_config(
         if global { "global" } else { "local" }
     );
     if let Err(error) =
-        silently_save_to_git_config(git_repo, signer_info, global).context(err_msg.clone())
+        persist_protected_signer(git_repo, signer_info, global).context(err_msg.clone())
     {
         // Check if this is a read-only file system error
         let is_readonly_error = error
@@ -961,7 +981,7 @@ async fn save_to_git_config(
                         }
                     }
                     1 => {
-                        silently_save_to_git_config(git_repo, signer_info, false)
+                        persist_protected_signer(git_repo, signer_info, false)
                             .context("failed to configure the signer in local Git config")?;
                         return Ok(SignerInfoSource::GitLocal);
                     }
@@ -1025,6 +1045,7 @@ fn save_signer_alias_into(
     git_repo: &Option<&Repo>,
     alias: &str,
     npub: &str,
+    credential: Option<&str>,
     global: bool,
     receipts: &mut CredentialStorageReceipts,
 ) -> Result<()> {
@@ -1037,7 +1058,7 @@ fn save_signer_alias_into(
     let policy = credential_store::policy(git_repo);
     let credential_backed = policy != SecretStorage::GitConfig;
     receipts.alias = credential_backed
-        .then(|| credential_store::store_alias(&alias, &npub, policy))
+        .then(|| credential_store::store_alias(&alias, &npub, credential, policy))
         .transpose()
         .context("failed to save signer alias in the credential store")?
         .map(|(entry, backend)| CredentialStorageReport {
@@ -1220,6 +1241,7 @@ fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
 fn protect_secrets(
     git_repo: &Option<&Repo>,
     signer_info: &SignerInfo,
+    alias: Option<&str>,
     receipts: &mut CredentialStorageReceipts,
 ) -> Result<SignerInfo> {
     use crate::login::credential_store::{self, SecretStorage};
@@ -1274,7 +1296,7 @@ fn protect_secrets(
             let npub = npub
                 .as_deref()
                 .context("cannot store bunker signer without its user npub")?;
-            credential_store::store_bunker_signer(npub, bunker_uri, &keys, policy).map(
+            credential_store::store_bunker_signer(npub, bunker_uri, &keys, alias, policy).map(
                 |(pointer, backend)| {
                     (
                         SignerInfo::Selection {
@@ -1300,6 +1322,9 @@ fn protect_secrets(
             Ok(protected)
         }
         Err(error) => {
+            if credential_store::is_signer_credential_conflict(&error) {
+                return Err(error);
+            }
             if !Interactor::is_non_interactive()
                 && Interactor::default().confirm(PromptConfirmParms::default().with_prompt(
                     "failed to store the secret in a credential store. save it as plaintext in git config instead?",
@@ -1390,6 +1415,23 @@ fn silently_save_to_git_config(
     Ok(())
 }
 
+/// Persist signer material after credential-store protection. A protected
+/// bunker becomes a canonical npub selection; unlike an unresolved CLI alias,
+/// that selection is safe to write alongside its already-known identity.
+fn persist_protected_signer(
+    git_repo: &Option<&Repo>,
+    signer_info: &SignerInfo,
+    global: bool,
+) -> Result<()> {
+    if let SignerInfo::Selection { selector } = signer_info {
+        let npub = PublicKey::parse(selector)
+            .context("protected remote signer did not resolve to a canonical npub")?
+            .to_bech32()?;
+        return save_signer_selection(git_repo, &npub, &npub, global);
+    }
+    silently_save_to_git_config(git_repo, signer_info, global)
+}
+
 /// Non-interactive signup function for creating a new account
 ///
 /// # Arguments
@@ -1425,7 +1467,8 @@ pub async fn signup_non_interactive(
     // Store the secret and configure the selected Git-config scope.
     let git_repo = Repo::discover().ok();
     let mut receipts = CredentialStorageReceipts::default();
-    let config_signer_info = protect_secrets(&git_repo.as_ref(), &signer_info, &mut receipts)?;
+    let config_signer_info =
+        protect_secrets(&git_repo.as_ref(), &signer_info, None, &mut receipts)?;
     if let Err(error) =
         silently_save_to_git_config(&git_repo.as_ref(), &config_signer_info, !save_local)
     {

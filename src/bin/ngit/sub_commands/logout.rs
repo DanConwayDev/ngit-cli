@@ -145,7 +145,7 @@ fn hint_retained_secrets(forget: bool, pointers: &[String]) {
         return;
     }
     for pointer in pointers {
-        let subject = if pointer.starts_with("signer:") {
+        let subject = if credential_store::is_bunker_signer_entry_name(pointer) {
             "the remote signer connection"
         } else {
             "the account secret"
