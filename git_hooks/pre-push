@@ -2,6 +2,22 @@
 
 set -eu
 
+rustfmt_version="$(rustfmt --version 2>/dev/null || true)"
+case "$rustfmt_version" in
+    *nightly*) ;;
+    *)
+        if [ "${NGIT_PRE_PUSH_IN_DEV_SHELL:-}" != "1" ] && command -v nix >/dev/null 2>&1
+        then
+            echo "Entering ngit's Nix development shell for pre-push checks."
+            exec nix develop --command env NGIT_PRE_PUSH_IN_DEV_SHELL=1 "$0" "$@"
+        fi
+
+        echo "ngit pre-push requires nightly rustfmt because rustfmt.toml uses unstable options."
+        echo "Enter the Nix development shell or put nightly rustfmt on PATH, then retry."
+        exit 1
+        ;;
+esac
+
 if ! cargo fmt -- --check
 then
     echo "There are some code style issues."
