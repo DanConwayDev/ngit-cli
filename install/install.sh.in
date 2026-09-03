@@ -30,12 +30,19 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_nixos() {
+    if [ -e /etc/NIXOS ]; then
+        return 0
+    fi
+    [ -r /etc/os-release ] && grep -qE '^ID=("?nixos"?)$' /etc/os-release
+}
+
 detect_target() {
     ngit_os=$(uname -s)
     ngit_arch=$(uname -m)
     case "$ngit_os:$ngit_arch" in
         Linux:x86_64|Linux:amd64)
-            if ldd --version 2>&1 | grep -qi musl; then
+            if is_nixos || ldd --version 2>&1 | grep -qi musl; then
                 printf '%s\n' 'linux-x86_64-musl'
             else
                 printf '%s\n' 'linux-x86_64-gnu'
@@ -159,10 +166,11 @@ EOF
         chmod 0755 "$ngit_staged"
         mv "$ngit_staged" "$ngit_dir/$ngit_binary"
     done
-    write_receipt "$ngit_dir"
-
     ngit_reported=$("$ngit_dir/ngit" --version)
     [ "$ngit_reported" = "ngit $VERSION" ] || fail "installed ngit reported an unexpected version: $ngit_reported"
+    ngit_remote_reported=$("$ngit_dir/git-remote-nostr" --version)
+    [ "$ngit_remote_reported" = "v$VERSION" ] || fail "installed git-remote-nostr reported an unexpected version: $ngit_remote_reported"
+    write_receipt "$ngit_dir"
     info "Installed ngit v$VERSION to $ngit_dir"
 }
 
