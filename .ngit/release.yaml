@@ -1,0 +1,60 @@
+schema: 1
+application: ngit
+pubkey: npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr
+name: ngit
+summary: Nostr-native Git collaboration from the command line.
+description: |
+  ngit is a command-line client and Git remote helper for decentralized code
+  collaboration over Nostr. It keeps repository state, issues, and pull
+  requests on Nostr while using interchangeable Git servers for object
+  storage.
+tags:
+  - nostr
+  - git
+  - cli
+  - collaboration
+  - development
+license: MIT
+website: https://ngit.dev
+repository: nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
+channel: main
+release_notes: CHANGELOG.md
+publication:
+  blossom_servers:
+    - https://blossom.primal.net
+    - https://blossom.ditto.pub
+    - https://haven.danconwaydev.com
+  zapstore_relay: true
+  add_application_platforms: true
+assets:
+  - file: artifacts/ngit-{tag}-x86_64-unknown-linux-gnu.2.17.tar.gz
+    mime: application/gzip
+    platforms:
+      - linux-x86_64
+    variant: glibc-2.17
+    original_url: https://github.com/DanConwayDev/ngit-cli/releases/download/{tag}/ngit-{tag}-x86_64-unknown-linux-gnu.2.17.tar.gz
+  - file: artifacts/ngit-{tag}-x86_64-unknown-linux-musl.tar.gz
+    mime: application/gzip
+    platforms:
+      - linux-x86_64
+    variant: musl
+    original_url: https://github.com/DanConwayDev/ngit-cli/releases/download/{tag}/ngit-{tag}-x86_64-unknown-linux-musl.tar.gz
+  - file: artifacts/ngit-{tag}-aarch64-unknown-linux-gnu.2.17.tar.gz
+    mime: application/gzip
+    platforms:
+      - linux-aarch64
+    variant: glibc-2.17
+    original_url: https://github.com/DanConwayDev/ngit-cli/releases/download/{tag}/ngit-{tag}-aarch64-unknown-linux-gnu.2.17.tar.gz
+  - file: artifacts/ngit-{tag}-universal-apple-darwin.tar.gz
+    mime: application/gzip
+    platforms:
+      - darwin-x86_64
+      - darwin-aarch64
+    variant: universal
+    original_url: https://github.com/DanConwayDev/ngit-cli/releases/download/{tag}/ngit-{tag}-universal-apple-darwin.tar.gz
+  - file: artifacts/ngit-{tag}-x86_64-pc-windows-msvc.zip
+    mime: application/zip
+    platforms:
+      - windows-x86_64
+    variant: msvc
+    original_url: https://github.com/DanConwayDev/ngit-cli/releases/download/{tag}/ngit-{tag}-x86_64-pc-windows-msvc.zip

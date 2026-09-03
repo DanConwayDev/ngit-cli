@@ -1,7 +1,7 @@
 name: Release
 
 permissions:
-  contents: write
+  contents: read
 
 on:
   push:
@@ -11,6 +11,8 @@ on:
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/create-gh-release-action@v1
@@ -21,6 +23,8 @@ jobs:
 
   upload-assets:
     needs: create-release
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -63,7 +67,8 @@ jobs:
       - name: Install cargo-zigbuild using Homebrew for macOS
         if: runner.os == 'macOS' && matrix.build-tool == 'cargo-zigbuild'
         run: brew install cargo-zigbuild
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - id: release-archive
+        uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: ngit,git-remote-nostr
           target: ${{ matrix.target }}
@@ -74,3 +79,76 @@ jobs:
           tar: unix
           zip: windows
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retain Unix archive for NIP-82 publication
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nip82-${{ matrix.target }}
+          path: ${{ steps.release-archive.outputs.tar }}
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain Windows archive for NIP-82 publication
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nip82-${{ matrix.target }}
+          path: ${{ steps.release-archive.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-nip82:
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nip82-*
+          path: artifacts
+          merge-multiple: true
+      - uses: danconwaydev/setup-ngit@v3
+      - name: Publish NIP-82 release
+        shell: bash
+        env:
+          NGIT_PUBLISHER_NBUNKSEC: ${{ secrets.NGIT_PUBLISHER_NBUNKSEC }}
+          NGIT_REPOSITORY: nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${NGIT_PUBLISHER_NBUNKSEC:-}" ]]; then
+            printf 'NGIT_PUBLISHER_NBUNKSEC is required\n' >&2
+            exit 1
+          fi
+
+          signer_file="$RUNNER_TEMP/ngit-release.nbunksec"
+          cleanup() {
+            rm -f "$signer_file"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$NGIT_PUBLISHER_NBUNKSEC" > "$signer_file"
+
+          version="${GITHUB_REF_NAME#v}"
+          released_at="$(
+            git for-each-ref --format='%(creatordate:unix)' \
+              "refs/tags/$GITHUB_REF_NAME"
+          )"
+          if [[ -z "$released_at" ]]; then
+            printf 'Could not determine the creation time of tag %s\n' \
+              "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+          ngit \
+            --repo "$NGIT_REPOSITORY" \
+            --nbunksec-file "$signer_file" \
+            --defaults \
+            --json \
+            release publish "$version" \
+            --manifest .ngit/release.yaml \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --released-at "$released_at"
