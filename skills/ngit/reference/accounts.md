@@ -36,10 +36,12 @@ ngit --nbunksec-file /private/connection <command> # one-shot bunker session, om
 
 `account whoami` combines usable signers from the current repository's local Git
 config, global/system Git config, the OS credential store, and
-`credentials.json`. It groups every effective alias under its account, marks
-the local/global/system login scopes and the account that currently wins Git's
-scope precedence, and prints ready-to-use `ngit --signer ... <command>`
-and `git -c nostr.signer=... <command>` guidance once beneath the inventory.
+`credentials.json`. It groups identities by npub and lists every distinct
+local-key or remote-signer connection with the npub and aliases that select it.
+Scope and active badges appear on the actual connection, so different local
+and global NIP-46 sessions for one identity remain distinguishable. It prints
+ready-to-use `ngit --signer ... <command>` and
+`git -c nostr.signer=... <command>` guidance once beneath the inventory.
 The same footer explains global and repository login, alias creation, and how
 logout reveals a shadowed global default. `ACCOUNT` can be a full npub, a
 listed alias, or the exact cached Nostr profile name. `account list` is an

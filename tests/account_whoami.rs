@@ -201,6 +201,18 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
     assert_eq!(local["active"], true);
     assert_eq!(string_array(&local["scopes"]), ["local"]);
     assert_eq!(string_array(&local["aliases"]), ["dcdev", "shipwright"]);
+    let local_signers = local["signers"]
+        .as_array()
+        .context("local signers must be an array")?;
+    assert_eq!(local_signers.len(), 1);
+    assert_eq!(local_signers[0]["type"], "local-key");
+    assert_eq!(local_signers[0]["npub_default"], true);
+    assert_eq!(
+        string_array(&local_signers[0]["aliases"]),
+        ["dcdev", "shipwright"]
+    );
+    assert_eq!(string_array(&local_signers[0]["scopes"]), ["local"]);
+    assert_eq!(local_signers[0]["active"], true);
     let local_selectors = local["selectors"]
         .as_array()
         .context("local selectors must be an array")?;
@@ -263,10 +275,11 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
     for expected in [
         local_npub_line.as_str(),
         "  aliases: dcdev, shipwright",
+        "    local key via npub, dcdev, shipwright [local, active]",
         "Plain Jane",
         "  aliases: none",
-        "ACCOUNT can be any full npub or listed alias above",
-        "or your exact Nostr\nprofile name.",
+        "ACCOUNT can be any listed alias, an available full npub",
+        "or your exact\nNostr profile name.",
         "ngit --signer ACCOUNT <command>",
         "git -c nostr.signer=ACCOUNT <command>",
         "ngit account login ACCOUNT",

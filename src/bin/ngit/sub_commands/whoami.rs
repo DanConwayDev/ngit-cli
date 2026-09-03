@@ -4,14 +4,15 @@ use anyhow::{Context, Result};
 use ngit::{
     client::Params,
     login::{
-        SignerInfoSource, credential_store,
+        SignerInfo, SignerInfoSource, credential_store,
         existing::{
-            configured_alias_names, configured_signer_npub, resolve_selection, signer_is_available,
+            configured_alias_names, configured_signer_npub, get_signer_info, resolve_selection,
+            signer_is_available,
         },
         user::get_user_details,
     },
 };
-use nostr::prelude::{PublicKey, ToBech32};
+use nostr::prelude::{Keys, PublicKey, ToBech32};
 use serde::Serialize;
 
 use crate::{
@@ -41,6 +42,7 @@ struct AccountJson {
     scopes: Vec<String>,
     active: bool,
     selectors: Vec<SelectorJson>,
+    signers: Vec<SignerJson>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +50,34 @@ struct SelectorJson {
     #[serde(rename = "type")]
     kind: &'static str,
     value: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SignerJson {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    npub_default: bool,
+    aliases: Vec<String>,
+    scopes: Vec<String>,
+    active: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SignerKey {
+    Local,
+    Remote {
+        bunker_uri: String,
+        app_public_key: PublicKey,
+    },
+}
+
+struct SignerConnection {
+    key: SignerKey,
+    kind: &'static str,
+    npub_default: bool,
+    aliases: BTreeSet<String>,
+    scopes: Vec<String>,
+    active: bool,
 }
 
 struct Account {
@@ -58,6 +88,7 @@ struct Account {
     scopes: Vec<String>,
     active: bool,
     selectors: Vec<SelectorJson>,
+    signers: Vec<SignerConnection>,
 }
 
 struct LoginScopes {
@@ -72,6 +103,18 @@ impl LoginScopes {
             .as_deref()
             .or(self.global.as_deref())
             .or(self.system.as_deref())
+    }
+
+    fn active_label(&self) -> Option<&'static str> {
+        if self.local.is_some() {
+            Some("local")
+        } else if self.global.is_some() {
+            Some("global")
+        } else if self.system.is_some() {
+            Some("system")
+        } else {
+            None
+        }
     }
 
     fn labels_for(&self, npub: &str) -> Vec<String> {
@@ -131,7 +174,7 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
 
     let mut available_npubs = Vec::new();
     for npub in candidate_npubs {
-        if signer_is_available(&git_repo_ref, &npub)? {
+        if aliases_by_npub.contains_key(&npub) || signer_is_available(&git_repo_ref, &npub)? {
             available_npubs.push(npub);
         }
     }
@@ -145,6 +188,7 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     )
     .await?;
 
+    add_signers(&mut accounts, git_repo_ref, &scopes).await?;
     add_selectors(&mut accounts, git_repo_ref).await;
     accounts.sort_by(|a, b| {
         (
@@ -221,6 +265,7 @@ async fn load_accounts(
             scopes: scopes.labels_for(&canonical_npub),
             active: scopes.active() == Some(canonical_npub.as_str()),
             selectors: Vec::new(),
+            signers: Vec::new(),
         });
     }
 
@@ -228,6 +273,69 @@ async fn load_accounts(
         client.disconnect().await?;
     }
     Ok(accounts)
+}
+
+async fn add_signers(
+    accounts: &mut [Account],
+    git_repo: Option<&Repo>,
+    scopes: &LoginScopes,
+) -> Result<()> {
+    for account in accounts {
+        for alias in account.aliases.clone() {
+            if let Ok(resolved) = resolve_selection(&git_repo, &alias, &None, false).await {
+                account.add_signer(&resolved.signer_info, Some(&alias), false, None, false)?;
+            }
+        }
+
+        if let Ok(resolved) = resolve_selection(&git_repo, &account.npub, &None, false).await {
+            account.add_signer(&resolved.signer_info, None, true, None, false)?;
+        }
+
+        for (label, source, configured_npub) in [
+            ("local", SignerInfoSource::GitLocal, scopes.local.as_deref()),
+            (
+                "global",
+                SignerInfoSource::GitGlobal,
+                scopes.global.as_deref(),
+            ),
+            (
+                "system",
+                SignerInfoSource::GitSystem,
+                scopes.system.as_deref(),
+            ),
+        ] {
+            if configured_npub != Some(account.npub.as_str()) {
+                continue;
+            }
+            let (signer_info, _, alias) =
+                get_signer_info(&git_repo, &None, &None, &Some(source)).await?;
+            account.add_signer(
+                &signer_info,
+                alias.as_deref(),
+                false,
+                Some(label),
+                scopes.active_label() == Some(label),
+            )?;
+        }
+
+        account.signers.sort_by(|a, b| {
+            (
+                !a.active,
+                a.scopes.is_empty(),
+                !a.npub_default,
+                a.kind,
+                &a.aliases,
+            )
+                .cmp(&(
+                    !b.active,
+                    b.scopes.is_empty(),
+                    !b.npub_default,
+                    b.kind,
+                    &b.aliases,
+                ))
+        });
+    }
+    Ok(())
 }
 
 async fn add_selectors(accounts: &mut [Account], git_repo: Option<&Repo>) {
@@ -252,7 +360,9 @@ async fn add_selectors(accounts: &mut [Account], git_repo: Option<&Repo>) {
                 account.selectors.push(selector("alias", alias));
             }
         }
-        account.selectors.push(selector("npub", &account.npub));
+        if account.signers.iter().any(|signer| signer.npub_default) {
+            account.selectors.push(selector("npub", &account.npub));
+        }
     }
 }
 
@@ -294,19 +404,46 @@ fn print_human(accounts: &[Account]) {
         } else {
             println!("  aliases: {}", account.aliases.join(", "));
         }
+        println!("  signers:");
+        for signer in &account.signers {
+            let mut selectors = signer.aliases.iter().cloned().collect::<Vec<_>>();
+            if signer.npub_default {
+                selectors.insert(0, "npub".to_string());
+            }
+            let mut badges = signer.scopes.clone();
+            if signer.active {
+                badges.push("active".to_string());
+            }
+            let badges = if badges.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", badges.join(", "))
+            };
+            println!(
+                "    {} via {}{badges}",
+                match signer.kind {
+                    "local-key" => "local key",
+                    _ => "remote signer session",
+                },
+                selectors.join(", ")
+            );
+        }
         if account.name != account.npub
             && !account
                 .selectors
                 .iter()
                 .any(|selector| selector.kind == "profile")
         {
-            println!("  account name is ambiguous; use the npub or an alias as ACCOUNT");
+            println!("  account name is ambiguous; use an available npub or alias as ACCOUNT");
+        }
+        if !account.signers.iter().any(|signer| signer.npub_default) {
+            println!("  npub has multiple signer sessions; use an alias as ACCOUNT");
         }
     }
 
     println!();
-    println!("ACCOUNT can be any full npub or listed alias above, or your exact Nostr");
-    println!("profile name.");
+    println!("ACCOUNT can be any listed alias, an available full npub, or your exact");
+    println!("Nostr profile name.");
     println!();
     println!("commands:");
     println!("  ngit --signer ACCOUNT <command>        one ngit command");
@@ -315,6 +452,64 @@ fn print_human(accounts: &[Account]) {
     println!("  ngit account login --local ACCOUNT     set repository default");
     println!("  ngit account login ACCOUNT --alias ALIAS  add alias; set global default");
     print_logout_guidance(accounts);
+}
+
+impl Account {
+    fn add_signer(
+        &mut self,
+        signer_info: &SignerInfo,
+        alias: Option<&str>,
+        npub_default: bool,
+        scope: Option<&str>,
+        active: bool,
+    ) -> Result<()> {
+        let (key, kind) = match signer_info {
+            SignerInfo::Nsec { .. } => (SignerKey::Local, "local-key"),
+            SignerInfo::Bunker {
+                bunker_uri,
+                bunker_app_key,
+                ..
+            } => (
+                SignerKey::Remote {
+                    bunker_uri: bunker_uri.clone(),
+                    app_public_key: Keys::parse(bunker_app_key)
+                        .context("configured remote signer has an invalid app key")?
+                        .public_key(),
+                },
+                "remote-signer",
+            ),
+            SignerInfo::Selection { .. } => {
+                anyhow::bail!("internal error: unresolved account signer selection")
+            }
+        };
+        let index = self
+            .signers
+            .iter()
+            .position(|connection| connection.key == key)
+            .unwrap_or_else(|| {
+                self.signers.push(SignerConnection {
+                    key,
+                    kind,
+                    npub_default: false,
+                    aliases: BTreeSet::new(),
+                    scopes: Vec::new(),
+                    active: false,
+                });
+                self.signers.len() - 1
+            });
+        let connection = &mut self.signers[index];
+        connection.npub_default |= npub_default;
+        if let Some(alias) = alias {
+            connection.aliases.insert(alias.to_string());
+        }
+        if let Some(scope) = scope {
+            if !connection.scopes.iter().any(|existing| existing == scope) {
+                connection.scopes.push(scope.to_string());
+            }
+        }
+        connection.active |= active;
+        Ok(())
+    }
 }
 
 fn print_logout_guidance(accounts: &[Account]) {
@@ -353,6 +548,17 @@ impl Account {
             scopes: self.scopes,
             active: self.active,
             selectors: self.selectors,
+            signers: self
+                .signers
+                .into_iter()
+                .map(|signer| SignerJson {
+                    kind: signer.kind,
+                    npub_default: signer.npub_default,
+                    aliases: signer.aliases.into_iter().collect(),
+                    scopes: signer.scopes,
+                    active: signer.active,
+                })
+                .collect(),
         }
     }
 }

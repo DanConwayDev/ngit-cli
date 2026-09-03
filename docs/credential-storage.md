@@ -140,15 +140,18 @@ When `--signer` is omitted, existing flat local/global/system login selection
 continues to work. A configured `nostr.signer` opts that scope into the new
 selection model.
 
-`ngit account whoami` groups all usable signers by npub, shows their effective
-aliases, and marks local/global/system login scopes plus the account selected
-by Git's normal scope precedence. `ngit account list` is an alias for the same
-inventory. The human footer defines `ACCOUNT` once and shows how to use
-it for a single ngit or Git command, make it the local or global default, add
-an alias, or remove a local override. An `ACCOUNT` may be a full npub, a
-listed alias, or the exact cached Nostr profile name. Profile names shadowed by
-an alias or shared by multiple credentialed accounts are marked unusable;
-every account always retains its unambiguous full-npub selector.
+`ngit account whoami` groups identities by npub, then lists each distinct
+usable signer connection without exposing its secret. Each connection reports
+whether it is a local key or remote-signer session, the npub and aliases that
+select it, and its local/global/system and active scope badges. `ngit account
+list` is an alias for the same inventory. The human footer defines `ACCOUNT`
+once and shows how to use it for a single ngit or Git command, make it the
+local or global default, add an alias, or remove a local override. An `ACCOUNT`
+may be an available full npub, a listed alias, or the exact cached Nostr profile
+name. Profile names shadowed by an alias or shared by multiple credentialed
+accounts are marked unusable. A full npub is also unavailable when several
+alias-specific sessions remain without a default, in which case `whoami`
+requires an alias instead of advertising an ambiguous selector.
 
 ## Choosing where secrets live
 

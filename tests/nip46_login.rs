@@ -364,7 +364,13 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     let aliased_repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
 
-    let first = run_nbunksec_login(&first_repo, &first_encoded, credentials.path(), None).await?;
+    let first = run_nbunksec_login(
+        &first_repo,
+        &first_encoded,
+        credentials.path(),
+        Some("primary"),
+    )
+    .await?;
     assert!(
         first.status.success(),
         "initial remote-signer login failed: {}",
@@ -373,8 +379,8 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     let npub = user_keys.public_key().to_bech32()?;
     assert_eq!(
         first_repo.config("nostr.signer").await?.as_deref(),
-        Some(npub.as_str()),
-        "credential-backed bunker login should persist its resolved npub"
+        Some("primary"),
+        "credential-backed bunker login should persist its alias"
     );
     let before_rejected_login = std::fs::read(credentials.path())?;
 
@@ -412,11 +418,66 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
     assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
     assert!(stored.get("nostr/signer-alias:dedicated").is_some());
+    assert_eq!(stored["nostr/alias:primary"], npub);
+    assert_eq!(
+        stored["nostr/alias-credential:primary"],
+        format!("signer:{npub}")
+    );
     assert_eq!(stored["nostr/alias:dedicated"], npub);
     assert_eq!(
         stored["nostr/alias-credential:dedicated"],
         "signer-alias:dedicated"
     );
+
+    let whoami = aliased_repo
+        .ngit(["account", "whoami", "--offline", "--json"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        whoami.status.success(),
+        "multi-session account inventory failed: {}",
+        String::from_utf8_lossy(&whoami.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&whoami.stdout)?;
+    let account = document["accounts"]
+        .as_array()
+        .context("whoami accounts must be an array")?
+        .iter()
+        .find(|account| account["npub"] == npub)
+        .context("multi-session account missing from whoami")?;
+    let signers = account["signers"]
+        .as_array()
+        .context("whoami signers must be an array")?;
+    assert_eq!(signers.len(), 2);
+    let primary = signers
+        .iter()
+        .find(|signer| {
+            signer["aliases"].as_array().is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|alias| alias.as_str() == Some("primary"))
+            })
+        })
+        .context("default remote session missing from whoami")?;
+    assert_eq!(primary["type"], "remote-signer");
+    assert_eq!(primary["npub_default"], true);
+    assert_eq!(primary["active"], false);
+    let dedicated = signers
+        .iter()
+        .find(|signer| {
+            signer["aliases"].as_array().is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|alias| alias.as_str() == Some("dedicated"))
+            })
+        })
+        .context("dedicated remote session missing from whoami")?;
+    assert_eq!(dedicated["type"], "remote-signer");
+    assert_eq!(dedicated["npub_default"], false);
+    assert_eq!(dedicated["scopes"], serde_json::json!(["local"]));
+    assert_eq!(dedicated["active"], true);
 
     first_task.abort();
     second_task.abort();
@@ -516,6 +577,33 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         stderr.contains("multiple remote-signer connections")
             && stderr.contains("--signer <alias>"),
         "ambiguous bare-npub selection should require an alias: {stderr}"
+    );
+    let ambiguous_whoami = ambiguous_repo
+        .ngit(["account", "whoami", "--offline", "--json"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", ambiguous_credentials.path())
+        .output()
+        .await?;
+    assert!(
+        ambiguous_whoami.status.success(),
+        "whoami should list alias-selectable sessions when the npub is ambiguous: {}",
+        String::from_utf8_lossy(&ambiguous_whoami.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&ambiguous_whoami.stdout)?;
+    let account = document["accounts"]
+        .as_array()
+        .context("whoami accounts must be an array")?
+        .iter()
+        .find(|account| account["npub"] == npub)
+        .context("ambiguous multi-session account missing from whoami")?;
+    assert_eq!(account["signers"].as_array().map(Vec::len), Some(2));
+    assert!(
+        account["selectors"]
+            .as_array()
+            .context("whoami selectors must be an array")?
+            .iter()
+            .all(|selector| selector["type"] != "npub"),
+        "whoami must not advertise an ambiguous npub selector"
     );
 
     let migration_credentials = NamedTempFile::new()?;
