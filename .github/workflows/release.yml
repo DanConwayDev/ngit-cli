@@ -133,7 +133,8 @@ jobs:
 
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" == *-* ]]; then
-            channel=beta
+            prerelease="${version#*-}"
+            channel="${prerelease%%[.+]*}"
           else
             channel=main
           fi
