@@ -17,7 +17,6 @@ tags:
 license: MIT
 website: https://ngit.dev
 repository: nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/relay.ngit.dev/ngit
-channel: main
 release_notes: CHANGELOG.md
 publication:
   blossom_servers:

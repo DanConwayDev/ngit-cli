@@ -132,6 +132,11 @@ jobs:
           printf '%s\n' "$NGIT_PUBLISHER_NBUNKSEC" > "$signer_file"
 
           version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" == *-* ]]; then
+            channel=beta
+          else
+            channel=main
+          fi
           released_at="$(
             git for-each-ref --format='%(creatordate:unix)' \
               "refs/tags/$GITHUB_REF_NAME"
@@ -149,6 +154,7 @@ jobs:
             --json \
             release publish "$version" \
             --manifest .ngit/release.yaml \
+            --channel "$channel" \
             --tag "$GITHUB_REF_NAME" \
             --commit "$GITHUB_SHA" \
             --released-at "$released_at"
