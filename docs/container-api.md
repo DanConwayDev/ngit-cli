@@ -276,8 +276,8 @@ upload progress remain on stderr. A successful publication has this shape:
 
 ```json
 {
-  "format_version": 1,
-  "ok": true,
+  "format_version": 2,
+  "command_status": "ok",
   "command": "container.publish",
   "warnings": [],
   "result": {
@@ -317,6 +317,11 @@ upload progress remain on stderr. A successful publication has this shape:
 }
 ```
 
+`command_status` is the ngit command outcome and agrees with the process exit
+code. Nested publication statuses describe individual storage operations.
+Format version 2 replaces version 1's top-level `ok` boolean with this shared
+string field.
+
 `tags` is the final published tag map; `updated_tags` contains only tags read
 from this layout. Each selected server has operation `upload`; successful
 command completion guarantees that every blob has at least one `stored` or
@@ -332,8 +337,8 @@ Failures use the shared publication error envelope:
 
 ```json
 {
-  "format_version": 1,
-  "ok": false,
+  "format_version": 2,
+  "command_status": "error",
   "command": "container.publish",
   "warnings": [],
   "result": null,

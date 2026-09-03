@@ -73,7 +73,7 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     let npub = public_key.to_bech32()?;
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "created",
             "entity": "account",
             "name": args.name,

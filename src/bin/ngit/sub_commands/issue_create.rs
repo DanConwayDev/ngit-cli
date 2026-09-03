@@ -131,7 +131,7 @@ pub async fn launch(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "created",
             "entity": "issue",
             "id": event_bech32,

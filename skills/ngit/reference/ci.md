@@ -74,7 +74,7 @@ ngit ci status <COMMIT-ISH> --require-ci-trust maintainer-directed --json
 
 Interpret the result carefully:
 
-- Top-level `status: "ok"` means the query command succeeded; it does not mean
+- Top-level `command_status: "ok"` means the query command succeeded; it does not mean
   CI passed.
 - `ci.state` reports whether the run is pending, running, or concluded.
 - `ci.conclusion` reports success, failure, cancellation, or another outcome.

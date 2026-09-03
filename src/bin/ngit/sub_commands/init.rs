@@ -2092,7 +2092,7 @@ async fn publish_and_finalize(
         .replace("nostr://", "https://gitworkshop.dev/");
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "published",
             "entity": "repository",
             "nostr_url": nostr_url,

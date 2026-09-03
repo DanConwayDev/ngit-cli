@@ -108,7 +108,7 @@ async fn launch_status(
         };
         if crate::output::is_json() {
             crate::output::set_value(serde_json::json!({
-                "status": "ok",
+                "command_status": "ok",
                 "action": "unchanged",
                 "entity": "issue",
                 "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
@@ -185,7 +185,7 @@ async fn launch_status(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": action,
             "entity": "issue",
             "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),

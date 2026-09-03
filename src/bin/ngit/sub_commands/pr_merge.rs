@@ -346,7 +346,7 @@ pub(super) fn merge_json(
     error: Option<&str>,
 ) -> Value {
     let mut document = json!({
-        "status": if error.is_some() { "error" } else { "ok" },
+        "command_status": if error.is_some() { "error" } else { "ok" },
         "action": if error.is_some() { "refused" } else { "merged" },
         "entity": "pr",
         "id": crate::output::event_id_to_nevent(proposal_id, relay),

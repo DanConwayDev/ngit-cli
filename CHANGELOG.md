@@ -88,6 +88,12 @@ publication.
 
 ### Changed
 
+- JSON command-result envelopes now use top-level `command_status: "ok" |
+  "error"` instead of the ambiguous `status` field or `ok` boolean. Nested
+  fields continue to describe domain results, so a successful `ci status`
+  query can pair `command_status: "ok"` with `ci.conclusion: "failure"`.
+  Release, nsite, and container publication envelopes advance to format
+  version 2 for this breaking schema change.
 - `ngit merge` now accepts `--require-ci-trust`, matching `ngit pr merge`.
 - Repository hosting flags now distinguish grasp-derived infrastructure from
   deliberate additions. `ngit init` uses `--additional-relay` and

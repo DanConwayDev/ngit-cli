@@ -908,7 +908,7 @@ pub async fn launch(
         if !changed {
             if crate::output::is_json() {
                 crate::output::set_value(serde_json::json!({
-                    "status": "ok",
+                    "command_status": "ok",
                     "action": "maintainer_change_already_acknowledged",
                     "pubkey": target.to_string(),
                 }));

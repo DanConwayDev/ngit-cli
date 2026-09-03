@@ -473,7 +473,7 @@ impl CiReport {
         gate_failure: Option<&str>,
     ) -> Value {
         let mut document = json!({
-            "status": if gate_failure.is_some() { "error" } else { "ok" },
+            "command_status": if gate_failure.is_some() { "error" } else { "ok" },
             "entity": "ci",
             "target": target.to_json(relay),
             "ci": self.to_ci_value(relay),

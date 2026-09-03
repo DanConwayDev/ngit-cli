@@ -69,7 +69,7 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
                     let installed =
                         ngit::self_update::install_update(&installation, &update).await?;
                     output::set_value(json!({
-                        "status": "ok",
+                        "command_status": "ok",
                         "command": "update",
                         "result": {
                             "state": "installed",
@@ -96,7 +96,7 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
 
 fn set_current_output(current: &str, newer_candidate: Option<&str>) {
     output::set_value(json!({
-        "status": "ok",
+        "command_status": "ok",
         "command": "update",
         "result": {
             "state": "current",
@@ -113,7 +113,7 @@ fn set_pending_output(
     newer_candidate: Option<&str>,
 ) {
     output::set_value(json!({
-        "status": "ok",
+        "command_status": "ok",
         "command": "update",
         "result": {
             "state": "pending",
@@ -132,7 +132,7 @@ fn set_ready_output(
     newer_candidate: Option<&str>,
 ) {
     output::set_value(json!({
-        "status": "ok",
+        "command_status": "ok",
         "command": "update",
         "result": {
             "state": state,

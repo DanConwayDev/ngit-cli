@@ -464,7 +464,9 @@ async fn publishes_when_each_blob_has_one_confirmed_blossom_copy() -> Result<()>
         String::from_utf8_lossy(&output.stderr)
     );
     let result: Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(result["ok"] == true);
+    ensure!(result["format_version"] == 2);
+    ensure!(result["command_status"] == "ok");
+    ensure!(result.get("ok").is_none());
     ensure!(result["warnings"].as_array().is_some_and(|warnings| {
         warnings
             .iter()
@@ -546,7 +548,9 @@ async fn does_not_publish_when_a_blob_has_no_confirmed_blossom_copy() -> Result<
         "container publish unexpectedly succeeded"
     );
     let result: Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(result["ok"] == false);
+    ensure!(result["format_version"] == 2);
+    ensure!(result["command_status"] == "error");
+    ensure!(result.get("ok").is_none());
     ensure!(result["error"]["code"] == "blossom_upload_failed");
     ensure!(
         result["error"]["details"]["blobs"]

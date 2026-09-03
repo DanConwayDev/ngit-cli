@@ -164,8 +164,8 @@ the extended NIP-44 format.
 aggregate hash, file and unique-blob counts, previous event ID, selected
 servers and relays, loaded config path, configured fallback, summarized
 Blossom work with per-blob/per-server outcomes, and relay acknowledgements.
-Runtime failures use `ok: false` with a stable error code; progress and signer
-diagnostics remain on stderr.
+Runtime failures use `command_status: "error"` with a stable error code;
+progress and signer diagnostics remain on stderr.
 
 Blobs which were stored before a later failure are safe to reuse because their
 identity is their SHA-256. Rerunning the same command confirms them with HEAD

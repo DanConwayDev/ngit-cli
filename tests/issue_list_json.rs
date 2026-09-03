@@ -64,7 +64,7 @@ async fn issue_json_stdout_is_valid_when_relay_updates_are_reported() -> Result<
     let create_stdout = String::from_utf8_lossy(&create.stdout).to_string();
     let create_json: serde_json::Value = serde_json::from_str(&create_stdout)
         .with_context(|| format!("issue create stdout is not valid JSON:\n{create_stdout}"))?;
-    assert_eq!(create_json["status"], "ok");
+    assert_eq!(create_json["command_status"], "ok");
     assert_eq!(create_json["action"], "created");
     assert_eq!(create_json["entity"], "issue");
     assert_eq!(create_json["subject"], "a test issue");

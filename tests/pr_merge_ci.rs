@@ -361,7 +361,7 @@ async fn top_level_merge_gate_refuses_without_changing_user_context() -> Result<
         !out.status.success(),
         "the failing CI result must refuse: {json}"
     );
-    assert_eq!(json["status"], "error", "{json}");
+    assert_eq!(json["command_status"], "error", "{json}");
     assert_eq!(json["action"], "refused", "{json}");
     assert_eq!(json["ci"]["conclusion"], "failure", "{json}");
     assert_not_merged(&arranged, &failing, &main_before).await?;
@@ -471,7 +471,7 @@ async fn require_ci_trust_blocks_a_merge_the_current_result_cannot_support() -> 
              {} PR: {json}",
             pr.branch_name,
         );
-        assert_eq!(json["status"], "error", "{json}");
+        assert_eq!(json["command_status"], "error", "{json}");
         assert_eq!(json["ci"]["state"], state, "{json}");
         assert!(
             json["error"]
@@ -583,7 +583,7 @@ async fn a_workflow_that_never_concluded_blocks_the_merge_beside_a_successful_on
         "one workflow that never completed is not a green target, whatever \
          the workflow beside it reported: {json}",
     );
-    assert_eq!(json["status"], "error", "{json}");
+    assert_eq!(json["command_status"], "error", "{json}");
     assert_eq!(
         json["ci"]["state"], "stale",
         "the target has not concluded while one of its current runs never \
@@ -763,7 +763,7 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
             "a maintainer-directed success meets the {floor} floor: {json}\nstderr: {}",
             String::from_utf8_lossy(&out.stderr),
         );
-        assert_eq!(json["status"], "ok", "{json}");
+        assert_eq!(json["command_status"], "ok", "{json}");
         assert_eq!(json["ci"]["conclusion"], "success", "{json}");
         assert_eq!(
             json["ci"]["runs"][0]["classification"], "maintainer-directed",
@@ -833,7 +833,7 @@ async fn a_neutral_or_skipped_conclusion_is_merged_rather_than_refused_or_warned
          renders as a pass elsewhere: {json}\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["command_status"], "ok", "{json}");
     assert_eq!(json["ci"]["state"], "concluded", "{json}");
     assert_eq!(json["ci"]["conclusion"], "neutral", "{json}");
     assert_eq!(
@@ -934,7 +934,7 @@ async fn without_the_flag_a_failing_result_warns_and_the_merge_proceeds() -> Res
          refusal: {json}\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(json["status"], "ok", "{json}");
+    assert_eq!(json["command_status"], "ok", "{json}");
     assert_eq!(json["ci"]["conclusion"], "failure", "{json}");
     assert!(
         json["ci_warning"]

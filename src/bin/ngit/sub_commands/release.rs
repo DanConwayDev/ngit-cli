@@ -41,8 +41,8 @@ pub async fn launch(
     match result {
         Ok(output) if json_output => {
             output::set_value(json!({
-                "format_version": 1,
-                "ok": true,
+                "format_version": 2,
+                "command_status": "ok",
                 "command": output.command,
                 "repository": output.repository,
                 "authority": output.authority,
@@ -71,8 +71,8 @@ pub async fn launch(
                     |error| (error.code, error.message.clone(), error.details.clone()),
                 );
             output::set_value(json!({
-                "format_version": 1,
-                "ok": false,
+                "format_version": 2,
+                "command_status": "error",
                 "command": command,
                 "repository": null,
                 "authority": null,

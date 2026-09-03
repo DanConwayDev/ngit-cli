@@ -49,7 +49,7 @@ fn set_comment_json(
 ) {
     let relay = repo_ref.relays.first();
     crate::output::set_value(serde_json::json!({
-        "status": "ok",
+        "command_status": "ok",
         "action": "commented",
         "entity": entity_name.to_lowercase(),
         "id": crate::output::event_id_to_nevent(comment_id, relay),

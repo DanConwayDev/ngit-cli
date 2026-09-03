@@ -112,8 +112,8 @@ docker pull ncontainer.io/<your-npub>/myimage:latest
 Use `--json` for a stable result containing the event ID, `naddr`, final tag
 map, loaded manifest path, uploaded blob outcomes, Blossom servers, and
 per-relay acknowledgements. Success documents also contain a top-level
-`warnings` array. Typed failures use `ok: false` with an `error` object; a
-Blossom failure retains per-server outcomes and possible orphan blobs.
+`warnings` array. Typed failures use `command_status: "error"` with an `error`
+object; a Blossom failure retains per-server outcomes and possible orphan blobs.
 
 ## Validation and update safety
 

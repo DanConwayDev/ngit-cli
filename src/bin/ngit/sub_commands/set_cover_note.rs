@@ -109,7 +109,7 @@ async fn publish_set_cover_note_event(
         if existing_cn.content.trim() == body {
             if crate::output::is_json() {
                 crate::output::set_value(serde_json::json!({
-                    "status": "ok",
+                    "command_status": "ok",
                     "action": "unchanged",
                     "entity": target_kind.to_lowercase(),
                     "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
@@ -189,7 +189,7 @@ async fn publish_set_cover_note_event(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "cover-note-set",
             "entity": target_kind.to_lowercase(),
             "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),

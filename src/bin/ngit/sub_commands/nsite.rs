@@ -68,8 +68,8 @@ pub(crate) async fn launch(
     match result {
         Ok(value) if json_output => {
             output::set_value(json!({
-                "format_version": 1,
-                "ok": true,
+                "format_version": 2,
+                "command_status": "ok",
                 "command": "nsite.publish",
                 "repository": value.repository,
                 "authority": value.authority,
@@ -94,8 +94,8 @@ pub(crate) async fn launch(
                 |error| (error.code, error.message.clone(), error.details.clone()),
             );
             output::set_value(json!({
-                "format_version": 1,
-                "ok": false,
+                "format_version": 2,
+                "command_status": "error",
                 "command": "nsite.publish",
                 "repository": null,
                 "authority": null,

@@ -149,7 +149,7 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
     );
     let json: Value = serde_json::from_slice(&output.stdout)
         .context("account create stdout is not valid JSON")?;
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command_status"], "ok");
     assert_eq!(json["entity"], "account");
     assert_eq!(json["name"], display_name);
     assert_eq!(json["scope"], "local");

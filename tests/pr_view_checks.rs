@@ -552,7 +552,7 @@ async fn a_neutral_or_skipped_conclusion_is_reported_and_gated_as_a_pass() -> Re
             "`{conclusion}` is green for the gate exactly as it is for the \
              Checks section: {status}"
         );
-        assert_eq!(status["status"], "ok", "{status}");
+        assert_eq!(status["command_status"], "ok", "{status}");
         assert_eq!(status["ci"]["state"], view["ci"]["state"], "{status}");
         assert_eq!(
             status["ci"]["conclusion"], view["ci"]["conclusion"],

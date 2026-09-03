@@ -370,9 +370,9 @@ reference left open:
   repository event.
 - **A refused `--require-ci-trust` is output, not a failure to produce
   output.** `main`'s JSON error path replaces the document with
-  `{"status":"error"}`, which would discard the runs that explain the
-  refusal. `ci status` therefore emits its full document — the `ci` object,
-  plus `status: "error"` and the reason — and exits non-zero through
+  `{"command_status":"error"}`, which would discard the runs that explain
+  the refusal. `ci status` therefore emits its full document — the `ci` object,
+  plus `command_status: "error"` and the reason — and exits non-zero through
   `output::finish_and_exit`. The gate is evaluated on the rolled-up current
   result: not `concluded`, not green, or a weakest run below the floor.
 - **A PR's `#E` anchor is not always the event ngit threads from.** When a
@@ -598,14 +598,14 @@ reference left open:
   and no status event. Like `ci status`, the refusal is emitted as the
   command's document through `output::finish_and_exit(1)` rather than
   `main`'s error path, which would replace the runs that explain it with
-  `{"status":"error"}`.
+  `{"command_status":"error"}`.
 - **`ci_warning` is a field, always present.** The human output prints the
   caveat; the JSON document carries it as `ci_warning`, `null` when there is
   nothing to say, so a consumer never branches on a missing key — the same
   rule the `pr list` row follows. It is always `null` when
   `--require-ci-trust` was passed: there a shortfall is the refusal in
-  `error`, never a warning. `status`/`action` are derived from the presence of
-  `error` (`ok`/`merged` against `error`/`refused`), since a refusal is the
+  `error`, never a warning. `command_status`/`action` are derived from the
+  presence of `error` (`ok`/`merged` against `error`/`refused`), since a refusal is the
   one outcome with an error and no published `event`.
 - **The summary is the current revision only.** `include_outdated` is false,
   as in `ci status`: a merge is a decision about the revision being merged,
@@ -737,7 +737,8 @@ own — and its cost is one extra filter per repository relay.
   per-relay outcomes and returns `Ok` even when every one failed, which the
   older publishing subcommands accept. A CI control exists solely to be read
   by a coordinator, so publishing it nowhere is not a partial success worth
-  reporting as `status: "ok"`; these commands bail, naming the relays tried.
+  reporting as `command_status: "ok"`; these commands bail, naming the relays
+  tried.
 - **A non-maintainer is warned, never refused.** The default acceptance
   policy is maintainer-only, but the NIP lets an operator accept other
   requester pubkeys, so refusing would make ngit stricter than the protocol.
@@ -904,7 +905,7 @@ A row with no current run reports `state: "none"` with `conclusion`,
 left unchecked.
 
 `ngit ci status` wraps that object in the document every ngit command emits —
-`status`, `entity: "ci"`, and a `target` describing what was resolved:
+`command_status`, `entity: "ci"`, and a `target` describing what was resolved:
 
 ```jsonc
 "target": { "kind": "pr", "pr": "<nevent>", "anchor": "<nevent>",
@@ -915,18 +916,18 @@ left unchecked.
 
 `anchor` is the kind-1618 event CI references in `E`, which differs from `pr`
 only for a patch thread later upgraded to a PR. A refused
-`--require-ci-trust` sets `status: "error"` and adds `error`, keeping the `ci`
-object that explains the refusal.
+`--require-ci-trust` sets `command_status: "error"` and adds `error`, keeping
+the `ci` object that explains the refusal.
 
 `ngit pr merge` embeds the same object in its own document, beside
 `ci_warning` — the non-blocking caveat as a field, `null` when there is none:
 
 ```jsonc
-{ "status": "ok", "action": "merged", "entity": "pr", "id": "<nevent>",
+{ "command_status": "ok", "action": "merged", "entity": "pr", "id": "<nevent>",
   "event": "<nevent>", "ci": { "...": "..." }, "ci_warning": null }
 ```
 
-A refusal is `status: "error"`, `action: "refused"`, an `error`, no `event`,
+A refusal is `command_status: "error"`, `action: "refused"`, an `error`, no `event`,
 and `ci_warning: null`.
 
 Integration tests assert on this JSON and exit codes, never on table text.

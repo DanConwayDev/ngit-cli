@@ -164,7 +164,7 @@ async fn apply_pr(
     if stdout {
         if crate::output::is_json() {
             crate::output::set_value(serde_json::json!({
-                "status": "ok",
+                "command_status": "ok",
                 "patches": patch_texts,
             }));
         } else {
@@ -222,7 +222,7 @@ fn output_patches_to_stdout(mut patches: Vec<nostr::prelude::Event>) {
     patches.reverse();
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "patches": patches.into_iter().map(|patch| patch.content).collect::<Vec<_>>(),
         }));
     } else {

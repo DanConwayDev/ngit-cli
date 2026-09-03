@@ -114,7 +114,7 @@ async fn launch_service_control(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": action,
             "entity": "ci",
             "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()),
@@ -212,7 +212,7 @@ pub async fn launch_trigger(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "triggered",
             "entity": "ci",
             "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()),

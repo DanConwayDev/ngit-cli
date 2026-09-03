@@ -301,8 +301,8 @@ JSON objects have this common envelope:
 
 ```json
 {
-  "format_version": 1,
-  "ok": true,
+  "format_version": 2,
+  "command_status": "ok",
   "command": "release.view",
   "repository": {
     "selected_coordinate": "30617:...:ngit",
@@ -321,6 +321,11 @@ JSON objects have this common envelope:
 }
 ```
 
+`command_status` is the ngit command outcome and agrees with the process exit
+code. It is distinct from statuses and outcomes inside `result`.
+Format version 2 replaces version 1's top-level `ok` boolean with this shared
+string field.
+
 Fields which are not meaningful for a command are `null`; they are not omitted
 from the common envelope. Entity objects contain parsed semantic fields and a
 `raw_event` object. Lists MUST have deterministic ordering and MUST be arrays,
@@ -333,7 +338,7 @@ Their adjacent `event_id_bech32` and `author_npub` fields provide explicit
 user-facing encodings; callers MUST NOT infer the encoding from a field's
 contents.
 
-Runtime errors use `ok: false`, `result: null`, and:
+Runtime errors use `command_status: "error"`, `result: null`, and:
 
 ```json
 {
@@ -380,7 +385,7 @@ The initial stable error codes are:
 - `replacement_ordering_exhausted`.
 
 New error codes may be added in a backwards-compatible minor release. Existing
-codes MUST NOT change meaning within `format_version: 1`.
+codes MUST NOT change meaning within `format_version: 2`.
 
 ### JSON entity shapes
 

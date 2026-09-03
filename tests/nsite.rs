@@ -215,7 +215,9 @@ async fn no_confirmed_copy_publishes_no_manifest_event() -> Result<()> {
     let server_root = blossom.base_url_with_slash();
     let requests = blossom.finish().await?;
 
-    ensure!(failure["ok"] == false);
+    ensure!(failure["format_version"] == 2);
+    ensure!(failure["command_status"] == "error");
+    ensure!(failure.get("ok").is_none());
     ensure!(failure["error"]["code"] == "blossom_upload_failed");
     let details = &failure["error"]["details"];
     ensure!(details["blobs"][0]["sha256"] == hex_hash(INDEX_HTML));

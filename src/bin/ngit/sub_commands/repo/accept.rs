@@ -218,7 +218,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "accepted",
             "entity": "repository",
             "name": repo_name,

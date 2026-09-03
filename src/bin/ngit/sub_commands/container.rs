@@ -55,8 +55,8 @@ pub async fn launch(
                 |error| (error.code, error.message.clone(), error.details.clone()),
             );
             output::set_value(json!({
-                "format_version": 1,
-                "ok": false,
+                "format_version": 2,
+                "command_status": "error",
                 "command": "container.publish",
                 "warnings": [],
                 "result": null,
@@ -227,8 +227,8 @@ fn render_success(success: &PublishSuccess<'_>, json_output: bool) -> Result<()>
 
     if json_output {
         crate::output::set_value(json!({
-            "format_version": 1,
-            "ok": true,
+            "format_version": 2,
+            "command_status": "ok",
             "command": "container.publish",
             "warnings": success.warnings,
             "result": {

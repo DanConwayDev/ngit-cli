@@ -126,8 +126,9 @@ Do not infer complete relay replication from command success: publication
 succeeds when at least one selected relay accepts the event. Inspect every
 `result.relays[].accepted` value when full fanout matters.
 
-Typed failures use `ok: false` and an `error` object. Blossom failures retain
-per-blob/per-server outcomes and possible orphan blobs under `error.details`.
+Typed failures use `command_status: "error"` and an `error` object. Blossom
+failures retain per-blob/per-server outcomes and possible orphan blobs under
+`error.details`.
 
 ## Limits
 

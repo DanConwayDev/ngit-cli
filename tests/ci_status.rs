@@ -389,7 +389,7 @@ async fn pr_targets_resolve_by_prefix_nevent_full_hex_and_bare_short_hex() -> Re
     // how to force the event-prefix interpretation.
     let (out, json) = ci_status(&arranged.publisher, &["abcdef"]).await?;
     assert!(!out.status.success(), "an unresolvable target must fail");
-    assert_eq!(json["status"], "error");
+    assert_eq!(json["command_status"], "error");
     let error = json["error"].as_str().unwrap_or_default();
     assert!(
         error.contains("#abcdef"),
@@ -731,7 +731,7 @@ async fn an_expired_progress_marker_with_no_result_is_stale() -> Result<()> {
     )
     .await?;
     assert!(!out.status.success(), "a stale target must fail the gate");
-    assert_eq!(gated["status"], "error");
+    assert_eq!(gated["command_status"], "error");
     assert!(
         gated["error"]
             .as_str()
@@ -787,7 +787,7 @@ async fn require_ci_trust_gates_on_the_weakest_current_run() -> Result<()> {
         out.status.success(),
         "a maintainer-directed success meets the floor: {json}"
     );
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command_status"], "ok");
     assert_eq!(runs(&json)[0]["classification"], "maintainer-directed");
     assert!(
         runs(&json)[0]["evidence"]
@@ -834,7 +834,7 @@ async fn require_ci_trust_gates_on_the_weakest_current_run() -> Result<()> {
             !out.status.success(),
             "a run with no known context must fail the {floor} floor: {json}"
         );
-        assert_eq!(json["status"], "error");
+        assert_eq!(json["command_status"], "error");
         assert_eq!(
             runs(&json).len(),
             2,
@@ -922,7 +922,11 @@ async fn a_neutral_or_skipped_conclusion_passes_the_gate_and_a_cancelled_one_doe
             green,
             "`{conclusion}` must gate as the shared green predicate says: {json}"
         );
-        assert_eq!(json["status"], if green { "ok" } else { "error" }, "{json}");
+        assert_eq!(
+            json["command_status"],
+            if green { "ok" } else { "error" },
+            "{json}"
+        );
     }
 
     Ok(())

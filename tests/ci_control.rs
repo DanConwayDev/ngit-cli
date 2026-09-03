@@ -173,7 +173,7 @@ async fn request_publishes_one_service_request_for_the_repository_and_coordinato
     let coordinator = arranged.coordinator_npub()?;
 
     let json = ngit_json_ok(&arranged.publisher, &["ci", "request", &coordinator]).await?;
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command_status"], "ok");
     assert_eq!(json["action"], "service-requested");
     assert_eq!(json["entity"], "ci");
     assert_eq!(json["warning"], Value::Null, "a maintainer is not warned");
@@ -264,7 +264,7 @@ async fn a_non_maintainer_request_warns_and_still_publishes() -> Result<()> {
     // The NIP lets an operator accept requesters who are not maintainers, so
     // this is a caveat and never a refusal.
     let json = ngit_json_ok(&contributor, &["ci", "request", &coordinator]).await?;
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command_status"], "ok");
     assert!(
         json["warning"].is_string(),
         "a non-maintainer requester is warned: {json}",
@@ -411,7 +411,7 @@ async fn offline_publishes_without_the_pre_publish_fetch() -> Result<()> {
         &["ci", "request", &coordinator, "--offline"],
     )
     .await?;
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command_status"], "ok");
 
     let event = arranged.only_published(KIND_SERVICE_REQUEST).await?;
     assert_eq!(event_id_of(&json["event"]), event.id);

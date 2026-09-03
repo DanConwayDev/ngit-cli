@@ -109,7 +109,7 @@ async fn publish_label_event(
         let already: Vec<String> = labels.iter().map(|l| format!("#{}", l.trim())).collect();
         if crate::output::is_json() {
             crate::output::set_value(serde_json::json!({
-                "status": "ok",
+                "command_status": "ok",
                 "action": "unchanged",
                 "entity": target_kind.to_lowercase(),
                 "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
@@ -192,7 +192,7 @@ async fn publish_label_event(
 
     if crate::output::is_json() {
         crate::output::set_value(serde_json::json!({
-            "status": "ok",
+            "command_status": "ok",
             "action": "labelled",
             "entity": target_kind.to_lowercase(),
             "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),

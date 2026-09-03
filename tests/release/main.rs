@@ -1707,7 +1707,9 @@ async fn release_publish_reuses_an_asset_event_and_is_readable() -> Result<()> {
         ],
     )
     .await?;
-    ensure!(published_release["ok"] == true);
+    ensure!(published_release["format_version"] == 2);
+    ensure!(published_release["command_status"] == "ok");
+    ensure!(published_release.get("ok").is_none());
     ensure!(published_release["result"]["operation"] == "created");
 
     let initial_release = single_event(
