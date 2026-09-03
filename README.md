@@ -16,7 +16,7 @@ install options:
 1. live on the edge with one-line install: `curl -Ls https://ngit.dev/install.sh | bash`
 2. **build from source**: clone this repository, [install rust and cargo](https://www.rust-lang.org/tools/install), checkout the latest release tag, run `cargo build --release` and move `./target/release/ngit` and `./target/release/git-remote-nostr` to your PATH.
 3. **install with cargo**: [install rust and cargo](https://www.rust-lang.org/tools/install), run `cargo install ngit`, maken sure `~/.cargo/bin` is in your PATH
-4. **install with nix**: add `ngit.url = "github:DanConwayDev/ngit-cli";` as a flake input and then include `inputs.ngit.packages."${pkgs.system}".default` in packages.
+4. **install with nix**: run `nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v2.6.3'`.
 5. download the latest release binaries from [gitworkshop.dev/ngit](https://gitworkshop.dev/ngit) and add to PATH
 
 run the commands `ngit` and `git-remote-nostr` to ensure the binaries are in your PATH. `git-remote-nostr` is a small compatibility launcher that git discovers by name; the implementation lives in `ngit`, so both need installing together.

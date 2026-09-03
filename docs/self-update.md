@@ -45,9 +45,10 @@ before replacing either binary.
 
 ## Website installer handoff
 
-[`install/install.sh.in`](../install/install.sh.in) is the canonical Unix
-bootstrap template. It is deliberately pinned and contains two deployment
-placeholders:
+[`install/install.sh.in`](../install/install.sh.in) and
+[`install/install.ps1.in`](../install/install.ps1.in) are the canonical Unix
+and Windows bootstrap templates. They are deliberately pinned and contain two
+deployment placeholders:
 
 - `@@VERSION@@`: the exact stable NIP-82 release version;
 - `@@ASSET_MANIFEST@@`: newline-separated
@@ -63,13 +64,20 @@ and render exactly one record for each supported installer target:
 | `linux-x86_64-musl` | `linux-x86_64`, variant containing `musl` |
 | `linux-aarch64-gnu` | `linux-aarch64`, variant containing `gnu` or `glibc` |
 | `darwin-universal` | one asset covering both `darwin-x86_64` and `darwin-aarch64` |
+| `windows-x86_64` | `windows-x86_64` |
 
 Every rendered URL must be a content-addressed HTTPS Blossom URL from its
 kind-3063 asset; the rendered hash, filename, and MIME type must be copied from
 the same signed event. Deployment must fail on missing, duplicate,
-unreferenced, or invalid assets. The generated `/install.sh` is updated only
-after all release events and Blossom placements are queryable.
+unreferenced, or invalid assets. The generated `/install.sh` and
+`/install.ps1` are updated only after all release events and Blossom placements
+are queryable.
 
 The template remains a bootstrap mechanism. When it finds an existing
 receipted installation with `ngit update`, it delegates to the native
 updater so release policy and replacement logic are not maintained in shell.
+On NixOS it shows an exact tagged `nix profile add` command using ngit.dev's
+GRASP-backed Git alias, then exits without changing the profile. `--standalone`
+is an explicit escape hatch which selects the static musl archive for a
+user-owned x86_64 installation. Other NixOS architectures remain Nix-managed
+until a matching static asset is published.

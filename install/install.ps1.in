@@ -1,0 +1,147 @@
+# Canonical ngit standalone bootstrap installer for Windows.
+#
+# The website deployment renders the two placeholders below from one exact,
+# validated NIP-82 main-channel release. This script intentionally does not
+# discover "latest" or execute unpinned downloads at runtime.
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$version = "@@VERSION@@"
+$assetManifest = @'
+@@ASSET_MANIFEST@@
+'@
+
+$receiptFilename = ".ngit-install-receipt.json"
+$binaryNames = @("ngit.exe", "git-remote-nostr.exe")
+
+function Write-Info([string]$Message) {
+    Write-Host "[INFO] $Message"
+}
+
+function Fail-Install([string]$Message) {
+    throw $Message
+}
+
+function Select-ReleaseAsset {
+    $matches = @(
+        foreach ($line in ($assetManifest -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+            $fields = $line.Split("|")
+            if ($fields.Count -eq 5 -and $fields[0] -eq "windows-x86_64") {
+                ,$fields
+            }
+        }
+    )
+    if ($matches.Count -ne 1) {
+        Fail-Install "the release has no unique asset for windows-x86_64"
+    }
+    return $matches[0]
+}
+
+function Add-UserPath([string]$InstallDirectory) {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $entries = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($entries.Where({ $_.TrimEnd("\") -ieq $InstallDirectory.TrimEnd("\") }).Count -eq 0) {
+        $updated = (@($entries) + $InstallDirectory) -join ";"
+        [Environment]::SetEnvironmentVariable("Path", $updated, "User")
+        Write-Info "Added $InstallDirectory to the user PATH; restart the terminal to use it"
+    }
+}
+
+function Write-Receipt([string]$InstallDirectory) {
+    $receipt = [ordered]@{
+        schema = 1
+        method = "standalone"
+        version = $version
+    } | ConvertTo-Json
+    $temporary = Join-Path $InstallDirectory "$receiptFilename.tmp.$PID"
+    [IO.File]::WriteAllText($temporary, "$receipt`n", [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination (Join-Path $InstallDirectory $receiptFilename) -Force
+}
+
+function Invoke-NgitInstall {
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        Fail-Install "installer template was not rendered with a stable release"
+    }
+
+    $asset = Select-ReleaseAsset
+    $url = $asset[1]
+    $expectedSha = $asset[2]
+    $filename = $asset[3]
+    $mime = $asset[4]
+    $uri = $null
+    if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne "https") {
+        Fail-Install "the rendered release asset URL is not HTTPS"
+    }
+    if ($expectedSha -notmatch '^[0-9a-f]{64}$') {
+        Fail-Install "the rendered asset SHA-256 is invalid"
+    }
+    if ([IO.Path]::GetFileName($filename) -ne $filename -or -not $filename.EndsWith(".zip")) {
+        Fail-Install "the rendered release asset filename is invalid"
+    }
+    if ($mime -ne "application/zip") {
+        Fail-Install "the rendered Windows release asset is not a ZIP archive"
+    }
+
+    $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) "ngit-install-$([Guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
+    try {
+        $archive = Join-Path $temporaryDirectory $filename
+        Write-Info "Downloading ngit v$version for windows-x86_64"
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        $actualSha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualSha -ne $expectedSha) {
+            Fail-Install "SHA-256 mismatch: expected $expectedSha, observed $actualSha"
+        }
+
+        $extracted = Join-Path $temporaryDirectory "extracted"
+        Expand-Archive -LiteralPath $archive -DestinationPath $extracted
+        $sources = @{}
+        foreach ($binary in $binaryNames) {
+            $found = @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter $binary)
+            if ($found.Count -ne 1) {
+                Fail-Install "release archive does not contain exactly one $binary"
+            }
+            $sources[$binary] = $found[0].FullName
+        }
+        $ngitReported = & $sources["ngit.exe"] --version
+        if ($ngitReported -ne "ngit $version") {
+            Fail-Install "release archive ngit reported an unexpected version: $ngitReported"
+        }
+        $remoteReported = & $sources["git-remote-nostr.exe"] --version
+        if ($remoteReported -ne "v$version") {
+            Fail-Install "release archive git-remote-nostr reported an unexpected version: $remoteReported"
+        }
+
+        $installDirectory = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\ngit\bin"
+        New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+        foreach ($binary in $binaryNames) {
+            $staged = Join-Path $installDirectory ".$binary.new.$PID"
+            Copy-Item -LiteralPath $sources[$binary] -Destination $staged -Force
+            Move-Item -LiteralPath $staged -Destination (Join-Path $installDirectory $binary) -Force
+        }
+
+        $installedNgit = & (Join-Path $installDirectory "ngit.exe") --version
+        $installedRemote = & (Join-Path $installDirectory "git-remote-nostr.exe") --version
+        if ($installedNgit -ne "ngit $version" -or $installedRemote -ne "v$version") {
+            Fail-Install "the installed binaries did not report ngit v$version"
+        }
+        Write-Receipt $installDirectory
+        Add-UserPath $installDirectory
+        Write-Info "Installed ngit v$version to $installDirectory"
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+try {
+    Invoke-NgitInstall
+}
+catch {
+    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}

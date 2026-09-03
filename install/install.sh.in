@@ -16,9 +16,14 @@ NGIT_ASSET_MANIFEST
 
 RECEIPT_FILENAME='.ngit-install-receipt.json'
 BINARIES='ngit git-remote-nostr'
+FORCE_STANDALONE=0
 
 info() {
     printf '[INFO] %s\n' "$1"
+}
+
+warn() {
+    printf '[WARN] %s\n' "$1" >&2
 }
 
 fail() {
@@ -30,18 +35,50 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_nixos() {
+    if [ -e /etc/NIXOS ]; then
+        return 0
+    fi
+    [ -r /etc/os-release ] && grep -qE '^ID=("?nixos"?)$' /etc/os-release
+}
+
+parse_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --standalone) FORCE_STANDALONE=1 ;;
+            -h|--help)
+                printf '%s\n' 'usage: install.sh [--standalone]'
+                printf '%s\n' '  --standalone  use the static musl archive on x86_64 NixOS instead of Nix'
+                exit 0
+                ;;
+            *) fail "unknown installer option: $1" ;;
+        esac
+        shift
+    done
+}
+
+nixos_install_guidance() {
+    warn 'NixOS detected; prefer an exact Nix-managed installation:'
+    printf "  nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v%s'\n" "$VERSION" >&2
+    warn 'For a user-owned static installation instead, rerun with:'
+    printf '  curl -fsSL https://ngit.dev/install.sh | bash -s -- --standalone\n' >&2
+}
+
 detect_target() {
     ngit_os=$(uname -s)
     ngit_arch=$(uname -m)
     case "$ngit_os:$ngit_arch" in
         Linux:x86_64|Linux:amd64)
-            if ldd --version 2>&1 | grep -qi musl; then
+            if is_nixos || ldd --version 2>&1 | grep -qi musl; then
                 printf '%s\n' 'linux-x86_64-musl'
             else
                 printf '%s\n' 'linux-x86_64-gnu'
             fi
             ;;
-        Linux:aarch64|Linux:arm64) printf '%s\n' 'linux-aarch64-gnu' ;;
+        Linux:aarch64|Linux:arm64)
+            is_nixos && return 1
+            printf '%s\n' 'linux-aarch64-gnu'
+            ;;
         Darwin:x86_64|Darwin:arm64|Darwin:aarch64) printf '%s\n' 'darwin-universal' ;;
         *) return 1 ;;
     esac
@@ -118,11 +155,17 @@ delegate_existing_install() {
 }
 
 main() {
+    parse_arguments "$@"
     case "$VERSION" in
         [0-9]*.[0-9]*.[0-9]*) ;;
         *) fail 'installer template was not rendered by the release deployment' ;;
     esac
     delegate_existing_install || true
+
+    if is_nixos && [ "$FORCE_STANDALONE" -ne 1 ]; then
+        nixos_install_guidance
+        exit 1
+    fi
 
     ngit_target=$(detect_target) || fail 'this operating system and architecture are not supported by the standalone installer'
     ngit_asset=$(select_asset "$ngit_target") || fail "the release has no unique asset for $ngit_target"
@@ -159,10 +202,11 @@ EOF
         chmod 0755 "$ngit_staged"
         mv "$ngit_staged" "$ngit_dir/$ngit_binary"
     done
-    write_receipt "$ngit_dir"
-
     ngit_reported=$("$ngit_dir/ngit" --version)
     [ "$ngit_reported" = "ngit $VERSION" ] || fail "installed ngit reported an unexpected version: $ngit_reported"
+    ngit_remote_reported=$("$ngit_dir/git-remote-nostr" --version)
+    [ "$ngit_remote_reported" = "v$VERSION" ] || fail "installed git-remote-nostr reported an unexpected version: $ngit_remote_reported"
+    write_receipt "$ngit_dir"
     info "Installed ngit v$VERSION to $ngit_dir"
 }
 
