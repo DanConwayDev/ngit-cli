@@ -52,6 +52,7 @@ async fn publishes_a_verified_oci_layout_to_blossom_and_nostr() -> Result<()> {
             blossom.base_url(),
             "--source",
             "https://example.com/my-app",
+            "--repo-relay-only",
             "--json",
         ])
         .output()

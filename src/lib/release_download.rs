@@ -731,7 +731,7 @@ pub fn infer_mime_type(
         "application/octet-stream".to_owned()
     };
 
-    if is_generic_mime(&selected) {
+    if explicit.is_none() && is_generic_mime(&selected) {
         warnings.push(DownloadWarning::new(
             DownloadWarningCode::GenericMime,
             "the asset MIME type could not be inferred more precisely than application/octet-stream",
@@ -996,6 +996,22 @@ mod tests {
         assert_eq!(unknown.mime_type, "application/octet-stream");
         assert!(has_warning(
             &unknown.warnings,
+            DownloadWarningCode::GenericMime
+        ));
+    }
+
+    #[test]
+    fn explicit_generic_mime_does_not_claim_inference_failed() {
+        let resolved = infer_mime_type(
+            Some("application/octet-stream"),
+            None,
+            "release-payload.bin",
+        )
+        .expect("MIME resolution");
+
+        assert_eq!(resolved.mime_type, "application/octet-stream");
+        assert!(!has_warning(
+            &resolved.warnings,
             DownloadWarningCode::GenericMime
         ));
     }
