@@ -127,6 +127,11 @@ publication.
 
 ### Fixed
 
+- Blossom presence checks and upload responses now treat a server's MIME type
+  as representation metadata rather than blob identity. Content-addressed bytes
+  can be reused by files with different media types, so an existing empty blob
+  labelled `inode/x-empty` no longer blocks publication of an empty CSS file;
+  hash, size, and descriptor URL validation remain strict.
 - `ngit update` now recognizes signed prerelease events whose NIP-82 channel
   matches the first SemVer prerelease identifier (`rc.7` uses `rc`, `beta.2`
   uses `beta`) for both automatic and exact-version updates, while continuing

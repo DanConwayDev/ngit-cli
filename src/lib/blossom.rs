@@ -1686,19 +1686,9 @@ fn validate_presence_metadata(response: &reqwest::Response, snapshot: &FileSnaps
         );
     }
 
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .context("Blossom presence response omitted Content-Type")?
-        .to_str()
-        .context("Blossom presence response returned a non-text Content-Type")?;
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    if !snapshot_media_type_matches(snapshot, media_type) {
-        bail!(
-            "Blossom presence response Content-Type {content_type:?} does not match snapshot MIME type {:?}",
-            snapshot.mime_type
-        );
-    }
+    // MIME is representation metadata, not part of a content-addressed blob's
+    // identity. The same bytes can back differently typed files, while BUD-02
+    // permits an existing upload to return its original descriptor.
     Ok(())
 }
 
@@ -2284,51 +2274,9 @@ fn validate_descriptor(descriptor: &BlobDescriptor, snapshot: &FileSnapshot) -> 
     if descriptor.size != snapshot.size {
         bail!("Blossom descriptor size does not match the uploaded bytes");
     }
-    if !snapshot_media_type_matches(snapshot, &descriptor.mime_type) {
-        bail!("Blossom descriptor MIME type does not match the upload");
-    }
+    // Do not compare MIME here: an existing blob may have been stored under a
+    // different type even though its hash and exact bytes are reusable.
     validate_blob_url(&descriptor.url, &snapshot.sha256)
-}
-
-fn snapshot_media_type_matches(snapshot: &FileSnapshot, actual: &str) -> bool {
-    let expected = snapshot.mime_type.as_str();
-    if actual.eq_ignore_ascii_case(expected) {
-        return true;
-    }
-    let filename = snapshot.filename.to_ascii_lowercase();
-    let expected = expected.to_ascii_lowercase();
-    let actual = actual.to_ascii_lowercase();
-    match filename.rsplit_once('.').map(|(_, extension)| extension) {
-        Some("map") => {
-            expected == "application/json"
-                && matches!(actual.as_str(), "application/json" | "text/plain")
-        }
-        Some("js" | "mjs") => {
-            matches!(
-                expected.as_str(),
-                "application/javascript" | "text/javascript"
-            ) && matches!(
-                actual.as_str(),
-                "application/javascript" | "text/javascript"
-            )
-        }
-        Some("webmanifest") => {
-            matches!(
-                expected.as_str(),
-                "application/manifest+json" | "application/json"
-            ) && matches!(
-                actual.as_str(),
-                "application/manifest+json" | "application/json"
-            )
-        }
-        Some("ico") => {
-            matches!(
-                expected.as_str(),
-                "image/vnd.microsoft.icon" | "image/x-icon"
-            ) && matches!(actual.as_str(), "image/vnd.microsoft.icon" | "image/x-icon")
-        }
-        _ => false,
-    }
 }
 
 fn validate_blob_url(url: &Url, sha256: &str) -> Result<()> {
@@ -3831,7 +3779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presence_requires_matching_length_and_mime_metadata() -> Result<()> {
+    async fn presence_requires_matching_length_but_not_mime_metadata() -> Result<()> {
         let file = tempfile::NamedTempFile::new()?;
         std::fs::write(file.path(), b"static site")?;
         let snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
@@ -3854,67 +3802,36 @@ mod tests {
         assert!(snapshot_is_present(&client, &Url::parse(&server_url)?, &snapshot).await?);
         completed_request(server).await?;
 
-        for (length, mime, expected_message) in [
-            (
-                snapshot.size.saturating_add(1).to_string(),
-                snapshot.mime_type.clone(),
-                "does not match the",
-            ),
-            (
-                snapshot.size.to_string(),
-                "text/css".to_owned(),
-                "does not match snapshot MIME type",
-            ),
-        ] {
-            let (server_url, server) = spawn_head_server(move |_| TestResponse {
-                status: "200 OK",
-                headers: vec![
-                    ("Content-Length".to_owned(), length),
-                    ("Content-Type".to_owned(), mime),
-                ],
-                body: String::new(),
-            })
-            .await?;
-            let error = snapshot_is_present(&client, &Url::parse(&server_url)?, &snapshot)
-                .await
-                .unwrap_err();
-            assert!(error.message.contains(expected_message));
-            assert!(error.presence_metadata_mismatch);
-            completed_request(server).await?;
-        }
-        Ok(())
-    }
+        let mismatched_size = snapshot.size.saturating_add(1).to_string();
+        let expected_mime = snapshot.mime_type.clone();
+        let (server_url, server) = spawn_head_server(move |_| TestResponse {
+            status: "200 OK",
+            headers: vec![
+                ("Content-Length".to_owned(), mismatched_size),
+                ("Content-Type".to_owned(), expected_mime),
+            ],
+            body: String::new(),
+        })
+        .await?;
+        let error = snapshot_is_present(&client, &Url::parse(&server_url)?, &snapshot)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("does not match the"));
+        assert!(error.presence_metadata_mismatch);
+        completed_request(server).await?;
 
-    #[tokio::test]
-    async fn static_asset_mime_aliases_are_filename_scoped() -> Result<()> {
-        let file = tempfile::NamedTempFile::new()?;
-        std::fs::write(file.path(), b"static asset")?;
-        let mut snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
-
-        for (filename, expected, actual) in [
-            ("app.js.map", "application/json", "text/plain"),
-            ("app.js", "text/javascript", "application/javascript"),
-            (
-                "manifest.webmanifest",
-                "application/manifest+json",
-                "application/json",
-            ),
-            ("favicon.ico", "image/vnd.microsoft.icon", "image/x-icon"),
-        ] {
-            snapshot.filename = filename.to_owned();
-            snapshot.mime_type = expected.to_owned();
-            assert!(snapshot_media_type_matches(&snapshot, actual));
-        }
-
-        snapshot.filename = "site.css".to_owned();
-        snapshot.mime_type = "text/css".to_owned();
-        assert!(!snapshot_media_type_matches(&snapshot, "text/plain"));
-        snapshot.filename = "ngit.bin".to_owned();
-        snapshot.mime_type = "application/octet-stream".to_owned();
-        assert!(!snapshot_media_type_matches(
-            &snapshot,
-            "application/x-pie-executable"
-        ));
+        let expected_size = snapshot.size.to_string();
+        let (server_url, server) = spawn_head_server(move |_| TestResponse {
+            status: "200 OK",
+            headers: vec![
+                ("Content-Length".to_owned(), expected_size),
+                ("Content-Type".to_owned(), "video/avi".to_owned()),
+            ],
+            body: String::new(),
+        })
+        .await?;
+        assert!(snapshot_is_present(&client, &Url::parse(&server_url)?, &snapshot).await?);
+        completed_request(server).await?;
         Ok(())
     }
 
@@ -4873,7 +4790,6 @@ mod tests {
         let cases = [
             ("sha", "descriptor SHA-256"),
             ("size", "descriptor size"),
-            ("mime", "descriptor MIME type"),
             ("url", "descriptor URL does not identify"),
             ("url_query", "URL must not contain a query"),
         ];
@@ -4894,7 +4810,6 @@ mod tests {
                 match response_field.as_str() {
                     "sha" => value["sha256"] = serde_json::json!("0".repeat(64)),
                     "size" => value["size"] = serde_json::json!(expected_size + 1),
-                    "mime" => value["type"] = serde_json::json!("text/plain"),
                     "url" => {
                         value["url"] = serde_json::json!(format!("{base_url}/not-the-hash.apk"));
                     }
@@ -4923,6 +4838,32 @@ mod tests {
             );
             completed_request(server).await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_existing_descriptor_with_a_different_mime_type() -> Result<()> {
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"")?;
+        let mut snapshot = snapshot_local_file(LocalFileRequest::new(file.path())).await?;
+        snapshot.filename = "site.css".to_owned();
+        snapshot.mime_type = "text/css".to_owned();
+        let signer = NgitSigner::Keys(Keys::generate());
+
+        let expected_hash = snapshot.sha256.clone();
+        let expected_size = snapshot.size;
+        let (server_url, server) = spawn_one_shot_server(move |base_url| TestResponse {
+            status: "200 OK",
+            headers: Vec::new(),
+            body: descriptor_json(base_url, &expected_hash, expected_size, "inode/x-empty"),
+        })
+        .await?;
+
+        let descriptor =
+            upload_snapshot_with_timeout(&server_url, &snapshot, &signer, TOTAL_TIMEOUT).await?;
+        assert_eq!(descriptor.descriptor.sha256, snapshot.sha256);
+        assert_eq!(descriptor.descriptor.mime_type, "inode/x-empty");
+        completed_request(server).await?;
         Ok(())
     }
 }
