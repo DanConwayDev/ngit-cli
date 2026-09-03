@@ -570,7 +570,10 @@ pub enum AccountCommands {
     /// secret unless --forget is passed
     Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
-    ExportKeys,
+    #[command(
+        long_about = "export nostr keys to login to other nostr clients\n\nBy default, opens a menu for printing or displaying the npub and secret as a QR code. Use --secret to print only the nsec or nbunksec.\n\nExamples:\n  ngit account export-keys --secret\n  ngit --signer work account export-keys --secret"
+    )]
+    ExportKeys(sub_commands::export_keys::SubCommandArgs),
     /// remove a stored account secret from the OS credential store / ngit
     /// file store
     ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
@@ -1736,6 +1739,22 @@ mod tests {
                 "failed for {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn export_keys_secret_is_explicit_and_not_json_wrapped() {
+        let cli = Cli::try_parse_from(["ngit", "account", "export-keys", "--secret"])
+            .expect("export-keys should accept --secret");
+        let Some(Commands::Account(account)) = cli.command else {
+            panic!("expected account command");
+        };
+        let AccountCommands::ExportKeys(args) = account.account_command else {
+            panic!("expected export-keys command");
+        };
+        assert!(args.secret);
+        assert!(
+            Cli::try_parse_from(["ngit", "account", "export-keys", "--secret", "--json",]).is_err()
+        );
     }
 
     #[test]

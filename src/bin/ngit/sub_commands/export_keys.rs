@@ -12,6 +12,13 @@ use nostr::prelude::ToBech32;
 
 use crate::{cli::SignerParams, git::Repo};
 
+#[derive(clap::Args)]
+pub struct SubCommandArgs {
+    /// Print only the nsec or nbunksec, without opening the export menu
+    #[arg(long, conflicts_with = "json", help_heading = "Export options")]
+    pub secret: bool,
+}
+
 fn set_json_output(signer_info: &SignerInfo, npub: &str) -> Result<()> {
     match signer_info {
         SignerInfo::Bunker {
@@ -39,7 +46,10 @@ fn set_json_output(signer_info: &SignerInfo, npub: &str) -> Result<()> {
     }
 }
 
-pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
+pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
+    if args.secret && crate::output::is_json() {
+        anyhow::bail!("--secret cannot be combined with --json");
+    }
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
 
@@ -64,6 +74,9 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
     if crate::output::is_json() {
         return set_json_output(&signer_info, &npub);
     }
+    if args.secret {
+        return print_secret(&signer_info);
+    }
     match signer_info {
         SignerInfo::Bunker {
             bunker_uri,
@@ -78,6 +91,21 @@ pub async fn launch(signer: SignerParams<'_>) -> Result<()> {
             anyhow::bail!("internal error: unresolved signer selection during key export")
         }
     }
+}
+
+fn print_secret(signer_info: &SignerInfo) -> Result<()> {
+    match signer_info {
+        SignerInfo::Bunker {
+            bunker_uri,
+            bunker_app_key,
+            ..
+        } => println!("{}", login::nbunksec::encode(bunker_uri, bunker_app_key)?),
+        SignerInfo::Nsec { nsec, .. } => println!("{nsec}"),
+        SignerInfo::Selection { .. } => {
+            anyhow::bail!("internal error: unresolved signer selection during key export")
+        }
+    }
+    Ok(())
 }
 
 fn export_interactive(message: &str, npub: &str, secret_name: &str, secret: &str) -> Result<()> {

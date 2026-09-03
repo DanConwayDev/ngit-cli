@@ -105,6 +105,23 @@ async fn export_keys_returns_nbunksec_for_a_bunker_account() -> Result<()> {
         connection.client_key,
         client_keys.secret_key().to_secret_hex()
     );
+
+    let output = repo
+        .ngit(["account", "export-keys", "--secret"])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "plain bunker-secret export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let encoded = std::str::from_utf8(&output.stdout)?.trim();
+    let connection = nbunksec::decode(encoded)?;
+    assert_eq!(connection.bunker_uri, bunker_uri);
+    assert_eq!(
+        connection.client_key,
+        client_keys.secret_key().to_secret_hex()
+    );
     Ok(())
 }
 
@@ -277,6 +294,20 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
         entries.get(format!("{SERVICE}/{pointer}")).is_some(),
         "credential file lacks pointer entry"
     );
+
+    let output = repo
+        .ngit(["account", "export-keys", "--secret"])
+        .env("NGIT_SECRET_STORAGE", "auto")
+        .env("NGIT_KEYRING_FILE", file.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "plain nsec export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exported = Keys::parse(std::str::from_utf8(&output.stdout)?.trim())?;
+    assert_eq!(exported.public_key().to_bech32()?, pointer);
 
     let output = repo
         .ngit(["account", "export-keys"])

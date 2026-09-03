@@ -161,8 +161,8 @@ async fn main() {
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Logout(sub_args) => sub_commands::logout::launch(sub_args).await,
-                AccountCommands::ExportKeys => {
-                    sub_commands::export_keys::launch(signer_params).await
+                AccountCommands::ExportKeys(sub_args) => {
+                    sub_commands::export_keys::launch(sub_args, signer_params).await
                 }
                 AccountCommands::ForgetKeys(sub_args) => {
                     sub_commands::forget_keys::launch(sub_args)

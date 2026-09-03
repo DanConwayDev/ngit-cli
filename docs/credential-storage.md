@@ -235,8 +235,10 @@ returned event against it.
 `ngit account export-keys` exports the matching portable credential for the
 selected account: `npub` plus `nsec` for a local-key account, or `npub` plus
 `nbunksec` for a remote-signer account. The `nbunksec` is an established
-connection credential, not the remote user's identity secret. Use
-`ngit --signer <account> account export-keys` to select a non-default stored
-account.
+connection credential, not the remote user's identity secret. The default
+human mode offers print and QR-code choices; `--secret` prints only the nsec or
+nbunksec for shell use, while `--json` returns the typed secret field alongside
+the npub. Use `ngit --signer <account> account export-keys` to select a
+non-default stored account.
 
 [`keyring`]: https://crates.io/crates/keyring

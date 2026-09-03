@@ -22,6 +22,7 @@ ngit account login --local --alias alice       # activate a retained alias for t
 ngit account login --local -i --alias alice    # pair a fresh signer and assign or replace this alias
 ngit account create --name "Alice" --json
 ngit account export-keys --json                # returns nsec or nbunksec for the selected account
+ngit account export-keys --secret              # print only the selected nsec or nbunksec
 ngit account logout --json                    # removes login config, but preserves stored keys
 ngit account logout --forget --json           # logout and delete the stored secret
 ngit account forget-keys <entry> --json       # delete a preserved credential-store entry
