@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -15,9 +15,17 @@ use ngit::{
 };
 use reqwest::Url;
 
-const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix} [{bar:22.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {msg}";
-const BLOSSOM_PHASE_ROW_TEMPLATE: &str = "   {spinner} [{elapsed_precise}] {prefix} — {msg}";
-const BLOSSOM_FINISHED_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix} — {msg}";
+const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise:.dim}] {prefix:28.bold.cyan} [{bar:22.cyan/blue}] {bytes:.dim}/{total_bytes:.dim} {bytes_per_sec:.dim} {wide_msg:.dim}";
+const BLOSSOM_PHASE_ROW_TEMPLATE: &str =
+    "   {spinner:.cyan} [{elapsed_precise:.dim}] {prefix:28.bold.cyan} — {wide_msg:.dim}";
+const BLOSSOM_FINISHED_ROW_TEMPLATE: &str =
+    "     [{elapsed_precise:.dim}] {prefix:28.bold.cyan} — {wide_msg:.dim}";
+const BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE: &str = "  {prefix:.bold.cyan}  {wide_msg:.dim}";
+const BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE: &str =
+    "    [{bar:22.cyan/blue}] {bytes:.dim}/{total_bytes:.dim} {bytes_per_sec:.dim} {wide_msg:.dim}";
+const BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE: &str =
+    "    {spinner:.cyan} [{elapsed_precise:.dim}] {wide_msg:.dim}";
+const DETAILED_UPLOAD_BLOB_LIMIT: usize = 3;
 
 pub(crate) struct BlossomUploadProgress {
     multi: MultiProgress,
@@ -31,6 +39,9 @@ pub(crate) struct BlossomUploadProgress {
     upload_style: ProgressStyle,
     phase_style: ProgressStyle,
     finished_style: ProgressStyle,
+    server_summary_style: ProgressStyle,
+    compact_upload_style: ProgressStyle,
+    compact_phase_style: ProgressStyle,
     sequential_file: Mutex<Option<SequentialFileScope>>,
     presence: Mutex<BlossomPresenceActivity>,
     activity: Mutex<BlossomActivity>,
@@ -46,6 +57,8 @@ struct SequentialFileScope {
 #[derive(Default)]
 struct BlossomPresenceActivity {
     servers: HashMap<String, BlossomPresenceServerActivity>,
+    server_order: Vec<Url>,
+    outcomes: HashMap<(String, String), BlossomServerStatus>,
 }
 
 struct BlossomPresenceServerActivity {
@@ -97,9 +110,33 @@ enum BlossomPhase {
     Retrying,
 }
 
+#[derive(Clone)]
 struct ActiveBlossomPlacement {
     phase: BlossomPhase,
-    bar: ProgressBar,
+    bar: Option<ProgressBar>,
+    total_bytes: u64,
+    uploaded_bytes: u64,
+    message: String,
+    server_label: String,
+    sequence: usize,
+}
+
+struct BlossomServerUploadActivity {
+    summary_bar: ProgressBar,
+    focus_bar: Option<ProgressBar>,
+    focus_sequence: Option<usize>,
+    total: usize,
+    planned_uploads: usize,
+    completed: usize,
+    available: usize,
+    unavailable: usize,
+}
+
+struct InitialBlossomServerActivity {
+    server: Url,
+    available: usize,
+    unavailable: usize,
+    planned_uploads: usize,
 }
 
 #[derive(Default)]
@@ -112,7 +149,11 @@ struct BlossomActivity {
     completed: usize,
     confirmed: usize,
     unavailable: usize,
+    available_filenames: HashSet<String>,
+    compact: bool,
+    next_sequence: usize,
     active: HashMap<(String, String), ActiveBlossomPlacement>,
+    servers: HashMap<String, BlossomServerUploadActivity>,
     finished_bars: Vec<ProgressBar>,
 }
 
@@ -127,6 +168,7 @@ impl BlossomActivity {
         planned_uploads: usize,
         confirmed: usize,
         unavailable: usize,
+        available_filenames: HashSet<String>,
     ) {
         *self = Self {
             batch,
@@ -137,7 +179,11 @@ impl BlossomActivity {
             completed: 0,
             confirmed,
             unavailable,
+            available_filenames,
+            compact: blobs > DETAILED_UPLOAD_BLOB_LIMIT,
+            next_sequence: 0,
             active: HashMap::new(),
+            servers: HashMap::new(),
             finished_bars: Vec::new(),
         };
     }
@@ -162,7 +208,7 @@ impl BlossomActivity {
         filename: &str,
         server: &Url,
         status: BlossomServerStatus,
-    ) -> Option<ProgressBar> {
+    ) -> Option<ActiveBlossomPlacement> {
         let placement = self
             .active
             .remove(&(filename.to_owned(), server.to_string()))?;
@@ -172,11 +218,22 @@ impl BlossomActivity {
             BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
         ) {
             self.confirmed = self.confirmed.saturating_add(1);
+            self.available_filenames.insert(filename.to_owned());
         } else {
             self.unavailable = self.unavailable.saturating_add(1);
         }
-        let bar = placement.bar;
-        Some(bar)
+        if let Some(summary) = self.servers.get_mut(server.as_str()) {
+            summary.completed = summary.completed.saturating_add(1);
+            if matches!(
+                status,
+                BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent
+            ) {
+                summary.available = summary.available.saturating_add(1);
+            } else {
+                summary.unavailable = summary.unavailable.saturating_add(1);
+            }
+        }
+        Some(placement)
     }
 
     fn message(&self) -> String {
@@ -199,7 +256,18 @@ impl BlossomActivity {
             .confirmed
             .saturating_add(self.unavailable)
             .saturating_add(self.planned_uploads.saturating_sub(self.completed));
-        let mut phases = vec![format!("{}/{} confirmed", self.confirmed, total)];
+        let mut phases = if self.compact {
+            vec![
+                format!(
+                    "{}/{} files available",
+                    self.available_filenames.len(),
+                    self.blobs
+                ),
+                format!("{}/{} copies available", self.confirmed, total),
+            ]
+        } else {
+            vec![format!("{}/{} copies available", self.confirmed, total)]
+        };
         for (count, label) in [
             (uploading, "uploading"),
             (awaiting_response, "awaiting response"),
@@ -212,7 +280,7 @@ impl BlossomActivity {
                 phases.push(format!("{count} {label}"));
             }
         }
-        format!("{} — {}", self.subject(), phases.join("; "))
+        phases.join("; ")
     }
 }
 
@@ -233,8 +301,10 @@ impl BlossomUploadProgress {
         verbose: bool,
     ) -> Result<Arc<Self>> {
         let multi = MultiProgress::with_draw_target(draw_target);
-        let heading_style = ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {msg}")?
-            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let heading_style = ProgressStyle::with_template(
+            " {spinner:.cyan} [{elapsed_precise:.dim}] {prefix:.bold.cyan} — {wide_msg:.dim}",
+        )?
+        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let presence_style = ProgressStyle::with_template(
             "   [{elapsed_precise}] Checking existing Blossom copies [{bar:22.cyan/blue}] {pos}/{len} {msg}",
         )?
@@ -248,6 +318,13 @@ impl BlossomUploadProgress {
         let phase_style =
             ProgressStyle::with_template(BLOSSOM_PHASE_ROW_TEMPLATE)?.tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let finished_style = ProgressStyle::with_template(BLOSSOM_FINISHED_ROW_TEMPLATE)?;
+        let server_summary_style =
+            ProgressStyle::with_template(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE)?;
+        let compact_upload_style =
+            ProgressStyle::with_template(BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE)?
+                .progress_chars("##-");
+        let compact_phase_style = ProgressStyle::with_template(BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE)?
+            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
             multi,
@@ -261,6 +338,9 @@ impl BlossomUploadProgress {
             upload_style,
             phase_style,
             finished_style,
+            server_summary_style,
+            compact_upload_style,
+            compact_phase_style,
             sequential_file: Mutex::new(None),
             presence: Mutex::new(BlossomPresenceActivity::default()),
             activity: Mutex::new(BlossomActivity::default()),
@@ -320,6 +400,8 @@ impl BlossomUploadProgress {
             .presence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        presence.server_order = servers.to_vec();
+        presence.outcomes.clear();
         for server in servers {
             let bar = self.multi.add(ProgressBar::new(blobs as u64));
             bar.set_style(self.presence_server_style.clone());
@@ -400,6 +482,58 @@ impl BlossomUploadProgress {
         presence.servers.clear();
     }
 
+    fn record_placement_outcome(&self, filename: &str, server: &Url, status: BlossomServerStatus) {
+        self.presence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .outcomes
+            .insert((filename.to_owned(), server.to_string()), status);
+    }
+
+    fn initial_upload_activity(
+        &self,
+        filenames: &[String],
+    ) -> (HashSet<String>, Vec<InitialBlossomServerActivity>) {
+        let presence = self
+            .presence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut available_filenames = HashSet::new();
+        let servers = presence
+            .server_order
+            .iter()
+            .map(|server| {
+                let mut available = 0;
+                let mut unavailable = 0;
+                let mut planned_uploads = 0;
+                for filename in filenames {
+                    match presence
+                        .outcomes
+                        .get(&(filename.clone(), server.to_string()))
+                    {
+                        Some(BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent) => {
+                            available += 1;
+                            available_filenames.insert(filename.clone());
+                        }
+                        Some(
+                            BlossomServerStatus::Failed
+                            | BlossomServerStatus::Unknown
+                            | BlossomServerStatus::NotAttempted,
+                        ) => unavailable += 1,
+                        None => planned_uploads += 1,
+                    }
+                }
+                InitialBlossomServerActivity {
+                    server: server.clone(),
+                    available,
+                    unavailable,
+                    planned_uploads,
+                }
+            })
+            .collect();
+        (available_filenames, servers)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_upload_group(
         &self,
@@ -412,7 +546,8 @@ impl BlossomUploadProgress {
         unavailable: usize,
     ) {
         self.restore_draw_target();
-        let message = {
+        let (available_filenames, initial_servers) = self.initial_upload_activity(&filenames);
+        let (subject, message) = {
             let mut activity = self
                 .activity
                 .lock()
@@ -425,12 +560,37 @@ impl BlossomUploadProgress {
                 placements,
                 confirmed,
                 unavailable,
+                available_filenames,
             );
-            activity.message()
+            if activity.compact {
+                for server in initial_servers.into_iter().rev() {
+                    let summary_bar = self
+                        .multi
+                        .insert_after(&self.heading, ProgressBar::new_spinner());
+                    summary_bar.set_style(self.server_summary_style.clone());
+                    summary_bar.set_prefix(blossom_server_label(&server.server));
+                    activity.servers.insert(
+                        server.server.to_string(),
+                        BlossomServerUploadActivity {
+                            summary_bar,
+                            focus_bar: None,
+                            focus_sequence: None,
+                            total: blobs,
+                            planned_uploads: server.planned_uploads,
+                            completed: 0,
+                            available: server.available,
+                            unavailable: server.unavailable,
+                        },
+                    );
+                }
+                self.refresh_compact_server_rows(&mut activity);
+            }
+            (activity.subject(), activity.message())
         };
         self.heading.reset();
         self.heading.unset_length();
         self.heading.set_style(self.heading_style.clone());
+        self.heading.set_prefix(subject);
         self.heading.set_message(message);
         self.heading.enable_steady_tick(Duration::from_millis(100));
         self.heading.force_draw();
@@ -451,40 +611,65 @@ impl BlossomUploadProgress {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let key = (filename.to_owned(), server.to_string());
-            let placement = activity.active.entry(key).or_insert_with(|| {
-                let bar = self.multi.add(ProgressBar::new(total_bytes));
-                ActiveBlossomPlacement {
-                    phase: BlossomPhase::Uploading,
-                    bar,
-                }
-            });
+            if !activity.active.contains_key(&key) {
+                let sequence = activity.next_sequence;
+                activity.next_sequence = activity.next_sequence.saturating_add(1);
+                activity.active.insert(
+                    key.clone(),
+                    ActiveBlossomPlacement {
+                        phase: BlossomPhase::Uploading,
+                        bar: None,
+                        total_bytes,
+                        uploaded_bytes: 0,
+                        message: String::new(),
+                        server_label: blossom_server_label(server),
+                        sequence,
+                    },
+                );
+            }
+            let should_show = !activity.compact;
+            let Some(placement) = activity.active.get_mut(&key) else {
+                return;
+            };
             placement.phase = BlossomPhase::Uploading;
-            placement.bar.reset();
-            placement.bar.set_length(total_bytes);
-            placement.bar.set_position(0);
-            placement.bar.set_prefix(blossom_server_label(server));
-            placement.bar.set_style(self.upload_style.clone());
-            placement.bar.set_message(if attempt > 1 {
-                format!("uploading (attempt {attempt}/{max_attempts})")
-            } else {
-                "uploading".to_owned()
-            });
+            placement.total_bytes = total_bytes;
+            placement.uploaded_bytes = 0;
+            placement.message = blossom_file_message(
+                &if attempt > 1 {
+                    format!("uploading (attempt {attempt}/{max_attempts})")
+                } else {
+                    "uploading".to_owned()
+                },
+                filename,
+            );
+            if placement.bar.is_none() && should_show {
+                placement.bar = Some(self.multi.add(ProgressBar::new(total_bytes)));
+            }
+            if let Some(bar) = &placement.bar {
+                bar.reset();
+                self.render_active_placement(bar, placement);
+            }
+            self.refresh_compact_server_rows(&mut activity);
             activity.message()
         };
         self.heading.set_message(message);
     }
 
     fn increment_upload(&self, filename: &str, server: &Url, bytes: u64) {
-        let activity = self
+        let mut activity = self
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(placement) = activity
             .active
-            .get(&(filename.to_owned(), server.to_string()))
+            .get_mut(&(filename.to_owned(), server.to_string()))
         {
-            placement.bar.inc(bytes);
+            placement.uploaded_bytes = placement.uploaded_bytes.saturating_add(bytes);
+            if let Some(bar) = &placement.bar {
+                bar.set_position(placement.uploaded_bytes);
+            }
         }
+        self.refresh_compact_server_rows(&mut activity);
     }
 
     fn set_operation_phase(
@@ -492,7 +677,7 @@ impl BlossomUploadProgress {
         filename: &str,
         server: &Url,
         phase: BlossomPhase,
-        message: String,
+        message: &str,
     ) {
         let message = {
             let mut activity = self
@@ -504,9 +689,11 @@ impl BlossomUploadProgress {
                 .get_mut(&(filename.to_owned(), server.to_string()))
             {
                 placement.phase = phase;
-                placement.bar.set_style(self.phase_style.clone());
-                placement.bar.set_message(message);
-                placement.bar.enable_steady_tick(Duration::from_millis(100));
+                placement.message = blossom_file_message(message, filename);
+                if let Some(bar) = &placement.bar {
+                    self.render_active_placement(bar, placement);
+                }
+                self.refresh_compact_server_rows(&mut activity);
                 Some(activity.message())
             } else {
                 None
@@ -523,16 +710,137 @@ impl BlossomUploadProgress {
                 .activity
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(bar) = activity.finish(filename, server, status) else {
+            let Some(placement) = activity.finish(filename, server, status) else {
                 return false;
             };
-            bar.set_style(self.finished_style.clone());
-            bar.finish_with_message(blossom_finished_status_label(status));
-            activity.finished_bars.push(bar);
+            if let Some(bar) = placement.bar {
+                bar.set_style(self.finished_style.clone());
+                bar.finish_with_message(blossom_file_message(
+                    blossom_finished_status_label(status),
+                    filename,
+                ));
+                activity.finished_bars.push(bar);
+            }
+            self.refresh_compact_server_rows(&mut activity);
             activity.message()
         };
         self.heading.set_message(heading_message);
         true
+    }
+
+    fn render_active_placement(&self, bar: &ProgressBar, placement: &ActiveBlossomPlacement) {
+        bar.set_prefix(placement.server_label.clone());
+        match placement.phase {
+            BlossomPhase::Uploading => {
+                bar.disable_steady_tick();
+                bar.set_style(self.upload_style.clone());
+                bar.set_length(placement.total_bytes);
+                bar.set_position(placement.uploaded_bytes);
+            }
+            BlossomPhase::AwaitingResponse | BlossomPhase::Verifying | BlossomPhase::Retrying => {
+                bar.set_style(self.phase_style.clone());
+                bar.enable_steady_tick(Duration::from_millis(100));
+            }
+        }
+        bar.set_message(placement.message.clone());
+    }
+
+    fn refresh_compact_server_rows(&self, activity: &mut BlossomActivity) {
+        if !activity.compact {
+            return;
+        }
+        let server_keys = activity.servers.keys().cloned().collect::<Vec<_>>();
+        for server_key in server_keys {
+            let mut uploading = 0_usize;
+            let mut awaiting_response = 0_usize;
+            let mut verifying = 0_usize;
+            let mut retrying = 0_usize;
+            let focus = activity
+                .active
+                .iter()
+                .filter(|((_, server), placement)| {
+                    if server != &server_key {
+                        return false;
+                    }
+                    match placement.phase {
+                        BlossomPhase::Uploading => uploading += 1,
+                        BlossomPhase::AwaitingResponse => awaiting_response += 1,
+                        BlossomPhase::Verifying => verifying += 1,
+                        BlossomPhase::Retrying => retrying += 1,
+                    }
+                    true
+                })
+                .map(|(_, placement)| placement)
+                .min_by_key(|placement| {
+                    (blossom_phase_priority(placement.phase), placement.sequence)
+                })
+                .cloned();
+            let Some(summary) = activity.servers.get_mut(&server_key) else {
+                continue;
+            };
+            let active = uploading
+                .saturating_add(awaiting_response)
+                .saturating_add(verifying)
+                .saturating_add(retrying);
+            let pending = summary
+                .planned_uploads
+                .saturating_sub(summary.completed.saturating_add(active));
+            let mut parts = vec![format!(
+                "{}/{} copies available",
+                summary.available, summary.total
+            )];
+            for (count, label) in [
+                (uploading, "uploading"),
+                (awaiting_response, "awaiting response"),
+                (verifying, "verifying storage"),
+                (retrying, "waiting to retry"),
+                (pending, "pending"),
+                (summary.unavailable, "unavailable"),
+            ] {
+                if count != 0 {
+                    parts.push(format!("{count} {label}"));
+                }
+            }
+            summary.summary_bar.set_message(parts.join("; "));
+
+            if let Some(placement) = focus {
+                if summary.focus_bar.is_none() {
+                    summary.focus_bar = Some(
+                        self.multi
+                            .insert_after(&summary.summary_bar, ProgressBar::new(0)),
+                    );
+                }
+                let Some(bar) = summary.focus_bar.as_ref() else {
+                    continue;
+                };
+                if summary.focus_sequence != Some(placement.sequence) {
+                    bar.reset_elapsed();
+                }
+                self.render_compact_placement(bar, &placement);
+                summary.focus_sequence = Some(placement.sequence);
+            } else {
+                if let Some(bar) = summary.focus_bar.take() {
+                    bar.finish_and_clear();
+                }
+                summary.focus_sequence = None;
+            }
+        }
+    }
+
+    fn render_compact_placement(&self, bar: &ProgressBar, placement: &ActiveBlossomPlacement) {
+        match placement.phase {
+            BlossomPhase::Uploading => {
+                bar.disable_steady_tick();
+                bar.set_style(self.compact_upload_style.clone());
+                bar.set_length(placement.total_bytes);
+                bar.set_position(placement.uploaded_bytes);
+            }
+            BlossomPhase::AwaitingResponse | BlossomPhase::Verifying | BlossomPhase::Retrying => {
+                bar.set_style(self.compact_phase_style.clone());
+                bar.enable_steady_tick(Duration::from_millis(100));
+            }
+        }
+        bar.set_message(placement.message.clone());
     }
 
     fn finish_upload_group(&self) {
@@ -546,9 +854,18 @@ impl BlossomUploadProgress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for placement in activity.active.values() {
-            placement.bar.finish_and_clear();
+            if let Some(bar) = &placement.bar {
+                bar.finish_and_clear();
+            }
         }
         activity.active.clear();
+        for summary in activity.servers.values_mut() {
+            if let Some(bar) = summary.focus_bar.take() {
+                bar.finish_and_clear();
+            }
+            summary.summary_bar.finish_and_clear();
+        }
+        activity.servers.clear();
         for bar in &activity.finished_bars {
             bar.finish_and_clear();
         }
@@ -594,13 +911,13 @@ impl BlossomUploadProgress {
             activity
                 .active
                 .get(&(filename.to_owned(), server.to_string()))
-                .map_or(0, |placement| placement.bar.position())
+                .map_or(0, |placement| placement.uploaded_bytes)
         };
         self.set_operation_phase(
             filename,
             server,
             BlossomPhase::AwaitingResponse,
-            blossom_timed_attempt_message(
+            &blossom_timed_attempt_message(
                 &format!("{} sent; awaiting server response", HumanBytes(sent)),
                 attempt,
                 max_attempts,
@@ -622,7 +939,7 @@ impl BlossomUploadProgress {
             filename,
             server,
             BlossomPhase::Verifying,
-            blossom_timed_attempt_message(
+            &blossom_timed_attempt_message(
                 "verifying stored blob",
                 attempt,
                 max_attempts,
@@ -655,6 +972,7 @@ impl BlossomUploadProgress {
         status: BlossomServerStatus,
         message: Option<&str>,
     ) {
+        self.record_placement_outcome(filename, server, status);
         let tracked = self.finish_operation(filename, server, status);
         if !tracked || self.verbose {
             self.print_placement(filename, server, status, message);
@@ -707,12 +1025,26 @@ fn blossom_server_label(server: &Url) -> String {
         .to_owned()
 }
 
+fn blossom_file_message(action: &str, filename: &str) -> String {
+    format!("{action} — {filename}")
+}
+
+const fn blossom_phase_priority(phase: BlossomPhase) -> u8 {
+    match phase {
+        BlossomPhase::Uploading => 0,
+        BlossomPhase::Verifying => 1,
+        BlossomPhase::AwaitingResponse => 2,
+        BlossomPhase::Retrying => 3,
+    }
+}
+
 fn blossom_finished_status_label(status: BlossomServerStatus) -> &'static str {
     match status {
-        BlossomServerStatus::Stored | BlossomServerStatus::AlreadyPresent => "done: confirmed",
-        BlossomServerStatus::Failed => "done: failed",
-        BlossomServerStatus::Unknown => "done: unavailable",
-        BlossomServerStatus::NotAttempted => "done: not attempted",
+        BlossomServerStatus::Stored => "uploaded and verified",
+        BlossomServerStatus::AlreadyPresent => "already stored",
+        BlossomServerStatus::Failed => "failed",
+        BlossomServerStatus::Unknown => "unavailable",
+        BlossomServerStatus::NotAttempted => "not attempted",
     }
 }
 
@@ -821,7 +1153,7 @@ impl BlossomProgress for BlossomUploadProgress {
                 filename,
                 server,
                 BlossomPhase::Retrying,
-                format!("waiting to retry (attempt {next_attempt}/{max_attempts})"),
+                &format!("waiting to retry (attempt {next_attempt}/{max_attempts})"),
             ),
             BlossomProgressEvent::PlacementFinished {
                 filename,
@@ -851,7 +1183,7 @@ mod tests {
     fn blossom_batch_rows_reserve_the_spinner_column() {
         let rendered_bracket_column = |template: &str| {
             template
-                .replace("{spinner}", "x")
+                .replace("{spinner:.cyan}", "x")
                 .find('[')
                 .expect("Blossom row template should render elapsed time")
         };
@@ -864,6 +1196,16 @@ mod tests {
             rendered_bracket_column(BLOSSOM_FINISHED_ROW_TEMPLATE),
             rendered_bracket_column(BLOSSOM_PHASE_ROW_TEMPLATE)
         );
+    }
+
+    #[test]
+    fn compact_rows_form_a_colored_server_hierarchy() {
+        assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.starts_with("  {prefix"));
+        assert!(BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE.starts_with("    ["));
+        assert!(BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE.starts_with("    {spinner"));
+        assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.contains("bold.cyan"));
+        assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.contains("wide_msg:.dim"));
+        assert!(BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE.contains("bar:22.cyan/blue"));
     }
 
     #[test]
@@ -890,7 +1232,7 @@ mod tests {
         let activity = progress.activity.lock().unwrap();
         assert_eq!(activity.batch, 2);
         assert_eq!(activity.batches, 5);
-        assert!(activity.message().contains("file 2/5"));
+        assert!(activity.subject().contains("file 2/5"));
         Ok(())
     }
 
@@ -926,8 +1268,9 @@ mod tests {
             .get(&("release.tar.gz".to_owned(), server.to_string()))
             .unwrap()
             .bar
-            .clone();
-        assert_eq!(bar.message(), "uploading");
+            .clone()
+            .expect("a single-file upload should have a visible row");
+        assert_eq!(bar.message(), "uploading — release.tar.gz");
         progress.update(&BlossomProgressEvent::UploadedBytes {
             batch: 1,
             filename: "release.tar.gz".to_owned(),
@@ -1100,7 +1443,7 @@ mod tests {
         });
 
         let uploading = progress.heading.message();
-        assert!(uploading.contains("2 files"));
+        assert!(progress.heading.prefix().contains("2 files"));
         assert!(uploading.contains("2 uploading"));
         assert!(uploading.contains("1 pending"));
 
@@ -1125,7 +1468,8 @@ mod tests {
             .get(&("ngit-grasp.tar.gz".to_owned(), first_server.to_string()))
             .unwrap()
             .bar
-            .clone();
+            .clone()
+            .expect("a small upload group should show every placement");
         assert!(verifying_bar.message().contains("15s timeout"));
         assert!(!verifying_bar.message().contains("attempt 1/3"));
 
@@ -1147,11 +1491,14 @@ mod tests {
             message: None,
         });
         let placed = progress.heading.message();
-        assert!(placed.contains("1/3 confirmed"));
+        assert!(placed.contains("1/3 copies available"));
         assert!(placed.contains("1 uploading"));
         let activity = progress.activity.lock().unwrap();
         assert_eq!(activity.finished_bars.len(), 1);
-        assert_eq!(activity.finished_bars[0].message(), "done: confirmed");
+        assert_eq!(
+            activity.finished_bars[0].message(),
+            "uploaded and verified — ngit-grasp.tar.gz"
+        );
         drop(activity);
 
         progress.update(&BlossomProgressEvent::UploadBatchFinished {
@@ -1159,6 +1506,161 @@ mod tests {
             batches: 1,
         });
         assert!(progress.activity.lock().unwrap().finished_bars.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compact_progress_has_one_focused_row_per_server_and_truthful_counts() -> Result<()> {
+        let progress = BlossomUploadProgress::new(true)?;
+        let first_server = Url::parse("https://one.example/")?;
+        let second_server = Url::parse("https://two.example/")?;
+        let filenames = (0..6)
+            .map(|index| format!("asset-{index}.js"))
+            .collect::<Vec<_>>();
+        progress.update(&BlossomProgressEvent::PresenceChecksStarted {
+            blobs: filenames.len(),
+            servers: vec![first_server.clone(), second_server.clone()],
+            checks: filenames.len() * 2,
+        });
+        for (filename, server) in [
+            (&filenames[0], &first_server),
+            (&filenames[2], &first_server),
+            (&filenames[4], &first_server),
+            (&filenames[1], &second_server),
+            (&filenames[3], &second_server),
+        ] {
+            progress.update(&BlossomProgressEvent::PlacementFinished {
+                filename: filename.clone(),
+                server: server.clone(),
+                status: BlossomServerStatus::AlreadyPresent,
+                message: None,
+            });
+        }
+        progress.update(&BlossomProgressEvent::AuthorizationStarted {
+            batch: 1,
+            batches: 1,
+            blobs: filenames.len(),
+            filenames: filenames.clone(),
+        });
+        progress.update(&BlossomProgressEvent::UploadBatchStarted {
+            batch: 1,
+            batches: 1,
+            blobs: filenames.len(),
+            filenames: filenames.clone(),
+            placements: 7,
+            confirmed: 5,
+            unavailable: 0,
+            bytes: 70,
+        });
+        assert!(progress.heading.prefix().contains("6 files"));
+        assert!(progress.heading.message().contains("5/6 files available"));
+        assert!(progress.heading.message().contains("5/12 copies available"));
+        {
+            let activity = progress.activity.lock().unwrap();
+            assert_eq!(activity.servers.len(), 2);
+            assert!(
+                activity.servers[first_server.as_str()]
+                    .summary_bar
+                    .message()
+                    .contains("3/6 copies available")
+            );
+            assert!(
+                activity.servers[second_server.as_str()]
+                    .summary_bar
+                    .message()
+                    .contains("2/6 copies available")
+            );
+        }
+
+        for (filename, server) in [
+            (&filenames[1], &first_server),
+            (&filenames[3], &first_server),
+            (&filenames[0], &second_server),
+            (&filenames[2], &second_server),
+            (&filenames[5], &second_server),
+        ] {
+            progress.update(&BlossomProgressEvent::UploadRequestStarted {
+                batch: 1,
+                batches: 1,
+                filename: filename.clone(),
+                server: server.clone(),
+                attempt: 1,
+                max_attempts: 3,
+                total_bytes: 10,
+                additional_bytes: 0,
+            });
+        }
+
+        {
+            let activity = progress.activity.lock().unwrap();
+            assert!(activity.compact);
+            assert_eq!(activity.active.len(), 5);
+            assert_eq!(activity.servers.len(), 2);
+            assert!(
+                activity
+                    .active
+                    .values()
+                    .all(|placement| placement.bar.is_none())
+            );
+            assert!(activity.finished_bars.is_empty());
+            let first = &activity.servers[first_server.as_str()];
+            assert!(first.summary_bar.message().contains("2 uploading"));
+            assert!(first.summary_bar.message().contains("1 pending"));
+            assert_eq!(
+                first.focus_bar.as_ref().unwrap().message(),
+                "uploading — asset-1.js"
+            );
+            let second = &activity.servers[second_server.as_str()];
+            assert!(second.summary_bar.message().contains("3 uploading"));
+            assert!(second.summary_bar.message().contains("1 pending"));
+            assert_eq!(
+                second.focus_bar.as_ref().unwrap().message(),
+                "uploading — asset-0.js"
+            );
+        }
+
+        progress.update(&BlossomProgressEvent::UploadedBytes {
+            batch: 1,
+            filename: filenames[1].clone(),
+            server: first_server.clone(),
+            bytes: 5,
+        });
+        assert_eq!(
+            progress.activity.lock().unwrap().servers[first_server.as_str()]
+                .focus_bar
+                .as_ref()
+                .unwrap()
+                .position(),
+            5
+        );
+        progress.update(&BlossomProgressEvent::PlacementFinished {
+            filename: filenames[1].clone(),
+            server: first_server.clone(),
+            status: BlossomServerStatus::Stored,
+            message: None,
+        });
+        {
+            let activity = progress.activity.lock().unwrap();
+            assert!(activity.finished_bars.is_empty());
+            let first = &activity.servers[first_server.as_str()];
+            assert!(first.summary_bar.message().contains("4/6 copies available"));
+            assert!(first.summary_bar.message().contains("1 uploading"));
+            assert_eq!(
+                first.focus_bar.as_ref().unwrap().message(),
+                "uploading — asset-3.js"
+            );
+        }
+        assert!(progress.heading.message().contains("5/6 files available"));
+        progress.update(&BlossomProgressEvent::PlacementFinished {
+            filename: filenames[5].clone(),
+            server: second_server,
+            status: BlossomServerStatus::Stored,
+            message: None,
+        });
+        let activity = progress.activity.lock().unwrap();
+        assert!(activity.finished_bars.is_empty());
+        assert!(activity.message().contains("6/6 files available"));
+        assert!(activity.message().contains("7/12 copies available"));
         Ok(())
     }
 }
