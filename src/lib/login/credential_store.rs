@@ -1142,7 +1142,7 @@ mod account_registry {
     use serde::{Deserialize, Serialize};
     use tempfile::NamedTempFile;
 
-    use super::{CredentialInventory, FILE_ENV, canonical_npub, normalize_alias};
+    use super::{CredentialInventory, canonical_npub, normalize_alias};
 
     #[derive(Default, Serialize, Deserialize)]
     struct Registry {
@@ -1154,7 +1154,7 @@ mod account_registry {
         // Keep all test writes beside the debug-only redirected credential
         // file so tests can never touch the real user data directory.
         #[cfg(debug_assertions)]
-        if let Ok(credentials) = std::env::var(FILE_ENV) {
+        if let Ok(credentials) = std::env::var(super::FILE_ENV) {
             let mut indexed = PathBuf::from(credentials).into_os_string();
             indexed.push(".accounts");
             return Ok(PathBuf::from(indexed));
