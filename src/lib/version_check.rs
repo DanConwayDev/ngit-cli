@@ -372,8 +372,17 @@ fn ngit_release_from_event(event: &Event) -> Option<SoftwareRelease> {
     (release.raw_event.pubkey == ngit_repo_coordinate().public_key
         && release.application.coordinate == ngit_application_coordinate()
         && release.application_identifier == NGIT_APPLICATION_IDENTIFIER
-        && release.channel == "main")
-        .then_some(release)
+        && parse_version(&release.version)
+            .is_some_and(|version| release.channel == release_channel(&version)))
+    .then_some(release)
+}
+
+fn release_channel(version: &Version) -> &str {
+    if version.pre.is_empty() {
+        "main"
+    } else {
+        version.pre.as_str().split('.').next().unwrap_or_default()
+    }
 }
 
 fn ngit_asset_from_event(event: &Event) -> Option<SoftwareAsset> {
@@ -549,6 +558,50 @@ mod tests {
         event
     }
 
+    fn release_and_asset_events(version: &str, channel: &str) -> (Event, Event) {
+        let application = AddressPointer {
+            coordinate: ngit_application_coordinate(),
+            relay_hint: None,
+        };
+        let mut asset = asset_event_builder(AssetInput {
+            application: Some(application.clone()),
+            identifier: format!("ngit-{version}-linux"),
+            version: version.into(),
+            url: Some(format!("https://cdn.example/{}.tar.gz", "11".repeat(32))),
+            filename: Some("ngit.tar.gz".into()),
+            mime: "application/gzip".into(),
+            sha256: "11".repeat(32),
+            size: Some(42),
+            platforms: vec!["linux-x86_64".into()],
+            variant: Some("glibc-2.17".into()),
+            ..AssetInput::default()
+        })
+        .unwrap()
+        .finalize(&keys())
+        .unwrap();
+        asset.pubkey = ngit_repo_coordinate().public_key;
+        let mut release = release_event_builder(ReleaseInput {
+            application,
+            version: version.into(),
+            channel: channel.into(),
+            notes: String::new(),
+            assets: vec![ReleaseAssetInput {
+                event_id: asset.id,
+                author: asset.pubkey,
+                relay_hint: None,
+                platforms: vec!["linux-x86_64".into()],
+            }],
+            commit: None,
+            extra_tags: vec![],
+            released_at: Timestamp::now(),
+        })
+        .unwrap()
+        .finalize(&keys())
+        .unwrap();
+        release.pubkey = ngit_repo_coordinate().public_key;
+        (release, asset)
+    }
+
     #[test]
     fn picks_highest_semver_tag_from_state_event() {
         let event = state_event(&["v2.4.0", "v2.6.0", "v2.6.0^{}"]);
@@ -640,6 +693,53 @@ mod tests {
                 .iter()
                 .any(|filter| filter["#d"] == serde_json::json!(["ngit@v3.0.0"]))
         );
+    }
+
+    #[test]
+    fn trusted_release_channel_matches_the_semver_version() {
+        for (version, channel, expected) in [
+            ("3.0.0", "main", true),
+            ("3.0.0", "stable", false),
+            ("3.0.0-rc.7", "rc", true),
+            ("3.0.0-rc.7", "main", false),
+            ("3.0.0-beta.2", "beta", true),
+            ("3.0.0-alpha.preview.1", "alpha", true),
+        ] {
+            let (release, _) = release_and_asset_events(version, channel);
+            assert_eq!(
+                ngit_release_from_event(&release).is_some(),
+                expected,
+                "version {version} on channel {channel}"
+            );
+        }
+    }
+
+    #[test]
+    fn rc_release_resolves_for_automatic_and_exact_updates() {
+        let state = state_event(&["v3.0.0-rc.7"]);
+        let (release, asset) = release_and_asset_events("3.0.0-rc.7", "rc");
+
+        let automatic = resolve_available_update(
+            "3.0.0-rc.6",
+            &[state],
+            std::slice::from_ref(&release),
+            std::slice::from_ref(&asset),
+            Some("linux-x86_64"),
+            Some("gnu"),
+        )
+        .unwrap();
+        assert_eq!(automatic.version, "3.0.0-rc.7");
+
+        let exact = resolve_update_for_version(
+            "3.0.0-rc.6",
+            "3.0.0-rc.7",
+            &[release],
+            &[asset],
+            Some("linux-x86_64"),
+            Some("gnu"),
+        )
+        .unwrap();
+        assert_eq!(exact.version, "3.0.0-rc.7");
     }
 
     #[test]
