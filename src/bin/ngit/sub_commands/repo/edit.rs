@@ -5,7 +5,8 @@ use clap::ArgGroup;
 use ngit::{
     cli_interactor::{cli_error, cli_error_with_category},
     client::{
-        Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
+        Params, fetch_filters_to_local_cache, get_event_from_global_cache,
+        get_events_from_local_cache, get_repo_ref_from_cache,
     },
     event_ordering::latest_event,
     repo_ref::{
@@ -571,6 +572,68 @@ async fn latest_maintainer_announcement(
     latest_event(&candidates).cloned()
 }
 
+/// Refresh the announcement being edited from every relay where public
+/// replacements are published for this account.
+///
+/// Repository discovery can bootstrap from an indexer that still holds an
+/// older announcement whose relay set no longer overlaps the latest one. The
+/// account's NIP-65 write relays are the stable publication surface across
+/// that hosting change, so a mutation must consult all of them before deriving
+/// a replacement. A partial read fails closed: the missing relay may be the
+/// only one that accepted the current replacement.
+async fn refresh_own_announcement_from_account_relays(
+    cli: &Cli,
+    git_repo: &Repo,
+    git_repo_path: &Path,
+    client: &Client,
+    user_ref: &ngit::login::user::UserRef,
+    repo_ref: &RepoRef,
+) -> Result<()> {
+    if cli.repo_relay_only || init::repository_relay_only(git_repo, repo_ref) {
+        return Ok(());
+    }
+
+    let mut relays = Vec::new();
+    for relay in user_ref.relays.write() {
+        let relay = nostr::prelude::RelayUrl::parse(&relay)
+            .with_context(|| format!("invalid account write relay URL {relay:?}"))?;
+        if !relays.contains(&relay) {
+            relays.push(relay);
+        }
+    }
+    if relays.is_empty() {
+        return Ok(());
+    }
+
+    let filter = Filter::new()
+        .kind(Kind::GitRepoAnnouncement)
+        .author(user_ref.public_key)
+        .identifier(repo_ref.identifier.clone());
+    let results = fetch_filters_to_local_cache(client, git_repo_path, &relays, &[filter])
+        .await
+        .context("failed to refresh your repository announcement from account write relays")?;
+    let failures = results
+        .iter()
+        .filter_map(|(relay, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{relay}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    let failures = failures.join("; ");
+    Err(cli_error_with_category(
+        "repository_announcement_refresh_incomplete",
+        "cannot safely edit the repository announcement because an account write relay was not read",
+        &[("relay errors", &failures)],
+        &["retry when every account write relay is reachable"],
+    ))
+}
+
 fn relationship_governance(
     args: &SubCommandArgs,
     repo_ref: &RepoRef,
@@ -689,6 +752,18 @@ pub async fn launch(
     let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate)
         .await
         .context("no repository announcement found on relays")?;
+    refresh_own_announcement_from_account_relays(
+        cli,
+        &git_repo,
+        git_repo_path,
+        &client,
+        &user_ref,
+        &repo_ref,
+    )
+    .await?;
+    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate)
+        .await
+        .context("no repository announcement found after refreshing account write relays")?;
     let my_pubkey = user_ref.public_key;
     let mut my_ref = own_announcement(&repo_ref, my_pubkey)?;
 

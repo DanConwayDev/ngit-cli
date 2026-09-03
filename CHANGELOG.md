@@ -121,6 +121,11 @@ publication.
 
 ### Fixed
 
+- `ngit repo edit` now refreshes the maintainer's current announcement from
+  every NIP-65 write relay before deriving a replacement. A cold cache can no
+  longer let a stale indexer announcement make a targeted `--add-*` edit drop
+  existing grasp servers, relays, clone URLs, hashtags, or membership data;
+  incomplete account-relay reads fail before anything is signed or published.
 - `ngit merge` now preserves staged, unstaged, and untracked changes across
   the merge commit and branch switch, including the staged/unstaged boundary.
   If those changes conflict with the merged target, ngit rolls the merge back

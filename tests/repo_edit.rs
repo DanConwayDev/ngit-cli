@@ -11,7 +11,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
-use ngit::login::user::PrivateGitRelayList;
+use ngit::{
+    login::user::PrivateGitRelayList,
+    repo_ref::{format_grasp_server_url_as_clone_url, format_grasp_server_url_as_relay_url},
+};
 use nostr::nips::nip46::{NostrConnectEventBuilder, NostrConnectMessage, NostrConnectRequest};
 use nostr_connect::signer::{
     NostrConnectKeys, NostrConnectRemoteSigner, NostrConnectSignerActions,
@@ -164,6 +167,42 @@ fn replace_clone(event: &Event, keys: &Keys, clone_url: &str) -> Result<Event> {
         .finalize(keys)?)
 }
 
+fn replace_grasp_hosting(event: &Event, keys: &Keys, grasp_server: &str) -> Result<Event> {
+    let identifier = tag_value(event, "d").context("announcement identifier is missing")?;
+    let clone_url =
+        format_grasp_server_url_as_clone_url(grasp_server, &keys.public_key(), &identifier)?;
+    let relay_url = format_grasp_server_url_as_relay_url(grasp_server)?;
+    let mut tags: Vec<Tag> = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            !matches!(
+                tag.as_slice().first().map(String::as_str),
+                Some("clone" | "relays")
+            )
+        })
+        .cloned()
+        .collect();
+    tags.push(Tag::parse(["clone", clone_url.as_str()])?);
+    tags.push(Tag::parse(["relays", relay_url.as_str()])?);
+    Ok(EventBuilder::new(event.kind, event.content.clone())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
+        .finalize(keys)?)
+}
+
+fn clear_repo_event_caches(repo: &test_harness::Repo) -> Result<()> {
+    for name in ["nostr-cache.lmdb", "test-global-cache.lmdb"] {
+        let path = repo.dir().join(".git").join(name);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 async fn edit_ok(repo: &test_harness::Repo, args: &[&str]) -> Result<()> {
     let mut command = vec!["repo", "edit"];
     command.extend_from_slice(args);
@@ -256,6 +295,139 @@ async fn targeted_setting_actions_preserve_derived_and_untouched_values() -> Res
     assert!(clones[0].starts_with(&primary_grasp));
     assert_eq!(tag_values(&removed, "relays").len(), 1);
     assert!(tag_values_multiple(&removed, "t").is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn targeted_grasp_add_uses_latest_announcement_from_account_write_relay() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("account")
+    .with_grasp_server("repo")
+    .with_grasp_server("current")
+    .with_grasp_server("added")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("cold cache targeted edit".into()),
+            identifier: Some("cold-cache-targeted-edit".into()),
+            ..Default::default()
+        })
+        .await?;
+    let author = published.maintainer_keys.public_key();
+    let original = latest_announcement(&harness, author, &published.identifier).await?;
+    let original_grasp = harness.grasp("repo").url().to_string();
+    let current_grasp = harness.grasp("current").url().to_string();
+    let added_grasp = harness.grasp("added").url().to_string();
+    let account_relay = harness.relay("account").url().to_string();
+
+    let relay_list = EventBuilder::new(Kind::RelayList, "")
+        .tag(Tag::parse(["r", account_relay.as_str(), "write"])?)
+        .custom_created_at(Timestamp::from_secs(original.created_at.as_secs() + 1))
+        .finalize(&published.maintainer_keys)?;
+    publish_to_relay(harness.relay("default").url(), &[&relay_list]).await?;
+
+    // Model a prior replacement which moved hosting away from the original
+    // grasp. It is available from both its newly declared repository relay and
+    // the author's write relay, while the bootstrap relay still holds the
+    // original announcement. A cold client that selects the original cannot
+    // learn the new repository relay from that stale event, so the account
+    // relay is the stable discovery route across the hosting change.
+    let current = replace_grasp_hosting(&original, &published.maintainer_keys, &current_grasp)?;
+    publish_to_relay(&account_relay, &[&current]).await?;
+    publish_to_relay(&harness.grasp("current").relay_url(), &[&current]).await?;
+    clear_repo_event_caches(&publisher)?;
+
+    edit_ok(&publisher, &["--add-grasp-server", &added_grasp]).await?;
+
+    let edited = harness
+        .grasp("added")
+        .events(Filter::new().author(author).kind(Kind::GitRepoAnnouncement))
+        .await?
+        .into_iter()
+        .filter(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+        .context("new grasp server did not receive the edited announcement")?;
+    let clones = tag_values(&edited, "clone");
+    assert!(
+        clones.iter().any(|clone| clone.starts_with(&current_grasp)),
+        "the targeted add must preserve the latest announcement's current grasp server: {clones:?}",
+    );
+    assert!(
+        clones.iter().any(|clone| clone.starts_with(&added_grasp)),
+        "the targeted add must include the requested grasp server: {clones:?}",
+    );
+    assert!(
+        !clones
+            .iter()
+            .any(|clone| clone.starts_with(&original_grasp)),
+        "the targeted add must not resurrect hosting from the stale bootstrap announcement: {clones:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edit_refuses_when_an_account_write_relay_cannot_be_read() -> Result<()> {
+    let mut harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let author = published.maintainer_keys.public_key();
+    let filter = Filter::new().author(author).kind(Kind::GitRepoAnnouncement);
+    let before = harness
+        .grasp("repo")
+        .events(filter.clone())
+        .await?
+        .into_iter()
+        .find(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .context("initial announcement is missing from the grasp relay")?;
+
+    drop(
+        harness
+            .take_relay("default")
+            .context("default relay is missing")?,
+    );
+    let refused = publisher
+        .ngit(["repo", "edit", "--description", "must not publish"])
+        .output()
+        .await
+        .context("failed to spawn ngit repo edit")?;
+    assert!(
+        !refused.status.success(),
+        "repo edit must fail closed when an account write relay cannot be read",
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("account write relay"),
+        "the refusal should identify the incomplete announcement refresh: {stderr}",
+    );
+
+    let after = harness
+        .grasp("repo")
+        .events(filter)
+        .await?
+        .into_iter()
+        .find(|event| tag_value(event, "d").as_deref() == Some(published.identifier.as_str()))
+        .context("announcement disappeared from the grasp relay")?;
+    assert_eq!(
+        after.id, before.id,
+        "a failed refresh must not publish an announcement replacement",
+    );
 
     Ok(())
 }

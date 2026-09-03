@@ -2907,7 +2907,7 @@ async fn publish_origin_state(
     Ok(())
 }
 
-fn repository_relay_only(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
+pub(super) fn repository_relay_only(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
     repo_ref.private
         || git_repo
             .get_git_config_item("nostr.repo-relay-only", None)
