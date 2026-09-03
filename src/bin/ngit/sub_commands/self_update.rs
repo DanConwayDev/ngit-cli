@@ -29,10 +29,10 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
         } => {
             set_pending_output(&current, &candidate, stage, newer_candidate.as_deref());
             println!(
-                "ngit v{candidate} has been tagged, but its trusted NIP-82 {} are not ready yet",
+                "ngit v{candidate} has been tagged, but its trusted NIP-82 {} not ready yet",
                 match stage {
-                    ngit::self_update::PendingStage::Release => "release",
-                    ngit::self_update::PendingStage::Assets => "release assets",
+                    ngit::self_update::PendingStage::Release => "release is",
+                    ngit::self_update::PendingStage::Assets => "release assets are",
                 }
             );
             print_newer_candidate_notice(Some(&candidate), newer_candidate.as_deref());
