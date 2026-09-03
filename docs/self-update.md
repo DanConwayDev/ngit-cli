@@ -76,3 +76,8 @@ are queryable.
 The template remains a bootstrap mechanism. When it finds an existing
 receipted installation with `ngit update`, it delegates to the native
 updater so release policy and replacement logic are not maintained in shell.
+On NixOS it shows an exact tagged `nix profile add` command using ngit.dev's
+GRASP-backed Git alias, then exits without changing the profile. `--standalone`
+is an explicit escape hatch which selects the static musl archive for a
+user-owned x86_64 installation. Other NixOS architectures remain Nix-managed
+until a matching static asset is published.

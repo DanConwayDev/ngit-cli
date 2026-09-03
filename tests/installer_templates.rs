@@ -2,6 +2,7 @@ use std::{fs, process::Command};
 
 const UNIX_TEMPLATE: &str = include_str!("../install/install.sh.in");
 const WINDOWS_TEMPLATE: &str = include_str!("../install/install.ps1.in");
+const README: &str = include_str!("../README.md");
 
 #[test]
 fn installer_templates_have_one_deployment_contract() {
@@ -16,7 +17,7 @@ fn installer_templates_have_one_deployment_contract() {
 }
 
 #[test]
-fn unix_template_is_valid_shell_and_handles_nixos_with_musl() {
+fn unix_template_is_valid_shell_and_prefers_nix_on_nixos() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("install.sh");
     fs::write(&path, UNIX_TEMPLATE).unwrap();
@@ -24,8 +25,21 @@ fn unix_template_is_valid_shell_and_handles_nixos_with_musl() {
     assert!(status.success());
     assert!(UNIX_TEMPLATE.contains("if is_nixos || ldd --version"));
     assert!(UNIX_TEMPLATE.contains("linux-x86_64-musl"));
+    assert!(
+        UNIX_TEMPLATE.contains("nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v%s'")
+    );
+    assert!(!UNIX_TEMPLATE.contains("github:DanConwayDev/ngit-cli"));
+    assert!(UNIX_TEMPLATE.contains("bash -s -- --standalone"));
+    assert!(UNIX_TEMPLATE.contains("if is_nixos && [ \"$FORCE_STANDALONE\" -ne 1 ]"));
+    assert!(UNIX_TEMPLATE.contains("is_nixos && return 1"));
     assert!(UNIX_TEMPLATE.contains("\"$ngit_dir/ngit\" --version"));
     assert!(UNIX_TEMPLATE.contains("\"$ngit_dir/git-remote-nostr\" --version"));
+}
+
+#[test]
+fn readme_nix_install_tracks_the_stable_release() {
+    assert!(README.contains("nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v2.6.3'"));
+    assert!(!README.contains("github:DanConwayDev/ngit-cli"));
 }
 
 #[test]
