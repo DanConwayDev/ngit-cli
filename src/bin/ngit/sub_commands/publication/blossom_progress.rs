@@ -15,16 +15,14 @@ use ngit::{
 };
 use reqwest::Url;
 
-const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise:.dim}] {prefix:28.bold.cyan} [{bar:22.cyan/blue}] {bytes:.dim}/{total_bytes:.dim} {bytes_per_sec:.dim} {wide_msg:.dim}";
+const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix:28} [{bar:22}] {bytes}/{total_bytes} {bytes_per_sec} {wide_msg}";
 const BLOSSOM_PHASE_ROW_TEMPLATE: &str =
-    "   {spinner:.cyan} [{elapsed_precise:.dim}] {prefix:28.bold.cyan} — {wide_msg:.dim}";
-const BLOSSOM_FINISHED_ROW_TEMPLATE: &str =
-    "     [{elapsed_precise:.dim}] {prefix:28.bold.cyan} — {wide_msg:.dim}";
-const BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE: &str = "  {prefix:.bold.cyan}  {wide_msg:.dim}";
+    "   {spinner} [{elapsed_precise}] {prefix:28} — {wide_msg}";
+const BLOSSOM_FINISHED_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix:28} — {wide_msg}";
+const BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE: &str = "  {prefix}  {wide_msg}";
 const BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE: &str =
-    "    [{bar:22.cyan/blue}] {bytes:.dim}/{total_bytes:.dim} {bytes_per_sec:.dim} {wide_msg:.dim}";
-const BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE: &str =
-    "    {spinner:.cyan} [{elapsed_precise:.dim}] {wide_msg:.dim}";
+    "    [{bar:22}] {bytes}/{total_bytes} {bytes_per_sec} {wide_msg}";
+const BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE: &str = "    {spinner} [{elapsed_precise}] {wide_msg}";
 const DETAILED_UPLOAD_BLOB_LIMIT: usize = 3;
 
 pub(crate) struct BlossomUploadProgress {
@@ -301,18 +299,16 @@ impl BlossomUploadProgress {
         verbose: bool,
     ) -> Result<Arc<Self>> {
         let multi = MultiProgress::with_draw_target(draw_target);
-        let heading_style = ProgressStyle::with_template(
-            " {spinner:.cyan} [{elapsed_precise:.dim}] {prefix:.bold.cyan} — {wide_msg:.dim}",
-        )?
-        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
+        let heading_style =
+            ProgressStyle::with_template(" {spinner} [{elapsed_precise}] {prefix} — {wide_msg}")?
+                .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈");
         let presence_style = ProgressStyle::with_template(
-            "   [{elapsed_precise}] Checking existing Blossom copies [{bar:22.cyan/blue}] {pos}/{len} {msg}",
+            "   [{elapsed_precise}] Checking existing Blossom copies [{bar:22}] {pos}/{len} {msg}",
         )?
         .progress_chars("##-");
-        let presence_server_style = ProgressStyle::with_template(
-            "      {prefix:28} [{bar:18.cyan/blue}] {pos}/{len} {msg}",
-        )?
-        .progress_chars("##-");
+        let presence_server_style =
+            ProgressStyle::with_template("      {prefix:28} [{bar:18}] {pos}/{len} {msg}")?
+                .progress_chars("##-");
         let upload_style =
             ProgressStyle::with_template(BLOSSOM_UPLOAD_ROW_TEMPLATE)?.progress_chars("##-");
         let phase_style =
@@ -1183,7 +1179,7 @@ mod tests {
     fn blossom_batch_rows_reserve_the_spinner_column() {
         let rendered_bracket_column = |template: &str| {
             template
-                .replace("{spinner:.cyan}", "x")
+                .replace("{spinner}", "x")
                 .find('[')
                 .expect("Blossom row template should render elapsed time")
         };
@@ -1199,13 +1195,19 @@ mod tests {
     }
 
     #[test]
-    fn compact_rows_form_a_colored_server_hierarchy() {
+    fn compact_rows_form_a_plain_server_hierarchy() {
         assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.starts_with("  {prefix"));
         assert!(BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE.starts_with("    ["));
         assert!(BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE.starts_with("    {spinner"));
-        assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.contains("bold.cyan"));
-        assert!(BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE.contains("wide_msg:.dim"));
-        assert!(BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE.contains("bar:22.cyan/blue"));
+        for template in [
+            BLOSSOM_SERVER_SUMMARY_ROW_TEMPLATE,
+            BLOSSOM_COMPACT_UPLOAD_ROW_TEMPLATE,
+            BLOSSOM_COMPACT_PHASE_ROW_TEMPLATE,
+        ] {
+            assert!(!template.contains("cyan"));
+            assert!(!template.contains("blue"));
+            assert!(!template.contains(".dim"));
+        }
     }
 
     #[test]
