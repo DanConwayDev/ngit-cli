@@ -190,6 +190,13 @@ publication.
 - Fix silent mis-targeting of repo-scoped events (`ngit send`, `ngit issue create`, `ngit pr *`, `ngit repo`, etc.) when a repository had multiple `nostr://` remotes with disagreeing coordinates. Previously the resolver iterated a `HashMap` and picked the first key it saw, ignored `nostr.repo`, and printed no diagnostic; the effect was that PRs and issues could be published against the wrong repository coordinate without warning. See the documented priority under "Changed".
 - `ngit merge` run with no argument on a bare `pr/<name>` branch now falls back to matching the branch's tip commit against the published tips of open and draft PRs when the logged-in-author mapping finds zero or several candidates. A maintainer merging a contributor's PR from a hand-made bare branch, and a logged-out user merging their own, now resolve the PR instead of erroring; when several open PRs share both the branch name and the tip commit, merge still asks for an explicit event-id.
 
+## [3.0.0-rc.7] - 2026-09-03
+
+- Seventh v3 release candidate, preserving backward-compatible signer records,
+  distinguishing multiple remote-signer connections for one identity, adding
+  direct credential export, and publishing ngit's complete cross-platform
+  release through NIP-82 from the GitHub release workflow.
+
 ## [3.0.0-rc.6] - 2026-09-03
 
 - Sixth v3 release candidate, unifying resilient Blossom publication and
