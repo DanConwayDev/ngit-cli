@@ -466,8 +466,8 @@ impl BlossomUploadProgress {
     }
 
     fn finish_presence_checks(&self) {
-        self.heading
-            .finish_with_message("existing Blossom copy checks complete");
+        self.heading.finish_and_clear();
+        self.clear_presence_bars();
     }
 
     fn clear_presence_bars(&self) {
@@ -1242,6 +1242,35 @@ mod tests {
         assert_eq!(activity.batch, 2);
         assert_eq!(activity.batches, 5);
         assert!(activity.subject().contains("file 2/5"));
+        Ok(())
+    }
+
+    #[test]
+    fn completed_presence_checks_are_transient() -> Result<()> {
+        let progress = BlossomUploadProgress::new(true)?;
+        let server = Url::parse("https://blossom.example/")?;
+        progress.update(&BlossomProgressEvent::PresenceChecksStarted {
+            blobs: 1,
+            servers: vec![server.clone()],
+            checks: 1,
+        });
+        progress.update(&BlossomProgressEvent::PresenceCheckFinished {
+            server: server.clone(),
+            status: BlossomPresenceStatus::AlreadyStored,
+            checked: 1,
+            checks: 1,
+            confirmed: 1,
+            missing: 0,
+            metadata_differences: 0,
+            failed: 0,
+            skipped: 0,
+        });
+        progress.update(&BlossomProgressEvent::PresenceChecksFinished { missing: 0 });
+
+        assert!(progress.heading.is_finished());
+        let presence = progress.presence.lock().unwrap();
+        assert!(presence.servers.is_empty());
+        assert_eq!(presence.server_order, [server]);
         Ok(())
     }
 
