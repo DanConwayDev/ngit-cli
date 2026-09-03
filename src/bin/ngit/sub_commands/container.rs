@@ -139,10 +139,10 @@ async fn publish(
         .context("failed to sign the container repository event; uploaded blobs are reusable")?;
     let relay_results = send_events(
         &context.client,
-        None,
+        Some(context.git_repo_path()?),
         vec![event.clone()],
-        repository_relays.iter().map(ToString::to_string).collect(),
         vec![],
+        repository_relays.clone(),
         !json_output,
         json_output,
     )
