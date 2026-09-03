@@ -372,8 +372,9 @@ fn ngit_release_from_event(event: &Event) -> Option<SoftwareRelease> {
     (release.raw_event.pubkey == ngit_repo_coordinate().public_key
         && release.application.coordinate == ngit_application_coordinate()
         && release.application_identifier == NGIT_APPLICATION_IDENTIFIER
-        && parse_version(&release.version)
-            .is_some_and(|version| release.channel == release_channel(&version)))
+        && (release.channel == "main"
+            || parse_version(&release.version)
+                .is_some_and(|version| release.channel == release_channel(&version))))
     .then_some(release)
 }
 
@@ -701,7 +702,8 @@ mod tests {
             ("3.0.0", "main", true),
             ("3.0.0", "stable", false),
             ("3.0.0-rc.7", "rc", true),
-            ("3.0.0-rc.7", "main", false),
+            ("3.0.0-rc.7", "main", true),
+            ("3.0.0-rc.7", "beta", false),
             ("3.0.0-beta.2", "beta", true),
             ("3.0.0-alpha.preview.1", "alpha", true),
         ] {
