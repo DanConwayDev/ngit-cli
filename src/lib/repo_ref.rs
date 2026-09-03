@@ -888,13 +888,25 @@ impl RepoRef {
     /// added in the same republish gains a start boundary, which is accurate
     /// since the prior listing proves they were not a member before.
     pub fn role_history_for_republish(&self) -> Vec<Tag> {
+        self.role_history_for_republish_with_lead(self.lead)
+    }
+
+    /// Build republish history while classifying a pre-role-tag listing under
+    /// the lead the replacement announcement will assert.
+    ///
+    /// Existing indexed history is always returned verbatim. The lead
+    /// override matters only when materializing a legacy or implicit listing:
+    /// it lets the first role-aware announcement describe the prior sole
+    /// maintainer as the lead from the beginning instead of inventing and
+    /// immediately closing a co-maintainer interval for them.
+    pub fn role_history_for_republish_with_lead(&self, lead: Option<PublicKey>) -> Vec<Tag> {
         let mut tags = self.role_tags.clone();
         let has_maintainer_entries = tags
             .iter()
             .any(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("M" | "m")));
         if !has_maintainer_entries {
             for pk in &self.maintainers {
-                let letter = if self.lead == Some(*pk) { "M" } else { "m" };
+                let letter = if lead == Some(*pk) { "M" } else { "m" };
                 tags.push(Tag::parse([letter, &pk.to_string()]).unwrap());
             }
         }
@@ -5192,6 +5204,14 @@ mod tests {
                     .collect()
             }
 
+            fn history_of_with_lead(repo_ref: &RepoRef, lead: PublicKey) -> Vec<Vec<String>> {
+                repo_ref
+                    .role_history_for_republish_with_lead(Some(lead))
+                    .iter()
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            }
+
             #[test]
             fn existing_maintainer_role_tags_pass_through_verbatim() {
                 let keys = nostr::prelude::Keys::generate();
@@ -5245,6 +5265,18 @@ mod tests {
                         tag(&["o", &moderator.to_string()]),
                         tag(&["m", &author.to_string()]),
                     ],
+                );
+            }
+
+            #[test]
+            fn implicit_sole_maintainer_materializes_as_the_requested_lead() {
+                let keys = nostr::prelude::Keys::generate();
+                let author = keys.public_key();
+                let parsed = RepoRef::try_from((role_event(&keys, vec![]), None)).unwrap();
+
+                assert_eq!(
+                    history_of_with_lead(&parsed, author),
+                    vec![tag(&["M", &author.to_string()])],
                 );
             }
 

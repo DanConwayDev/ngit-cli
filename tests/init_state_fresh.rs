@@ -930,9 +930,9 @@ async fn pre_existing_origin_with_tag_promotes_to_nostr_and_state_event_covers_t
 // ---------------------------------------------------------------------------
 
 /// `repo edit --lead-maintainer` with the publisher's own npub keeps the
-/// listing intact and asserts the publisher as lead. The replacement closes
-/// the author's implicit co-maintainer history and starts an `M` interval at
-/// the same transition time.
+/// listing intact and asserts the publisher as lead. Their implicit sole-
+/// maintainer history becomes an untimed `M` interval instead of a fabricated
+/// closed `m` interval followed by a newly started `M` interval.
 #[tokio::test]
 async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
     let harness = Harness::builder(
@@ -1010,21 +1010,10 @@ async fn lead_maintainer_self_emits_uppercase_m_role_tag() -> Result<()> {
         .filter(|t| t.first().is_some_and(|name| name == "M" || name == "m"))
         .collect();
     let author = state.keys.public_key().to_string();
-    assert_eq!(role_tags.len(), 2, "expected M and closed m history");
-    assert_eq!(&role_tags[0][..2], &["M".to_string(), author.clone()]);
     assert_eq!(
-        &role_tags[1][..3],
-        &["m".to_string(), author, "0".to_string()]
-    );
-    assert_eq!(role_tags[0].len(), 3, "the M interval should be active");
-    assert_eq!(
-        role_tags[1].len(),
-        4,
-        "the prior m interval should be closed"
-    );
-    assert_eq!(
-        role_tags[0][2], role_tags[1][3],
-        "promotion should close m and start M at one boundary",
+        role_tags,
+        vec![vec!["M".to_string(), author]],
+        "the implicit sole maintainer should be lead from the beginning without m history",
     );
     assert_eq!(
         tag_values(&announcement, "maintainers"),

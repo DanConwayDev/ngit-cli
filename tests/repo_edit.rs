@@ -609,11 +609,25 @@ async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
 
     edit_ok(&publisher, &["--add-maintainer", &bob_npub]).await?;
     let invited = latest_announcement(&harness, alice, &published.identifier).await?;
+    let alice_hex = alice.to_string();
     assert_eq!(
         tag_values(&invited, "maintainers"),
-        vec![alice.to_string(), bob.to_string()],
+        vec![alice_hex.clone(), bob.to_string()],
     );
-    assert_eq!(tag_values_multiple(&invited, "M"), vec![alice.to_string()]);
+    let alice_roles: Vec<Vec<String>> = invited
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| {
+            matches!(tag.first().map(String::as_str), Some("M" | "m"))
+                && tag.get(1) == Some(&alice_hex)
+        })
+        .collect();
+    assert_eq!(
+        alice_roles,
+        vec![vec!["M".to_string(), alice_hex]],
+        "the implicit sole maintainer should become lead from the beginning without m history",
+    );
     let active_m: Vec<String> = invited
         .tags
         .iter()
@@ -622,6 +636,10 @@ async fn named_add_and_remove_change_only_that_relationship() -> Result<()> {
         .filter_map(|tag| tag.get(1).cloned())
         .collect();
     assert_eq!(active_m, vec![bob.to_string()]);
+    assert!(
+        active_role_start(&invited, "m", bob).is_some(),
+        "the new maintainer invitation should start at the edit time",
+    );
 
     let refused = publisher
         .ngit([

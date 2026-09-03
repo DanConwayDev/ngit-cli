@@ -612,10 +612,13 @@ author's announcement. ngit requires the author to repair it before another
 repository edit, as described under “Edge cases and failure rules.”
 
 The happy-path announcements progress like this. Alice's first invitation at
-`T1` automatically establishes Alice as lead and creates Bob's pending edge:
+`T1` automatically establishes Alice as lead from the beginning of the
+repository and creates Bob's pending edge. Alice's untimed record has an
+effective authorization start of `0`; it does not fabricate a prior `m`
+interval for her:
 
 ```text
-["M", "<alice-pubkey>", "T1"]
+["M", "<alice-pubkey>"]
 ["m", "<bob-pubkey>", "T1"]
 ["maintainers", "<alice-pubkey>", "<bob-pubkey>"]
 ```

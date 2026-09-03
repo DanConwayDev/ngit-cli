@@ -1571,11 +1571,13 @@ fn resolve_fields(
     // [`ResolvedFields::role_tags`]). When my announcement predates role
     // tags, untimed entries are materialized from its maintainer listing so
     // a member this republish drops is closed with an end boundary rather
-    // than silently unlisted.
+    // than silently unlisted. Materialize them under the lead this
+    // replacement will assert so first establishing a lead does not invent a
+    // prior co-maintainer interval for that pubkey.
     let role_tags = args.role_tags.clone().unwrap_or_else(|| {
-        my_ref
-            .as_ref()
-            .map_or_else(Vec::new, RepoRef::role_history_for_republish)
+        my_ref.as_ref().map_or_else(Vec::new, |repo_ref| {
+            repo_ref.role_history_for_republish_with_lead(lead)
+        })
     });
 
     let private = if args.private {
