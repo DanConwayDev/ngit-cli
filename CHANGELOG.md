@@ -127,6 +127,11 @@ publication.
 
 ### Fixed
 
+- `ngit update` now recognizes signed prerelease events whose NIP-82 channel
+  matches the first SemVer prerelease identifier (`rc.7` uses `rc`, `beta.2`
+  uses `beta`) for both automatic and exact-version updates. Stable releases
+  remain restricted to `main`, and pending-release warnings now use the
+  correct singular or plural verb.
 - Remote-signer login no longer overwrites a different NIP-46 connection for
   the same npub before failing to persist Git config. A bare npub retains its
   default signer, while `--alias <name>` stores and selects additional signer
