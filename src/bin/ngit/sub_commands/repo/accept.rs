@@ -9,7 +9,7 @@ use ngit::{
     cli_interactor::{cli_error, cli_error_with_category},
     client::{Params, get_repo_ref_from_cache, send_events},
     git::nostr_url::NostrUrlDecoded,
-    login::user::publish_private_git_relay_list,
+    login::user::{UserRef, publish_private_git_relay_list},
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
@@ -42,7 +42,7 @@ async fn preflight_existing_announcement(
     selected: nostr::prelude::PublicKey,
     my_pubkey: nostr::prelude::PublicKey,
     force_requested: bool,
-) -> Result<()> {
+) -> Result<Option<RepoRef>> {
     let discovered =
         super::preflight::discover_candidate_events(client, repo_ref, my_pubkey).await?;
     let Some(existing) = super::preflight::latest_announcement(
@@ -53,7 +53,7 @@ async fn preflight_existing_announcement(
     )
     .await
     else {
-        return Ok(());
+        return Ok(None);
     };
     let existing_event_id = existing.id.to_hex();
     let existing = RepoRef::try_from((existing, None))
@@ -76,6 +76,41 @@ async fn preflight_existing_announcement(
         selected,
         my_pubkey,
     )?;
+    let repairs_maintainer_self_defer = existing
+        .invalid_self_defers()
+        .iter()
+        .any(|invalid| invalid.author == my_pubkey && invalid.role != "o");
+    if repairs_maintainer_self_defer {
+        if existing.root_commit != repo_ref.root_commit {
+            return Err(cli_error_with_category(
+                "membership_identity_conflict",
+                "repairing this announcement would join a different repository identity",
+                &[
+                    (
+                        "existing earliest unique commit",
+                        existing.root_commit.as_str(),
+                    ),
+                    (
+                        "invitation earliest unique commit",
+                        repo_ref.root_commit.as_str(),
+                    ),
+                ],
+                &[
+                    "preserve the repositories under separate identifiers or reconcile their identity first",
+                ],
+            ));
+        }
+        super::preflight::require_equivalent_activating_state(
+            git_repo_path,
+            repo_ref,
+            my_pubkey,
+            true,
+            force_requested,
+            &discovered,
+        )
+        .await?;
+        return Ok(Some(existing));
+    }
     let force_guidance = if force_requested {
         "--force cannot replace an existing repository announcement"
     } else {
@@ -90,6 +125,89 @@ async fn preflight_existing_announcement(
             force_guidance,
         ],
     ))
+}
+
+async fn accept_by_repairing_self_defer(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    mut existing: RepoRef,
+    signer: &Arc<NgitSigner>,
+    user_ref: &UserRef,
+    client: &mut Client,
+    grasp_servers: &[String],
+) -> Result<()> {
+    let my_pubkey = user_ref.public_key;
+    let maintainers = default_acceptance_maintainers(repo_ref, my_pubkey);
+    let lead = acceptance_lead(repo_ref, my_pubkey).filter(|lead| maintainers.contains(lead));
+    let now = Timestamp::now().as_secs();
+    existing.role_tags = existing
+        .role_history_for_self_defer_acceptance(&my_pubkey, &maintainers, lead, now)
+        .context("failed to repair the invalid self-defer while accepting maintainership")?;
+    existing.maintainers = maintainers;
+    existing.lead = lead;
+    existing.private = repo_ref.private;
+    existing.events = repo_ref.events.clone();
+
+    if !grasp_servers.is_empty() {
+        let mut git_servers = Vec::new();
+        let mut relay_strings = Vec::new();
+        apply_grasp_infrastructure(
+            grasp_servers,
+            &mut git_servers,
+            &mut relay_strings,
+            &my_pubkey,
+            &repo_ref.identifier,
+        )?;
+        existing.git_server = git_servers;
+        existing.relays = relay_strings
+            .iter()
+            .filter_map(|relay| RelayUrl::parse(relay).ok())
+            .collect();
+    }
+    if repo_ref.private && existing.relays.is_empty() {
+        return Err(cli_error(
+            "a private repository announcement requires a relay hint",
+            &[],
+            &["retry with `ngit repo accept --grasp-server <server>`"],
+        ));
+    }
+
+    let event = existing.to_event(signer).await?;
+    client.set_signer(signer.clone()).await;
+    if repo_ref.private {
+        publish_private_git_relay_list(client, &existing.relays, user_ref, signer)
+            .await
+            .context("failed to publish private Git relay discovery list")?;
+    }
+    let mut repository_relays = repo_ref.relays.clone();
+    for relay in &existing.relays {
+        if !repository_relays.contains(relay) {
+            repository_relays.push(relay.clone());
+        }
+    }
+    let _ = send_events(
+        client,
+        Some(git_repo.get_path()?),
+        vec![event],
+        user_ref.relays.write(),
+        repository_relays,
+        true,
+        false,
+    )
+    .await
+    .context("failed to publish the repaired maintainer acceptance")?;
+
+    if !grasp_servers.is_empty() {
+        wait_for_grasp_servers(
+            git_repo,
+            grasp_servers,
+            &my_pubkey,
+            &repo_ref.identifier,
+            repo_ref.private.then(|| signer.clone()),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn require_pending_invitation(
@@ -184,7 +302,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
 
     require_pending_invitation(&repo_ref, selected, my_pubkey)?;
 
-    preflight_existing_announcement(
+    let existing_self_defer = preflight_existing_announcement(
         git_repo_path,
         &repo_ref,
         &client,
@@ -199,7 +317,18 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     println!("accepting maintainer invitation for '{repo_name}'");
     println!("publishing your repository announcement to nostr...");
 
-    if args.grasp_server.is_empty() {
+    if let Some(existing) = existing_self_defer {
+        accept_by_repairing_self_defer(
+            &git_repo,
+            &repo_ref,
+            existing,
+            &signer,
+            &user_ref,
+            &mut client,
+            &args.grasp_server,
+        )
+        .await?;
+    } else if args.grasp_server.is_empty() {
         // Use the existing defaults logic from the library
         accept_maintainership_with_defaults(&git_repo, &repo_ref, &user_ref, &mut client, &signer)
             .await?;

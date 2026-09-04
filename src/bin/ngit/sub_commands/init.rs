@@ -802,6 +802,15 @@ pub struct SubCommandArgs {
     /// the empty result of removing the final co-maintainer.
     #[clap(skip)]
     pub(crate) replace_maintainers: bool,
+    /// Whether an exact internal replacement already contains the author's
+    /// pubkey when their repaired role remains active. Ordinary edits leave
+    /// this false and receive the historical implicit author insertion.
+    #[clap(skip)]
+    pub(crate) replacement_lists_author: bool,
+    /// Permit the internal repository-edit recovery path to replace an
+    /// announcement for an author who currently has no resolvable role.
+    #[clap(skip)]
+    pub(crate) allow_self_defer_repair: bool,
     /// Explicitly clear this announcement's active lead declaration.
     #[clap(skip)]
     pub(crate) clear_lead: bool,
@@ -1042,7 +1051,7 @@ fn validate_post_fetch(
             Ok(())
         }
         InitState::NotListed { .. } => {
-            if cli.force {
+            if args.allow_self_defer_repair || cli.force {
                 Ok(())
             } else {
                 Err(cli_error(
@@ -1368,7 +1377,11 @@ fn resolve_fields(
     };
 
     let base_maintainers = if args.replace_maintainers {
-        let mut m = vec![user_ref.public_key];
+        let mut m = if args.replacement_lists_author {
+            Vec::new()
+        } else {
+            vec![user_ref.public_key]
+        };
         for npub in &args.other_maintainers {
             if let Ok(pk) = PublicKey::from_bech32(npub) {
                 if !m.contains(&pk) {

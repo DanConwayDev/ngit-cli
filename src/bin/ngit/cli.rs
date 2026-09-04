@@ -1663,7 +1663,7 @@ pub enum RepoCommands {
     /// update repository metadata on nostr
     #[command(
         long_about = "update an existing repository announcement on nostr\n\nrepository announcements are created with `ngit init`; use this command for every later metadata or roster change. Omitted settings are preserved; collection settings use targeted --add-* and --remove-* actions",
-        after_long_help = "Examples:\n  ngit repo edit --description \"New description\"\n  ngit repo edit --add-grasp-server grasp.example.com\n  ngit repo edit --remove-additional-relay wss://old.example.com --add-additional-relay wss://new.example.com"
+        after_long_help = "Examples:\n  ngit repo edit --description \"New description\"\n  ngit repo edit --add-grasp-server grasp.example.com\n  ngit repo edit --remove-additional-relay wss://old.example.com --add-additional-relay wss://new.example.com\n  ngit repo edit --repair-self-defer m=continue\n  ngit repo edit --repair-self-defer m=1788467593"
     )]
     Edit(sub_commands::repo::edit::SubCommandArgs),
     /// accept an invitation to co-maintain a repository

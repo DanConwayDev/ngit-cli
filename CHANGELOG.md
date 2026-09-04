@@ -127,6 +127,11 @@ publication.
 
 ### Fixed
 
+- Invalid repository self-`defer` role records are now author-scoped health
+  problems instead of repository-wide failures. A strictly later signed
+  self-role restores current authority without rewriting the malformed
+  history; otherwise only that signer is gated and can explicitly repair the
+  record with `ngit repo edit --repair-self-defer` or accept a fresh role.
 - The `nostr://` Git remote helper now accepts raw commit object IDs on the
   source side of push refspecs, matching Git's normal behavior for commands
   such as `git push origin <oid>:refs/heads/recovery`. Branch and lightweight

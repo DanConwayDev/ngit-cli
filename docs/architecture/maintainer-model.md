@@ -1577,11 +1577,20 @@ byte.
 Clients may use signed surrounding history to propose, but never silently
 apply, a repair. If a later active self-role starts at `T`, the suggested
 correction replaces `defer` with `T`; the signer must approve and sign the new
-announcement. An explicit operation that accepts that new role may make the
-same close-and-open correction in its normal preview. Without one unambiguous
-successor, the signer chooses whether the old role remains active or supplies
-a numeric end. Other viewers see the warning but are neither prompted nor
-blocked.
+announcement. An explicit operation that accepts a current maintainer
+invitation may combine acceptance with that repair only for one unique, simple
+`[role, author, start, defer]` maintainer record. It must have either no
+successor or one unambiguous signed successor boundary, and the announcement
+must contain no other ended or restarted self-role history that the repair
+would make authority-bearing. The accepted role's new start must also strictly
+supersede every additional malformed self-role interval that is not already
+superseded; acceptance cannot report success while another invalid interval
+still blocks the signer. Longer records, multiple invalid maintainer records,
+ambiguous successors, and other history-bearing or still-blocking cases require
+a separate signer-reviewed repair before acceptance. Clients do not advertise
+acceptance as the repair for those cases. Without one unambiguous successor,
+the signer chooses whether the old role remains active or supplies a numeric
+end. Other viewers see the warning but are neither prompted nor blocked.
 
 For example:
 
@@ -1596,9 +1605,10 @@ coordinate into a restart. A client may offer
 `["m", "<author-pubkey>", "0", "200"]` as the repair, but until the author
 signs it the earlier interval remains unresolved.
 
-If there is no superseding active role and the resolved lead still has an
-active invitation, read commands warn and authority-bearing commands for that
-signer direct them to publish a valid acceptance:
+If there is no superseding active role, the resolved lead still has an active
+invitation, and the invalid record satisfies the safe combined-repair shape
+above, read commands warn and authority-bearing commands for that signer direct
+them to publish a valid acceptance:
 
 ```text
 your announcement does not contain an active maintainer acceptance
@@ -1606,8 +1616,9 @@ the lead relationship and your self-role must both be active
 accept the current invitation with: ngit repo accept
 ```
 
-If there is no current invitation, the client reports that fact instead of
-offering a command that could manufacture one.
+If there is no current invitation, or the history requires a separate repair,
+the client reports that fact instead of offering an acceptance command that
+could manufacture a role or import unresolved authority.
 
 #### A co-maintainer actively assigns a third party
 
@@ -2092,7 +2103,11 @@ The implementation and tests must make these statements true:
     leaving only the unresolved historical interval invalid. With no such
     successor, only the affected author's announcement mutations and
     role-dependent writes are gated. Clients do not silently repair the record
-    during an unrelated edit.
+    during an unrelated edit. Acceptance may combine with repair only for one
+    simple invalid maintainer `[start, defer]` interval with no ambiguous
+    successor or other ended/restarted self-role history, and its new start must
+    leave no additional malformed interval unsuperseded; every more complex or
+    still-blocking history requires a separate signer-reviewed repair.
 28. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically, display the
