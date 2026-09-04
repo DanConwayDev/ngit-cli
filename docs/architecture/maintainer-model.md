@@ -705,7 +705,8 @@ repository lifecycle; only a later start after a real timestamp gap can begin a
 new same-coordinate lifecycle.
 
 A record whose history cannot be parsed — a non-numeric boundary other than a
-final `defer`, a `defer` before the final position, or a missing subject —
+final `defer`, a `defer` before the final position, or a missing, empty, or
+non-hex subject —
 carries no role semantics in either direction. The author's own announcement
 preserves such a record byte-for-byte across unrelated edits, exactly like an
 invalid self-`defer`, so signed evidence is never silently rewritten. A copy
@@ -838,7 +839,8 @@ subject's state after reciprocity even though ngit flags that shape for
 convergence; a `defer` copy cannot.
 
 Only syntactically valid, currently active `M` records create lead pointers. An
-`M` with malformed role history is ignored for authority and lead resolution
+`M` with malformed role history or a non-hex subject is ignored for authority
+and lead resolution
 and reported as author-scoped repository health; its mere presence does not
 turn the absence of a valid active `M` into an incomplete explicit path. When
 no valid active `M` remains at the selected coordinate, resolution uses the
@@ -1604,7 +1606,12 @@ copies into other authors' views filter them out.
 Clients may use signed surrounding history to propose, but never silently
 apply, a repair. If a later active self-role starts at `T`, the suggested
 correction replaces `defer` with `T`; the signer must approve and sign the new
-announcement. An explicit operation that accepts a current maintainer
+announcement. When that successor uses the same role letter, the repaired
+interval and successor are emitted as one record, for example
+`["m", author, start, T, T]`; leaving two valid same-role records would retain
+the duplicate-history conflict. A same-role record with any other shape cannot
+be merged by this guided repair and requires the signer-reviewed advanced
+repair flow. An explicit operation that accepts a current maintainer
 invitation may combine acceptance with that repair only for one unique, simple
 `[role, author, start, defer]` maintainer record. It must have either no
 successor or one unambiguous signed successor boundary, and the announcement

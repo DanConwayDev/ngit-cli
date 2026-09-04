@@ -371,9 +371,9 @@ pub fn announcement_author_has_only_malformed_self_records(event: &Event) -> boo
 }
 
 /// One unparseable role record on a signed announcement: malformed history
-/// boundaries, a `defer` before the final position, or a missing or empty
-/// subject. Preserved byte-for-byte on the author's own announcement (see
-/// [`RepoRef::generate_role_tags`]) and surfaced as author-scoped
+/// boundaries, a `defer` before the final position, or a missing, empty, or
+/// non-hex subject. Preserved byte-for-byte on the author's own announcement
+/// (see [`RepoRef::generate_role_tags`]) and surfaced as author-scoped
 /// repository health. No automated repair exists for these records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MalformedRoleRecord {
@@ -398,7 +398,9 @@ fn malformed_role_records_in(event: &Event) -> Vec<MalformedRoleRecord> {
             continue;
         };
         let unparseable = role_boundaries(slice).is_none()
-            || slice.get(1).is_some_and(|subject| subject.is_empty());
+            || !slice
+                .get(1)
+                .is_some_and(|subject| PublicKey::from_str(subject).is_ok());
         if !unparseable {
             continue;
         }
@@ -715,9 +717,9 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
             let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
                 continue;
             };
-            let pk = PublicKey::from_str(pk)
-                .context(format!("failed to convert entry from `{name}` role tag {pk} into a valid nostr public key. it should be in hex format"))
-                .context("invalid repository event")?;
+            let Ok(pk) = PublicKey::from_str(pk) else {
+                continue;
+            };
             if pk == event.pubkey {
                 author_has_role_entry = true;
             }
@@ -1105,11 +1107,11 @@ impl RepoRef {
     ///   never passed through the ordinary transition logic by an unrelated
     ///   edit;
     /// - every other unparseable record — malformed history boundaries or a
-    ///   missing subject — is likewise preserved byte-for-byte: it can be
-    ///   neither opened nor closed, never enters the active roster, and an
-    ///   unrelated edit must not silently rewrite or drop signed history
-    ///   (replication into another author's view filters these out instead, see
-    ///   [`RepoRef::role_history_for_replication`]);
+    ///   missing, empty, or non-hex subject — is likewise preserved
+    ///   byte-for-byte: it can be neither opened nor closed, never enters the
+    ///   active roster, and an unrelated edit must not silently rewrite or drop
+    ///   signed history (replication into another author's view filters these
+    ///   out instead, see [`RepoRef::role_history_for_replication`]);
     /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
     ///   or end moderators.
     pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
@@ -1149,6 +1151,10 @@ impl RepoRef {
                 malformed_tags.push(tag.clone());
                 continue;
             };
+            if PublicKey::from_str(pk).is_err() {
+                malformed_tags.push(tag.clone());
+                continue;
+            }
             let index = usize::from(name != "M");
             if let Some((_, records)) = prior.iter_mut().find(|(p, _)| p == pk) {
                 upsert(&mut records[index], slice.to_vec());
@@ -1268,7 +1274,8 @@ impl RepoRef {
     /// author's view. Invalid self-`defer` records stay on their source event
     /// for audit but are not laundered into valid-looking third-party history.
     /// Every other unparseable record — malformed history boundaries or a
-    /// missing subject, in `o` tags as much as `M`/`m` — is excluded too: the
+    /// missing, empty, or non-hex subject, in `o` tags as much as `M`/`m` — is
+    /// excluded too: the
     /// author's own announcement preserves it byte-for-byte for audit (see
     /// [`RepoRef::generate_role_tags`]), so a copy relying on the old
     /// silent-drop emission would otherwise replicate the corruption into
@@ -1281,7 +1288,9 @@ impl RepoRef {
                 let slice = tag.as_slice();
                 !role_entry_is_self_defer(slice, &source_author)
                     && role_boundaries(slice).is_some()
-                    && slice.get(1).is_some_and(|subject| !subject.is_empty())
+                    && slice
+                        .get(1)
+                        .is_some_and(|subject| PublicKey::from_str(subject).is_ok())
             })
             .collect()
     }
@@ -1515,6 +1524,11 @@ impl RepoRef {
     /// the sentinel), or the chosen numeric end boundary otherwise. A signed,
     /// unambiguous successor fixes the only safe numeric boundary; ambiguous
     /// history requires the caller to supply a boundary explicitly. The
+    /// repaired interval and a same-role successor are emitted as one
+    /// multi-interval record, matching NIP-34's one-record-per-role shape.
+    /// Any same-role history that cannot be merged without interpretation is
+    /// refused.
+    ///
     /// replacement timestamp bounds every repair so future-dated history
     /// cannot be normalized into an end that predates its start.
     pub fn repair_self_defer(
@@ -1586,10 +1600,41 @@ impl RepoRef {
             );
         }
 
+        let valid_same_role = self
+            .role_tags
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| {
+                let slice = tag.as_slice();
+                slice.first().map(String::as_str) == Some(role)
+                    && slice.get(1) == Some(&author_hex)
+                    && !role_entry_is_self_defer(slice, &author_hex)
+                    && role_boundaries(slice).is_some()
+            })
+            .collect::<Vec<_>>();
+        if valid_same_role.len() > 1 {
+            bail!("announcement has duplicate valid self-{role} records");
+        }
+        let successor = valid_same_role.first().map(|(index, tag)| {
+            let boundaries = role_boundaries(tag.as_slice()).unwrap();
+            (*index, tag.as_slice().to_vec(), boundaries)
+        });
+        if let Some((_, _, boundaries)) = &successor {
+            if !matches!(
+                (end, boundaries.as_slice()),
+                (Some(boundary), [RoleBoundary::Timestamp(start)]) if boundary == *start
+            ) {
+                bail!("the valid self-{role} record cannot merge with this repair boundary");
+            }
+        }
+
         let index = matching[0];
         let mut parts = self.role_tags[index].as_slice().to_vec();
         if let Some(boundary) = end {
             *parts.last_mut().unwrap() = boundary.to_string();
+            if let Some((_, successor_parts, _)) = &successor {
+                parts.extend(successor_parts[2..].iter().cloned());
+            }
         } else {
             parts.pop();
             if role == "o" {
@@ -1606,6 +1651,9 @@ impl RepoRef {
             }
         }
         self.role_tags[index] = Tag::parse(parts).unwrap();
+        if let Some((successor_index, _, _)) = successor {
+            self.role_tags.remove(successor_index);
+        }
         Ok(())
     }
 
@@ -4959,6 +5007,7 @@ mod tests {
                 vec![
                     tag(&["m", &author.to_string(), "100"]),
                     tag(&["o", &author.to_string(), "abc"]),
+                    tag(&["M", "not-a-pubkey", "200"]),
                 ],
             );
 
@@ -4972,7 +5021,7 @@ mod tests {
                     .iter()
                     .map(|record| (record.role.clone(), record.blocks_author))
                     .collect::<Vec<_>>(),
-                vec![("o".to_string(), false)],
+                vec![("M".to_string(), false), ("o".to_string(), false)],
             );
         }
 
@@ -5922,12 +5971,14 @@ mod tests {
                 let subject = nostr::prelude::Keys::generate().public_key();
                 let garbage_boundary = tag(&["m", &subject.to_string(), "abc"]);
                 let defer_not_final = tag(&["m", &subject.to_string(), "100", "defer", "200"]);
+                let invalid_subject = tag(&["m", "not-a-pubkey", "100"]);
                 assert_eq!(
                     generate(
                         vec![
                             tag(&["m", &author.to_string()]),
                             garbage_boundary.clone(),
                             defer_not_final.clone(),
+                            invalid_subject.clone(),
                         ],
                         vec![author],
                         &author,
@@ -5936,6 +5987,7 @@ mod tests {
                         tag(&["m", &author.to_string()]),
                         garbage_boundary,
                         defer_not_final,
+                        invalid_subject,
                     ],
                 );
             }
@@ -5948,6 +6000,7 @@ mod tests {
                     Tag::parse(["m", &author.to_string()]).unwrap(),
                     Tag::parse(["m", &subject.to_string(), "abc"]).unwrap(),
                     Tag::parse(["m", &subject.to_string(), "100", "defer", "200"]).unwrap(),
+                    Tag::parse(["m", "not-a-pubkey", "100"]).unwrap(),
                 ];
                 assert_eq!(active_maintainer_projection(&tags), vec![author]);
             }
@@ -6720,6 +6773,71 @@ mod tests {
                     parsed
                         .role_tags
                         .contains(&Tag::parse(["M", &author.to_string(), "200",]).unwrap())
+                );
+            }
+
+            #[test]
+            fn explicit_self_defer_repair_merges_same_role_successor() {
+                for role in ["M", "m", "o"] {
+                    let author_keys = nostr::prelude::Keys::generate();
+                    let author = author_keys.public_key();
+                    let mut parsed = RepoRef::try_from((
+                        role_event(
+                            &author_keys,
+                            vec![
+                                tag(&[role, &author.to_string(), "100", "defer"]),
+                                tag(&[role, &author.to_string(), "200"]),
+                            ],
+                        ),
+                        None,
+                    ))
+                    .unwrap();
+
+                    parsed
+                        .repair_self_defer(&author, role, Some(200), NOW)
+                        .unwrap();
+                    assert_eq!(
+                        parsed
+                            .role_tags
+                            .iter()
+                            .filter(|tag| {
+                                let tag = tag.as_slice();
+                                tag.first().map(String::as_str) == Some(role)
+                                    && tag.get(1) == Some(&author.to_string())
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        vec![
+                            Tag::parse(tag(&[role, &author.to_string(), "100", "200", "200",]))
+                                .unwrap()
+                        ],
+                        "same-role {role} history must become one multi-interval record",
+                    );
+                }
+            }
+
+            #[test]
+            fn explicit_self_defer_repair_refuses_unmergeable_same_role_history() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let mut parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["m", &author.to_string(), "150", "175"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                assert!(
+                    parsed
+                        .repair_self_defer(&author, "m", Some(200), NOW)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("cannot merge")
                 );
             }
 

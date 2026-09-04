@@ -1372,3 +1372,50 @@ async fn self_defer_continue_repair_republishes_the_active_co_maintainer_role() 
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_defer_end_repair_merges_same_role_successor_in_signed_event() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("same-role repair merge".into()),
+            identifier: Some("same-role-repair-merge".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let alice_hex = alice.to_string();
+    let original = latest_announcement(&harness, alice, &published.identifier).await?;
+    let malformed = replace_role_tags(
+        &original,
+        &published.maintainer_keys,
+        &[
+            svec(&["m", &alice_hex, "100", "defer"]),
+            svec(&["m", &alice_hex, "200"]),
+        ],
+    )?;
+    publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
+    publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
+
+    edit_ok(&publisher, &["--repair-self-defer", "m=200"]).await?;
+
+    let repaired = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        role_tags_naming(&repaired, alice),
+        vec![svec(&["m", &alice_hex, "100", "200", "200"])],
+        "the signed replacement must merge the repaired interval and successor",
+    );
+    assert_eq!(
+        tag_values(&repaired, "maintainers"),
+        vec![alice_hex],
+        "the active successor must remain in the compatibility projection",
+    );
+    Ok(())
+}

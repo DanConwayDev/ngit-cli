@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
-use test_harness::{Harness, PublishRepoOpts, tag_value};
+use test_harness::{Harness, PublishRepoOpts, tag_value, tag_values};
 
 async fn latest_announcement(
     harness: &Harness,
@@ -68,6 +68,15 @@ async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {
     }
     client.disconnect().await;
     Ok(())
+}
+
+fn role_tags(event: &Event) -> Vec<Vec<String>> {
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| matches!(tag.first().map(String::as_str), Some("M" | "m" | "o")))
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -154,6 +163,66 @@ async fn exclusively_malformed_lead_stays_readable_with_author_scoped_health() -
             .id,
         malformed.id,
         "a gated edit must not publish a replacement announcement",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_edit_preserves_non_hex_role_subject_without_granting_authority() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("malformed role subject".into()),
+            identifier: Some("malformed-role-subject".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let alice_hex = alice.to_string();
+    let original = latest_announcement(&harness, alice, &published.identifier).await?;
+    let malformed = replace_role_tags(
+        &original,
+        &published.maintainer_keys,
+        &[
+            vec!["M", &alice_hex, "100"],
+            vec!["m", "not-a-pubkey", "200"],
+        ],
+    )?;
+    publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
+    publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
+
+    let edited = publisher
+        .ngit(["repo", "edit", "--description", "updated"])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        edited.status.success(),
+        "a malformed third-party subject must not block the valid author\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&edited.stdout),
+        String::from_utf8_lossy(&edited.stderr),
+    );
+
+    let replacement = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_ne!(replacement.id, malformed.id);
+    assert_eq!(
+        role_tags(&replacement),
+        vec![
+            vec!["M".into(), alice_hex.clone(), "100".into()],
+            vec!["m".into(), "not-a-pubkey".into(), "200".into()],
+        ],
+        "the signed replacement must preserve the malformed record byte-for-byte",
+    );
+    assert_eq!(
+        tag_values(&replacement, "maintainers"),
+        vec![alice_hex],
+        "a non-hex role subject must never enter the authority projection",
     );
     Ok(())
 }

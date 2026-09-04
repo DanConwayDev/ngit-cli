@@ -131,9 +131,14 @@ publication.
   problems instead of repository-wide failures. A strictly later signed
   self-role restores current authority without rewriting the malformed
   history; otherwise only that signer is gated and can explicitly repair the
-  record with `ngit repo edit --repair-self-defer` or accept a fresh role.
-- Unparseable repository role records no longer read as a signed departure.
-  An author whose own role records are exclusively malformed is blocked —
+  record with `ngit repo edit --repair-self-defer` or accept a fresh role. A
+  numeric repair now merges a same-role successor into one multi-interval
+  record so the signed replacement does not retain a duplicate-role conflict.
+- Unparseable repository role records, including records with non-hex
+  subjects, no longer abort repository parsing or read as a signed departure.
+  They remain byte-for-byte on the source announcement but never grant
+  authority or enter copied history. An author whose own role records are
+  exclusively malformed is blocked —
   excluded from authority as an author-scoped health problem that gates only
   that signer's announcement edits (no automated repair exists yet) — while
   the repository stays readable through the selected coordinate instead of
