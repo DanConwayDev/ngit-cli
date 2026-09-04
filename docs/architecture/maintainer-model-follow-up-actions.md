@@ -44,9 +44,12 @@ safe, but must not silently guess at membership, history, or repository state.
   outstanding.
 - Detect a `maintainers` compatibility tag that disagrees with active `M` and
   `m` roles, and add the standalone `ngit repo edit --fix-maintainers` repair.
-- Reject self-`defer` as an invalid role record, exclude it from resolved
-  authority and history, and expose a persistent health problem. Require an
-  explicit context-appropriate repair instead of silently converting it into a
+- Reject self-`defer` as an invalid role record and exclude its unresolved
+  interval from authority and history. Scope the health problem and write gate
+  to its author. When a later valid active self-role has an ordered signed
+  start, let it supersede the malformed record for current authority and keep
+  only a non-blocking historical warning. Require an explicit
+  context-appropriate repair instead of silently converting the record into a
   numeric close-and-reopen interval during an unrelated edit.
 - Align the sibling NIP-34 draft so `defer` is valid only on non-self history
   records and a self-role must remain active or carry a numeric end.
@@ -112,8 +115,10 @@ safe, but must not silently guess at membership, history, or repository state.
 - Add focused integration scenarios for published announcements, selected
   coordinates, authorization results, and the absence of publication or local
   mutation on refusal.
-- Cover invalid self-`defer`, first-invite direct `M` materialization,
-  same-boundary accepted `m` to `M` continuity, numeric archive, signed
-  deletion, and gapped restart presentation explicitly.
+- Cover invalid self-`defer` both with and without a later active self-role,
+  author-scoped gating, non-blocking superseded history, suggested and prompted
+  repairs, first-invite direct `M` materialization, same-boundary accepted `m`
+  to `M` continuity, numeric archive, signed deletion, and gapped restart
+  presentation explicitly.
 - Keep tests parallel-safe and wait only on observable conditions with bounded
   deadlines.

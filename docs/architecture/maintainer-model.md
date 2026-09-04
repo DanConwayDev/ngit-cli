@@ -579,6 +579,14 @@ self-role ending in `defer` is invalid rather than a historical copy; its raw
 presence prevents the author from becoming an implicit maintainer, but the
 record itself supplies neither authority nor a numeric departure boundary.
 
+Clients discard that invalid interval before selecting the author's current
+role. A valid active self-role whose signed start is later than the malformed
+interval's last valid start supersedes it for current-role resolution. The
+successor can provide current authority through the normal reciprocal graph;
+it does not repair the malformed interval or authorize events during the
+unresolved historical period. If signed boundaries do not order the records,
+the client cannot assume that one supersedes the other.
+
 Using `defer` for a valid third-party copy is a statement of intent, not a rule
 that forbids real third-party assignments. A third-party client may publish an
 active `m` from a co-maintainer to somebody else. That record is a real
@@ -985,6 +993,13 @@ coordinate, inferred state, and exceptional consequences visible.
   indexed roles, warn after every ngit or Git command in that checkout, and
   offer only `ngit repo edit --fix-maintainers` as the immediate repair. Report
   the same repository-health error as structured data in JSON output.
+- Treat a self-role ending in `defer` as an author-scoped health problem, not a
+  repository-wide failure. Preserve it for audit but exclude its unresolved
+  interval from role history. If a later valid active self-role supersedes it,
+  use that role for current authority and leave the warning non-blocking.
+  Otherwise block only the affected author's announcement mutations and
+  role-dependent writes, while allowing reads, other users' operations, and an
+  explicit repair or role-acceptance action.
 - In JSON mode, expose structured pending actions and exact commands. Include
   `lead_path`,
   `recommended_coordinate`, and `follow_lead_command` on every response where
@@ -1544,13 +1559,46 @@ signed departure time and must never make the coordinate appear numerically
 archived.
 
 The raw self-entry still prevents the author from receiving implicit
-maintainership. Without another valid active self-`M` or self-`m`, the signer is
-therefore not current until they repair or replace the invalid record. A
-metadata edit must not silently choose a numeric end or reopen the interval.
+maintainership. A later valid active self-role with a signed start after the
+malformed interval's last valid start supersedes it for current-role
+resolution. The active successor participates in current authorization
+normally, so the malformed history remains a non-blocking health warning for
+that signer. It neither creates a repository restart nor fills the unresolved
+historical interval.
 
-If the resolved lead still has an active invitation, every repository command
-for that signer reports the malformed acceptance and directs them to publish a
-valid one:
+Without such a successor, the signer is not current until they repair or
+replace the invalid record. Only that signer's announcement mutations and
+role-dependent writes are blocked; repository reads and other users' valid
+operations continue. An unrelated edit must never choose a numeric end or
+reopen the interval silently. When an unrelated edit is otherwise allowed
+because a successor is active, it preserves the malformed record byte for
+byte.
+
+Clients may use signed surrounding history to propose, but never silently
+apply, a repair. If a later active self-role starts at `T`, the suggested
+correction replaces `defer` with `T`; the signer must approve and sign the new
+announcement. An explicit operation that accepts that new role may make the
+same close-and-open correction in its normal preview. Without one unambiguous
+successor, the signer chooses whether the old role remains active or supplies
+a numeric end. Other viewers see the warning but are neither prompted nor
+blocked.
+
+For example:
+
+```text
+["m", "<author-pubkey>", "0", "defer"] # invalid historical interval
+["M", "<author-pubkey>", "200"]        # valid active successor
+```
+
+The self-`M` establishes the author's current role from `200`, subject to the
+normal graph checks. The invalid self-`m` neither blocks that role nor turns the
+coordinate into a restart. A client may offer
+`["m", "<author-pubkey>", "0", "200"]` as the repair, but until the author
+signs it the earlier interval remains unresolved.
+
+If there is no superseding active role and the resolved lead still has an
+active invitation, read commands warn and authority-bearing commands for that
+signer direct them to publish a valid acceptance:
 
 ```text
 your announcement does not contain an active maintainer acceptance
@@ -2039,8 +2087,12 @@ The implementation and tests must make these statements true:
 27. A valid third-party historical copy can never authorize its subject or
     route lead resolution when its final interval is `defer`. A self-role
     ending in `defer` is invalid, excluded from resolved history and authority,
-    and reported as repository health; clients do not silently repair it during
-    an unrelated edit.
+    and reported as author-scoped repository health. A later valid active
+    self-role with an ordered signed start supersedes it for current authority,
+    leaving only the unresolved historical interval invalid. With no such
+    successor, only the affected author's announcement mutations and
+    role-dependent writes are gated. Clients do not silently repair the record
+    during an unrelated edit.
 28. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically, display the
@@ -2068,7 +2120,8 @@ invitation, a record ending in `defer`, an ended record, absent and contradictor
 projections, a mismatch warning, the edit gate, and a repair that leaves all
 indexed role tags byte-for-byte unchanged. The reciprocal-lifecycle fixtures
 cover active lead/self acceptance, a valid non-self lead `M` ending in `defer`,
-invalid self-`defer` with a persistent health warning and explicit repair,
+invalid self-`defer` with author-scoped gating, a superseding active self-role,
+the remaining historical warning, and explicit or prompted repair,
 passive third-party `defer` copies, correct resolution of externally authored
 active third-party `m` assignments, warnings to co-maintainer and lead, both
 edit gates, refusal to follow before lead coverage, safe conversion after
