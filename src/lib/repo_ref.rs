@@ -1462,6 +1462,8 @@ impl RepoRef {
     ) -> Result<Vec<Tag>> {
         let repair_end = self.self_defer_acceptance_repair_end(author, now)?;
         let author_hex = author.to_string();
+        let active_subjects: HashSet<String> =
+            maintainers.iter().map(PublicKey::to_string).collect();
         let mut role_tags = Vec::with_capacity(self.role_tags.len());
         for tag in &self.role_tags {
             let slice = tag.as_slice();
@@ -1472,9 +1474,32 @@ impl RepoRef {
                 let mut parts = slice.to_vec();
                 *parts.last_mut().unwrap() = repair_end.to_string();
                 role_tags.push(Tag::parse(parts).unwrap());
-            } else {
-                role_tags.push(tag.clone());
+                continue;
             }
+            // Mirror [`RepoRef::role_history_for_acceptance`]'s third-party
+            // handling: an active record naming a subject outside the
+            // accepted roster is re-emitted with a trailing `defer` — "I no
+            // longer assert this role" — instead of passing an `o` through
+            // still active or letting the role generator close an `m` with a
+            // fabricated numeric departure. Unparseable records fail
+            // `role_entry_is_active` and stay byte-for-byte for audit.
+            let is_active_third_party = slice.first().is_some_and(|name| is_role_tag_name(name))
+                && slice.get(1).is_some_and(|subject| {
+                    !subject.is_empty()
+                        && subject != &author_hex
+                        && !active_subjects.contains(subject)
+                })
+                && role_entry_is_active(slice);
+            if is_active_third_party {
+                let mut parts = slice.to_vec();
+                if parts.len().is_multiple_of(2) {
+                    parts.push("0".to_string());
+                }
+                parts.push("defer".to_string());
+                role_tags.push(Tag::parse(parts).unwrap());
+                continue;
+            }
+            role_tags.push(tag.clone());
         }
 
         let mut accepting = self.clone();
@@ -6322,6 +6347,69 @@ mod tests {
                     .map(|role| role.as_slice().to_vec())
                     .collect::<Vec<_>>();
 
+                assert!(history.contains(&tag(&[
+                    "m",
+                    &author.to_string(),
+                    "100",
+                    &NOW.to_string(),
+                    &NOW.to_string(),
+                ])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), "100"])));
+            }
+
+            #[test]
+            fn explicit_acceptance_repair_defers_third_party_roles_like_normal_acceptance() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["m", &other.to_string(), "120"]),
+                            tag(&["o", &moderator.to_string(), "115"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_self_defer_acceptance(
+                        &author,
+                        &[author, lead],
+                        Some(lead),
+                        NOW,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    history.contains(&tag(&["m", &other.to_string(), "120", "defer"])),
+                    "an active third-party `m` must be re-emitted as deferred \
+                     history, not closed with a fabricated numeric departure: \
+                     {history:?}",
+                );
+                assert!(
+                    history.contains(&tag(&["o", &moderator.to_string(), "115", "defer"])),
+                    "an active third-party `o` must be deferred, not \
+                     re-asserted still active: {history:?}",
+                );
+                assert_eq!(
+                    history
+                        .iter()
+                        .filter(|entry| entry.get(1) == Some(&other.to_string())
+                            || entry.get(1) == Some(&moderator.to_string()))
+                        .count(),
+                    2,
+                    "no other record may keep asserting the third parties: {history:?}",
+                );
                 assert!(history.contains(&tag(&[
                     "m",
                     &author.to_string(),
