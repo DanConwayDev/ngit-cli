@@ -72,6 +72,8 @@ Because this is the first invitation from a sole-maintainer repository, ngit
 automatically records Alice as lead. Bob is visible as invited but has no
 maintainer authority until he accepts. Alice would add
 `--no-lead-maintainer` only to choose the exceptional leadless model.
+Alice's implicit sole role materializes directly as `M`; this first invitation
+is not an `m` to `M` role transition.
 
 #### 3. Bob accepts
 
@@ -528,9 +530,13 @@ Indexed role tags have this form:
 - `o` assigns or acknowledges a moderator.
 - With ordinary numeric boundaries, a tag is active when it has fewer than
   four elements or an odd number of elements: its final boundary is a start.
-- A literal `defer` in an end position retains an interval as historical-only
-  without asserting a numeric end. Its even-length tag is inactive for
-  authorization or lead forwarding.
+- A literal `defer` in an end position on a non-self record retains an interval
+  as historical-only without asserting a numeric end. Its even-length tag is
+  inactive for authorization or lead forwarding.
+- An author cannot defer their own role boundary. A self-`M`, self-`m`, or
+  self-`o` must remain active or use a numeric end. Self-`defer` is invalid,
+  cannot grant current or historical authority, and is reported as repository
+  health information rather than interpreted as a signed departure time.
 - A pubkey may have one record for each role letter. A role transition closes
   the old letter and starts the new one rather than rewriting the past.
 
@@ -541,7 +547,7 @@ Examples:
 ["m", "<pubkey>", "100"]                  # active since 100
 ["m", "<pubkey>", "100", "200"]         # ended at 200
 ["m", "<pubkey>", "100", "200", "300"] # active again since 300
-["m", "<pubkey>", "300", "defer"]        # historical copy, not active
+["m", "<other-pubkey>", "300", "defer"]  # third-party historical copy
 ```
 
 An empty history means the start is unknown; it is not evidence that the role
@@ -567,27 +573,29 @@ Every third-party interval copied solely as history, rather than as this
 author's assignment, ends in `defer` unless the author records a numeric end.
 Their active self-`m` records ngit's canonical signed acceptance of their
 assigned role, and their active `M` identifies and reciprocates with the lead.
-A record ending in `defer` is historical-only and contributes no current graph
-edge. It cannot satisfy reciprocity, whether it is a self-role, lead pointer,
-or third-party listing.
+A valid non-self record ending in `defer` is historical-only and contributes no
+current graph edge. It cannot satisfy reciprocity or lead forwarding. A
+self-role ending in `defer` is invalid rather than a historical copy; its raw
+presence prevents the author from becoming an implicit maintainer, but the
+record itself supplies neither authority nor a numeric departure boundary.
 
-The `defer` convention is a statement of intent, not a protocol restriction. A
-third-party client may publish an active `m` from a co-maintainer to somebody
-else. That record is a real assignment or invitation, participates in
-reciprocal graph resolution, and appears in `maintainers`; clients must not
-silently reinterpret it as `defer`. ngit does not create this shape in a
-lead-shaped repository and treats it as the recoverable edge case specified
-below.
+Using `defer` for a valid third-party copy is a statement of intent, not a rule
+that forbids real third-party assignments. A third-party client may publish an
+active `m` from a co-maintainer to somebody else. That record is a real
+assignment or invitation, participates in reciprocal graph resolution, and
+appears in `maintainers`; clients must not silently reinterpret it as `defer`.
+ngit does not create this shape in a lead-shaped repository and treats it as
+the recoverable edge case specified below.
 
 The deliberately leadless topology is different: because no lead publishes an
 active roster, confirmed co-maintainers use active reciprocal `m` assignments.
 Those edges have normal authorization and repository-join consequences.
 
 The sibling NIP-34 draft should retain its recommendation that a co-maintainer
-actively list themselves and the lead. It must add the `defer` extension for
-records copied for other maintainers and moderators when the author makes no
-current assignment through them. Those copies retain history without becoming
-assignments.
+actively list themselves and the lead. It must add the `defer` extension only
+for records copied for other maintainers and moderators when the author makes
+no current assignment through them. Those copies retain history without
+becoming assignments; a self-role cannot use that sentinel.
 
 If an announcement has no `M`, `m`, `o`, or legacy `maintainers` tag, its
 author is the implicit sole maintainer. This is the preferred one-person wire
@@ -642,9 +650,10 @@ The role tags in the sibling NIP-34 draft already carry start/end history and
 define precedence between conflicting copies. Effective membership history is
 therefore replicated in `M`, `m`, and `o`; it does not need another tag type.
 
-The missing distinction is how a maintainer can retain an interval without
-currently assigning its subject or asserting that the interval ended. This
-proposal reserves the literal `defer` in an end position:
+The missing distinction is how a maintainer can retain somebody else's
+interval without currently assigning its subject or asserting that the
+interval ended. This proposal reserves the literal `defer` in an end position
+on a non-self record:
 
 ```text
 ["m", "<bob-pubkey>", "200", "defer"]
@@ -661,9 +670,12 @@ inactive. A numeric end replaces `defer` when the author records one:
 ["m", "<bob-pubkey>", "200", "300"]
 ```
 
-The sibling NIP-34 draft must be clarified so a valid history boundary may be
-this literal sentinel as well as a Unix timestamp. Clients must never parse
-`defer` as an end time or as an active role assignment.
+The sibling NIP-34 draft must be clarified so a valid non-self history boundary
+may be this literal sentinel as well as a Unix timestamp. Clients must never
+parse `defer` as an end time or as an active role assignment. When the subject
+is the announcement author, `defer` makes the record invalid and produces a
+health warning; it cannot stand in for the numeric boundary required to end the
+author's own role.
 
 The lead uses an ordinary omitted end for real current assignments. A current
 co-maintainer does the same for their lead `M` and self-`m`, because those two
@@ -674,6 +686,15 @@ and self-`m`, start an active self-`M`, and publish the full active roster. A
 former lead becoming a co-maintainer keeps an active `M` to the new lead and
 active self-`m`, while changing relationships covered by the prepared lead into
 historical-only copies.
+
+An `m` to `M` promotion is a real acceptance of a new lead role by an existing
+co-maintainer. It is not part of the first invitation sent by an implicit sole
+maintainer: that first role-aware announcement materializes the sole
+maintainer directly as `M`, with no fabricated prior self-`m` interval. For an
+accepted promotion, the self-`m` end and self-`M` start use the same signed
+boundary. That equality records a continuous role transition within one
+repository lifecycle; only a later start after a real timestamp gap can begin a
+new same-coordinate lifecycle.
 
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
@@ -908,6 +929,15 @@ coordinate, inferred state, and exceptional consequences visible.
 - Show **selected maintainer** as both the current entry point and the signer
   controlling that coordinate. Show **lead maintainer** separately and do not
   present the lead as owner of every maintainer's coordinate.
+- Keep lifecycle presentation separate from current authority. After a
+  deletion-aware relay view is sufficiently complete, show a selected
+  coordinate's signed archive, deletion, or gapped restart with its actor and
+  boundary time while keeping its last available signed snapshot readable.
+  Never turn that presentation snapshot into a current member or state-author
+  set.
+- Do not infer an archive, deletion, or restart from a missing announcement on
+  one relay. Progressive reads may show already-observed content, but an
+  absence-based lifecycle notice waits for the required relay view to settle.
 - When the selected announcement's pointer walk resolves to another confirmed
   lead with equivalent graph and state, warn after every human-facing
   repository command and show `ngit repo follow-lead` as the remedy. The clone
@@ -1503,15 +1533,20 @@ the resolved lead's active roster itself needs to change, a co-maintainer asks
 that lead to add or remove the named person first. The compatibility repair is
 never a membership operation.
 
-#### Ngit's canonical acceptance makes a required role historical-only
+#### Ngit's canonical acceptance contains `defer`
 
 Ngit's canonical co-maintainer acceptance shape is incomplete if its lead `M`
-or self-`m` ends in `defer`; both records must be active for that publishing
-shape. Clients retain deferred records as history, but they contribute no
-current edge and a deferred `M` is never used for forwarding. Read-side
-confirmation still follows the reciprocal graph rule above, so a different
-valid active `M` or `m` edge can provide reciprocity unless the author has
-explicitly ended their own maintainer role.
+ends in `defer`; that valid non-self record is historical-only and cannot
+forward or provide current reciprocity. A self-`m` ending in `defer` is instead
+invalid. Clients preserve the raw tag for audit, exclude it from authority and
+resolved history, and report a repository-health error. Its presence is not a
+signed departure time and must never make the coordinate appear numerically
+archived.
+
+The raw self-entry still prevents the author from receiving implicit
+maintainership. Without another valid active self-`M` or self-`m`, the signer is
+therefore not current until they repair or replace the invalid record. A
+metadata edit must not silently choose a numeric end or reopen the interval.
 
 If the resolved lead still has an active invitation, every repository command
 for that signer reports the malformed acceptance and directs them to publish a
@@ -1668,7 +1703,7 @@ Acknowledging removal therefore withdraws standing consent for a later
 assignment. Conversely, a candidate who does not acknowledge removal retains
 their active acceptance and is immediately confirmed if assigned again.
 
-#### A removed maintainer abandons or forks the redirect
+#### A removed maintainer archives or restarts the coordinate
 
 ngit provides no interface for these exceptional transitions, but clients must
 interpret valid events produced elsewhere. Carol can end every relationship at
@@ -1681,11 +1716,26 @@ interpret valid events produced elsewhere. Carol can end every relationship at
 ["maintainers"]
 ```
 
-With neither an active role nor an active lead pointer, cloning or fetching
-`nostr://<carol>/<identifier>` fails instead of guessing another coordinate.
+With neither an active role nor an active lead pointer, the coordinate has no
+current repository authority. A clone or fetch that requires current signed
+state fails instead of guessing another coordinate, but presentation clients
+must not replace the repository with a terminal error page. They present
+`<carol>/<identifier>` as archived at `T4`, keep its last available signed
+announcement and open issue/proposal history readable, and preserve its Git
+servers and relay hints for that historical view. The archive does not restore
+Carol or any former member to the current authority set.
 
-Carol can instead make an aggressive same-identifier fork by ending the old
-relationships and opening a new active self-lead interval:
+A valid kind `5` request deleting Carol's announcement has the same
+presentation rule with stronger wording: show that Carol deleted
+`<carol>/<identifier>` at the deletion event's `created_at`. Retain the last
+observed signed snapshot when available, including its relay hints, without
+making the deleted announcement eligible for current resolution. If relays no
+longer retain that announcement, the coordinate and signed deletion evidence
+still support the lifecycle notice even though the unavailable fields cannot
+be reconstructed.
+
+Carol can instead make a gapped same-identifier restart by ending the old
+relationships and later opening a new active self-lead interval (`T5 > T4`):
 
 ```text
 ["M", "<alice-pubkey>", "T2", "T4"]
@@ -1696,12 +1746,20 @@ relationships and opening a new active self-lead interval:
 ```
 
 The same coordinate now roots Carol's new virtual repository while retaining
-the signed role, issue, and proposal history up to the `T5` divergence. Carol
-can invite Bob, but Bob's `(pubkey, identifier)` announcement can participate
-in only one active virtual repository at a time; switching him must pass the
-normal component and state-conflict checks. The friendlier fork creates a new
+the signed role, issue, and proposal history up to the `T5` divergence.
+Presentation clients show the current repository with a restart notice; they
+do not classify the repository as unsupported or hide it. Carol can invite
+Bob, but Bob's `(pubkey, identifier)` announcement can participate in only one
+active virtual repository at a time; switching him must pass the normal
+component and state-conflict checks. The friendlier fork creates a new
 identifier, making the divergence explicit instead of repurposing existing
 `nostr://<carol>/<identifier>` links.
+
+If the old self-`m` ends exactly when self-`M` starts, there is no lifecycle
+gap. That is the continuous accepted role transition described above, not a
+restart. Write-side lead and roster preflight still determine whether a client
+may author the transition; read-side presentation does not invent a gap merely
+because the role letter changed.
 
 #### A removal partitions the graph
 
@@ -1869,9 +1927,11 @@ The implementation and tests must make these statements true:
    conflicting lead path blocks instead of treating the flag as an override.
 4. Ngit's ordinary acceptance command records an active `M` naming the inviter
    and an active self-`m` naming the invitee. Both are required for that
-   canonical emitted shape, and ending either in `defer` cannot satisfy it.
-   Read-side authority still follows the reciprocal active-edge rule in item
-   8. Acceptance cannot add unrelated people or self-promote.
+   canonical emitted shape. A non-self lead `M` ending in `defer` is valid
+   history but cannot satisfy acceptance; a self-`m` ending in `defer` is
+   invalid and produces a health error. Read-side authority still follows the
+   reciprocal active-edge rule in item 8. Acceptance cannot add unrelated
+   people or self-promote.
 5. Discovering acceptance promptly shows the lead
    `--acknowledge-maintainer-change` and shows other co-maintainers
    `repo follow-lead`, without prompting. JSON returns the same actions as
@@ -1976,14 +2036,28 @@ The implementation and tests must make these statements true:
 25. A coordinate remains controllable by every holder of its signing key;
     changing its lead cannot transfer or revoke that control.
 26. Metadata-only edits do not migrate legacy membership.
-27. A historical copy can never authorize its subject or route lead resolution
-    when its final interval is `defer`.
+27. A valid third-party historical copy can never authorize its subject or
+    route lead resolution when its final interval is `defer`. A self-role
+    ending in `defer` is invalid, excluded from resolved history and authority,
+    and reported as repository health; clients do not silently repair it during
+    an unrelated edit.
 28. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
-    interpret those externally authored events deterministically and recommend
-    a new identifier for a friendly fork.
+    interpret those externally authored events deterministically, display the
+    resulting archive or current restarted repository, and recommend a new
+    identifier for a friendly fork.
 29. Current authorization remains defined when exact history is missing or
     disputed.
+30. An existing co-maintainer accepting a lead role closes self-`m` and opens
+    self-`M` at the same boundary. This is one continuous repository lifecycle.
+    The first invitation from an implicit sole maintainer instead materializes
+    that signer directly as `M`; it does not fabricate an `m` to `M` promotion.
+    A same-coordinate restart requires a later self-lead start after a real
+    timestamp gap.
+31. Once deletion-aware relay discovery settles, clients present signed
+    archive, deletion, and restart boundaries with actor and time and retain the
+    last available signed repository snapshot, including relay hints. That
+    historical presentation never restores current repository authority.
 
 Each normal workflow and destructive edge case needs a unit-level graph,
 history, and state fixture plus an integration test for the published
@@ -1993,16 +2067,18 @@ sleeps. The compatibility-roster fixture specifically covers an active
 invitation, a record ending in `defer`, an ended record, absent and contradictory
 projections, a mismatch warning, the edit gate, and a repair that leaves all
 indexed role tags byte-for-byte unchanged. The reciprocal-lifecycle fixtures
-cover active lead/self acceptance, rejection of `defer` in either required
-record, passive third-party `defer` copies, correct resolution of externally
-authored active third-party `m` assignments, warnings to co-maintainer and lead,
-both edit gates, refusal to follow before lead coverage, safe conversion after
+cover active lead/self acceptance, a valid non-self lead `M` ending in `defer`,
+invalid self-`defer` with a persistent health warning and explicit repair,
+passive third-party `defer` copies, correct resolution of externally authored
+active third-party `m` assignments, warnings to co-maintainer and lead, both
+edit gates, refusal to follow before lead coverage, safe conversion after
 coverage, rejection of a lead removal while such an edge retains its subject,
 immediate removal without such an edge, the removed-author warning and follow
 repair, immediate reconfirmation from a standing self-role before removal
 acknowledgement, reinvitation requiring a new self-role start after that role
-ends, a dead coordinate after an externally authored redirect end, and an
-externally authored same-identifier self-led fork.
+ends, first-invite direct materialization as `M`, same-boundary accepted `m` to
+`M` continuity, archived and deleted coordinate presentation, and a gapped
+same-identifier restart that remains readable.
 
 The state-collision fixtures cover an invitee's older state winning, the
 inviting state winning, an add that confirms immediately, a transitive

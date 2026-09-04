@@ -44,6 +44,12 @@ safe, but must not silently guess at membership, history, or repository state.
   outstanding.
 - Detect a `maintainers` compatibility tag that disagrees with active `M` and
   `m` roles, and add the standalone `ngit repo edit --fix-maintainers` repair.
+- Reject self-`defer` as an invalid role record, exclude it from resolved
+  authority and history, and expose a persistent health problem. Require an
+  explicit context-appropriate repair instead of silently converting it into a
+  numeric close-and-reopen interval during an unrelated edit.
+- Align the sibling NIP-34 draft so `defer` is valid only on non-self history
+  records and a self-role must remain active or carry a numeric end.
 - Detect active third-party assignments authored by a co-maintainer. Guide the
   lead to cover the named people and the co-maintainer to convert those records
   to `defer` with `repo follow-lead`.
@@ -79,12 +85,17 @@ safe, but must not silently guess at membership, history, or repository state.
   has ended their own role, without treating that selected non-member as an
   authority seed. Until this topology is supported, repository data and member
   actions reached only through it remain fail-closed.
+- Preserve read-side presentation for archived and deleted coordinates and for
+  gapped same-identifier restarts. Report the signed actor and lifecycle time,
+  retain the final available signed snapshot and relay hints, and never promote
+  that historical presentation into current authority.
 - Support deliberate add or acceptance when it would join another
   same-identifier maintainer component.
 - Define explicit repository adoption and multi-component merge workflows,
   including reconciliation of Git history, refs, identity, infrastructure,
   membership history, and imported maintainers.
-- Interpret aggressive same-identifier forks deterministically while
+- Complete deterministic current-authority resolution for gapped
+  same-identifier restarts without hiding their read-side history, while
   recommending a new identifier for friendly forks.
 
 ## Additional public API
@@ -101,5 +112,8 @@ safe, but must not silently guess at membership, history, or repository state.
 - Add focused integration scenarios for published announcements, selected
   coordinates, authorization results, and the absence of publication or local
   mutation on refusal.
+- Cover invalid self-`defer`, first-invite direct `M` materialization,
+  same-boundary accepted `m` to `M` continuity, numeric archive, signed
+  deletion, and gapped restart presentation explicitly.
 - Keep tests parallel-safe and wait only on observable conditions with bounded
   deadlines.
