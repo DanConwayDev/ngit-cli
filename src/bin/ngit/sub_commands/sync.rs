@@ -319,19 +319,12 @@ pub(crate) async fn sync_with_client(
     }
 
     for d in &diverging_refs {
-        let short_ref = d
-            .ref_name
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&d.ref_name);
-        let short_server = get_short_git_server_name(&d.source_url);
-        term.write_line(&format!(
-            "{short_server} has diverged on {short_ref} ({} ahead, {} behind nostr state) \
-             — --trust-server cannot fix this",
-            d.commits_ahead, d.commits_behind,
-        ))?;
-        term.write_line(&format!(
-            "  to adopt server state: git fetch {} {} && git push {} +{}",
-            d.source_url, short_ref, nostr_remote_name, short_ref,
+        term.write_line(&diverged_ref_guidance(
+            &d.ref_name,
+            &d.source_url,
+            &nostr_remote_name,
+            d.commits_ahead,
+            d.commits_behind,
         ))?;
     }
 
@@ -590,6 +583,30 @@ pub(crate) async fn sync_with_client(
         );
     }
     Ok(())
+}
+
+/// Build the guidance printed for a git server ref that has diverged
+/// from nostr state. `commits_ahead` counts the server's commits that
+/// nostr state lacks; `commits_behind` counts the nostr commits the
+/// server lacks.
+///
+/// The adopt-server recipe fetches the server's tip into `FETCH_HEAD`
+/// and force-pushes that to the nostr remote, so it works regardless of
+/// what the local branch points at.
+fn diverged_ref_guidance(
+    ref_name: &str,
+    server_url: &str,
+    nostr_remote_name: &str,
+    commits_ahead: usize,
+    commits_behind: usize,
+) -> String {
+    let short_ref = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
+    let short_server = get_short_git_server_name(server_url);
+    format!(
+        "{short_server} has diverged on {short_ref} ({commits_ahead} ahead, {commits_behind} behind nostr state) \
+         — --trust-server cannot fix this\n  \
+         to adopt server state: git fetch {server_url} {short_ref} && git push {nostr_remote_name} +FETCH_HEAD:{short_ref}"
+    )
 }
 
 /// Backfill missing `^{}` peeled refs for annotated tags already in
@@ -2227,6 +2244,30 @@ mod tests {
              local branch or tracking ref",
         );
         assert_eq!(state_refspecs, vec![format!("{state_oid}:refs/heads/main")]);
+    }
+
+    // -----------------------------------------------------------------------
+    // diverged_ref_guidance
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn diverged_branch_guidance_adopts_the_fetched_server_tip() {
+        let guidance = diverged_ref_guidance(
+            "refs/heads/main",
+            "https://github.com/OWNER/REPO.git",
+            "origin",
+            2,
+            1,
+        );
+        assert_eq!(
+            guidance,
+            "github.com/OWNER/REPO.git has diverged on main (2 ahead, 1 behind nostr state) \
+             — --trust-server cannot fix this\n  \
+             to adopt server state: git fetch https://github.com/OWNER/REPO.git main \
+             && git push origin +FETCH_HEAD:main",
+            "the recipe must push the fetched server tip (FETCH_HEAD), not the \
+             local branch, which may point anywhere",
+        );
     }
 
     // -----------------------------------------------------------------------
