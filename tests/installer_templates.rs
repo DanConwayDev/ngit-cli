@@ -25,9 +25,8 @@ fn unix_template_is_valid_shell_and_prefers_nix_on_nixos() {
     assert!(status.success());
     assert!(UNIX_TEMPLATE.contains("if is_nixos || ldd --version"));
     assert!(UNIX_TEMPLATE.contains("linux-x86_64-musl"));
-    assert!(
-        UNIX_TEMPLATE.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=refs/tags/v%s'")
-    );
+    assert!(UNIX_TEMPLATE.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=stable'"));
+    assert!(!UNIX_TEMPLATE.contains("refs/tags/"));
     assert!(!UNIX_TEMPLATE.contains("github:DanConwayDev/ngit-cli"));
     assert!(UNIX_TEMPLATE.contains("bash -s -- --standalone"));
     assert!(UNIX_TEMPLATE.contains("if is_nixos && [ \"$FORCE_STANDALONE\" -ne 1 ]"));
