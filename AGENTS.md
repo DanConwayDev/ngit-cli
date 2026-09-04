@@ -320,6 +320,42 @@ exactly these patterns. They are non-negotiable:
 4. **Commit**: Follow git commit message conventions (enforced by `git_hooks/commit-msg`)
 5. **Push**: Push branch to submit PR via ngit
 
+## Release Process
+
+A release is a `chore: release vX.Y.Z` commit updating `CHANGELOG.md`,
+`Cargo.toml`, and `Cargo.lock`, followed by an annotated `vX.Y.Z` tag on that
+commit. Pushing the tag triggers `.github/workflows/release.yml`, which builds
+the platform archives; the signed release assets are then published with
+`ngit release publish` (see `docs/releases.md`).
+
+### Bump the `stable` branch (mandatory for stable releases)
+
+The `stable` branch always points at the newest promoted stable
+(non-prerelease) release tag. Public install guidance depends on this
+contract: the README and the docs site instruct
+`nix profile add 'git+https://ngit.dev/ngit.git?ref=stable'`, flake inputs
+reference the same branch, and `git checkout stable` is the documented
+from-source build point.
+
+When promoting a stable release, fast-forward `stable` to the release tag and
+push it as part of the release steps:
+
+```bash
+git branch -f stable vX.Y.Z
+git push origin stable
+```
+
+Rules:
+
+1. Release candidates (`vX.Y.Z-rc.N`) never move `stable`.
+2. Never point `stable` at an untagged commit or move it backwards.
+3. Do not skip the push: an unbumped `stable` silently serves an old release
+   to every documented Nix install path.
+
+The `readme_nix_install_tracks_the_stable_branch` test in
+`tests/installer_templates.rs` guards the README command; the ngit-docs
+repository has its own site-contract guard for the docs site.
+
 ## Resources
 
 - **Main Repository**: [gitworkshop.dev/dan@gitworkshop.dev/ngit](https://gitworkshop.dev/dan@gitworkshop.dev/ngit)
@@ -375,7 +411,7 @@ For questions about the codebase or contributions:
 
 ---
 
-**Last Updated**: 2025-10-20  
+**Last Updated**: 2026-09-04  
 **Version**: 1.7.4  
 **Maintainer**: DanConwayDev
 
