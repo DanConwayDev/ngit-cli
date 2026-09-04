@@ -590,9 +590,22 @@ pub(crate) async fn sync_with_client(
 /// nostr state lacks; `commits_behind` counts the nostr commits the
 /// server lacks.
 ///
+/// Every recipe is a single copyable command that names the ref
+/// explicitly, because the diverged ref need not be checked out or be
+/// the default branch. For a branch the non-destructive option comes
+/// first: a merge commit joining both tips, after which both the server
+/// and nostr state fast-forward and no clone breaks. `git merge
+/// --ff-only <remote>/<branch>` brings the local branch to the published
+/// nostr tip before merging, and fails loudly if the local branch has
+/// unpushed commits rather than folding them into the resolution. The
+/// final `git push` is then a plain fast-forward from nostr state, so
+/// the normal push path publishes the new state and updates every
+/// listed server.
+///
 /// The adopt-server recipe fetches the server's tip into `FETCH_HEAD`
-/// and force-pushes that to the nostr remote, so it works regardless of
-/// what the local branch points at.
+/// and force-pushes that, so it works regardless of what the local
+/// branch points at. Merging does not apply to tags, so a tag gets only
+/// the two adopt recipes, addressed by full ref name.
 fn diverged_ref_guidance(
     ref_name: &str,
     server_url: &str,
@@ -600,13 +613,47 @@ fn diverged_ref_guidance(
     commits_ahead: usize,
     commits_behind: usize,
 ) -> String {
-    let short_ref = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
     let short_server = get_short_git_server_name(server_url);
-    format!(
-        "{short_server} has diverged on {short_ref} ({commits_ahead} ahead, {commits_behind} behind nostr state) \
-         — --trust-server cannot fix this\n  \
-         to adopt server state: git fetch {server_url} {short_ref} && git push {nostr_remote_name} +FETCH_HEAD:{short_ref}"
-    )
+    let mut lines = vec![];
+    if let Some(branch) = ref_name.strip_prefix("refs/heads/") {
+        lines.push(format!(
+            "{short_server} has diverged on {branch} ({commits_ahead} ahead, {commits_behind} behind nostr state)"
+        ));
+        lines.push("  merge both sides (keeps every commit):".to_string());
+        lines.push(format!(
+            "    git fetch {nostr_remote_name} && git switch {branch} && git merge --ff-only {nostr_remote_name}/{branch} \\"
+        ));
+        lines.push(format!(
+            "      && git fetch {server_url} {branch} && git merge FETCH_HEAD \\"
+        ));
+        lines.push(format!("      && git push {nostr_remote_name} {branch}"));
+        lines.push(format!(
+            "  adopt the server's tip (discards {commits_behind} nostr commit{}):",
+            plural(commits_behind)
+        ));
+        lines.push(format!(
+            "    git fetch {server_url} {branch} && git push {nostr_remote_name} +FETCH_HEAD:{branch}"
+        ));
+    } else {
+        let short_ref = ref_name.strip_prefix("refs/tags/").unwrap_or(ref_name);
+        lines.push(format!(
+            "{short_server} has diverged on {short_ref} ({commits_ahead} ahead, {commits_behind} behind nostr state)"
+        ));
+        lines.push(format!(
+            "  adopt the server's tip (discards {commits_behind} nostr commit{}):",
+            plural(commits_behind)
+        ));
+        lines.push(format!(
+            "    git fetch {server_url} {ref_name} && git push {nostr_remote_name} +FETCH_HEAD:{ref_name}"
+        ));
+    }
+    lines.push(format!(
+        "  adopt nostr state (discards {commits_ahead} server commit{}):",
+        plural(commits_ahead)
+    ));
+    lines.push("    ngit sync --force".to_string());
+    lines.join("\n")
 }
 
 /// Backfill missing `^{}` peeled refs for annotated tags already in
@@ -917,8 +964,8 @@ struct AheadRef {
 
 /// A git server ref that has diverged from the nostr state — both the server
 /// and nostr state have commits the other does not.  Cannot be resolved with
-/// `--trust-server`; the user must fetch the commits directly and force-push
-/// to the nostr remote after reviewing them.
+/// `--trust-server`; the user must merge both tips, adopt the server's tip,
+/// or adopt nostr state with `--force` (see [`diverged_ref_guidance`]).
 struct DivergingRef {
     /// Fully-qualified ref name, e.g. `refs/heads/main`
     ref_name: String,
@@ -2251,7 +2298,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn diverged_branch_guidance_adopts_the_fetched_server_tip() {
+    fn diverged_branch_guidance_offers_merge_then_both_adopt_recipes() {
         let guidance = diverged_ref_guidance(
             "refs/heads/main",
             "https://github.com/OWNER/REPO.git",
@@ -2259,14 +2306,51 @@ mod tests {
             2,
             1,
         );
+        let expected = [
+            "github.com/OWNER/REPO.git has diverged on main (2 ahead, 1 behind nostr state)",
+            "  merge both sides (keeps every commit):",
+            "    git fetch origin && git switch main && git merge --ff-only origin/main \\",
+            "      && git fetch https://github.com/OWNER/REPO.git main && git merge FETCH_HEAD \\",
+            "      && git push origin main",
+            "  adopt the server's tip (discards 1 nostr commit):",
+            "    git fetch https://github.com/OWNER/REPO.git main && git push origin +FETCH_HEAD:main",
+            "  adopt nostr state (discards 2 server commits):",
+            "    ngit sync --force",
+        ]
+        .join("\n");
         assert_eq!(
-            guidance,
-            "github.com/OWNER/REPO.git has diverged on main (2 ahead, 1 behind nostr state) \
-             — --trust-server cannot fix this\n  \
-             to adopt server state: git fetch https://github.com/OWNER/REPO.git main \
-             && git push origin +FETCH_HEAD:main",
-            "the recipe must push the fetched server tip (FETCH_HEAD), not the \
-             local branch, which may point anywhere",
+            guidance, expected,
+            "merge comes first; the adopt-server recipe must push the fetched \
+             server tip (FETCH_HEAD), not the local branch, which may point anywhere",
+        );
+    }
+
+    #[test]
+    fn diverged_tag_guidance_skips_merge_and_uses_the_full_ref_name() {
+        let guidance = diverged_ref_guidance(
+            "refs/tags/v1.0.0",
+            "https://github.com/OWNER/REPO.git",
+            "origin",
+            1,
+            3,
+        );
+        let expected = [
+            "github.com/OWNER/REPO.git has diverged on v1.0.0 (1 ahead, 3 behind nostr state)",
+            "  adopt the server's tip (discards 3 nostr commits):",
+            "    git fetch https://github.com/OWNER/REPO.git refs/tags/v1.0.0 \
+             && git push origin +FETCH_HEAD:refs/tags/v1.0.0",
+            "  adopt nostr state (discards 1 server commit):",
+            "    ngit sync --force",
+        ]
+        .join("\n");
+        assert_eq!(
+            guidance, expected,
+            "a tag cannot be merged, so only the two adopt recipes are offered, \
+             and the push refspec names the full tag ref",
+        );
+        assert!(
+            !guidance.contains("merge"),
+            "tag guidance must not suggest merging"
         );
     }
 
