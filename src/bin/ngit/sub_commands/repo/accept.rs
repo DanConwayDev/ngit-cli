@@ -21,7 +21,7 @@ use crate::{
     git::{Repo, RepoActions},
     login,
     repo_ref::{print_selected_repo, try_resolve_repo_coordinate},
-    sub_commands::repository_fetch::prepare_account_for_repo_fetch,
+    sub_commands::{init, repository_fetch::prepare_account_for_repo_fetch},
 };
 
 #[derive(Debug, clap::Args)]
@@ -165,13 +165,7 @@ async fn accept_by_repairing_self_defer(
             .filter_map(|relay| RelayUrl::parse(relay).ok())
             .collect();
     }
-    if repo_ref.private && existing.relays.is_empty() {
-        return Err(cli_error(
-            "a private repository announcement requires a relay hint",
-            &[],
-            &["retry with `ngit repo accept --grasp-server <server>`"],
-        ));
-    }
+    require_reachable_repair_hosting(&existing.git_server, &existing.relays, repo_ref.private)?;
 
     let event = existing.to_event(signer).await?;
     client.set_signer(signer.clone()).await;
@@ -209,6 +203,27 @@ async fn accept_by_repairing_self_defer(
         .await?;
     }
     Ok(())
+}
+
+/// Refuse to sign a repaired acceptance whose hosting cannot reach the
+/// repository. The repair republishes the existing announcement's hosting
+/// verbatim (unless `--grasp-server` replaced it upstream), so the
+/// reachability invariant has to hold here just like in `ngit init` and
+/// `ngit repo edit`. A private repository additionally needs a relay hint
+/// for its discovery list, checked first for its more specific guidance.
+fn require_reachable_repair_hosting(
+    git_servers: &[String],
+    relays: &[RelayUrl],
+    private: bool,
+) -> Result<()> {
+    if private && relays.is_empty() {
+        return Err(cli_error(
+            "a private repository announcement requires a relay hint",
+            &[],
+            &["retry with `ngit repo accept --grasp-server <server>`"],
+        ));
+    }
+    init::validate_announcement_hosting(git_servers, relays, init::LaunchMode::RepoAccept)
 }
 
 fn require_pending_invitation(
@@ -519,4 +534,74 @@ async fn accept_with_grasp_servers(
     // is the explicit way to move the checkout to the resolved lead.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relay(url: &str) -> RelayUrl {
+        RelayUrl::parse(url).unwrap()
+    }
+
+    #[test]
+    fn a_repair_with_a_relay_and_a_git_server_is_accepted() {
+        for private in [false, true] {
+            assert!(
+                require_reachable_repair_hosting(
+                    &["https://git.example.com/x.git".to_string()],
+                    &[relay("wss://relay.example.com")],
+                    private,
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_repair_without_hosting_is_refused_before_signing() {
+        let error = require_reachable_repair_hosting(&[], &[], false)
+            .expect_err("hosting-less repair must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("at least one relay and one git server"),
+            "unexpected refusal: {error}",
+        );
+
+        let error = require_reachable_repair_hosting(
+            &["https://git.example.com/x.git".to_string()],
+            &[],
+            false,
+        )
+        .expect_err("relay-less public repair must be refused");
+        assert!(
+            error.to_string().contains("at least one relay"),
+            "unexpected refusal: {error}",
+        );
+
+        let error =
+            require_reachable_repair_hosting(&[], &[relay("wss://relay.example.com")], false)
+                .expect_err("git-server-less repair must be refused");
+        assert!(
+            error.to_string().contains("at least one git server"),
+            "unexpected refusal: {error}",
+        );
+    }
+
+    #[test]
+    fn a_private_repair_without_a_relay_hint_keeps_its_specific_guidance() {
+        let error = require_reachable_repair_hosting(
+            &["https://git.example.com/x.git".to_string()],
+            &[],
+            true,
+        )
+        .expect_err("relay-less private repair must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("a private repository announcement requires a relay hint"),
+            "unexpected refusal: {error}",
+        );
+    }
 }

@@ -94,23 +94,34 @@ enum InitState {
 pub(crate) enum LaunchMode {
     Init,
     RepoEdit,
+    /// `ngit repo accept` repairing an existing self-defer announcement; it
+    /// republishes that announcement's hosting and only `--grasp-server` can
+    /// change it.
+    RepoAccept,
 }
 
 impl LaunchMode {
     /// How this command adds hosting, for suggestions that can be run as
     /// printed. `ngit init` declares a complete announcement; `ngit repo edit`
-    /// uses targeted add actions.
-    fn add_hosting_suggestions(self) -> [&'static str; 2] {
+    /// uses targeted add actions; `ngit repo accept` has only its grasp flag.
+    fn add_hosting_suggestions(self) -> Vec<&'static str> {
         match self {
-            Self::Init => [
+            Self::Init => vec![
                 "ngit init --grasp-server <URL>",
                 "ngit init --additional-relay <URL> --additional-clone <URL>",
             ],
-            Self::RepoEdit => [
+            Self::RepoEdit => vec![
                 "ngit repo edit --add-grasp-server <URL>",
                 "ngit repo edit --add-additional-relay <URL> --add-additional-clone <URL>",
             ],
+            Self::RepoAccept => vec!["ngit repo accept --grasp-server <URL>"],
         }
+    }
+
+    /// Whether the command can add a relay or clone URL individually. `ngit
+    /// repo accept` cannot, so its refusal must not detail flags it lacks.
+    fn has_additional_hosting_flags(self) -> bool {
+        !matches!(self, Self::RepoAccept)
     }
 }
 
@@ -166,20 +177,20 @@ fn announcement_hosting_refusal(
         "--grasp-server <URL>",
         "hosts your nostr and git data together",
     )];
-    if missing_relay {
+    if missing_relay && mode.has_additional_hosting_flags() {
         details.push((
             "--additional-relay <URL>",
             "where your nostr data is hosted",
         ));
     }
-    if missing_clone {
+    if missing_clone && mode.has_additional_hosting_flags() {
         details.push(("--additional-clone <URL>", "where your git data is hosted"));
     }
 
     Some(AnnouncementHostingRefusal {
         message,
         details,
-        suggestions: mode.add_hosting_suggestions().to_vec(),
+        suggestions: mode.add_hosting_suggestions(),
     })
 }
 
@@ -3203,6 +3214,21 @@ mod announcement_hosting_tests {
                 && edit.contains("--add-additional-relay")
                 && edit.contains("--add-additional-clone"),
             "repo edit should suggest its targeted add actions: {edit}",
+        );
+    }
+
+    /// `ngit repo accept` can only change hosting through `--grasp-server`,
+    /// so its refusal must not detail or suggest flags the command lacks.
+    #[test]
+    fn repo_accept_names_only_its_grasp_flag() {
+        let accept = refusal_text(true, true, LaunchMode::RepoAccept);
+        assert!(
+            accept.contains("ngit repo accept --grasp-server"),
+            "repo accept should suggest its grasp flag: {accept}",
+        );
+        assert!(
+            !accept.contains("--additional-relay") && !accept.contains("--additional-clone"),
+            "repo accept has no additional hosting flags to name: {accept}",
         );
     }
 }
