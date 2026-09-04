@@ -105,6 +105,7 @@ async fn preflight_existing_announcement(
             repo_ref,
             my_pubkey,
             true,
+            false,
             force_requested,
             &discovered,
         )

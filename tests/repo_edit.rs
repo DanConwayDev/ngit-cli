@@ -1241,3 +1241,89 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
     }));
     Ok(())
 }
+
+/// Replace every role-bearing tag (`M`/`m`/`o`/`maintainers`) on an
+/// announcement with the supplied role tags, modelling history written by
+/// an older ngit version.
+fn replace_role_tags(event: &Event, keys: &Keys, role_tags: &[Vec<String>]) -> Result<Event> {
+    let mut tags: Vec<Tag> = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            !matches!(
+                tag.as_slice().first().map(String::as_str),
+                Some("M" | "m" | "o" | "maintainers")
+            )
+        })
+        .cloned()
+        .collect();
+    for role in role_tags {
+        tags.push(Tag::parse(role.clone())?);
+    }
+    Ok(EventBuilder::new(event.kind, event.content.clone())
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
+        .finalize(keys)?)
+}
+
+fn svec(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(ToString::to_string).collect()
+}
+
+fn role_tags_naming(event: &Event, subject: PublicKey) -> Vec<Vec<String>> {
+    let subject = subject.to_string();
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| {
+            matches!(tag.first().map(String::as_str), Some("M" | "m" | "o"))
+                && tag.get(1) == Some(&subject)
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_defer_continue_repair_republishes_the_active_co_maintainer_role() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("co-maintainer self-defer repair".into()),
+            identifier: Some("co-maintainer-self-defer-repair".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let alice_hex = alice.to_string();
+    let original = latest_announcement(&harness, alice, &published.identifier).await?;
+    let malformed = replace_role_tags(
+        &original,
+        &published.maintainer_keys,
+        &[svec(&["m", &alice_hex, "100", "defer"])],
+    )?;
+    publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
+    publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
+
+    edit_ok(&publisher, &["--repair-self-defer", "m=continue"]).await?;
+
+    let repaired = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        role_tags_naming(&repaired, alice),
+        vec![svec(&["m", &alice_hex, "100"])],
+        "continuing the co-maintainer role must republish the repaired \
+         active `m` without opening or closing any other self record",
+    );
+    assert_eq!(
+        tag_values(&repaired, "maintainers"),
+        vec![alice_hex],
+        "the compatibility projection must list the repaired co-maintainer",
+    );
+    Ok(())
+}

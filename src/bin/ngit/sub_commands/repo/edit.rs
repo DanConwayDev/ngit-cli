@@ -925,6 +925,7 @@ pub async fn launch(
                 &repo_ref,
                 my_pubkey,
                 true,
+                true,
                 false,
                 &discovered,
             )
@@ -1174,6 +1175,7 @@ pub async fn launch(
                     git_repo_path,
                     &repo_ref,
                     target,
+                    false,
                     false,
                     args.force,
                     &discovered,
