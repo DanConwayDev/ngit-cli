@@ -26,7 +26,7 @@ fn unix_template_is_valid_shell_and_prefers_nix_on_nixos() {
     assert!(UNIX_TEMPLATE.contains("if is_nixos || ldd --version"));
     assert!(UNIX_TEMPLATE.contains("linux-x86_64-musl"));
     assert!(
-        UNIX_TEMPLATE.contains("nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v%s'")
+        UNIX_TEMPLATE.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=refs/tags/v%s'")
     );
     assert!(!UNIX_TEMPLATE.contains("github:DanConwayDev/ngit-cli"));
     assert!(UNIX_TEMPLATE.contains("bash -s -- --standalone"));
@@ -38,7 +38,7 @@ fn unix_template_is_valid_shell_and_prefers_nix_on_nixos() {
 
 #[test]
 fn readme_nix_install_tracks_the_stable_release() {
-    assert!(README.contains("nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v2.6.3'"));
+    assert!(README.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=refs/tags/v2.6.3'"));
     assert!(!README.contains("github:DanConwayDev/ngit-cli"));
 }
 

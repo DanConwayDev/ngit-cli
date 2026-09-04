@@ -59,7 +59,7 @@ parse_arguments() {
 
 nixos_install_guidance() {
     warn 'NixOS detected; prefer an exact Nix-managed installation:'
-    printf "  nix profile add 'git+https://ngit.dev/cli.git?ref=refs/tags/v%s'\n" "$VERSION" >&2
+    printf "  nix profile add 'git+https://ngit.dev/ngit.git?ref=refs/tags/v%s'\n" "$VERSION" >&2
     warn 'For a user-owned static installation instead, rerun with:'
     printf '  curl -fsSL https://ngit.dev/install.sh | bash -s -- --standalone\n' >&2
 }
