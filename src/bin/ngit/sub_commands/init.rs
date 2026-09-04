@@ -32,7 +32,7 @@ use ngit::{
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, latest_event_repo_ref,
-        normalize_grasp_server_url, save_repo_config_to_yaml,
+        normalize_grasp_server_url, role_tags_assert_lead, save_repo_config_to_yaml,
     },
     repo_state::RepoState,
     utils::join_with_and,
@@ -1411,6 +1411,15 @@ fn resolve_fields(
         .transpose()?;
     let (maintainers, lead) = if args.clear_lead {
         (maintainers, None)
+    } else if let (None, Some(role_tags)) = (lead_arg, &args.role_tags) {
+        // An explicitly prepared role-tag history (acknowledgement or
+        // self-defer repair) already records the lead this replacement
+        // asserts. Re-deriving the lead from the cached announcement would
+        // resurrect the pre-repair record: an `M=continue` repair would emit
+        // the signer as `m` and close the repaired `M` with a departure
+        // boundary they never signed.
+        let implied = role_tags_assert_lead(role_tags).filter(|lead| maintainers.contains(lead));
+        (maintainers, implied)
     } else {
         apply_lead_to_maintainers(
             lead_arg,

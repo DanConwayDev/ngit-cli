@@ -1284,6 +1284,51 @@ fn role_tags_naming(event: &Event, subject: PublicKey) -> Vec<Vec<String>> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_defer_continue_repair_republishes_the_active_lead_role() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness
+        .publish_repo(PublishRepoOpts {
+            display_name: Some("lead self-defer repair".into()),
+            identifier: Some("lead-self-defer-repair".into()),
+            ..Default::default()
+        })
+        .await?;
+    let alice = published.maintainer_keys.public_key();
+    let alice_hex = alice.to_string();
+    let original = latest_announcement(&harness, alice, &published.identifier).await?;
+    let malformed = replace_role_tags(
+        &original,
+        &published.maintainer_keys,
+        &[svec(&["M", &alice_hex, "100", "defer"])],
+    )?;
+    publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
+    publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
+
+    edit_ok(&publisher, &["--repair-self-defer", "M=continue"]).await?;
+
+    let repaired = latest_announcement(&harness, alice, &published.identifier).await?;
+    assert_eq!(
+        role_tags_naming(&repaired, alice),
+        vec![svec(&["M", &alice_hex, "100"])],
+        "continuing the lead role must republish the repaired active `M` \
+         without fabricating a co-maintainer record or a departure boundary",
+    );
+    assert_eq!(
+        tag_values(&repaired, "maintainers"),
+        vec![alice_hex],
+        "the compatibility projection must list the repaired lead",
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn self_defer_continue_repair_republishes_the_active_co_maintainer_role() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),

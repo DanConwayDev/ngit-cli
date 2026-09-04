@@ -495,6 +495,28 @@ fn active_maintainer_projection(tags: &[Tag]) -> Vec<PublicKey> {
     maintainers
 }
 
+/// The lead a set of indexed role tags asserts: the subject of the first
+/// currently-active `M` entry, mirroring how [`RepoRef::try_from`] populates
+/// [`RepoRef::lead`] from a signed announcement. `None` when no valid active
+/// `M` entry is present.
+///
+/// Callers that thread an explicitly prepared role-tag history into a
+/// republish (acknowledgement, self-defer repair) use this to keep the
+/// emitted lead consistent with those tags instead of re-deriving it from a
+/// stale cached announcement.
+pub fn role_tags_assert_lead(tags: &[Tag]) -> Option<PublicKey> {
+    tags.iter().find_map(|tag| {
+        let slice = tag.as_slice();
+        (slice.first().map(String::as_str) == Some("M") && role_entry_is_active(slice))
+            .then(|| {
+                slice
+                    .get(1)
+                    .and_then(|value| PublicKey::from_str(value).ok())
+            })
+            .flatten()
+    })
+}
+
 /// Whether `event`'s author does not assert maintainership: at least one
 /// role tag names the author but none of them is an active maintainer
 /// (`M`/`m`) entry, or an unsuperseded invalid self-`defer` makes their
