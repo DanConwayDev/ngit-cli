@@ -37,8 +37,9 @@ fn unix_template_is_valid_shell_and_prefers_nix_on_nixos() {
 }
 
 #[test]
-fn readme_nix_install_tracks_the_stable_release() {
-    assert!(README.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=refs/tags/v2.6.3'"));
+fn readme_nix_install_tracks_the_stable_branch() {
+    assert!(README.contains("nix profile add 'git+https://ngit.dev/ngit.git?ref=stable'"));
+    assert!(!README.contains("refs/tags/"));
     assert!(!README.contains("github:DanConwayDev/ngit-cli"));
 }
 
