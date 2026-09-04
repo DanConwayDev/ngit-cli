@@ -343,6 +343,83 @@ fn invalid_self_defer_blocks_author(event: &Event) -> bool {
         .any(InvalidSelfDefer::blocks_author)
 }
 
+/// Whether the author's own role records are exclusively malformed: at
+/// least one unparseable record names the author and no parseable record
+/// does. Such an author is treated like one blocked by an unsuperseded
+/// invalid self-`defer` — excluded from current authority and confirmation
+/// — but is *not* recorded as a signed departure: garbage supplies neither
+/// an active role nor a departure boundary. Records ending in `defer` parse
+/// and are handled by the dedicated self-`defer` machinery instead.
+pub fn announcement_author_has_only_malformed_self_records(event: &Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut has_malformed_self_entry = false;
+    let mut has_parseable_self_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if !slice.first().is_some_and(|name| is_role_tag_name(name))
+            || slice.get(1) != Some(&author)
+        {
+            continue;
+        }
+        if role_boundaries(slice).is_none() {
+            has_malformed_self_entry = true;
+        } else {
+            has_parseable_self_entry = true;
+        }
+    }
+    has_malformed_self_entry && !has_parseable_self_entry
+}
+
+/// One unparseable role record on a signed announcement: malformed history
+/// boundaries, a `defer` before the final position, or a missing or empty
+/// subject. Preserved byte-for-byte on the author's own announcement (see
+/// [`RepoRef::generate_role_tags`]) and surfaced as author-scoped
+/// repository health. No automated repair exists for these records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MalformedRoleRecord {
+    /// Author of the announcement carrying the record.
+    pub author: PublicKey,
+    /// The record's role letter (`M`, `m` or `o`).
+    pub role: String,
+    /// Whether the record names its own author while no parseable
+    /// self-record exists beside it. Mirroring
+    /// [`InvalidSelfDefer::blocks_author`], such an author is excluded from
+    /// current authority and their own role-dependent writes are gated.
+    pub blocks_author: bool,
+}
+
+fn malformed_role_records_in(event: &Event) -> Vec<MalformedRoleRecord> {
+    let author = event.pubkey.to_string();
+    let author_blocked = announcement_author_has_only_malformed_self_records(event);
+    let mut records = Vec::new();
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(role) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        let unparseable = role_boundaries(slice).is_none()
+            || slice.get(1).is_some_and(|subject| subject.is_empty());
+        if !unparseable {
+            continue;
+        }
+        let record = MalformedRoleRecord {
+            author: event.pubkey,
+            role: role.clone(),
+            blocks_author: author_blocked && slice.get(1) == Some(&author),
+        };
+        if !records.contains(&record) {
+            records.push(record);
+        }
+    }
+    records
+}
+
+/// Unparseable role records in one signed repository announcement. See
+/// [`MalformedRoleRecord`].
+pub fn announcement_malformed_role_records(event: &Event) -> Vec<MalformedRoleRecord> {
+    malformed_role_records_in(event)
+}
+
 /// Whether the author's valid role records explicitly leave maintainership.
 /// Invalid self-`defer` records are ignored here because they provide no
 /// departure statement; callers can retain those announcements as repairable
@@ -828,6 +905,34 @@ impl RepoRef {
         self.invalid_self_defers()
             .iter()
             .any(|invalid| invalid.author == *author && invalid.blocks_author())
+    }
+
+    /// Unparseable role records in the announcements retained for this
+    /// resolved repository view, deterministic for structured health output.
+    pub fn malformed_role_records(&self) -> Vec<MalformedRoleRecord> {
+        let mut records = self
+            .events
+            .values()
+            .flat_map(malformed_role_records_in)
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.author
+                .to_hex()
+                .cmp(&right.author.to_hex())
+                .then_with(|| left.role.cmp(&right.role))
+        });
+        records.dedup();
+        records
+    }
+
+    /// Whether `author`'s own role records are exclusively malformed. Like
+    /// [`RepoRef::invalid_self_defer_blocks`] this gates only that author's
+    /// role-dependent writes and announcement mutations; no automated repair
+    /// exists for these records.
+    pub fn malformed_role_records_block(&self, author: &PublicKey) -> bool {
+        self.malformed_role_records()
+            .iter()
+            .any(|record| record.author == *author && record.blocks_author)
     }
 
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
@@ -4772,6 +4877,100 @@ mod tests {
             assert!(!announcement_author_validly_declines_maintainership(
                 &repairable_maintainer
             ));
+        }
+
+        #[test]
+        fn exclusively_malformed_self_records_block_without_recording_departure() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let garbage_only = role_event(&keys, vec![tag(&["M", &author.to_string(), "abc"])]);
+
+            assert!(announcement_author_has_only_malformed_self_records(
+                &garbage_only
+            ));
+            assert!(!announcement_author_validly_declines_maintainership(
+                &garbage_only
+            ));
+            assert!(announcement_author_declines_maintainership(&garbage_only));
+            assert_eq!(
+                announcement_malformed_role_records(&garbage_only),
+                vec![MalformedRoleRecord {
+                    author,
+                    role: "M".to_string(),
+                    blocks_author: true,
+                }],
+            );
+
+            let parsed = RepoRef::try_from((garbage_only, None)).unwrap();
+            assert!(parsed.confirmed_maintainers().is_empty());
+            assert!(parsed.malformed_role_records_block(&author));
+        }
+
+        #[test]
+        fn numeric_departure_wins_alongside_malformed_records() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "10", "20"]),
+                    tag(&["M", &author.to_string(), "abc"]),
+                ],
+            );
+
+            assert!(announcement_author_validly_declines_maintainership(&event));
+            assert!(!announcement_author_has_only_malformed_self_records(&event));
+            let records = announcement_malformed_role_records(&event);
+            assert_eq!(records.len(), 1);
+            assert!(!records[0].blocks_author);
+        }
+
+        #[test]
+        fn valid_active_self_role_is_not_blocked_by_a_malformed_record() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100"]),
+                    tag(&["o", &author.to_string(), "abc"]),
+                ],
+            );
+
+            assert!(!announcement_author_has_only_malformed_self_records(&event));
+            assert!(!announcement_author_declines_maintainership(&event));
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(!parsed.malformed_role_records_block(&author));
+            assert_eq!(
+                parsed
+                    .malformed_role_records()
+                    .iter()
+                    .map(|record| (record.role.clone(), record.blocks_author))
+                    .collect::<Vec<_>>(),
+                vec![("o".to_string(), false)],
+            );
+        }
+
+        #[test]
+        fn acknowledging_a_malformed_only_target_fails_closed() {
+            let alice_keys = nostr::prelude::Keys::generate();
+            let alice = alice_keys.public_key();
+            let bob_keys = nostr::prelude::Keys::generate();
+            let bob = bob_keys.public_key();
+            let mut alice_ref = RepoRef::try_from((
+                role_event(
+                    &alice_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "100"]),
+                        tag(&["m", &bob.to_string(), "110"]),
+                    ],
+                ),
+                None,
+            ))
+            .unwrap();
+            let bob_event = role_event(&bob_keys, vec![tag(&["m", &bob.to_string(), "abc"])]);
+
+            assert!(alice_ref.acknowledge_maintainer_event(&bob_event).is_err());
         }
 
         #[test]

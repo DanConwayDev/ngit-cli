@@ -11,7 +11,7 @@ use ngit::{
     event_ordering::latest_event,
     repo_ref::{
         LeadSource, MaintainerAcknowledgement, RepoRef,
-        announcement_author_declines_maintainership, detect_existing_grasp_servers,
+        announcement_author_validly_declines_maintainership, detect_existing_grasp_servers,
         latest_event_repo_ref, normalize_grasp_server_url,
     },
 };
@@ -412,6 +412,25 @@ fn require_no_blocking_self_defer(
         "your repository announcement contains an invalid self-`defer` without an ordered active successor",
         &[],
         &guidance,
+    ))
+}
+
+/// Gate the affected signer's announcement mutations when their own role
+/// records are exclusively unparseable, mirroring
+/// [`require_no_blocking_self_defer`]. Unlike an invalid self-`defer` there
+/// is no automated repair for these records yet, so the guidance is manual.
+fn require_no_blocking_malformed_records(my_ref: &RepoRef, my_pubkey: PublicKey) -> Result<()> {
+    if !my_ref.malformed_role_records_block(&my_pubkey) {
+        return Ok(());
+    }
+    Err(cli_error_with_category(
+        "malformed_role_record",
+        "your repository announcement's own role records are unparseable",
+        &[],
+        &[
+            "no automated repair exists for malformed role records yet",
+            "publish a corrected announcement with a tool that can edit raw role tags",
+        ],
     ))
 }
 
@@ -941,6 +960,7 @@ pub async fn launch(
             .context("failed to repair invalid self-defer")?;
     } else {
         require_no_blocking_self_defer(&my_ref, &repo_ref, my_pubkey)?;
+        require_no_blocking_malformed_records(&my_ref, my_pubkey)?;
     }
 
     // Hosting is personal to each maintainer announcement. Separate the
@@ -1059,7 +1079,9 @@ pub async fn launch(
                         &["fetch again after that maintainer publishes their announcement"],
                     )
                 })?;
-        let departed = announcement_author_declines_maintainership(&target_event);
+        // Only a valid signed departure counts: an author whose records are
+        // exclusively malformed has neither departed nor accepted.
+        let departed = announcement_author_validly_declines_maintainership(&target_event);
         if !departed && !repo_ref.confirmed_maintainers().contains(&target) {
             return Err(cli_error(
                 "that pubkey has not published a confirmed maintainer acceptance",

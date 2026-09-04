@@ -132,6 +132,13 @@ publication.
   self-role restores current authority without rewriting the malformed
   history; otherwise only that signer is gated and can explicitly repair the
   record with `ngit repo edit --repair-self-defer` or accept a fresh role.
+- Unparseable repository role records no longer read as a signed departure.
+  An author whose own role records are exclusively malformed is blocked —
+  excluded from authority as an author-scoped health problem that gates only
+  that signer's announcement edits (no automated repair exists yet) — while
+  the repository stays readable through the selected coordinate instead of
+  suggesting a follow-lead redirect that cannot resolve. A valid numeric
+  departure still departs, and still redirects, even beside malformed tags.
 - The `nostr://` Git remote helper now accepts raw commit object IDs on the
   source side of push refspecs, matching Git's normal behavior for commands
   such as `git push origin <oid>:refs/heads/recovery`. Branch and lightweight

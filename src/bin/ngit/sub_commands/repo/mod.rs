@@ -186,6 +186,33 @@ fn invalid_self_defer_health_problems(repo_ref: &RepoRef) -> Vec<HealthProblemJs
         .collect()
 }
 
+fn malformed_role_record_health_problems(repo_ref: &RepoRef) -> Vec<HealthProblemJson> {
+    repo_ref
+        .malformed_role_records()
+        .into_iter()
+        .map(|record| HealthProblemJson {
+            code: "malformed_role_record",
+            message: if record.blocks_author {
+                "the author's own role records are exclusively unparseable and block their role-dependent writes"
+            } else {
+                "an unparseable role record is preserved for audit and carries no role semantics"
+            },
+            scope: Some("author"),
+            author: Some(
+                record
+                    .author
+                    .to_bech32()
+                    .unwrap_or_else(|_| record.author.to_hex()),
+            ),
+            role: Some(record.role),
+            blocks_author: Some(record.blocks_author),
+            superseded: None,
+            successor_role: None,
+            suggested_end: None,
+        })
+        .collect()
+}
+
 fn repository_health_status(
     problems: &[HealthProblemJson],
     repo_ref: &RepoRef,
@@ -197,10 +224,13 @@ fn repository_health_status(
             .iter()
             .any(|invalid| invalid.author == *my_pubkey && invalid.blocks_author())
     });
+    let signer_has_blocking_malformed_record =
+        my_pubkey.is_some_and(|my_pubkey| repo_ref.malformed_role_records_block(my_pubkey));
     if problems
         .iter()
         .any(|problem| matches!(problem.code, "lead_pending" | "lead_conflict"))
         || signer_has_blocking_self_defer
+        || signer_has_blocking_malformed_record
     {
         "error"
     } else if problems.is_empty() {
@@ -667,6 +697,7 @@ fn print_repo_info_json(
     }
     let invalid_self_defers = repo_ref.invalid_self_defers();
     problems.extend(invalid_self_defer_health_problems(repo_ref));
+    problems.extend(malformed_role_record_health_problems(repo_ref));
     let health_status = repository_health_status(&problems, repo_ref, my_pubkey);
 
     let info = RepoInfoJson {
@@ -1527,6 +1558,38 @@ mod tests {
             vec![tag(&["M", &author.to_string(), "100", "defer"])],
         )]);
         let problems = invalid_self_defer_health_problems(&repo_ref);
+
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&author)),
+            "error"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&viewer)),
+            "warning"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, None),
+            "warning"
+        );
+    }
+
+    #[test]
+    fn blocking_malformed_record_is_an_error_only_for_its_signer() {
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let viewer = Keys::generate().public_key();
+        let repo_ref = consolidated(vec![announcement(
+            &author_keys,
+            vec![tag(&["M", &author.to_string(), "abc"])],
+        )]);
+        let problems = malformed_role_record_health_problems(&repo_ref);
+        assert_eq!(problems.len(), 1);
+        let problem = serde_json::to_value(&problems[0]).unwrap();
+        assert_eq!(problem["code"], "malformed_role_record");
+        assert_eq!(problem["scope"], "author");
+        assert_eq!(problem["author"], author.to_bech32().unwrap());
+        assert_eq!(problem["role"], "M");
+        assert_eq!(problem["blocks_author"], true);
 
         assert_eq!(
             repository_health_status(&problems, &repo_ref, Some(&author)),

@@ -69,6 +69,7 @@ use crate::{
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
         announcement_author_declines_moderatorship,
+        announcement_author_has_only_malformed_self_records,
         announcement_author_validly_declines_maintainership,
         announcement_author_validly_declines_moderatorship, announcement_invalid_self_defers,
         normalize_grasp_server_url,
@@ -2137,15 +2138,18 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
     // `M`/`m` self-entry left the maintainer set or acknowledges only
     // moderatorship, so drop them from the maintainer set (and with it the
     // pooling of their infrastructure). Keep malformed self-`defer` authors
-    // as discovery-only candidates: confirmed_maintainers() still denies
-    // them authority, while health and explicit role acceptance need their
-    // signed event.
+    // and authors whose self-records are exclusively unparseable as
+    // discovery-only candidates: confirmed_maintainers() still denies
+    // them authority, while health reporting needs their signed event —
+    // garbage records a departure no more than a `defer` sentinel does.
     let declined_maintainers: HashSet<PublicKey> = repo_events
         .iter()
         .filter(|e| {
             let invalid = announcement_invalid_self_defers(e);
             announcement_author_validly_declines_maintainership(e)
-                || (announcement_author_declines_maintainership(e) && invalid.is_empty())
+                || (announcement_author_declines_maintainership(e)
+                    && invalid.is_empty()
+                    && !announcement_author_has_only_malformed_self_records(e))
         })
         .map(|e| e.pubkey)
         .collect();
@@ -2200,17 +2204,24 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
             );
         }
     }
-    // Invalid self-`defer` announcements are retained strictly for health and
-    // explicit repair, even when a separate valid record proves the author
-    // departed. Candidate and authority sets remain controlled by the
-    // resolved role graph, not by presence in this map.
+    // Invalid self-`defer` and exclusively-malformed announcements are
+    // retained strictly for health and explicit repair, even when a
+    // separate valid record proves the author departed. Candidate and
+    // authority sets remain controlled by the resolved role graph, not by
+    // presence in this map. These are the least trustworthy retained
+    // events, so a missing identifier skips the event instead of panicking.
     for event in &repo_events {
-        if !announcement_invalid_self_defers(event).is_empty() {
+        if !announcement_invalid_self_defers(event).is_empty()
+            || announcement_author_has_only_malformed_self_records(event)
+        {
+            let Some(identifier) = event.tags.identifier() else {
+                continue;
+            };
             events.insert(
                 Nip19Coordinate {
                     coordinate: Coordinate {
                         kind: event.kind,
-                        identifier: event.tags.identifier().unwrap().to_string(),
+                        identifier: identifier.to_string(),
                         public_key: event.pubkey,
                     },
                     relays: vec![],
@@ -2259,12 +2270,17 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
         ..repo_ref
     };
 
-    let selected_has_invalid_self_defer = repo_ref.events.values().any(|event| {
-        event.pubkey == repo_coordinate.public_key
-            && !announcement_invalid_self_defers(event).is_empty()
-    });
+    // Readability carve-out: skip the follow-lead bail only when the
+    // selected author is unconfirmed *because* their own records are broken
+    // — a blocking invalid self-`defer` or exclusively malformed
+    // self-records — and no valid numeric departure exists. A validly
+    // departed author redirects through follow-lead as usual: an incidental
+    // stray `defer` must not keep the CLI silently operating on the
+    // superseded coordinate.
+    let selected_unconfirmed_by_broken_records =
+        selected_author_is_unconfirmed_by_broken_records(&repo_ref, repo_coordinate.public_key);
     if !allow_unconfirmed_selected
-        && !selected_has_invalid_self_defer
+        && !selected_unconfirmed_by_broken_records
         && !repo_ref
             .confirmed_maintainers()
             .contains(&repo_coordinate.public_key)
@@ -2289,7 +2305,9 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
         .filter(|e| {
             let invalid = announcement_invalid_self_defers(e);
             announcement_author_validly_declines_moderatorship(e)
-                || (announcement_author_declines_moderatorship(e) && invalid.is_empty())
+                || (announcement_author_declines_moderatorship(e)
+                    && invalid.is_empty()
+                    && !announcement_author_has_only_malformed_self_records(e))
         })
         .map(|e| e.pubkey)
         .collect();
@@ -2321,15 +2339,36 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
     Ok(repo_ref)
 }
 
+/// Whether the selected author's retained announcement excludes them from
+/// confirmation *because* of broken records — a blocking invalid
+/// self-`defer` or exclusively malformed self-records — rather than a valid
+/// signed departure. Only this shape justifies read-only fallbacks: a
+/// validly departed author must redirect via `ngit repo follow-lead` even
+/// when a stray invalid record sits beside the numeric departure.
+fn selected_author_is_unconfirmed_by_broken_records(
+    repo_ref: &RepoRef,
+    selected: PublicKey,
+) -> bool {
+    repo_ref.events.values().any(|event| {
+        event.pubkey == selected
+            && !announcement_author_validly_declines_maintainership(event)
+            && (announcement_invalid_self_defers(event)
+                .iter()
+                .any(|invalid| invalid.blocks_author())
+                || announcement_author_has_only_malformed_self_records(event))
+    })
+}
+
 /// Apply shared repository fields using confirmed members only.
 ///
 /// `RepoRef::events` also retains invitation announcements because the graph
 /// resolver needs them to recognize acceptance. Those events must not alter
 /// metadata, privacy or infrastructure until their author is confirmed. The
-/// sole exception is an unresolved selected coordinate carrying invalid
-/// self-`defer`: when there is no confirmed member at all, retain that selected
-/// event's signed fields so read-only inspection remains possible. It still
-/// grants no member or state authority.
+/// sole exception is an unresolved selected coordinate whose own records are
+/// broken (a blocking invalid self-`defer` or exclusively malformed
+/// self-records): when there is no confirmed member at all, retain that
+/// selected event's signed fields so read-only inspection remains possible.
+/// It still grants no member or state authority.
 fn apply_confirmed_member_repository_data(repo_ref: &mut RepoRef) {
     let authoritative_events: Vec<Event> = repo_ref
         .confirmed_member_announcements()
@@ -2341,14 +2380,18 @@ fn apply_confirmed_member_repository_data(repo_ref: &mut RepoRef) {
         .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
 
     if authoritative_events.is_empty() {
-        let unresolved_selected = repo_ref
-            .events
-            .values()
-            .find(|event| {
-                event.pubkey == repo_ref.selected_maintainer
-                    && !announcement_invalid_self_defers(event).is_empty()
-            })
-            .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
+        let unresolved_selected = selected_author_is_unconfirmed_by_broken_records(
+            repo_ref,
+            repo_ref.selected_maintainer,
+        )
+        .then(|| {
+            repo_ref
+                .events
+                .values()
+                .find(|event| event.pubkey == repo_ref.selected_maintainer)
+                .and_then(|event| RepoRef::try_from((event.clone(), None)).ok())
+        })
+        .flatten();
         if let Some(selected) = unresolved_selected {
             repo_ref.name = selected.name;
             repo_ref.description = selected.description;

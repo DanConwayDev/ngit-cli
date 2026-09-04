@@ -839,12 +839,27 @@ convergence; a `defer` copy cannot.
 
 Only syntactically valid, currently active `M` records create lead pointers. An
 `M` with malformed role history is ignored for authority and lead resolution
-and reported as repository health information; its mere presence does not turn
-the absence of a valid active `M` into an incomplete explicit path. When no
-valid active `M` remains at the selected coordinate, resolution uses the
+and reported as author-scoped repository health; its mere presence does not
+turn the absence of a valid active `M` into an incomplete explicit path. When
+no valid active `M` remains at the selected coordinate, resolution uses the
 selected-rooted leadless graph. Once resolution follows a valid active `M`, a
 missing announcement, multiple active targets, or a cycle fails closed and
 seeds no authority.
+
+Malformed is not departure. An author whose relevant self-records are
+exclusively unparseable is blocked exactly like an author with an
+unsuperseded invalid self-`defer`: excluded from current authority and
+confirmation without being read as a signed departure, and unable to seed or
+confirm others. Health reports each unparseable record as a warning for
+viewers and an error for the affected signer, whose own announcement
+mutations are gated; unlike an invalid self-`defer` there is no automated
+repair for these records yet, so they must be corrected manually. When the
+selected author is unconfirmed because of such broken records — a blocking
+invalid self-`defer` or exclusively malformed self-records — and has not
+validly departed, clients keep the coordinate's signed metadata readable
+without granting member or state authority. A valid numeric departure
+prevails even beside malformed tags: a validly departed author is redirected
+toward the current lead as usual, stray invalid records notwithstanding.
 
 The deliberately leadless topology has no active lead roster, so it retains
 the reciprocal active-`m` fixpoint rooted at the selected maintainer. A cycle
