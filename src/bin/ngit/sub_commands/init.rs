@@ -32,7 +32,7 @@ use ngit::{
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, latest_event_repo_ref,
-        normalize_grasp_server_url, save_repo_config_to_yaml,
+        normalize_grasp_server_url, role_tags_assert_lead, save_repo_config_to_yaml,
     },
     repo_state::RepoState,
     utils::join_with_and,
@@ -94,23 +94,34 @@ enum InitState {
 pub(crate) enum LaunchMode {
     Init,
     RepoEdit,
+    /// `ngit repo accept` repairing an existing self-defer announcement; it
+    /// republishes that announcement's hosting and only `--grasp-server` can
+    /// change it.
+    RepoAccept,
 }
 
 impl LaunchMode {
     /// How this command adds hosting, for suggestions that can be run as
     /// printed. `ngit init` declares a complete announcement; `ngit repo edit`
-    /// uses targeted add actions.
-    fn add_hosting_suggestions(self) -> [&'static str; 2] {
+    /// uses targeted add actions; `ngit repo accept` has only its grasp flag.
+    fn add_hosting_suggestions(self) -> Vec<&'static str> {
         match self {
-            Self::Init => [
+            Self::Init => vec![
                 "ngit init --grasp-server <URL>",
                 "ngit init --additional-relay <URL> --additional-clone <URL>",
             ],
-            Self::RepoEdit => [
+            Self::RepoEdit => vec![
                 "ngit repo edit --add-grasp-server <URL>",
                 "ngit repo edit --add-additional-relay <URL> --add-additional-clone <URL>",
             ],
+            Self::RepoAccept => vec!["ngit repo accept --grasp-server <URL>"],
         }
+    }
+
+    /// Whether the command can add a relay or clone URL individually. `ngit
+    /// repo accept` cannot, so its refusal must not detail flags it lacks.
+    fn has_additional_hosting_flags(self) -> bool {
+        !matches!(self, Self::RepoAccept)
     }
 }
 
@@ -166,20 +177,20 @@ fn announcement_hosting_refusal(
         "--grasp-server <URL>",
         "hosts your nostr and git data together",
     )];
-    if missing_relay {
+    if missing_relay && mode.has_additional_hosting_flags() {
         details.push((
             "--additional-relay <URL>",
             "where your nostr data is hosted",
         ));
     }
-    if missing_clone {
+    if missing_clone && mode.has_additional_hosting_flags() {
         details.push(("--additional-clone <URL>", "where your git data is hosted"));
     }
 
     Some(AnnouncementHostingRefusal {
         message,
         details,
-        suggestions: mode.add_hosting_suggestions().to_vec(),
+        suggestions: mode.add_hosting_suggestions(),
     })
 }
 
@@ -802,6 +813,15 @@ pub struct SubCommandArgs {
     /// the empty result of removing the final co-maintainer.
     #[clap(skip)]
     pub(crate) replace_maintainers: bool,
+    /// Whether an exact internal replacement already contains the author's
+    /// pubkey when their repaired role remains active. Ordinary edits leave
+    /// this false and receive the historical implicit author insertion.
+    #[clap(skip)]
+    pub(crate) replacement_lists_author: bool,
+    /// Permit the internal repository-edit recovery path to replace an
+    /// announcement for an author who currently has no resolvable role.
+    #[clap(skip)]
+    pub(crate) allow_self_defer_repair: bool,
     /// Explicitly clear this announcement's active lead declaration.
     #[clap(skip)]
     pub(crate) clear_lead: bool,
@@ -1042,7 +1062,7 @@ fn validate_post_fetch(
             Ok(())
         }
         InitState::NotListed { .. } => {
-            if cli.force {
+            if args.allow_self_defer_repair || cli.force {
                 Ok(())
             } else {
                 Err(cli_error(
@@ -1368,7 +1388,11 @@ fn resolve_fields(
     };
 
     let base_maintainers = if args.replace_maintainers {
-        let mut m = vec![user_ref.public_key];
+        let mut m = if args.replacement_lists_author {
+            Vec::new()
+        } else {
+            vec![user_ref.public_key]
+        };
         for npub in &args.other_maintainers {
             if let Ok(pk) = PublicKey::from_bech32(npub) {
                 if !m.contains(&pk) {
@@ -1398,6 +1422,15 @@ fn resolve_fields(
         .transpose()?;
     let (maintainers, lead) = if args.clear_lead {
         (maintainers, None)
+    } else if let (None, Some(role_tags)) = (lead_arg, &args.role_tags) {
+        // An explicitly prepared role-tag history (acknowledgement or
+        // self-defer repair) already records the lead this replacement
+        // asserts. Re-deriving the lead from the cached announcement would
+        // resurrect the pre-repair record: an `M=continue` repair would emit
+        // the signer as `m` and close the repaired `M` with a departure
+        // boundary they never signed.
+        let implied = role_tags_assert_lead(role_tags).filter(|lead| maintainers.contains(lead));
+        (maintainers, implied)
     } else {
         apply_lead_to_maintainers(
             lead_arg,
@@ -3181,6 +3214,21 @@ mod announcement_hosting_tests {
                 && edit.contains("--add-additional-relay")
                 && edit.contains("--add-additional-clone"),
             "repo edit should suggest its targeted add actions: {edit}",
+        );
+    }
+
+    /// `ngit repo accept` can only change hosting through `--grasp-server`,
+    /// so its refusal must not detail or suggest flags the command lacks.
+    #[test]
+    fn repo_accept_names_only_its_grasp_flag() {
+        let accept = refusal_text(true, true, LaunchMode::RepoAccept);
+        assert!(
+            accept.contains("ngit repo accept --grasp-server"),
+            "repo accept should suggest its grasp flag: {accept}",
+        );
+        assert!(
+            !accept.contains("--additional-relay") && !accept.contains("--additional-clone"),
+            "repo accept has no additional hosting flags to name: {accept}",
         );
     }
 }

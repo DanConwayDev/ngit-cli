@@ -11,12 +11,12 @@ use ngit::{
     event_ordering::latest_event,
     repo_ref::{
         LeadSource, MaintainerAcknowledgement, RepoRef,
-        announcement_author_declines_maintainership, detect_existing_grasp_servers,
+        announcement_author_validly_declines_maintainership, detect_existing_grasp_servers,
         latest_event_repo_ref, normalize_grasp_server_url,
     },
 };
 use nostr::prelude::{
-    Event, Filter, Kind, PublicKey, ToBech32, nip01::Coordinate, nip19::Nip19Coordinate,
+    Event, Filter, Kind, PublicKey, Timestamp, ToBech32, nip01::Coordinate, nip19::Nip19Coordinate,
 };
 
 use crate::{
@@ -36,6 +36,7 @@ use crate::{
             "add_maintainer",
             "remove_maintainer",
             "acknowledge_maintainer_change",
+            "repair_self_defer",
         ])
         .multiple(false)
 ))]
@@ -112,6 +113,34 @@ pub struct SubCommandArgs {
     pub(crate) acknowledge_maintainer_change: Option<String>,
     #[arg(
         long,
+        value_name = "ROLE=CONTINUE|UNIX_TIME",
+        conflicts_with_all = [
+            "lead_maintainer",
+            "no_lead_maintainer",
+            "name",
+            "description",
+            "add_grasp_server",
+            "remove_grasp_server",
+            "add_additional_relay",
+            "remove_additional_relay",
+            "add_additional_clone",
+            "remove_additional_clone",
+            "web",
+            "upstream",
+            "add_hashtag",
+            "remove_hashtag",
+            "earliest_unique_commit",
+            "clean",
+            "private",
+            "public",
+            "force",
+        ],
+        help_heading = "Recovery"
+    )]
+    /// repair one invalid self-defer by continuing it or recording its end
+    pub(crate) repair_self_defer: Option<String>,
+    #[arg(
+        long,
         value_name = "NPUB",
         conflicts_with = "no_lead_maintainer",
         help_heading = "Membership"
@@ -148,6 +177,60 @@ impl SubCommandArgs {
     fn has_relationship_mutation(&self) -> bool {
         self.add_maintainer.is_some() || self.remove_maintainer.is_some()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SelfDeferRepair {
+    Continue { role: String },
+    End { role: String, boundary: u64 },
+}
+
+impl SelfDeferRepair {
+    fn role(&self) -> &str {
+        match self {
+            Self::Continue { role } | Self::End { role, .. } => role,
+        }
+    }
+
+    fn end(&self) -> Option<u64> {
+        match self {
+            Self::Continue { .. } => None,
+            Self::End { boundary, .. } => Some(*boundary),
+        }
+    }
+}
+
+fn parse_self_defer_repair(value: &str) -> Result<SelfDeferRepair> {
+    let Some((role, action)) = value.split_once('=') else {
+        return Err(cli_error(
+            "--repair-self-defer requires ROLE=continue or ROLE=UNIX_TIME",
+            &[],
+            &["for example: ngit repo edit --repair-self-defer m=continue"],
+        ));
+    };
+    if !matches!(role, "M" | "m" | "o") {
+        return Err(cli_error(
+            "--repair-self-defer role must be M, m, or o",
+            &[],
+            &[],
+        ));
+    }
+    if action == "continue" {
+        return Ok(SelfDeferRepair::Continue {
+            role: role.to_string(),
+        });
+    }
+    let boundary = action.parse::<u64>().map_err(|_| {
+        cli_error(
+            "--repair-self-defer end must be 'continue' or a Unix timestamp",
+            &[],
+            &[],
+        )
+    })?;
+    Ok(SelfDeferRepair::End {
+        role: role.to_string(),
+        boundary,
+    })
 }
 
 fn normalize_unique_values<F>(flag: &str, values: &[String], normalize: &F) -> Result<Vec<String>>
@@ -281,6 +364,87 @@ fn own_announcement(repo_ref: &RepoRef, my_pubkey: PublicKey) -> Result<RepoRef>
                 &["if you are invited, run `ngit repo accept` first"],
             )
         })
+}
+
+fn require_no_blocking_self_defer(
+    my_ref: &RepoRef,
+    repo_ref: &RepoRef,
+    my_pubkey: PublicKey,
+) -> Result<()> {
+    if !my_ref.invalid_self_defer_blocks(&my_pubkey) {
+        return Ok(());
+    }
+    let invalid = my_ref
+        .invalid_self_defers()
+        .into_iter()
+        .find(|invalid| invalid.author == my_pubkey && invalid.blocks_author());
+    let repair = invalid.as_ref().map(|invalid| {
+        let same_role_records = my_ref
+            .invalid_self_defers()
+            .iter()
+            .filter(|candidate| {
+                candidate.author == my_pubkey && candidate.role == invalid.role
+            })
+            .count();
+        if same_role_records == 1 {
+            format!(
+                "repair it explicitly with `ngit repo edit --repair-self-defer {}=continue` or `{}=<unix-time>`",
+                invalid.role, invalid.role
+            )
+        } else {
+            format!(
+                "multiple invalid self-`{}` records cannot be targeted individually; reconcile that signed history before editing",
+                invalid.role
+            )
+        }
+    });
+    let accept = "accept the current invitation with `ngit repo accept`".to_string();
+    let mut guidance = Vec::new();
+    if self_defer_acceptance_guidance_is_available(repo_ref, my_pubkey, Timestamp::now().as_secs())
+    {
+        guidance.push(accept.as_str());
+    }
+    if let Some(repair) = &repair {
+        guidance.push(repair.as_str());
+    }
+    Err(cli_error_with_category(
+        "invalid_self_defer",
+        "your repository announcement contains an invalid self-`defer` without an ordered active successor",
+        &[],
+        &guidance,
+    ))
+}
+
+/// Gate the affected signer's announcement mutations when their own role
+/// records are exclusively unparseable, mirroring
+/// [`require_no_blocking_self_defer`]. Unlike an invalid self-`defer` there
+/// is no automated repair for these records yet, so the guidance is manual.
+fn require_no_blocking_malformed_records(my_ref: &RepoRef, my_pubkey: PublicKey) -> Result<()> {
+    if !my_ref.malformed_role_records_block(&my_pubkey) {
+        return Ok(());
+    }
+    Err(cli_error_with_category(
+        "malformed_role_record",
+        "your repository announcement's own role records are unparseable",
+        &[],
+        &[
+            "no automated repair exists for malformed role records yet",
+            "publish a corrected announcement with a tool that can edit raw role tags",
+        ],
+    ))
+}
+
+fn self_defer_acceptance_guidance_is_available(
+    repo_ref: &RepoRef,
+    author: PublicKey,
+    now: u64,
+) -> bool {
+    repo_ref.invited_maintainers().contains(&author)
+        && repo_ref
+            .invalid_self_defers()
+            .iter()
+            .any(|invalid| invalid.author == author && invalid.role != "o")
+        && repo_ref.self_defer_acceptance_is_eligible(&author, now)
 }
 
 fn announcement_by(repo_ref: &RepoRef, pubkey: PublicKey) -> Option<RepoRef> {
@@ -766,6 +930,38 @@ pub async fn launch(
         .context("no repository announcement found after refreshing account write relays")?;
     let my_pubkey = user_ref.public_key;
     let mut my_ref = own_announcement(&repo_ref, my_pubkey)?;
+    let self_defer_repair = args
+        .repair_self_defer
+        .as_deref()
+        .map(parse_self_defer_repair)
+        .transpose()?;
+    if let Some(repair) = &self_defer_repair {
+        if matches!(repair, SelfDeferRepair::Continue { role } if role != "o") {
+            let discovered =
+                super::preflight::discover_candidate_events(&client, &repo_ref, my_pubkey).await?;
+            super::preflight::require_equivalent_activating_state(
+                git_repo_path,
+                &repo_ref,
+                my_pubkey,
+                true,
+                true,
+                false,
+                &discovered,
+            )
+            .await?;
+        }
+        my_ref
+            .repair_self_defer(
+                &my_pubkey,
+                repair.role(),
+                repair.end(),
+                Timestamp::now().as_secs(),
+            )
+            .context("failed to repair invalid self-defer")?;
+    } else {
+        require_no_blocking_self_defer(&my_ref, &repo_ref, my_pubkey)?;
+        require_no_blocking_malformed_records(&my_ref, my_pubkey)?;
+    }
 
     // Hosting is personal to each maintainer announcement. Separate the
     // caller's grasp-derived entries from explicitly additional entries before
@@ -883,7 +1079,9 @@ pub async fn launch(
                         &["fetch again after that maintainer publishes their announcement"],
                     )
                 })?;
-        let departed = announcement_author_declines_maintainership(&target_event);
+        // Only a valid signed departure counts: an author whose records are
+        // exclusively malformed has neither departed nor accepted.
+        let departed = announcement_author_validly_declines_maintainership(&target_event);
         if !departed && !repo_ref.confirmed_maintainers().contains(&target) {
             return Err(cli_error(
                 "that pubkey has not published a confirmed maintainer acceptance",
@@ -956,7 +1154,7 @@ pub async fn launch(
     } else {
         (my_ref.maintainers.clone(), None)
     };
-    if !maintainers.contains(&my_pubkey) {
+    if self_defer_repair.is_none() && !maintainers.contains(&my_pubkey) {
         maintainers.insert(0, my_pubkey);
     }
     if let Some(value) = &args.add_maintainer {
@@ -1000,6 +1198,7 @@ pub async fn launch(
                     &repo_ref,
                     target,
                     false,
+                    false,
                     args.force,
                     &discovered,
                 )
@@ -1033,7 +1232,8 @@ pub async fn launch(
 
     let mut role_tags = acknowledgement
         .map(|_| my_ref.role_tags.clone())
-        .or(prepared_role_tags);
+        .or(prepared_role_tags)
+        .or_else(|| self_defer_repair.as_ref().map(|_| my_ref.role_tags.clone()));
     if args.lead_maintainer.is_some() && requested_lead.is_some_and(|lead| lead != my_pubkey) {
         let lead = requested_lead.unwrap();
         let proposed_ref = announcement_by(&repo_ref, lead);
@@ -1058,7 +1258,8 @@ pub async fn launch(
     let relationship_action = args.has_relationship_mutation()
         || args.lead_maintainer.is_some()
         || args.no_lead_maintainer
-        || acknowledgement.is_some();
+        || acknowledgement.is_some()
+        || self_defer_repair.is_some();
     if let Some(lead) = requested_lead {
         if !maintainers.contains(&lead) {
             let lead = lead.to_bech32().unwrap_or_else(|_| lead.to_hex());
@@ -1087,11 +1288,13 @@ pub async fn launch(
         upstream: args.upstream.clone(),
         other_maintainers: maintainers
             .iter()
-            .filter(|pubkey| **pubkey != my_pubkey)
+            .filter(|pubkey| self_defer_repair.is_some() || **pubkey != my_pubkey)
             .filter_map(|pubkey| pubkey.to_bech32().ok())
             .collect(),
         lead_maintainer: requested_lead.and_then(|pubkey| pubkey.to_bech32().ok()),
         replace_maintainers: relationship_action,
+        replacement_lists_author: self_defer_repair.is_some(),
+        allow_self_defer_repair: self_defer_repair.is_some(),
         clear_lead: args.no_lead_maintainer,
         role_tags,
         preserve_selected_coordinate: true,
@@ -1112,9 +1315,11 @@ pub async fn launch(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use nostr::prelude::{EventBuilder, Keys, Tag, event::FinalizeEvent, nip01::Coordinate};
 
     use super::*;
+    use crate::cli::{Commands, RepoCommands};
 
     fn role_event(keys: &Keys, roles: Vec<Vec<String>>) -> Event {
         let mut tags = vec![Tag::identifier("repo")];
@@ -1174,6 +1379,179 @@ mod tests {
             )
             .unwrap(),
             Some(vec![]),
+        );
+    }
+
+    #[test]
+    fn only_an_ordered_active_successor_unblocks_announcement_edits() {
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let blocking = RepoRef::try_from((
+            role_event(
+                &keys,
+                vec![
+                    vec![
+                        "m".to_string(),
+                        author.to_string(),
+                        "100".to_string(),
+                        "defer".to_string(),
+                    ],
+                    vec!["M".to_string(), author.to_string(), "100".to_string()],
+                ],
+            ),
+            None,
+        ))
+        .unwrap();
+        assert!(require_no_blocking_self_defer(&blocking, &blocking, author).is_err());
+
+        let superseded = RepoRef::try_from((
+            role_event(
+                &keys,
+                vec![
+                    vec![
+                        "m".to_string(),
+                        author.to_string(),
+                        "100".to_string(),
+                        "defer".to_string(),
+                    ],
+                    vec!["M".to_string(), author.to_string(), "200".to_string()],
+                ],
+            ),
+            None,
+        ))
+        .unwrap();
+        assert!(require_no_blocking_self_defer(&superseded, &superseded, author).is_ok());
+    }
+
+    #[test]
+    fn blocking_self_defer_offers_accept_only_for_safe_combined_repair() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let mut repo_ref = RepoRef::try_from((
+            role_event(
+                &owner_keys,
+                vec![
+                    vec!["M".to_string(), owner.to_string(), "50".to_string()],
+                    vec!["m".to_string(), author.to_string(), "60".to_string()],
+                ],
+            ),
+            None,
+        ))
+        .unwrap();
+
+        let simple_event = role_event(
+            &author_keys,
+            vec![
+                vec!["M".to_string(), owner.to_string(), "100".to_string()],
+                vec![
+                    "m".to_string(),
+                    author.to_string(),
+                    "100".to_string(),
+                    "defer".to_string(),
+                ],
+            ],
+        );
+        let simple = RepoRef::try_from((simple_event.clone(), None)).unwrap();
+        insert(&mut repo_ref, simple_event);
+        assert!(repo_ref.invited_maintainers().contains(&author));
+        assert!(self_defer_acceptance_guidance_is_available(
+            &repo_ref, author, 1_000,
+        ));
+        assert!(require_no_blocking_self_defer(&simple, &repo_ref, author).is_err());
+
+        let history_event = role_event(
+            &author_keys,
+            vec![
+                vec!["M".to_string(), owner.to_string(), "100".to_string()],
+                vec![
+                    "m".to_string(),
+                    author.to_string(),
+                    "1".to_string(),
+                    "5".to_string(),
+                    "100".to_string(),
+                    "defer".to_string(),
+                ],
+            ],
+        );
+        let history = RepoRef::try_from((history_event.clone(), None)).unwrap();
+        insert(&mut repo_ref, history_event);
+        assert!(!self_defer_acceptance_guidance_is_available(
+            &repo_ref, author, 1_000,
+        ));
+        assert!(require_no_blocking_self_defer(&history, &repo_ref, author).is_err());
+
+        let duplicate_event = role_event(
+            &author_keys,
+            vec![
+                vec!["M".to_string(), owner.to_string(), "100".to_string()],
+                vec![
+                    "M".to_string(),
+                    author.to_string(),
+                    "100".to_string(),
+                    "defer".to_string(),
+                ],
+                vec![
+                    "m".to_string(),
+                    author.to_string(),
+                    "200".to_string(),
+                    "defer".to_string(),
+                ],
+            ],
+        );
+        let duplicate = RepoRef::try_from((duplicate_event.clone(), None)).unwrap();
+        insert(&mut repo_ref, duplicate_event);
+        assert!(!self_defer_acceptance_guidance_is_available(
+            &repo_ref, author, 1_000,
+        ));
+        assert!(require_no_blocking_self_defer(&duplicate, &repo_ref, author).is_err());
+    }
+
+    #[test]
+    fn self_defer_repair_argument_requires_an_explicit_role_and_choice() {
+        assert_eq!(
+            parse_self_defer_repair("m=continue").unwrap(),
+            SelfDeferRepair::Continue {
+                role: "m".to_string()
+            }
+        );
+        assert_eq!(
+            parse_self_defer_repair("M=200").unwrap(),
+            SelfDeferRepair::End {
+                role: "M".to_string(),
+                boundary: 200,
+            }
+        );
+        for invalid in ["m", "x=continue", "o=tomorrow"] {
+            assert!(parse_self_defer_repair(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn co_maintainer_self_repair_bypasses_lead_roster_governance() {
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let co_maintainer = Keys::generate().public_key();
+        let repo_ref = RepoRef::try_from((
+            role_event(&owner_keys, vec![tag("M", owner), tag("m", co_maintainer)]),
+            None,
+        ))
+        .unwrap();
+        let cli =
+            Cli::try_parse_from(["ngit", "repo", "edit", "--repair-self-defer", "m=continue"])
+                .unwrap();
+        let Some(Commands::Repo(repo)) = cli.command else {
+            panic!("expected repo command");
+        };
+        let Some(RepoCommands::Edit(args)) = repo.repo_command else {
+            panic!("expected repo edit command");
+        };
+
+        assert!(!args.has_relationship_mutation());
+        assert_eq!(
+            relationship_governance(&args, &repo_ref, co_maintainer).unwrap(),
+            None
         );
     }
 

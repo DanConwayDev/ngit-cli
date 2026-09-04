@@ -155,11 +155,19 @@ fn format_refs(refs: &[String]) -> String {
 /// `controller_is_incoming` is true for acceptance, where the caller controls
 /// the state being activated. It is false for an invitation that is already
 /// reciprocal, where the caller controls the current repository state.
+///
+/// `missing_existing_state_ok` is true only for a signer repairing their own
+/// invalid self-role record. When no *other* confirmed maintainer publishes
+/// authoritative state — typically because the malformed record itself
+/// emptied the confirmed set — the signer's state was the repository's state
+/// all along, so there is nothing for the reactivation to diverge from.
+/// Acceptance and invitation keep failing closed on a vacant existing view.
 pub async fn require_equivalent_activating_state(
     git_repo_path: &Path,
     repo_ref: &RepoRef,
     incoming_author: PublicKey,
     controller_is_incoming: bool,
+    missing_existing_state_ok: bool,
     force_requested: bool,
     discovered: &[Event],
 ) -> Result<()> {
@@ -204,6 +212,9 @@ pub async fn require_equivalent_activating_state(
         (&existing.state, Some(&incoming.state))
     };
     let Some(required) = required else {
+        if missing_existing_state_ok {
+            return Ok(());
+        }
         return Err(cli_error_with_category(
             "membership_state_conflict",
             "accepting would activate pre-existing state where the invited repository has no authoritative state",

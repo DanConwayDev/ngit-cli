@@ -12,12 +12,12 @@ use ngit::{
     client::{Params, fetching_quietly, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
     login::{existing::load_existing_login, user::get_user_ref_from_cache},
     repo_ref::{
-        RepoRef, RoleSource, extract_npub, format_grasp_server_url_as_relay_url,
+        InvalidSelfDefer, RepoRef, RoleSource, extract_npub, format_grasp_server_url_as_relay_url,
         is_grasp_server_clone_url, normalize_grasp_server_url,
     },
     utils::get_short_git_server_name,
 };
-use nostr::prelude::{FromBech32, PublicKey, ToBech32, nip19::Nip19Coordinate};
+use nostr::prelude::{FromBech32, PublicKey, Timestamp, ToBech32, nip19::Nip19Coordinate};
 use serde::Serialize;
 
 use crate::{
@@ -95,7 +95,7 @@ struct RepoInfoJson {
 #[derive(Serialize)]
 struct PendingActionJson {
     code: &'static str,
-    command: &'static str,
+    command: String,
 }
 
 #[derive(Serialize)]
@@ -108,6 +108,136 @@ struct RepoHealthJson {
 struct HealthProblemJson {
     code: &'static str,
     message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks_author: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    successor_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested_end: Option<u64>,
+}
+
+fn self_defer_accept_is_available(
+    repo_ref: &RepoRef,
+    invalid: &InvalidSelfDefer,
+    my_pubkey: Option<&PublicKey>,
+    invited_maintainers: &[PublicKey],
+    now: u64,
+) -> bool {
+    my_pubkey == Some(&invalid.author)
+        && invalid.role != "o"
+        && invited_maintainers.contains(&invalid.author)
+        && repo_ref.self_defer_acceptance_is_eligible(&invalid.author, now)
+}
+
+fn self_defer_repair_value(invalid: &InvalidSelfDefer) -> String {
+    invalid.suggested_end.map_or_else(
+        || {
+            if invalid.superseded {
+                "<unix-time>".to_string()
+            } else {
+                "<continue-or-unix-time>".to_string()
+            }
+        },
+        |end| end.to_string(),
+    )
+}
+
+fn invalid_self_defer_health_problems(repo_ref: &RepoRef) -> Vec<HealthProblemJson> {
+    let invalid_self_defers = repo_ref.invalid_self_defers();
+    invalid_self_defers
+        .iter()
+        .cloned()
+        .map(|invalid| {
+            let blocks_author = invalid.blocks_author();
+            let duplicate_role = invalid_self_defers.iter().filter(|candidate| {
+                candidate.author == invalid.author && candidate.role == invalid.role
+            }).count() > 1;
+            HealthProblemJson {
+                code: "invalid_self_defer",
+                message: if duplicate_role {
+                    "multiple invalid self-role records share this role and require manual reconciliation"
+                } else if blocks_author {
+                    "the author's self-role ends in defer without an ordered active successor"
+                } else {
+                    "the author's self-role ends in defer but a later active role supplies current authority"
+                },
+                scope: Some("author"),
+                author: Some(
+                    invalid
+                        .author
+                        .to_bech32()
+                        .unwrap_or_else(|_| invalid.author.to_hex()),
+                ),
+                role: Some(invalid.role),
+                blocks_author: Some(blocks_author),
+                superseded: Some(invalid.superseded),
+                successor_role: invalid.successor_role,
+                suggested_end: invalid.suggested_end,
+            }
+        })
+        .collect()
+}
+
+fn malformed_role_record_health_problems(repo_ref: &RepoRef) -> Vec<HealthProblemJson> {
+    repo_ref
+        .malformed_role_records()
+        .into_iter()
+        .map(|record| HealthProblemJson {
+            code: "malformed_role_record",
+            message: if record.blocks_author {
+                "the author's own role records are exclusively unparseable and block their role-dependent writes"
+            } else {
+                "an unparseable role record is preserved for audit and carries no role semantics"
+            },
+            scope: Some("author"),
+            author: Some(
+                record
+                    .author
+                    .to_bech32()
+                    .unwrap_or_else(|_| record.author.to_hex()),
+            ),
+            role: Some(record.role),
+            blocks_author: Some(record.blocks_author),
+            superseded: None,
+            successor_role: None,
+            suggested_end: None,
+        })
+        .collect()
+}
+
+fn repository_health_status(
+    problems: &[HealthProblemJson],
+    repo_ref: &RepoRef,
+    my_pubkey: Option<&PublicKey>,
+) -> &'static str {
+    let signer_has_blocking_self_defer = my_pubkey.is_some_and(|my_pubkey| {
+        repo_ref
+            .invalid_self_defers()
+            .iter()
+            .any(|invalid| invalid.author == *my_pubkey && invalid.blocks_author())
+    });
+    let signer_has_blocking_malformed_record =
+        my_pubkey.is_some_and(|my_pubkey| repo_ref.malformed_role_records_block(my_pubkey));
+    if problems
+        .iter()
+        .any(|problem| matches!(problem.code, "lead_pending" | "lead_conflict"))
+        || signer_has_blocking_self_defer
+        || signer_has_blocking_malformed_record
+    {
+        "error"
+    } else if problems.is_empty() {
+        "ok"
+    } else {
+        "warning"
+    }
 }
 
 #[derive(Serialize)]
@@ -440,7 +570,7 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     if json {
-        print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo)?;
+        print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo, my_pubkey.as_ref())?;
     } else {
         println!("subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)");
         println!();
@@ -460,6 +590,7 @@ fn print_repo_info_json(
     repo_ref: &RepoRef,
     coordinate: &Nip19Coordinate,
     git_repo: &Repo,
+    my_pubkey: Option<&PublicKey>,
 ) -> Result<()> {
     let nostr_url = git_repo
         .git_repo
@@ -530,10 +661,24 @@ fn print_repo_info_json(
         ngit::repo_ref::LeadSource::Pending => problems.push(HealthProblemJson {
             code: "lead_pending",
             message: "the selected lead path is incomplete",
+            scope: None,
+            author: None,
+            role: None,
+            blocks_author: None,
+            superseded: None,
+            successor_role: None,
+            suggested_end: None,
         }),
         ngit::repo_ref::LeadSource::Conflict => problems.push(HealthProblemJson {
             code: "lead_conflict",
             message: "the selected lead path is conflicting",
+            scope: None,
+            author: None,
+            role: None,
+            blocks_author: None,
+            superseded: None,
+            successor_role: None,
+            suggested_end: None,
         }),
         _ => {}
     }
@@ -541,18 +686,19 @@ fn print_repo_info_json(
         problems.push(HealthProblemJson {
             code: "follow_lead_available",
             message: "the selected coordinate forwards to another lead",
+            scope: None,
+            author: None,
+            role: None,
+            blocks_author: None,
+            superseded: None,
+            successor_role: None,
+            suggested_end: None,
         });
     }
-    let health_status = if problems
-        .iter()
-        .any(|problem| matches!(problem.code, "lead_pending" | "lead_conflict"))
-    {
-        "error"
-    } else if problems.is_empty() {
-        "ok"
-    } else {
-        "warning"
-    };
+    let invalid_self_defers = repo_ref.invalid_self_defers();
+    problems.extend(invalid_self_defer_health_problems(repo_ref));
+    problems.extend(malformed_role_record_health_problems(repo_ref));
+    let health_status = repository_health_status(&problems, repo_ref, my_pubkey);
 
     let info = RepoInfoJson {
         is_nostr_repo: true,
@@ -584,13 +730,53 @@ fn print_repo_info_json(
         lead_path: Some(lead_path),
         recommended_coordinate,
         follow_lead_command: forward_available.then(|| "ngit repo follow-lead".to_string()),
-        pending_actions: Some(if forward_available {
-            vec![PendingActionJson {
-                code: "follow_lead",
-                command: "ngit repo follow-lead",
-            }]
-        } else {
-            Vec::new()
+        pending_actions: Some({
+            let mut actions = if forward_available {
+                vec![PendingActionJson {
+                    code: "follow_lead",
+                    command: "ngit repo follow-lead".to_string(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let invited = repo_ref.invited_maintainers();
+            let now = Timestamp::now().as_secs();
+            if invalid_self_defers.iter().any(|invalid| {
+                self_defer_accept_is_available(repo_ref, invalid, my_pubkey, &invited, now)
+            }) {
+                actions.push(PendingActionJson {
+                    code: "accept_role",
+                    command: "ngit repo accept".to_string(),
+                });
+            }
+            if let Some(my_pubkey) = my_pubkey {
+                let mut emitted_roles = HashSet::new();
+                for invalid in invalid_self_defers
+                    .iter()
+                    .filter(|invalid| invalid.author == *my_pubkey)
+                {
+                    if !emitted_roles.insert(invalid.role.clone())
+                        || invalid_self_defers
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.author == invalid.author && candidate.role == invalid.role
+                            })
+                            .count()
+                            > 1
+                    {
+                        continue;
+                    }
+                    let end = self_defer_repair_value(invalid);
+                    actions.push(PendingActionJson {
+                        code: "repair_self_defer",
+                        command: format!(
+                            "ngit repo edit --repair-self-defer {}={end}",
+                            invalid.role
+                        ),
+                    });
+                }
+            }
+            actions
         }),
         health: Some(RepoHealthJson {
             status: health_status,
@@ -960,6 +1146,106 @@ async fn print_repo_info(
         eprintln!("warning: this checkout's selected coordinate forwards to the resolved lead");
         eprintln!("switch to the lead with: ngit repo follow-lead");
     }
+    let invalid_self_defers = repo_ref.invalid_self_defers();
+    let mut explained_ambiguous_roles = HashSet::new();
+    for invalid in &invalid_self_defers {
+        let author = display_name_for(&invalid.author, my_pubkey, git_repo_path).await;
+        if invalid.superseded {
+            if let Some(suggested_end) = invalid.suggested_end {
+                eprintln!(
+                    "warning: {author}'s invalid self-`{}` defer is superseded for current authority; suggested repair boundary: {suggested_end}",
+                    invalid.role
+                );
+                if my_pubkey == Some(&invalid.author) {
+                    let duplicate_role = invalid_self_defers
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.author == invalid.author && candidate.role == invalid.role
+                        })
+                        .count()
+                        > 1;
+                    if duplicate_role {
+                        if explained_ambiguous_roles.insert((invalid.author, invalid.role.clone()))
+                        {
+                            eprintln!(
+                                "multiple invalid self-`{}` records cannot be targeted individually; reconcile that signed history before editing",
+                                invalid.role
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "repair the history with: ngit repo edit --repair-self-defer {}={suggested_end}",
+                            invalid.role
+                        );
+                    }
+                }
+            } else {
+                eprintln!(
+                    "warning: {author}'s invalid self-`{}` defer is superseded for current authority, but multiple later roles make its end ambiguous",
+                    invalid.role
+                );
+                if my_pubkey == Some(&invalid.author) {
+                    let duplicate_role = invalid_self_defers
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.author == invalid.author && candidate.role == invalid.role
+                        })
+                        .count()
+                        > 1;
+                    if duplicate_role {
+                        if explained_ambiguous_roles.insert((invalid.author, invalid.role.clone()))
+                        {
+                            eprintln!(
+                                "multiple invalid self-`{}` records cannot be targeted individually; reconcile that signed history before editing",
+                                invalid.role
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "choose its end with: ngit repo edit --repair-self-defer {}=<unix-time>",
+                            invalid.role
+                        );
+                    }
+                }
+            }
+        } else {
+            eprintln!(
+                "warning: {author}'s invalid self-`{}` defer has no ordered active successor",
+                invalid.role
+            );
+            if self_defer_accept_is_available(
+                repo_ref,
+                invalid,
+                my_pubkey,
+                &repo_ref.invited_maintainers(),
+                Timestamp::now().as_secs(),
+            ) {
+                eprintln!("accept the current invitation with: ngit repo accept");
+            }
+            if my_pubkey == Some(&invalid.author) {
+                let duplicate_role = invalid_self_defers
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.author == invalid.author && candidate.role == invalid.role
+                    })
+                    .count()
+                    > 1;
+                if duplicate_role {
+                    if explained_ambiguous_roles.insert((invalid.author, invalid.role.clone())) {
+                        eprintln!(
+                            "multiple invalid self-`{}` records cannot be targeted individually; reconcile that signed history before editing",
+                            invalid.role
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "choose whether it continues or ended with: ngit repo edit --repair-self-defer {}=<continue-or-unix-time>",
+                        invalid.role
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A provenance note for listings that predate NIP-34 indexed role tags.
@@ -1235,6 +1521,225 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn self_defer_health_is_author_scoped_and_exposes_the_suggested_boundary() {
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let repo_ref = consolidated(vec![announcement(
+            &author_keys,
+            vec![
+                tag(&["m", &author.to_string(), "100", "defer"]),
+                tag(&["M", &author.to_string(), "200"]),
+            ],
+        )]);
+
+        let problems = invalid_self_defer_health_problems(&repo_ref);
+        assert_eq!(problems.len(), 1);
+        let problem = serde_json::to_value(&problems[0]).unwrap();
+        assert_eq!(problem["code"], "invalid_self_defer");
+        assert_eq!(problem["scope"], "author");
+        assert_eq!(problem["author"], author.to_bech32().unwrap());
+        assert_eq!(problem["role"], "m");
+        assert_eq!(problem["blocks_author"], false);
+        assert_eq!(problem["superseded"], true);
+        assert_eq!(problem["successor_role"], "M");
+        assert_eq!(problem["suggested_end"], 200);
+    }
+
+    #[test]
+    fn blocking_self_defer_is_an_error_only_for_its_signer() {
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let viewer = Keys::generate().public_key();
+        let repo_ref = consolidated(vec![announcement(
+            &author_keys,
+            vec![tag(&["M", &author.to_string(), "100", "defer"])],
+        )]);
+        let problems = invalid_self_defer_health_problems(&repo_ref);
+
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&author)),
+            "error"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&viewer)),
+            "warning"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, None),
+            "warning"
+        );
+    }
+
+    #[test]
+    fn blocking_malformed_record_is_an_error_only_for_its_signer() {
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let viewer = Keys::generate().public_key();
+        let repo_ref = consolidated(vec![announcement(
+            &author_keys,
+            vec![tag(&["M", &author.to_string(), "abc"])],
+        )]);
+        let problems = malformed_role_record_health_problems(&repo_ref);
+        assert_eq!(problems.len(), 1);
+        let problem = serde_json::to_value(&problems[0]).unwrap();
+        assert_eq!(problem["code"], "malformed_role_record");
+        assert_eq!(problem["scope"], "author");
+        assert_eq!(problem["author"], author.to_bech32().unwrap());
+        assert_eq!(problem["role"], "M");
+        assert_eq!(problem["blocks_author"], true);
+
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&author)),
+            "error"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, Some(&viewer)),
+            "warning"
+        );
+        assert_eq!(
+            repository_health_status(&problems, &repo_ref, None),
+            "warning"
+        );
+    }
+
+    #[test]
+    fn self_defer_actions_match_the_available_repair_paths() {
+        let author = Keys::generate().public_key();
+        let invalid_moderator = InvalidSelfDefer {
+            author,
+            role: "o".to_string(),
+            start: 100,
+            superseded: false,
+            successor_role: None,
+            suggested_end: None,
+        };
+        assert_eq!(
+            self_defer_repair_value(&invalid_moderator),
+            "<continue-or-unix-time>"
+        );
+
+        let ambiguous_successor = InvalidSelfDefer {
+            role: "m".to_string(),
+            superseded: true,
+            ..invalid_moderator
+        };
+        assert_eq!(self_defer_repair_value(&ambiguous_successor), "<unix-time>");
+    }
+
+    #[test]
+    fn self_defer_accept_guidance_requires_a_structurally_safe_repair() {
+        const NOW: u64 = 1_000;
+
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key();
+        let author_keys = Keys::generate();
+        let author = author_keys.public_key();
+        let guidance_available = |repo_ref: &RepoRef| {
+            repo_ref.invalid_self_defers().iter().any(|invalid| {
+                self_defer_accept_is_available(repo_ref, invalid, Some(&author), &[author], NOW)
+            })
+        };
+
+        let simple = consolidated(vec![
+            announcement(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "50"]),
+                    tag(&["m", &author.to_string(), "60"]),
+                ],
+            ),
+            announcement(
+                &author_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "100"]),
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                ],
+            ),
+        ]);
+        assert_eq!(simple.selected_maintainer, owner);
+        assert!(guidance_available(&simple));
+
+        let superseded_by_moderator = consolidated(vec![
+            announcement(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "50"]),
+                    tag(&["m", &author.to_string(), "60"]),
+                ],
+            ),
+            announcement(
+                &author_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "100"]),
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["o", &author.to_string(), "200"]),
+                ],
+            ),
+        ]);
+        assert!(
+            superseded_by_moderator
+                .invalid_self_defers()
+                .iter()
+                .any(|invalid| invalid.role == "m" && !invalid.blocks_author())
+        );
+        assert!(guidance_available(&superseded_by_moderator));
+
+        let future_invalid_moderator = consolidated(vec![
+            announcement(
+                &owner_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "50"]),
+                    tag(&["m", &author.to_string(), "60"]),
+                ],
+            ),
+            announcement(
+                &author_keys,
+                vec![
+                    tag(&["M", &owner.to_string(), "100"]),
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["o", &author.to_string(), &(NOW + 1).to_string(), "defer"]),
+                ],
+            ),
+        ]);
+        assert!(!guidance_available(&future_invalid_moderator));
+
+        let embedded_history = consolidated(vec![announcement(
+            &author_keys,
+            vec![tag(&["m", &author.to_string(), "1", "5", "100", "defer"])],
+        )]);
+        assert!(!guidance_available(&embedded_history));
+
+        let other_self_history = consolidated(vec![announcement(
+            &author_keys,
+            vec![
+                tag(&["m", &author.to_string(), "100", "defer"]),
+                tag(&["o", &author.to_string(), "20", "30"]),
+            ],
+        )]);
+        assert!(!guidance_available(&other_self_history));
+
+        let duplicate_invalid = consolidated(vec![announcement(
+            &author_keys,
+            vec![
+                tag(&["M", &author.to_string(), "100", "defer"]),
+                tag(&["m", &author.to_string(), "200", "defer"]),
+            ],
+        )]);
+        assert!(!guidance_available(&duplicate_invalid));
+
+        let ambiguous_successors = consolidated(vec![announcement(
+            &author_keys,
+            vec![
+                tag(&["m", &author.to_string(), "100", "defer"]),
+                tag(&["o", &author.to_string(), "200"]),
+                tag(&["M", &author.to_string(), "300"]),
+            ],
+        )]);
+        assert!(!ambiguous_successors.self_defer_acceptance_is_eligible(&author, NOW));
+        assert!(!guidance_available(&ambiguous_successors));
     }
 
     #[test]

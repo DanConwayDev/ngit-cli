@@ -173,6 +173,31 @@ pub enum RoleBoundary {
     Defer,
 }
 
+/// One invalid self-role interval whose final boundary is `defer`.
+///
+/// `defer` is meaningful only on a history copy about somebody else. The
+/// author's own unresolved interval grants no authority and supplies no
+/// departure timestamp. A later, explicitly-timed active self-role can
+/// supersede it for current-role resolution without repairing the interval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidSelfDefer {
+    pub author: PublicKey,
+    pub role: String,
+    pub start: u64,
+    pub superseded: bool,
+    pub successor_role: Option<String>,
+    pub suggested_end: Option<u64>,
+}
+
+impl InvalidSelfDefer {
+    /// Whether the malformed interval prevents this author from holding a
+    /// current role. The scope is deliberately the author, not the whole
+    /// repository component.
+    pub fn blocks_author(&self) -> bool {
+        !self.superseded
+    }
+}
+
 /// Signed membership transition copied into another maintainer's retained
 /// history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +260,228 @@ fn role_boundaries(slice: &[String]) -> Option<Vec<RoleBoundary>> {
     Some(boundaries)
 }
 
+fn invalid_self_defer_records(event: &Event) -> Vec<InvalidSelfDefer> {
+    let author = event.pubkey.to_string();
+    let mut active_successors = Vec::new();
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(role @ ("M" | "m" | "o")) = slice.first().map(String::as_str) else {
+            continue;
+        };
+        if slice.get(1) != Some(&author) {
+            continue;
+        }
+        let Some(boundaries) = role_boundaries(slice) else {
+            continue;
+        };
+        if boundaries.len() % 2 == 1 {
+            if let Some(RoleBoundary::Timestamp(start)) = boundaries.last() {
+                active_successors.push((role.to_string(), *start, slice.to_vec()));
+            }
+        }
+    }
+
+    let mut invalid = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let slice = tag.as_slice();
+            let role = slice.first().map(String::as_str)?;
+            if !is_role_tag_name(role) || slice.get(1) != Some(&author) {
+                return None;
+            }
+            let boundaries = role_boundaries(slice)?;
+            let [.., RoleBoundary::Timestamp(start), RoleBoundary::Defer] = boundaries.as_slice()
+            else {
+                return None;
+            };
+            let mut successors = active_successors
+                .iter()
+                .filter(|(_, successor_start, _)| successor_start > start)
+                .cloned()
+                .collect::<Vec<_>>();
+            successors.sort();
+            successors.dedup();
+            let superseded = !successors.is_empty();
+            let suggested = (successors.len() == 1).then(|| &successors[0]);
+            Some(InvalidSelfDefer {
+                author: event.pubkey,
+                role: role.to_string(),
+                start: *start,
+                superseded,
+                successor_role: suggested.map(|(role, _, _)| role.clone()),
+                suggested_end: suggested.map(|(_, start, _)| *start),
+            })
+        })
+        .collect::<Vec<_>>();
+    for index in 0..invalid.len() {
+        let same_role_count = invalid
+            .iter()
+            .filter(|candidate| {
+                candidate.author == invalid[index].author && candidate.role == invalid[index].role
+            })
+            .count();
+        if same_role_count > 1 {
+            invalid[index].successor_role = None;
+            invalid[index].suggested_end = None;
+        }
+    }
+    invalid
+}
+
+/// Invalid self-`defer` records in one signed repository announcement.
+///
+/// Callers may use the suggested boundary in a signing preview, but must not
+/// apply it without an explicit role acceptance or repair action.
+pub fn announcement_invalid_self_defers(event: &Event) -> Vec<InvalidSelfDefer> {
+    invalid_self_defer_records(event)
+}
+
+fn invalid_self_defer_blocks_author(event: &Event) -> bool {
+    invalid_self_defer_records(event)
+        .iter()
+        .any(InvalidSelfDefer::blocks_author)
+}
+
+/// Whether the author's own role records are exclusively malformed: at
+/// least one unparseable record names the author and no parseable record
+/// does. Such an author is treated like one blocked by an unsuperseded
+/// invalid self-`defer` — excluded from current authority and confirmation
+/// — but is *not* recorded as a signed departure: garbage supplies neither
+/// an active role nor a departure boundary. Records ending in `defer` parse
+/// and are handled by the dedicated self-`defer` machinery instead.
+pub fn announcement_author_has_only_malformed_self_records(event: &Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut has_malformed_self_entry = false;
+    let mut has_parseable_self_entry = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if !slice.first().is_some_and(|name| is_role_tag_name(name))
+            || slice.get(1) != Some(&author)
+        {
+            continue;
+        }
+        if role_boundaries(slice).is_none() {
+            has_malformed_self_entry = true;
+        } else {
+            has_parseable_self_entry = true;
+        }
+    }
+    has_malformed_self_entry && !has_parseable_self_entry
+}
+
+/// One unparseable role record on a signed announcement: malformed history
+/// boundaries, a `defer` before the final position, or a missing or empty
+/// subject. Preserved byte-for-byte on the author's own announcement (see
+/// [`RepoRef::generate_role_tags`]) and surfaced as author-scoped
+/// repository health. No automated repair exists for these records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MalformedRoleRecord {
+    /// Author of the announcement carrying the record.
+    pub author: PublicKey,
+    /// The record's role letter (`M`, `m` or `o`).
+    pub role: String,
+    /// Whether the record names its own author while no parseable
+    /// self-record exists beside it. Mirroring
+    /// [`InvalidSelfDefer::blocks_author`], such an author is excluded from
+    /// current authority and their own role-dependent writes are gated.
+    pub blocks_author: bool,
+}
+
+fn malformed_role_records_in(event: &Event) -> Vec<MalformedRoleRecord> {
+    let author = event.pubkey.to_string();
+    let author_blocked = announcement_author_has_only_malformed_self_records(event);
+    let mut records = Vec::new();
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(role) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        let unparseable = role_boundaries(slice).is_none()
+            || slice.get(1).is_some_and(|subject| subject.is_empty());
+        if !unparseable {
+            continue;
+        }
+        let record = MalformedRoleRecord {
+            author: event.pubkey,
+            role: role.clone(),
+            blocks_author: author_blocked && slice.get(1) == Some(&author),
+        };
+        if !records.contains(&record) {
+            records.push(record);
+        }
+    }
+    records
+}
+
+/// Unparseable role records in one signed repository announcement. See
+/// [`MalformedRoleRecord`].
+pub fn announcement_malformed_role_records(event: &Event) -> Vec<MalformedRoleRecord> {
+    malformed_role_records_in(event)
+}
+
+/// Whether the author's valid role records explicitly leave maintainership.
+/// Invalid self-`defer` records are ignored here because they provide no
+/// departure statement; callers can retain those announcements as repairable
+/// discovery candidates without mistaking the malformed boundary for a leave.
+pub fn announcement_author_validly_declines_maintainership(event: &Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut has_valid_self_entry = false;
+    let mut has_active_maintainer_entry = false;
+    let mut has_numeric_maintainer_departure = false;
+    let has_invalid_maintainer_self_defer = invalid_self_defer_records(event)
+        .iter()
+        .any(|invalid| invalid.role != "o");
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        let Some(name) = slice.first().filter(|name| is_role_tag_name(name)) else {
+            continue;
+        };
+        if slice.get(1) != Some(&author)
+            || role_entry_is_self_defer(slice, &author)
+            || role_boundaries(slice).is_none()
+        {
+            continue;
+        }
+        has_valid_self_entry = true;
+        if name != "o" {
+            if role_entry_is_active(slice) {
+                has_active_maintainer_entry = true;
+            } else {
+                has_numeric_maintainer_departure = true;
+            }
+        }
+    }
+    if has_invalid_maintainer_self_defer {
+        has_numeric_maintainer_departure && !has_active_maintainer_entry
+    } else {
+        has_valid_self_entry && !has_active_maintainer_entry
+    }
+}
+
+/// Whether the author's valid `o` history explicitly leaves moderatorship.
+/// An invalid self-`defer` is not a signed departure and is excluded.
+pub fn announcement_author_validly_declines_moderatorship(event: &Event) -> bool {
+    let author = event.pubkey.to_string();
+    let mut has_valid_self_o = false;
+    let mut has_active_self_o = false;
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if slice.first().map(String::as_str) != Some("o")
+            || slice.get(1) != Some(&author)
+            || role_entry_is_self_defer(slice, &author)
+            || role_boundaries(slice).is_none()
+        {
+            continue;
+        }
+        has_valid_self_o = true;
+        if role_entry_is_active(slice) {
+            has_active_self_o = true;
+        }
+    }
+    has_valid_self_o && !has_active_self_o
+}
+
 /// Whether a NIP-34 indexed role tag entry is currently active. A role tag
 /// lists a pubkey followed by optional alternating start/end history
 /// boundaries. An empty history is untimed and active; a numeric history is
@@ -243,6 +490,12 @@ fn role_boundaries(slice: &[String]) -> Option<Vec<RoleBoundary>> {
 fn role_entry_is_active(slice: &[String]) -> bool {
     role_boundaries(slice)
         .is_some_and(|boundaries| boundaries.is_empty() || boundaries.len() % 2 == 1)
+}
+
+fn role_entry_is_self_defer(slice: &[String], author: &str) -> bool {
+    slice.get(1).is_some_and(|subject| subject == author)
+        && role_boundaries(slice)
+            .is_some_and(|boundaries| matches!(boundaries.last(), Some(RoleBoundary::Defer)))
 }
 
 /// Whether the name is a NIP-34 indexed role tag consumed by the role-tag
@@ -319,17 +572,39 @@ fn active_maintainer_projection(tags: &[Tag]) -> Vec<PublicKey> {
     maintainers
 }
 
+/// The lead a set of indexed role tags asserts: the subject of the first
+/// currently-active `M` entry, mirroring how [`RepoRef::try_from`] populates
+/// [`RepoRef::lead`] from a signed announcement. `None` when no valid active
+/// `M` entry is present.
+///
+/// Callers that thread an explicitly prepared role-tag history into a
+/// republish (acknowledgement, self-defer repair) use this to keep the
+/// emitted lead consistent with those tags instead of re-deriving it from a
+/// stale cached announcement.
+pub fn role_tags_assert_lead(tags: &[Tag]) -> Option<PublicKey> {
+    tags.iter().find_map(|tag| {
+        let slice = tag.as_slice();
+        (slice.first().map(String::as_str) == Some("M") && role_entry_is_active(slice))
+            .then(|| {
+                slice
+                    .get(1)
+                    .and_then(|value| PublicKey::from_str(value).ok())
+            })
+            .flatten()
+    })
+}
+
 /// Whether `event`'s author does not assert maintainership: at least one
 /// role tag names the author but none of them is an active maintainer
-/// (`M`/`m`) entry — the author left by ending their self-role, or their
-/// announcement
-/// acknowledges only moderatorship (`o`). Per NIP-34 the self-role takes
-/// precedence over assignments in other announcements, so such an author
-/// must not be consolidated as a maintainer — in particular a moderator's
-/// acknowledgement announcement must not turn another member's maintainer
-/// assignment into authoritative state. An author absent from all role tags
-/// has *not* declined — they are implicitly a maintainer for the
-/// repository's entire history.
+/// (`M`/`m`) entry, or an unsuperseded invalid self-`defer` makes their
+/// apparent active role unusable. In the valid cases the author left by
+/// ending their self-role or acknowledges only moderatorship (`o`). Per
+/// NIP-34 the self-role takes precedence over assignments in other
+/// announcements, so such an author must not be consolidated as a maintainer
+/// — in particular a moderator's acknowledgement announcement must not turn
+/// another member's maintainer assignment into authoritative state. An author
+/// absent from all role tags has *not* declined — they are implicitly a
+/// maintainer for the repository's entire history.
 pub fn announcement_author_declines_maintainership(event: &nostr::prelude::Event) -> bool {
     let author = event.pubkey.to_string();
     let mut author_has_entry = false;
@@ -347,7 +622,8 @@ pub fn announcement_author_declines_maintainership(event: &nostr::prelude::Event
             author_has_active_maintainer_entry = true;
         }
     }
-    author_has_entry && !author_has_active_maintainer_entry
+    author_has_entry
+        && (!author_has_active_maintainer_entry || invalid_self_defer_blocks_author(event))
 }
 
 /// Whether `event`'s author does not hold moderatorship by their own
@@ -373,7 +649,7 @@ pub fn announcement_author_declines_moderatorship(event: &nostr::prelude::Event)
             author_has_active_o_entry = true;
         }
     }
-    author_has_o_entry && !author_has_active_o_entry
+    author_has_o_entry && (!author_has_active_o_entry || invalid_self_defer_blocks_author(event))
 }
 
 impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
@@ -603,6 +879,62 @@ impl TryFrom<(nostr::prelude::Event, Option<PublicKey>)> for RepoRef {
 }
 
 impl RepoRef {
+    /// Invalid self-`defer` intervals in the announcements retained for this
+    /// resolved repository view. The result is deterministic for structured
+    /// health output.
+    pub fn invalid_self_defers(&self) -> Vec<InvalidSelfDefer> {
+        let mut invalid = self
+            .events
+            .values()
+            .flat_map(invalid_self_defer_records)
+            .collect::<Vec<_>>();
+        invalid.sort_by(|left, right| {
+            left.author
+                .to_hex()
+                .cmp(&right.author.to_hex())
+                .then_with(|| left.role.cmp(&right.role))
+                .then_with(|| left.start.cmp(&right.start))
+        });
+        invalid
+    }
+
+    /// Whether `author` has an invalid self-`defer` with no ordered active
+    /// successor. This gates only that author's role-dependent writes and
+    /// announcement mutations.
+    pub fn invalid_self_defer_blocks(&self, author: &PublicKey) -> bool {
+        self.invalid_self_defers()
+            .iter()
+            .any(|invalid| invalid.author == *author && invalid.blocks_author())
+    }
+
+    /// Unparseable role records in the announcements retained for this
+    /// resolved repository view, deterministic for structured health output.
+    pub fn malformed_role_records(&self) -> Vec<MalformedRoleRecord> {
+        let mut records = self
+            .events
+            .values()
+            .flat_map(malformed_role_records_in)
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.author
+                .to_hex()
+                .cmp(&right.author.to_hex())
+                .then_with(|| left.role.cmp(&right.role))
+        });
+        records.dedup();
+        records
+    }
+
+    /// Whether `author`'s own role records are exclusively malformed. Like
+    /// [`RepoRef::invalid_self_defer_blocks`] this gates only that author's
+    /// role-dependent writes and announcement mutations; no automated repair
+    /// exists for these records.
+    pub fn malformed_role_records_block(&self, author: &PublicKey) -> bool {
+        self.malformed_role_records()
+            .iter()
+            .any(|record| record.author == *author && record.blocks_author)
+    }
+
     pub async fn to_event(&self, signer: &Arc<crate::NgitSigner>) -> Result<nostr::prelude::Event> {
         let public_key = signer.get_public_key().await?;
         let implicit_sole = self.role_tags.is_empty()
@@ -769,6 +1101,15 @@ impl RepoRef {
     ///   entry recorded no history), and already-ended records are kept so a
     ///   later re-add restarts them rather than forgetting they ever held the
     ///   role;
+    /// - an invalid self-`defer` is preserved byte-for-byte for audit and is
+    ///   never passed through the ordinary transition logic by an unrelated
+    ///   edit;
+    /// - every other unparseable record — malformed history boundaries or a
+    ///   missing subject — is likewise preserved byte-for-byte: it can be
+    ///   neither opened nor closed, never enters the active roster, and an
+    ///   unrelated edit must not silently rewrite or drop signed history
+    ///   (replication into another author's view filters these out instead, see
+    ///   [`RepoRef::role_history_for_replication`]);
     /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
     ///   or end moderators.
     pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
@@ -786,17 +1127,26 @@ impl RepoRef {
         }
         let mut prior: Vec<(String, [Option<Vec<String>>; 2])> = Vec::new();
         let mut moderator_tags: Vec<Tag> = Vec::new();
+        let mut invalid_self_defer_tags: Vec<Tag> = Vec::new();
+        let mut malformed_tags: Vec<Tag> = Vec::new();
+        let author_hex = author.to_string();
         for tag in &self.role_tags {
             let slice = tag.as_slice();
             let Some(name) = slice.first() else { continue };
+            if role_entry_is_self_defer(slice, &author_hex) {
+                invalid_self_defer_tags.push(tag.clone());
+                continue;
+            }
             if name == "o" {
                 moderator_tags.push(tag.clone());
                 continue;
             }
             if role_boundaries(slice).is_none() {
+                malformed_tags.push(tag.clone());
                 continue;
             }
             let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                malformed_tags.push(tag.clone());
                 continue;
             };
             let index = usize::from(name != "M");
@@ -810,7 +1160,6 @@ impl RepoRef {
         }
 
         let first_use_of_role_tags = self.role_tags.is_empty();
-        let author_hex = author.to_string();
         let lead_hex = self.lead.map(|pk| pk.to_string());
         let mut tags: Vec<Tag> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -871,6 +1220,8 @@ impl RepoRef {
         }
 
         tags.extend(moderator_tags);
+        tags.extend(invalid_self_defer_tags);
+        tags.extend(malformed_tags);
         tags
     }
 
@@ -913,6 +1264,28 @@ impl RepoRef {
         tags
     }
 
+    /// Role history safe to copy from this announcement into another
+    /// author's view. Invalid self-`defer` records stay on their source event
+    /// for audit but are not laundered into valid-looking third-party history.
+    /// Every other unparseable record — malformed history boundaries or a
+    /// missing subject, in `o` tags as much as `M`/`m` — is excluded too: the
+    /// author's own announcement preserves it byte-for-byte for audit (see
+    /// [`RepoRef::generate_role_tags`]), so a copy relying on the old
+    /// silent-drop emission would otherwise replicate the corruption into
+    /// every follower's announcement.
+    fn role_history_for_replication(&self, source_author: PublicKey) -> Vec<Tag> {
+        let source_author = source_author.to_string();
+        self.role_history_for_republish()
+            .into_iter()
+            .filter(|tag| {
+                let slice = tag.as_slice();
+                !role_entry_is_self_defer(slice, &source_author)
+                    && role_boundaries(slice).is_some()
+                    && slice.get(1).is_some_and(|subject| !subject.is_empty())
+            })
+            .collect()
+    }
+
     /// Build the accepting maintainer's first indexed role view.
     ///
     /// The relationships the accepter confirms start at `now`. Other role
@@ -932,12 +1305,13 @@ impl RepoRef {
             .values()
             .find(|event| event.pubkey == history_author)
             .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
-        let source_history = source
-            .as_ref()
-            .map_or_else(Vec::new, RepoRef::role_history_for_republish);
+        let source_history = source.as_ref().map_or_else(Vec::new, |source| {
+            source.role_history_for_replication(history_author)
+        });
 
         let active_subjects: HashSet<String> =
             maintainers.iter().map(PublicKey::to_string).collect();
+        let author_hex = author.to_string();
         debug_assert!(maintainers.contains(author));
         let mut history = Vec::new();
         for tag in source_history {
@@ -948,6 +1322,9 @@ impl RepoRef {
             let Some(subject) = slice.get(1) else {
                 continue;
             };
+            if name == "o" && subject == &author_hex {
+                continue;
+            }
             if active_subjects.contains(subject) && name != "o" {
                 continue;
             }
@@ -975,6 +1352,263 @@ impl RepoRef {
         history
     }
 
+    /// Prepare an explicit role acceptance from an existing announcement
+    /// whose self-role ended in invalid `defer`.
+    ///
+    /// A maintainer self-`defer` record is closed at its one signed successor
+    /// when history supplies an unambiguous boundary, or at the acceptance
+    /// boundary otherwise. The accepted role is then opened at the acceptance
+    /// boundary by the ordinary role generator. Other malformed self-role
+    /// records are preserved for a separate signer choice. This method is
+    /// intentionally used only by an explicit acceptance command; unrelated
+    /// edits preserve every malformed tag verbatim.
+    fn self_defer_acceptance_repair_end(&self, author: &PublicKey, now: u64) -> Result<u64> {
+        let author_hex = author.to_string();
+        let invalid_maintainer_tags = self
+            .role_tags
+            .iter()
+            .filter(|tag| {
+                let slice = tag.as_slice();
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && role_entry_is_self_defer(slice, &author_hex)
+            })
+            .collect::<Vec<_>>();
+        let invalid_self_defers = self.invalid_self_defers();
+        let invalid_maintainer_records = invalid_self_defers
+            .iter()
+            .filter(|invalid| invalid.author == *author && invalid.role != "o")
+            .collect::<Vec<_>>();
+        if invalid_maintainer_records.is_empty() || invalid_maintainer_tags.is_empty() {
+            bail!("maintainer acceptance requires an invalid maintainer self-defer record");
+        }
+        if invalid_maintainer_records.len() > 1 || invalid_maintainer_tags.len() > 1 {
+            bail!(
+                "maintainer acceptance cannot infer one prior role from multiple invalid self-defer records"
+            );
+        }
+        let invalid_boundaries = role_boundaries(invalid_maintainer_tags[0].as_slice()).unwrap();
+        if invalid_boundaries.len() != 2 {
+            bail!(
+                "maintainer acceptance can repair only a simple self-role start followed by defer"
+            );
+        }
+        let has_other_historical_self_role = self.role_tags.iter().any(|tag| {
+            let slice = tag.as_slice();
+            slice.get(1) == Some(&author_hex)
+                && !role_entry_is_self_defer(slice, &author_hex)
+                && role_boundaries(slice).is_some_and(|boundaries| boundaries.len() >= 2)
+        });
+        if has_other_historical_self_role {
+            bail!(
+                "maintainer acceptance cannot safely combine repair with existing self-role history"
+            );
+        }
+        if invalid_self_defers.iter().any(|invalid| {
+            invalid.author == *author
+                && invalid.role == "o"
+                && !invalid.superseded
+                && invalid.start >= now
+        }) {
+            bail!(
+                "maintainer acceptance would leave another invalid self-defer without a later active self-role"
+            );
+        }
+        let invalid = &invalid_maintainer_records[0];
+        let repair_end = if invalid.superseded {
+            invalid.suggested_end.context(
+                "maintainer acceptance cannot infer one boundary from multiple signed self-role successors",
+            )?
+        } else {
+            now
+        };
+        if invalid.start > repair_end {
+            bail!(
+                "the invalid self-defer start {} is later than its repair boundary {repair_end}",
+                invalid.start
+            );
+        }
+        if repair_end > now {
+            bail!(
+                "the invalid self-defer repair boundary {repair_end} is later than the acceptance boundary {now}"
+            );
+        }
+        Ok(repair_end)
+    }
+
+    /// Return whether explicit maintainership acceptance can safely repair the
+    /// author's invalid self-`defer` at `now` without importing prior history.
+    /// Consolidated repository views resolve the author's retained event;
+    /// standalone parsed announcements validate themselves.
+    pub fn self_defer_acceptance_is_eligible(&self, author: &PublicKey, now: u64) -> bool {
+        if self.selected_maintainer == *author {
+            return self.self_defer_acceptance_repair_end(author, now).is_ok();
+        }
+        self.events
+            .get(&self.announcement_coordinate(author))
+            .and_then(|event| RepoRef::try_from((event.clone(), None)).ok())
+            .is_some_and(|author_ref| {
+                author_ref
+                    .self_defer_acceptance_repair_end(author, now)
+                    .is_ok()
+            })
+    }
+
+    pub fn role_history_for_self_defer_acceptance(
+        &self,
+        author: &PublicKey,
+        maintainers: &[PublicKey],
+        lead: Option<PublicKey>,
+        now: u64,
+    ) -> Result<Vec<Tag>> {
+        let repair_end = self.self_defer_acceptance_repair_end(author, now)?;
+        let author_hex = author.to_string();
+        let active_subjects: HashSet<String> =
+            maintainers.iter().map(PublicKey::to_string).collect();
+        let mut role_tags = Vec::with_capacity(self.role_tags.len());
+        for tag in &self.role_tags {
+            let slice = tag.as_slice();
+            let is_maintainer_self_defer =
+                matches!(slice.first().map(String::as_str), Some("M" | "m"))
+                    && role_entry_is_self_defer(slice, &author_hex);
+            if is_maintainer_self_defer {
+                let mut parts = slice.to_vec();
+                *parts.last_mut().unwrap() = repair_end.to_string();
+                role_tags.push(Tag::parse(parts).unwrap());
+                continue;
+            }
+            // Mirror [`RepoRef::role_history_for_acceptance`]'s third-party
+            // handling: an active record naming a subject outside the
+            // accepted roster is re-emitted with a trailing `defer` — "I no
+            // longer assert this role" — instead of passing an `o` through
+            // still active or letting the role generator close an `m` with a
+            // fabricated numeric departure. Unparseable records fail
+            // `role_entry_is_active` and stay byte-for-byte for audit.
+            let is_active_third_party = slice.first().is_some_and(|name| is_role_tag_name(name))
+                && slice.get(1).is_some_and(|subject| {
+                    !subject.is_empty()
+                        && subject != &author_hex
+                        && !active_subjects.contains(subject)
+                })
+                && role_entry_is_active(slice);
+            if is_active_third_party {
+                let mut parts = slice.to_vec();
+                if parts.len().is_multiple_of(2) {
+                    parts.push("0".to_string());
+                }
+                parts.push("defer".to_string());
+                role_tags.push(Tag::parse(parts).unwrap());
+                continue;
+            }
+            role_tags.push(tag.clone());
+        }
+
+        let mut accepting = self.clone();
+        accepting.role_tags = role_tags;
+        accepting.maintainers = maintainers.to_vec();
+        accepting.lead = lead;
+        Ok(accepting.generate_role_tags(author, now))
+    }
+
+    /// Apply one signer-approved repair to an invalid self-`defer` record.
+    ///
+    /// `end` is `None` when the signer chooses to continue the role (remove
+    /// the sentinel), or the chosen numeric end boundary otherwise. A signed,
+    /// unambiguous successor fixes the only safe numeric boundary; ambiguous
+    /// history requires the caller to supply a boundary explicitly. The
+    /// replacement timestamp bounds every repair so future-dated history
+    /// cannot be normalized into an end that predates its start.
+    pub fn repair_self_defer(
+        &mut self,
+        author: &PublicKey,
+        role: &str,
+        end: Option<u64>,
+        replacement_at: u64,
+    ) -> Result<()> {
+        if !matches!(role, "M" | "m" | "o") {
+            bail!("self-defer repair role must be M, m, or o");
+        }
+        let author_hex = author.to_string();
+        let matching = self
+            .role_tags
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| {
+                let slice = tag.as_slice();
+                slice.first().map(String::as_str) == Some(role)
+                    && role_entry_is_self_defer(slice, &author_hex)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            bail!(
+                "expected exactly one invalid self-{role} defer record, found {}",
+                matching.len()
+            );
+        }
+        let invalid = self
+            .invalid_self_defers()
+            .into_iter()
+            .filter(|invalid| invalid.author == *author && invalid.role == role)
+            .collect::<Vec<_>>();
+        if invalid.len() != 1 {
+            bail!(
+                "expected exactly one invalid self-{role} defer health record, found {}",
+                invalid.len()
+            );
+        }
+        let invalid = &invalid[0];
+        if invalid.start > replacement_at {
+            bail!(
+                "the invalid self-{role} start {} is later than the replacement boundary {replacement_at}",
+                invalid.start
+            );
+        }
+        if let Some(boundary) = end {
+            if boundary < invalid.start || boundary > replacement_at {
+                bail!(
+                    "the self-{role} repair boundary must be between {} and {replacement_at}",
+                    invalid.start
+                );
+            }
+            if let Some(suggested) = invalid.suggested_end {
+                if suggested != boundary {
+                    bail!(
+                        "the signed successor supplies {suggested} as the unambiguous repair boundary"
+                    );
+                }
+            }
+        } else if invalid.superseded {
+            if let Some(suggested) = invalid.suggested_end {
+                bail!("a later signed self-role supersedes this interval; end it at {suggested}");
+            }
+            bail!(
+                "multiple later signed self-roles supersede this interval; choose a numeric end boundary"
+            );
+        }
+
+        let index = matching[0];
+        let mut parts = self.role_tags[index].as_slice().to_vec();
+        if let Some(boundary) = end {
+            *parts.last_mut().unwrap() = boundary.to_string();
+        } else {
+            parts.pop();
+            if role == "o" {
+                if !self.moderators.contains(author) {
+                    self.moderators.push(*author);
+                }
+            } else {
+                if !self.maintainers.contains(author) {
+                    self.maintainers.push(*author);
+                }
+                if role == "M" {
+                    self.lead = Some(*author);
+                }
+            }
+        }
+        self.role_tags[index] = Tag::parse(parts).unwrap();
+        Ok(())
+    }
+
     /// Build the role-history source for a confirmed co-maintainer preparing
     /// to receive the lead.
     ///
@@ -984,12 +1618,14 @@ impl RepoRef {
     /// moderator history is retained so preparation does not erase a signed
     /// historical view.
     pub fn role_history_for_prepared_lead(&self, current_lead: &RepoRef) -> Vec<Tag> {
-        let lead_history = current_lead.role_history_for_republish();
+        let candidate = self.selected_maintainer.to_string();
+        let lead_history =
+            current_lead.role_history_for_replication(current_lead.selected_maintainer);
         let lead_moderator_subjects: HashSet<String> = lead_history
             .iter()
             .filter_map(|tag| {
                 let slice = tag.as_slice();
-                (slice.first().map(String::as_str) == Some("o"))
+                (slice.first().map(String::as_str) == Some("o") && slice.get(1) != Some(&candidate))
                     .then(|| slice.get(1).cloned())
                     .flatten()
             })
@@ -1005,11 +1641,10 @@ impl RepoRef {
                         .is_none_or(|subject| !lead_moderator_subjects.contains(subject))
             })
             .collect();
-        history.extend(
-            lead_history
-                .into_iter()
-                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("o")),
-        );
+        history.extend(lead_history.into_iter().filter(|tag| {
+            let slice = tag.as_slice();
+            slice.first().map(String::as_str) == Some("o") && slice.get(1) != Some(&candidate)
+        }));
         history
     }
 
@@ -1022,16 +1657,18 @@ impl RepoRef {
     /// an assignment from this announcement.
     pub fn defer_third_party_roles(&mut self, author: PublicKey, lead: PublicKey) {
         self.role_tags = self.role_history_for_republish();
-        let active_subjects = [author.to_string(), lead.to_string()];
+        let author = author.to_string();
+        let lead = lead.to_string();
         for tag in &mut self.role_tags {
             let slice = tag.as_slice();
             let is_active_relationship =
                 matches!(slice.first().map(String::as_str), Some("M" | "m" | "o"))
                     && role_entry_is_active(slice);
-            let keep_active = matches!(slice.first().map(String::as_str), Some("M" | "m"))
-                && slice
-                    .get(1)
-                    .is_some_and(|subject| active_subjects.contains(subject));
+            let keep_active = slice.get(1).is_some_and(|subject| {
+                subject == &author
+                    || (subject == &lead
+                        && matches!(slice.first().map(String::as_str), Some("M" | "m")))
+            });
             if !is_active_relationship || keep_active {
                 continue;
             }
@@ -1083,12 +1720,15 @@ impl RepoRef {
             .into_iter()
             .map(|tag| (tag.as_slice().to_vec(), true))
             .collect();
-        for tag in canonical_lead.role_history_for_republish() {
+        for tag in canonical_lead.role_history_for_replication(canonical_lead.selected_maintainer) {
             let parts = tag.as_slice().to_vec();
             let Some(record_key) = key(&parts) else {
                 continue;
             };
             let subject = &record_key.1;
+            if record_key.0 == "o" && subject == &author_hex {
+                continue;
+            }
             let relationship_subject = [
                 author_hex.as_str(),
                 old_lead_hex.as_str(),
@@ -1114,11 +1754,12 @@ impl RepoRef {
             }
             let name = parts.first().map(String::as_str);
             let subject = parts.get(1).map(String::as_str);
-            let keep_active = *from_author
-                && matches!(name, Some("M" | "m"))
-                && ((author_is_active && subject == Some(&author_hex))
-                    || (name == Some("M")
-                        && matches!(subject, Some(value) if value == old_lead_hex || value == new_lead_hex)));
+            let keep_active = (*from_author && name == Some("o") && subject == Some(&author_hex))
+                || (*from_author
+                    && matches!(name, Some("M" | "m"))
+                    && ((author_is_active && subject == Some(&author_hex))
+                        || (name == Some("M")
+                            && matches!(subject, Some(value) if value == old_lead_hex || value == new_lead_hex))));
             if keep_active {
                 continue;
             }
@@ -4089,7 +4730,7 @@ mod tests {
         }
 
         #[test]
-        fn deferred_self_or_lead_records_do_not_accept_an_invitation() {
+        fn invalid_self_defer_does_not_accept_an_invitation() {
             let keys = nostr::prelude::Keys::generate();
             let author = keys.public_key();
             let lead = nostr::prelude::Keys::generate().public_key();
@@ -4102,6 +4743,17 @@ mod tests {
                 ],
             );
             assert!(announcement_author_declines_maintainership(&deferred_self));
+            assert_eq!(
+                announcement_invalid_self_defers(&deferred_self),
+                vec![InvalidSelfDefer {
+                    author,
+                    role: "m".to_string(),
+                    start: 100,
+                    superseded: false,
+                    successor_role: None,
+                    suggested_end: None,
+                }],
+            );
 
             let deferred_lead = role_event(
                 &keys,
@@ -4111,6 +4763,256 @@ mod tests {
                 ],
             );
             assert_eq!(RepoRef::try_from((deferred_lead, None)).unwrap().lead, None);
+        }
+
+        #[test]
+        fn only_a_later_timed_self_role_supersedes_invalid_self_defer() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+
+            for successor in [
+                tag(&["M", &author.to_string()]),
+                tag(&["M", &author.to_string(), "50"]),
+                tag(&["M", &author.to_string(), "100"]),
+            ] {
+                let event = role_event(
+                    &keys,
+                    vec![tag(&["m", &author.to_string(), "100", "defer"]), successor],
+                );
+                assert!(announcement_author_declines_maintainership(&event));
+                assert!(announcement_invalid_self_defers(&event)[0].blocks_author());
+            }
+
+            let superseded = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["M", &author.to_string(), "200"]),
+                ],
+            );
+            assert!(!announcement_author_declines_maintainership(&superseded));
+            assert_eq!(
+                announcement_invalid_self_defers(&superseded),
+                vec![InvalidSelfDefer {
+                    author,
+                    role: "m".to_string(),
+                    start: 100,
+                    superseded: true,
+                    successor_role: Some("M".to_string()),
+                    suggested_end: Some(200),
+                }],
+            );
+            let parsed = RepoRef::try_from((superseded, None)).unwrap();
+            assert!(parsed.is_authorized_maintainer(&author));
+            assert!(!parsed.invalid_self_defer_blocks(&author));
+        }
+
+        #[test]
+        fn cross_role_successors_restore_their_role_without_guessing_ambiguous_boundaries() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let wrong_role = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["o", &author.to_string(), "200"]),
+                ],
+            );
+            assert!(!announcement_invalid_self_defers(&wrong_role)[0].blocks_author());
+            assert!(announcement_author_declines_maintainership(&wrong_role));
+            assert!(!announcement_author_declines_moderatorship(&wrong_role));
+
+            let older_cross_role = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["o", &author.to_string(), "50"]),
+                ],
+            );
+            assert!(announcement_invalid_self_defers(&older_cross_role)[0].blocks_author());
+            assert!(announcement_author_declines_maintainership(
+                &older_cross_role
+            ));
+            assert!(announcement_author_declines_moderatorship(
+                &older_cross_role
+            ));
+
+            let ambiguous = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["M", &author.to_string(), "200"]),
+                    tag(&["m", &author.to_string(), "300"]),
+                ],
+            );
+            let invalid = &announcement_invalid_self_defers(&ambiguous)[0];
+            assert!(invalid.superseded);
+            assert!(!invalid.blocks_author());
+            assert_eq!(invalid.successor_role, None);
+            assert_eq!(invalid.suggested_end, None);
+
+            let duplicate_same_role = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100", "defer"]),
+                    tag(&["m", &author.to_string(), "150", "defer"]),
+                    tag(&["M", &author.to_string(), "200"]),
+                ],
+            );
+            let invalid = announcement_invalid_self_defers(&duplicate_same_role);
+            assert_eq!(invalid.len(), 2);
+            assert!(invalid.iter().all(|record| record.superseded));
+            assert!(invalid.iter().all(|record| record.successor_role.is_none()));
+            assert!(invalid.iter().all(|record| record.suggested_end.is_none()));
+        }
+
+        #[test]
+        fn numeric_departure_is_not_hidden_by_invalid_self_defer_in_another_role() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let maintainer_departure = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "10", "20"]),
+                    tag(&["o", &author.to_string(), "10", "defer"]),
+                ],
+            );
+            assert!(announcement_author_validly_declines_maintainership(
+                &maintainer_departure
+            ));
+
+            let moderator_departure = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string(), "10", "defer"]),
+                    tag(&["o", &author.to_string(), "10", "20"]),
+                ],
+            );
+            assert!(announcement_author_validly_declines_moderatorship(
+                &moderator_departure
+            ));
+
+            let repairable_maintainer = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "10", "defer"]),
+                    tag(&["o", &author.to_string(), "5"]),
+                ],
+            );
+            assert!(!announcement_author_validly_declines_maintainership(
+                &repairable_maintainer
+            ));
+        }
+
+        #[test]
+        fn exclusively_malformed_self_records_block_without_recording_departure() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let garbage_only = role_event(&keys, vec![tag(&["M", &author.to_string(), "abc"])]);
+
+            assert!(announcement_author_has_only_malformed_self_records(
+                &garbage_only
+            ));
+            assert!(!announcement_author_validly_declines_maintainership(
+                &garbage_only
+            ));
+            assert!(announcement_author_declines_maintainership(&garbage_only));
+            assert_eq!(
+                announcement_malformed_role_records(&garbage_only),
+                vec![MalformedRoleRecord {
+                    author,
+                    role: "M".to_string(),
+                    blocks_author: true,
+                }],
+            );
+
+            let parsed = RepoRef::try_from((garbage_only, None)).unwrap();
+            assert!(parsed.confirmed_maintainers().is_empty());
+            assert!(parsed.malformed_role_records_block(&author));
+        }
+
+        #[test]
+        fn numeric_departure_wins_alongside_malformed_records() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "10", "20"]),
+                    tag(&["M", &author.to_string(), "abc"]),
+                ],
+            );
+
+            assert!(announcement_author_validly_declines_maintainership(&event));
+            assert!(!announcement_author_has_only_malformed_self_records(&event));
+            let records = announcement_malformed_role_records(&event);
+            assert_eq!(records.len(), 1);
+            assert!(!records[0].blocks_author);
+        }
+
+        #[test]
+        fn valid_active_self_role_is_not_blocked_by_a_malformed_record() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["m", &author.to_string(), "100"]),
+                    tag(&["o", &author.to_string(), "abc"]),
+                ],
+            );
+
+            assert!(!announcement_author_has_only_malformed_self_records(&event));
+            assert!(!announcement_author_declines_maintainership(&event));
+            let parsed = RepoRef::try_from((event, None)).unwrap();
+            assert!(!parsed.malformed_role_records_block(&author));
+            assert_eq!(
+                parsed
+                    .malformed_role_records()
+                    .iter()
+                    .map(|record| (record.role.clone(), record.blocks_author))
+                    .collect::<Vec<_>>(),
+                vec![("o".to_string(), false)],
+            );
+        }
+
+        #[test]
+        fn acknowledging_a_malformed_only_target_fails_closed() {
+            let alice_keys = nostr::prelude::Keys::generate();
+            let alice = alice_keys.public_key();
+            let bob_keys = nostr::prelude::Keys::generate();
+            let bob = bob_keys.public_key();
+            let mut alice_ref = RepoRef::try_from((
+                role_event(
+                    &alice_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "100"]),
+                        tag(&["m", &bob.to_string(), "110"]),
+                    ],
+                ),
+                None,
+            ))
+            .unwrap();
+            let bob_event = role_event(&bob_keys, vec![tag(&["m", &bob.to_string(), "abc"])]);
+
+            assert!(alice_ref.acknowledge_maintainer_event(&bob_event).is_err());
+        }
+
+        #[test]
+        fn non_self_defer_remains_valid_inactive_history() {
+            let keys = nostr::prelude::Keys::generate();
+            let author = keys.public_key();
+            let historical = nostr::prelude::Keys::generate().public_key();
+            let event = role_event(
+                &keys,
+                vec![
+                    tag(&["M", &author.to_string(), "100"]),
+                    tag(&["m", &historical.to_string(), "100", "defer"]),
+                ],
+            );
+
+            assert!(announcement_invalid_self_defers(&event).is_empty());
+            assert!(!announcement_author_declines_maintainership(&event));
         }
 
         #[test]
@@ -4993,6 +5895,64 @@ mod tests {
             }
 
             #[test]
+            fn unrelated_edit_preserves_superseded_self_defer_verbatim() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let invalid = tag(&["m", &author.to_string(), "100", "defer"]);
+                let generated = generate_with_lead(
+                    vec![invalid.clone(), tag(&["M", &author.to_string(), "200"])],
+                    vec![author],
+                    Some(author),
+                    &author,
+                );
+
+                assert!(generated.contains(&invalid));
+                assert!(generated.contains(&tag(&["M", &author.to_string(), "200"])));
+                assert!(!generated.contains(&tag(&[
+                    "m",
+                    &author.to_string(),
+                    "100",
+                    &now(),
+                    &now(),
+                ])));
+            }
+
+            #[test]
+            fn unrelated_edit_preserves_malformed_role_records_verbatim() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let subject = nostr::prelude::Keys::generate().public_key();
+                let garbage_boundary = tag(&["m", &subject.to_string(), "abc"]);
+                let defer_not_final = tag(&["m", &subject.to_string(), "100", "defer", "200"]);
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            garbage_boundary.clone(),
+                            defer_not_final.clone(),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        garbage_boundary,
+                        defer_not_final,
+                    ],
+                );
+            }
+
+            #[test]
+            fn active_projection_excludes_malformed_role_records() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let subject = nostr::prelude::Keys::generate().public_key();
+                let tags = vec![
+                    Tag::parse(["m", &author.to_string()]).unwrap(),
+                    Tag::parse(["m", &subject.to_string(), "abc"]).unwrap(),
+                    Tag::parse(["m", &subject.to_string(), "100", "defer", "200"]).unwrap(),
+                ];
+                assert_eq!(active_maintainer_projection(&tags), vec![author]);
+            }
+
+            #[test]
             fn restarting_a_deferred_record_closes_and_reopens_it_now() {
                 let author = nostr::prelude::Keys::generate().public_key();
                 let returning = nostr::prelude::Keys::generate().public_key();
@@ -5334,6 +6294,7 @@ mod tests {
                         tag(&["m", &accepter.to_string(), "110"]),
                         tag(&["m", &other.to_string(), "120"]),
                         tag(&["m", &former.to_string(), "0", "90"]),
+                        tag(&["o", &accepter.to_string(), "115"]),
                         tag(&["o", &moderator.to_string()]),
                     ],
                 );
@@ -5358,6 +6319,595 @@ mod tests {
             }
 
             #[test]
+            fn explicit_acceptance_repairs_self_defer_at_the_new_role_boundary() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_self_defer_acceptance(
+                        &author,
+                        &[author, lead],
+                        Some(lead),
+                        NOW,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(history.contains(&tag(&[
+                    "m",
+                    &author.to_string(),
+                    "100",
+                    &NOW.to_string(),
+                    &NOW.to_string(),
+                ])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), "100"])));
+            }
+
+            #[test]
+            fn explicit_acceptance_repair_defers_third_party_roles_like_normal_acceptance() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let other = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["m", &other.to_string(), "120"]),
+                            tag(&["o", &moderator.to_string(), "115"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_self_defer_acceptance(
+                        &author,
+                        &[author, lead],
+                        Some(lead),
+                        NOW,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    history.contains(&tag(&["m", &other.to_string(), "120", "defer"])),
+                    "an active third-party `m` must be re-emitted as deferred \
+                     history, not closed with a fabricated numeric departure: \
+                     {history:?}",
+                );
+                assert!(
+                    history.contains(&tag(&["o", &moderator.to_string(), "115", "defer"])),
+                    "an active third-party `o` must be deferred, not \
+                     re-asserted still active: {history:?}",
+                );
+                assert_eq!(
+                    history
+                        .iter()
+                        .filter(|entry| entry.get(1) == Some(&other.to_string())
+                            || entry.get(1) == Some(&moderator.to_string()))
+                        .count(),
+                    2,
+                    "no other record may keep asserting the third parties: {history:?}",
+                );
+                assert!(history.contains(&tag(&[
+                    "m",
+                    &author.to_string(),
+                    "100",
+                    &NOW.to_string(),
+                    &NOW.to_string(),
+                ])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), "100"])));
+            }
+
+            #[test]
+            fn explicit_acceptance_uses_one_signed_cross_role_successor_boundary() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["o", &author.to_string(), "200"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_self_defer_acceptance(
+                        &author,
+                        &[author, lead],
+                        Some(lead),
+                        NOW,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(history.contains(&tag(&[
+                    "m",
+                    &author.to_string(),
+                    "100",
+                    "200",
+                    &NOW.to_string(),
+                ])));
+                assert!(history.contains(&tag(&["o", &author.to_string(), "200"])));
+            }
+
+            #[test]
+            fn acceptance_refuses_future_or_multiple_invalid_maintainer_intervals() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let lead = nostr::prelude::Keys::generate().public_key();
+                let future = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![tag(&[
+                            "m",
+                            &author.to_string(),
+                            &(NOW + 1).to_string(),
+                            "defer",
+                        ])],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    future
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(lead),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("later than its repair boundary")
+                );
+
+                let multiple = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["M", &author.to_string(), "100", "defer"]),
+                            tag(&["m", &author.to_string(), "200", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    multiple
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(lead),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("multiple invalid self-defer records")
+                );
+
+                let ambiguous_successors = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["o", &author.to_string(), "200"]),
+                            tag(&["M", &author.to_string(), "300"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    ambiguous_successors
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(author),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("multiple signed self-role successors")
+                );
+
+                let future_successor = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["o", &author.to_string(), &(NOW + 1).to_string()]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    future_successor
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(lead),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("later than the acceptance boundary")
+                );
+
+                for remaining_start in [NOW, NOW + 1] {
+                    let remaining_invalid_moderator = RepoRef::try_from((
+                        role_event(
+                            &author_keys,
+                            vec![
+                                tag(&["m", &author.to_string(), "100", "defer"]),
+                                tag(&[
+                                    "o",
+                                    &author.to_string(),
+                                    &remaining_start.to_string(),
+                                    "defer",
+                                ]),
+                            ],
+                        ),
+                        None,
+                    ))
+                    .unwrap();
+                    assert!(
+                        !remaining_invalid_moderator
+                            .self_defer_acceptance_is_eligible(&author, NOW)
+                    );
+                    assert!(
+                        remaining_invalid_moderator
+                            .role_history_for_self_defer_acceptance(
+                                &author,
+                                &[author, lead],
+                                Some(lead),
+                                NOW,
+                            )
+                            .unwrap_err()
+                            .to_string()
+                            .contains("leave another invalid self-defer")
+                    );
+                }
+
+                let earlier_invalid_moderator = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["o", &author.to_string(), "900", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(earlier_invalid_moderator.self_defer_acceptance_is_eligible(&author, NOW));
+                let accepted_roles = earlier_invalid_moderator
+                    .role_history_for_self_defer_acceptance(
+                        &author,
+                        &[author, lead],
+                        Some(lead),
+                        NOW,
+                    )
+                    .unwrap();
+                let accepted = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        accepted_roles
+                            .iter()
+                            .map(|tag| tag.as_slice().to_vec())
+                            .collect(),
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(!accepted.invalid_self_defer_blocks(&author));
+
+                let prior_self_history = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["o", &author.to_string(), "20", "30"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    prior_self_history
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(lead),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("existing self-role history")
+                );
+
+                let embedded_history = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![tag(&["m", &author.to_string(), "1", "5", "100", "defer"])],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                assert!(
+                    embedded_history
+                        .role_history_for_self_defer_acceptance(
+                            &author,
+                            &[author, lead],
+                            Some(lead),
+                            NOW,
+                        )
+                        .unwrap_err()
+                        .to_string()
+                        .contains("simple self-role start followed by defer")
+                );
+            }
+
+            #[test]
+            fn explicit_self_defer_repair_requires_signed_successor_boundary() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let mut parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![
+                            tag(&["m", &author.to_string(), "100", "defer"]),
+                            tag(&["M", &author.to_string(), "200"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                assert!(
+                    parsed
+                        .repair_self_defer(&author, "m", None, NOW)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("end it at 200")
+                );
+                assert!(
+                    parsed
+                        .repair_self_defer(&author, "m", Some(150), NOW)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("supplies 200")
+                );
+                parsed
+                    .repair_self_defer(&author, "m", Some(200), NOW)
+                    .unwrap();
+                assert!(
+                    parsed
+                        .role_tags
+                        .contains(&Tag::parse(["m", &author.to_string(), "100", "200",]).unwrap())
+                );
+                assert!(
+                    parsed
+                        .role_tags
+                        .contains(&Tag::parse(["M", &author.to_string(), "200",]).unwrap())
+                );
+            }
+
+            #[test]
+            fn explicit_self_defer_repair_can_continue_ambiguous_role() {
+                let author_keys = nostr::prelude::Keys::generate();
+                let author = author_keys.public_key();
+                let mut parsed = RepoRef::try_from((
+                    role_event(
+                        &author_keys,
+                        vec![tag(&["M", &author.to_string(), "100", "defer"])],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                parsed.repair_self_defer(&author, "M", None, NOW).unwrap();
+                assert!(
+                    parsed
+                        .role_tags
+                        .contains(&Tag::parse(["M", &author.to_string(), "100",]).unwrap())
+                );
+                assert!(parsed.maintainers.contains(&author));
+                assert_eq!(parsed.lead, Some(author));
+            }
+
+            #[test]
+            fn acceptance_does_not_copy_the_leads_invalid_self_defer() {
+                let lead_keys = nostr::prelude::Keys::generate();
+                let lead = lead_keys.public_key();
+                let accepter = nostr::prelude::Keys::generate().public_key();
+                let invalid = tag(&["m", &lead.to_string(), "100", "defer"]);
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &lead_keys,
+                        vec![
+                            invalid.clone(),
+                            tag(&["M", &lead.to_string(), "200"]),
+                            tag(&["m", &accepter.to_string(), "210"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_acceptance(&accepter, &[accepter, lead], Some(lead), NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(!history.contains(&invalid));
+                assert!(history.contains(&tag(&["m", &accepter.to_string(), &NOW.to_string(),])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), &NOW.to_string(),])));
+            }
+
+            #[test]
+            fn acceptance_does_not_copy_malformed_source_records() {
+                let lead_keys = nostr::prelude::Keys::generate();
+                let lead = lead_keys.public_key();
+                let accepter = nostr::prelude::Keys::generate().public_key();
+                let stray = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let malformed_m = tag(&["m", &stray.to_string(), "abc"]);
+                let malformed_o = tag(&["o", &moderator.to_string(), "100", "defer", "200"]);
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &lead_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &accepter.to_string(), "110"]),
+                            malformed_m.clone(),
+                            malformed_o.clone(),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_acceptance(&accepter, &[accepter, lead], Some(lead), NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(!history.iter().any(|role| role.get(1) == malformed_m.get(1)));
+                assert!(!history.iter().any(|role| role.get(1) == malformed_o.get(1)));
+                assert!(history.contains(&tag(&["m", &accepter.to_string(), &NOW.to_string()])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), &NOW.to_string()])));
+            }
+
+            #[test]
+            fn prepared_lead_does_not_copy_the_leads_malformed_records() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let lead = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "abc"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let candidate = RepoRef::try_from((
+                    role_event(
+                        &bob_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "110"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = candidate
+                    .role_history_for_prepared_lead(&lead)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert!(!history.contains(&tag(&["o", &moderator.to_string(), "abc"])));
+                // the malformed lead copy no longer suppresses the
+                // candidate's own valid deferred record
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "120", "defer"])));
+            }
+
+            #[test]
+            fn follow_lead_does_not_copy_malformed_lead_records() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let stray = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &stray.to_string(), "abc"]),
+                        tag(&["o", &moderator.to_string(), "100", "defer", "200"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, true)
+                    .unwrap();
+                carol_ref.maintainers = vec![carol, bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    !generated
+                        .iter()
+                        .any(|role| role.get(1) == Some(&stray.to_string()))
+                );
+                assert!(
+                    !generated
+                        .iter()
+                        .any(|role| role.get(1) == Some(&moderator.to_string()))
+                );
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200"])));
+            }
+
+            #[test]
             fn prepared_lead_activates_canonical_moderators_and_keeps_ended_history() {
                 let alice_keys = nostr::prelude::Keys::generate();
                 let alice = alice_keys.public_key();
@@ -5371,6 +6921,7 @@ mod tests {
                         vec![
                             tag(&["M", &alice.to_string(), "100"]),
                             tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &bob.to_string(), "105", "defer"]),
                             tag(&["o", &moderator.to_string(), "120"]),
                         ],
                     ),
@@ -5383,6 +6934,7 @@ mod tests {
                         vec![
                             tag(&["M", &alice.to_string(), "110"]),
                             tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &bob.to_string(), "115"]),
                             tag(&["o", &moderator.to_string(), "120", "defer"]),
                             tag(&["o", &former.to_string(), "10", "20"]),
                         ],
@@ -5397,6 +6949,8 @@ mod tests {
                     .map(|role| role.as_slice().to_vec())
                     .collect::<Vec<_>>();
                 assert!(history.contains(&tag(&["o", &moderator.to_string(), "120"])));
+                assert!(history.contains(&tag(&["o", &bob.to_string(), "115"])));
+                assert!(!history.contains(&tag(&["o", &bob.to_string(), "105", "defer"])));
                 assert!(history.contains(&tag(&["o", &former.to_string(), "10", "20"])));
                 assert!(!history.contains(&tag(&["o", &moderator.to_string(), "120", "defer",])));
             }
@@ -5412,6 +6966,7 @@ mod tests {
                     &alice_keys,
                     vec![
                         tag(&["M", &alice.to_string(), "100"]),
+                        tag(&["o", &alice.to_string(), "105"]),
                         tag(&["m", &bob.to_string(), "110"]),
                         tag(&["m", &carol.to_string(), "120"]),
                         tag(&["o", &moderator.to_string(), "130"]),
@@ -5427,6 +6982,7 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 assert!(history.contains(&tag(&["M", &alice.to_string(), "100"])));
+                assert!(history.contains(&tag(&["o", &alice.to_string(), "105"])));
                 assert!(history.contains(&tag(&["m", &bob.to_string(), "110"])));
                 assert!(history.contains(&tag(&["m", &carol.to_string(), "120", "defer"])));
                 assert!(history.contains(&tag(&["o", &moderator.to_string(), "130", "defer"])));
@@ -5445,6 +7001,7 @@ mod tests {
                     vec![
                         tag(&["M", &alice.to_string(), "200"]),
                         tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["o", &carol.to_string(), "210"]),
                         tag(&["m", &bob.to_string(), "150", "defer"]),
                     ],
                 );
@@ -5456,6 +7013,7 @@ mod tests {
                         tag(&["m", &alice.to_string(), "300"]),
                         tag(&["m", &carol.to_string(), "200"]),
                         tag(&["m", &dave.to_string(), "250"]),
+                        tag(&["o", &carol.to_string(), "190", "defer"]),
                     ],
                 );
                 let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
@@ -5472,6 +7030,8 @@ mod tests {
                     .collect::<Vec<_>>();
 
                 assert!(generated.contains(&tag(&["m", &carol.to_string(), "200"])));
+                assert!(generated.contains(&tag(&["o", &carol.to_string(), "210"])));
+                assert!(!generated.contains(&tag(&["o", &carol.to_string(), "190", "defer",])));
                 assert!(generated.contains(&tag(&[
                     "M",
                     &alice.to_string(),

@@ -68,7 +68,11 @@ use crate::{
     relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
-        announcement_author_declines_moderatorship, normalize_grasp_server_url,
+        announcement_author_declines_moderatorship,
+        announcement_author_has_only_malformed_self_records,
+        announcement_author_validly_declines_maintainership,
+        announcement_author_validly_declines_moderatorship, announcement_invalid_self_defers,
+        normalize_grasp_server_url,
     },
     repo_state::RepoState,
     signer::NgitSigner,
@@ -2133,10 +2137,20 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
     // members' announcements: an author with role entries but no active
     // `M`/`m` self-entry left the maintainer set or acknowledges only
     // moderatorship, so drop them from the maintainer set (and with it the
-    // pooling of their infrastructure).
+    // pooling of their infrastructure). Keep malformed self-`defer` authors
+    // and authors whose self-records are exclusively unparseable as
+    // discovery-only candidates: confirmed_maintainers() still denies
+    // them authority, while health reporting needs their signed event —
+    // garbage records a departure no more than a `defer` sentinel does.
     let declined_maintainers: HashSet<PublicKey> = repo_events
         .iter()
-        .filter(|e| announcement_author_declines_maintainership(e))
+        .filter(|e| {
+            let invalid = announcement_invalid_self_defers(e);
+            announcement_author_validly_declines_maintainership(e)
+                || (announcement_author_declines_maintainership(e)
+                    && invalid.is_empty()
+                    && !announcement_author_has_only_malformed_self_records(e))
+        })
         .map(|e| e.pubkey)
         .collect();
     ordered_maintainers.retain(|m| !declined_maintainers.contains(m));
@@ -2190,6 +2204,32 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
             );
         }
     }
+    // Invalid self-`defer` and exclusively-malformed announcements are
+    // retained strictly for health and explicit repair, even when a
+    // separate valid record proves the author departed. Candidate and
+    // authority sets remain controlled by the resolved role graph, not by
+    // presence in this map. These are the least trustworthy retained
+    // events, so a missing identifier skips the event instead of panicking.
+    for event in &repo_events {
+        if !announcement_invalid_self_defers(event).is_empty()
+            || announcement_author_has_only_malformed_self_records(event)
+        {
+            let Some(identifier) = event.tags.identifier() else {
+                continue;
+            };
+            events.insert(
+                Nip19Coordinate {
+                    coordinate: Coordinate {
+                        kind: event.kind,
+                        identifier: identifier.to_string(),
+                        public_key: event.pubkey,
+                    },
+                    relays: vec![],
+                },
+                event.clone(),
+            );
+        }
+    }
 
     // also set maintainers_without_annoucnement
     let mut maintainers_without_annoucnement: Vec<PublicKey> = vec![];
@@ -2230,7 +2270,17 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
         ..repo_ref
     };
 
+    // Readability carve-out: skip the follow-lead bail only when the
+    // selected author is unconfirmed *because* their own records are broken
+    // — a blocking invalid self-`defer` or exclusively malformed
+    // self-records — and no valid numeric departure exists. A validly
+    // departed author redirects through follow-lead as usual: an incidental
+    // stray `defer` must not keep the CLI silently operating on the
+    // superseded coordinate.
+    let selected_unconfirmed_by_broken_records =
+        selected_author_is_unconfirmed_by_broken_records(&repo_ref, repo_coordinate.public_key);
     if !allow_unconfirmed_selected
+        && !selected_unconfirmed_by_broken_records
         && !repo_ref
             .confirmed_maintainers()
             .contains(&repo_coordinate.public_key)
@@ -2248,10 +2298,17 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
     // left moderatorship (e.g. via `ngit repo leave`). Their announcement —
     // discovered by following the `o` assignment — sits outside the
     // membership graph's events map, so the fetched events are consulted
-    // directly.
+    // directly. As above, retain malformed self-`defer` candidates so their
+    // author-scoped health and explicit repair path remain available.
     let declined_moderators: HashSet<PublicKey> = repo_events
         .iter()
-        .filter(|e| announcement_author_declines_moderatorship(e))
+        .filter(|e| {
+            let invalid = announcement_invalid_self_defers(e);
+            announcement_author_validly_declines_moderatorship(e)
+                || (announcement_author_declines_moderatorship(e)
+                    && invalid.is_empty()
+                    && !announcement_author_has_only_malformed_self_records(e))
+        })
         .map(|e| e.pubkey)
         .collect();
     repo_ref.moderators = repo_ref
@@ -2282,11 +2339,36 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
     Ok(repo_ref)
 }
 
+/// Whether the selected author's retained announcement excludes them from
+/// confirmation *because* of broken records — a blocking invalid
+/// self-`defer` or exclusively malformed self-records — rather than a valid
+/// signed departure. Only this shape justifies read-only fallbacks: a
+/// validly departed author must redirect via `ngit repo follow-lead` even
+/// when a stray invalid record sits beside the numeric departure.
+fn selected_author_is_unconfirmed_by_broken_records(
+    repo_ref: &RepoRef,
+    selected: PublicKey,
+) -> bool {
+    repo_ref.events.values().any(|event| {
+        event.pubkey == selected
+            && !announcement_author_validly_declines_maintainership(event)
+            && (announcement_invalid_self_defers(event)
+                .iter()
+                .any(|invalid| invalid.blocks_author())
+                || announcement_author_has_only_malformed_self_records(event))
+    })
+}
+
 /// Apply shared repository fields using confirmed members only.
 ///
 /// `RepoRef::events` also retains invitation announcements because the graph
 /// resolver needs them to recognize acceptance. Those events must not alter
-/// metadata, privacy or infrastructure until their author is confirmed.
+/// metadata, privacy or infrastructure until their author is confirmed. The
+/// sole exception is an unresolved selected coordinate whose own records are
+/// broken (a blocking invalid self-`defer` or exclusively malformed
+/// self-records): when there is no confirmed member at all, retain that
+/// selected event's signed fields so read-only inspection remains possible.
+/// It still grants no member or state authority.
 fn apply_confirmed_member_repository_data(repo_ref: &mut RepoRef) {
     let authoritative_events: Vec<Event> = repo_ref
         .confirmed_member_announcements()
@@ -2296,6 +2378,33 @@ fn apply_confirmed_member_repository_data(repo_ref: &mut RepoRef) {
     let latest_metadata = authoritative_events
         .last()
         .and_then(|event| RepoRef::try_from((event.clone(), None)).ok());
+
+    if authoritative_events.is_empty() {
+        let unresolved_selected = selected_author_is_unconfirmed_by_broken_records(
+            repo_ref,
+            repo_ref.selected_maintainer,
+        )
+        .then(|| {
+            repo_ref
+                .events
+                .values()
+                .find(|event| event.pubkey == repo_ref.selected_maintainer)
+                .and_then(|event| RepoRef::try_from((event.clone(), None)).ok())
+        })
+        .flatten();
+        if let Some(selected) = unresolved_selected {
+            repo_ref.name = selected.name;
+            repo_ref.description = selected.description;
+            repo_ref.web = selected.web;
+            repo_ref.upstream = selected.upstream;
+            repo_ref.hashtags = selected.hashtags;
+            repo_ref.private = selected.private;
+            repo_ref.relays = selected.relays;
+            repo_ref.git_server = selected.git_server;
+            repo_ref.blossoms = selected.blossoms;
+            return;
+        }
+    }
 
     let mut relays = Vec::new();
     let mut git_server = Vec::new();
@@ -5767,9 +5876,20 @@ mod confirmed_repository_data_tests {
                     relay: "wss://invitee.example",
                     blossom: "https://invitee.example/blossom",
                     private: true,
-                    // A self-role alone does not acknowledge an existing
-                    // confirmed member, so this remains an invitation.
-                    roles: vec![vec!["m".to_string(), invitee.to_string()]],
+                    // The invalid maintainer self-defer is not a departure,
+                    // even alongside a valid moderator self-role. It remains
+                    // repairable as the owner's invitation without granting
+                    // current authority.
+                    roles: vec![
+                        vec!["M".to_string(), owner.to_string(), "20".to_string()],
+                        vec![
+                            "m".to_string(),
+                            invitee.to_string(),
+                            "20".to_string(),
+                            "defer".to_string(),
+                        ],
+                        vec!["o".to_string(), invitee.to_string(), "10".to_string()],
+                    ],
                 },
             ),
             announcement(
@@ -5781,12 +5901,20 @@ mod confirmed_repository_data_tests {
                     relay: "wss://departed.example",
                     blossom: "https://departed.example/blossom",
                     private: true,
-                    roles: vec![vec![
-                        "m".to_string(),
-                        departed.to_string(),
-                        "1".to_string(),
-                        "2".to_string(),
-                    ]],
+                    roles: vec![
+                        vec![
+                            "m".to_string(),
+                            departed.to_string(),
+                            "1".to_string(),
+                            "2".to_string(),
+                        ],
+                        vec![
+                            "o".to_string(),
+                            departed.to_string(),
+                            "1".to_string(),
+                            "defer".to_string(),
+                        ],
+                    ],
                 },
             ),
             announcement(
@@ -5824,6 +5952,7 @@ mod confirmed_repository_data_tests {
         .unwrap();
 
         assert_eq!(repo_ref.confirmed_maintainers(), vec![owner]);
+        assert!(repo_ref.invited_maintainers().contains(&invitee));
         assert!(repo_ref.confirmed_moderators().is_empty());
         assert_eq!(repo_ref.name, "owner metadata");
         assert!(!repo_ref.private);
@@ -5858,12 +5987,14 @@ mod confirmed_repository_data_tests {
                 .any(|event| event.pubkey == moderator),
             "the moderator announcement remains available for acknowledgement"
         );
+        assert!(!repo_ref.maintainers.contains(&departed));
+        assert!(!repo_ref.invited_maintainers().contains(&departed));
         assert!(
             repo_ref
                 .events
                 .values()
-                .all(|event| event.pubkey != departed),
-            "a departed author is removed after their self-role is evaluated"
+                .any(|event| event.pubkey == departed),
+            "the invalid moderator self-defer remains available for health without hiding the valid maintainer departure"
         );
         assert_eq!(repo_ref.members_for_announcement_tags(), vec![owner]);
         assert_eq!(
@@ -5950,6 +6081,64 @@ mod confirmed_repository_data_tests {
             error.to_string().contains(
                 "selected repository coordinate author is no longer a confirmed maintainer"
             ),
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_self_defer_selected_coordinate_remains_readable_without_authority() {
+        let selected_keys = Keys::generate();
+        let selected = selected_keys.public_key();
+        let event = announcement(
+            &selected_keys,
+            Announcement {
+                created_at: 10,
+                name: "unresolved selected coordinate",
+                clone_url: "https://selected.example/repo.git",
+                relay: "wss://selected.example",
+                blossom: "https://selected.example/blossom",
+                private: true,
+                roles: vec![vec![
+                    "M".to_string(),
+                    selected.to_string(),
+                    "5".to_string(),
+                    "defer".to_string(),
+                ]],
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        save_event_in_local_cache(dir.path(), &event).await.unwrap();
+
+        let repo_ref = get_repo_ref_from_cache(
+            Some(dir.path()),
+            &Nip19Coordinate {
+                coordinate: Coordinate {
+                    kind: Kind::GitRepoAnnouncement,
+                    public_key: selected,
+                    identifier: "repo".to_string(),
+                },
+                relays: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(repo_ref.confirmed_maintainers().is_empty());
+        assert!(!repo_ref.is_authorized_maintainer(&selected));
+        assert!(repo_ref.invalid_self_defer_blocks(&selected));
+        assert_eq!(repo_ref.name, "unresolved selected coordinate");
+        assert!(repo_ref.private);
+        assert_eq!(
+            repo_ref.git_server,
+            vec!["https://selected.example/repo.git"]
+        );
+        assert_eq!(
+            repo_ref
+                .relays
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["wss://selected.example"]
         );
     }
 

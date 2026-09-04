@@ -704,6 +704,16 @@ boundary. That equality records a continuous role transition within one
 repository lifecycle; only a later start after a real timestamp gap can begin a
 new same-coordinate lifecycle.
 
+A record whose history cannot be parsed — a non-numeric boundary other than a
+final `defer`, a `defer` before the final position, or a missing subject —
+carries no role semantics in either direction. The author's own announcement
+preserves such a record byte-for-byte across unrelated edits, exactly like an
+invalid self-`defer`, so signed evidence is never silently rewritten. A copy
+into another author's view is the opposite: replication, acceptance,
+lead-preparation, and follow-lead all exclude unparseable source records —
+including a source author's malformed `o` records — so corruption is never
+propagated into followers' announcements as valid-looking history.
+
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
 assignment, every ngit command shows
@@ -829,12 +839,27 @@ convergence; a `defer` copy cannot.
 
 Only syntactically valid, currently active `M` records create lead pointers. An
 `M` with malformed role history is ignored for authority and lead resolution
-and reported as repository health information; its mere presence does not turn
-the absence of a valid active `M` into an incomplete explicit path. When no
-valid active `M` remains at the selected coordinate, resolution uses the
+and reported as author-scoped repository health; its mere presence does not
+turn the absence of a valid active `M` into an incomplete explicit path. When
+no valid active `M` remains at the selected coordinate, resolution uses the
 selected-rooted leadless graph. Once resolution follows a valid active `M`, a
 missing announcement, multiple active targets, or a cycle fails closed and
 seeds no authority.
+
+Malformed is not departure. An author whose relevant self-records are
+exclusively unparseable is blocked exactly like an author with an
+unsuperseded invalid self-`defer`: excluded from current authority and
+confirmation without being read as a signed departure, and unable to seed or
+confirm others. Health reports each unparseable record as a warning for
+viewers and an error for the affected signer, whose own announcement
+mutations are gated; unlike an invalid self-`defer` there is no automated
+repair for these records yet, so they must be corrected manually. When the
+selected author is unconfirmed because of such broken records — a blocking
+invalid self-`defer` or exclusively malformed self-records — and has not
+validly departed, clients keep the coordinate's signed metadata readable
+without granting member or state authority. A valid numeric departure
+prevails even beside malformed tags: a validly departed author is redirected
+toward the current lead as usual, stray invalid records notwithstanding.
 
 The deliberately leadless topology has no active lead roster, so it retains
 the reciprocal active-`m` fixpoint rooted at the selected maintainer. A cycle
@@ -1572,16 +1597,27 @@ role-dependent writes are blocked; repository reads and other users' valid
 operations continue. An unrelated edit must never choose a numeric end or
 reopen the interval silently. When an unrelated edit is otherwise allowed
 because a successor is active, it preserves the malformed record byte for
-byte.
+byte. The same byte-for-byte preservation applies to every other unparseable
+role record on the author's own announcement, whatever its subject; only
+copies into other authors' views filter them out.
 
 Clients may use signed surrounding history to propose, but never silently
 apply, a repair. If a later active self-role starts at `T`, the suggested
 correction replaces `defer` with `T`; the signer must approve and sign the new
-announcement. An explicit operation that accepts that new role may make the
-same close-and-open correction in its normal preview. Without one unambiguous
-successor, the signer chooses whether the old role remains active or supplies
-a numeric end. Other viewers see the warning but are neither prompted nor
-blocked.
+announcement. An explicit operation that accepts a current maintainer
+invitation may combine acceptance with that repair only for one unique, simple
+`[role, author, start, defer]` maintainer record. It must have either no
+successor or one unambiguous signed successor boundary, and the announcement
+must contain no other ended or restarted self-role history that the repair
+would make authority-bearing. The accepted role's new start must also strictly
+supersede every additional malformed self-role interval that is not already
+superseded; acceptance cannot report success while another invalid interval
+still blocks the signer. Longer records, multiple invalid maintainer records,
+ambiguous successors, and other history-bearing or still-blocking cases require
+a separate signer-reviewed repair before acceptance. Clients do not advertise
+acceptance as the repair for those cases. Without one unambiguous successor,
+the signer chooses whether the old role remains active or supplies a numeric
+end. Other viewers see the warning but are neither prompted nor blocked.
 
 For example:
 
@@ -1596,9 +1632,10 @@ coordinate into a restart. A client may offer
 `["m", "<author-pubkey>", "0", "200"]` as the repair, but until the author
 signs it the earlier interval remains unresolved.
 
-If there is no superseding active role and the resolved lead still has an
-active invitation, read commands warn and authority-bearing commands for that
-signer direct them to publish a valid acceptance:
+If there is no superseding active role, the resolved lead still has an active
+invitation, and the invalid record satisfies the safe combined-repair shape
+above, read commands warn and authority-bearing commands for that signer direct
+them to publish a valid acceptance:
 
 ```text
 your announcement does not contain an active maintainer acceptance
@@ -1606,8 +1643,9 @@ the lead relationship and your self-role must both be active
 accept the current invitation with: ngit repo accept
 ```
 
-If there is no current invitation, the client reports that fact instead of
-offering a command that could manufacture one.
+If there is no current invitation, or the history requires a separate repair,
+the client reports that fact instead of offering an acceptance command that
+could manufacture a role or import unresolved authority.
 
 #### A co-maintainer actively assigns a third party
 
@@ -2092,7 +2130,11 @@ The implementation and tests must make these statements true:
     leaving only the unresolved historical interval invalid. With no such
     successor, only the affected author's announcement mutations and
     role-dependent writes are gated. Clients do not silently repair the record
-    during an unrelated edit.
+    during an unrelated edit. Acceptance may combine with repair only for one
+    simple invalid maintainer `[start, defer]` interval with no ambiguous
+    successor or other ended/restarted self-role history, and its new start must
+    leave no additional malformed interval unsuperseded; every more complex or
+    still-blocking history requires a separate signer-reviewed repair.
 28. ngit exposes no command to abandon a removed maintainer's redirect or turn
     the same coordinate into a new self-led virtual repository. Clients still
     interpret those externally authored events deterministically, display the
