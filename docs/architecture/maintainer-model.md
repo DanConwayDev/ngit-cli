@@ -704,6 +704,16 @@ boundary. That equality records a continuous role transition within one
 repository lifecycle; only a later start after a real timestamp gap can begin a
 new same-coordinate lifecycle.
 
+A record whose history cannot be parsed — a non-numeric boundary other than a
+final `defer`, a `defer` before the final position, or a missing subject —
+carries no role semantics in either direction. The author's own announcement
+preserves such a record byte-for-byte across unrelated edits, exactly like an
+invalid self-`defer`, so signed evidence is never silently rewritten. A copy
+into another author's view is the opposite: replication, acceptance,
+lead-preparation, and follow-lead all exclude unparseable source records —
+including a source author's malformed `o` records — so corruption is never
+propagated into followers' announcements as valid-looking history.
+
 Role-aware publishers preserve the resolved histories they know. When the lead
 observes a confirmation whose effective start is not recorded in its active
 assignment, every ngit command shows
@@ -1572,7 +1582,9 @@ role-dependent writes are blocked; repository reads and other users' valid
 operations continue. An unrelated edit must never choose a numeric end or
 reopen the interval silently. When an unrelated edit is otherwise allowed
 because a successor is active, it preserves the malformed record byte for
-byte.
+byte. The same byte-for-byte preservation applies to every other unparseable
+role record on the author's own announcement, whatever its subject; only
+copies into other authors' views filter them out.
 
 Clients may use signed surrounding history to propose, but never silently
 apply, a repair. If a later active self-role starts at `T`, the suggested

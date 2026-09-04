@@ -999,6 +999,12 @@ impl RepoRef {
     /// - an invalid self-`defer` is preserved byte-for-byte for audit and is
     ///   never passed through the ordinary transition logic by an unrelated
     ///   edit;
+    /// - every other unparseable record — malformed history boundaries or a
+    ///   missing subject — is likewise preserved byte-for-byte: it can be
+    ///   neither opened nor closed, never enters the active roster, and an
+    ///   unrelated edit must not silently rewrite or drop signed history
+    ///   (replication into another author's view filters these out instead, see
+    ///   [`RepoRef::role_history_for_replication`]);
     /// - moderator (`o`) tags are preserved verbatim — ngit does not yet assign
     ///   or end moderators.
     pub fn generate_role_tags(&self, author: &PublicKey, now: u64) -> Vec<Tag> {
@@ -1017,6 +1023,7 @@ impl RepoRef {
         let mut prior: Vec<(String, [Option<Vec<String>>; 2])> = Vec::new();
         let mut moderator_tags: Vec<Tag> = Vec::new();
         let mut invalid_self_defer_tags: Vec<Tag> = Vec::new();
+        let mut malformed_tags: Vec<Tag> = Vec::new();
         let author_hex = author.to_string();
         for tag in &self.role_tags {
             let slice = tag.as_slice();
@@ -1030,9 +1037,11 @@ impl RepoRef {
                 continue;
             }
             if role_boundaries(slice).is_none() {
+                malformed_tags.push(tag.clone());
                 continue;
             }
             let Some(pk) = slice.get(1).filter(|value| !value.is_empty()) else {
+                malformed_tags.push(tag.clone());
                 continue;
             };
             let index = usize::from(name != "M");
@@ -1107,6 +1116,7 @@ impl RepoRef {
 
         tags.extend(moderator_tags);
         tags.extend(invalid_self_defer_tags);
+        tags.extend(malformed_tags);
         tags
     }
 
@@ -1152,11 +1162,22 @@ impl RepoRef {
     /// Role history safe to copy from this announcement into another
     /// author's view. Invalid self-`defer` records stay on their source event
     /// for audit but are not laundered into valid-looking third-party history.
+    /// Every other unparseable record — malformed history boundaries or a
+    /// missing subject, in `o` tags as much as `M`/`m` — is excluded too: the
+    /// author's own announcement preserves it byte-for-byte for audit (see
+    /// [`RepoRef::generate_role_tags`]), so a copy relying on the old
+    /// silent-drop emission would otherwise replicate the corruption into
+    /// every follower's announcement.
     fn role_history_for_replication(&self, source_author: PublicKey) -> Vec<Tag> {
         let source_author = source_author.to_string();
         self.role_history_for_republish()
             .into_iter()
-            .filter(|tag| !role_entry_is_self_defer(tag.as_slice(), &source_author))
+            .filter(|tag| {
+                let slice = tag.as_slice();
+                !role_entry_is_self_defer(slice, &source_author)
+                    && role_boundaries(slice).is_some()
+                    && slice.get(1).is_some_and(|subject| !subject.is_empty())
+            })
             .collect()
     }
 
@@ -5672,6 +5693,42 @@ mod tests {
             }
 
             #[test]
+            fn unrelated_edit_preserves_malformed_role_records_verbatim() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let subject = nostr::prelude::Keys::generate().public_key();
+                let garbage_boundary = tag(&["m", &subject.to_string(), "abc"]);
+                let defer_not_final = tag(&["m", &subject.to_string(), "100", "defer", "200"]);
+                assert_eq!(
+                    generate(
+                        vec![
+                            tag(&["m", &author.to_string()]),
+                            garbage_boundary.clone(),
+                            defer_not_final.clone(),
+                        ],
+                        vec![author],
+                        &author,
+                    ),
+                    vec![
+                        tag(&["m", &author.to_string()]),
+                        garbage_boundary,
+                        defer_not_final,
+                    ],
+                );
+            }
+
+            #[test]
+            fn active_projection_excludes_malformed_role_records() {
+                let author = nostr::prelude::Keys::generate().public_key();
+                let subject = nostr::prelude::Keys::generate().public_key();
+                let tags = vec![
+                    Tag::parse(["m", &author.to_string()]).unwrap(),
+                    Tag::parse(["m", &subject.to_string(), "abc"]).unwrap(),
+                    Tag::parse(["m", &subject.to_string(), "100", "defer", "200"]).unwrap(),
+                ];
+                assert_eq!(active_maintainer_projection(&tags), vec![author]);
+            }
+
+            #[test]
             fn restarting_a_deferred_record_closes_and_reopens_it_now() {
                 let author = nostr::prelude::Keys::generate().public_key();
                 let returning = nostr::prelude::Keys::generate().public_key();
@@ -6430,6 +6487,137 @@ mod tests {
                 assert!(!history.contains(&invalid));
                 assert!(history.contains(&tag(&["m", &accepter.to_string(), &NOW.to_string(),])));
                 assert!(history.contains(&tag(&["M", &lead.to_string(), &NOW.to_string(),])));
+            }
+
+            #[test]
+            fn acceptance_does_not_copy_malformed_source_records() {
+                let lead_keys = nostr::prelude::Keys::generate();
+                let lead = lead_keys.public_key();
+                let accepter = nostr::prelude::Keys::generate().public_key();
+                let stray = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let malformed_m = tag(&["m", &stray.to_string(), "abc"]);
+                let malformed_o = tag(&["o", &moderator.to_string(), "100", "defer", "200"]);
+                let parsed = RepoRef::try_from((
+                    role_event(
+                        &lead_keys,
+                        vec![
+                            tag(&["M", &lead.to_string(), "100"]),
+                            tag(&["m", &accepter.to_string(), "110"]),
+                            malformed_m.clone(),
+                            malformed_o.clone(),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = parsed
+                    .role_history_for_acceptance(&accepter, &[accepter, lead], Some(lead), NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(!history.iter().any(|role| role.get(1) == malformed_m.get(1)));
+                assert!(!history.iter().any(|role| role.get(1) == malformed_o.get(1)));
+                assert!(history.contains(&tag(&["m", &accepter.to_string(), &NOW.to_string()])));
+                assert!(history.contains(&tag(&["M", &lead.to_string(), &NOW.to_string()])));
+            }
+
+            #[test]
+            fn prepared_lead_does_not_copy_the_leads_malformed_records() {
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let lead = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "100"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "abc"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+                let candidate = RepoRef::try_from((
+                    role_event(
+                        &bob_keys,
+                        vec![
+                            tag(&["M", &alice.to_string(), "110"]),
+                            tag(&["m", &bob.to_string(), "110"]),
+                            tag(&["o", &moderator.to_string(), "120", "defer"]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                let history = candidate
+                    .role_history_for_prepared_lead(&lead)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+                assert!(!history.contains(&tag(&["o", &moderator.to_string(), "abc"])));
+                // the malformed lead copy no longer suppresses the
+                // candidate's own valid deferred record
+                assert!(history.contains(&tag(&["o", &moderator.to_string(), "120", "defer"])));
+            }
+
+            #[test]
+            fn follow_lead_does_not_copy_malformed_lead_records() {
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let carol_keys = nostr::prelude::Keys::generate();
+                let carol = carol_keys.public_key();
+                let stray = nostr::prelude::Keys::generate().public_key();
+                let moderator = nostr::prelude::Keys::generate().public_key();
+                let carol_event = role_event(
+                    &carol_keys,
+                    vec![
+                        tag(&["M", &alice.to_string(), "200"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                    ],
+                );
+                let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
+                let canonical_event = role_event(
+                    &bob_keys,
+                    vec![
+                        tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &alice.to_string(), "300"]),
+                        tag(&["m", &carol.to_string(), "200"]),
+                        tag(&["m", &stray.to_string(), "abc"]),
+                        tag(&["o", &moderator.to_string(), "100", "defer", "200"]),
+                    ],
+                );
+                let canonical = RepoRef::try_from((canonical_event, None)).unwrap();
+
+                carol_ref.role_tags = carol_ref
+                    .role_history_for_follow_lead(&canonical, carol, alice, bob, true)
+                    .unwrap();
+                carol_ref.maintainers = vec![carol, bob];
+                carol_ref.lead = Some(bob);
+                let generated = carol_ref
+                    .generate_role_tags(&carol, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    !generated
+                        .iter()
+                        .any(|role| role.get(1) == Some(&stray.to_string()))
+                );
+                assert!(
+                    !generated
+                        .iter()
+                        .any(|role| role.get(1) == Some(&moderator.to_string()))
+                );
+                assert!(generated.contains(&tag(&["m", &carol.to_string(), "200"])));
             }
 
             #[test]
