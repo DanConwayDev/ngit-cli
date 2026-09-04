@@ -127,6 +127,11 @@ publication.
 
 ### Fixed
 
+- The `nostr://` Git remote helper now accepts raw commit object IDs on the
+  source side of push refspecs, matching Git's normal behavior for commands
+  such as `git push origin <oid>:refs/heads/recovery`. Branch and lightweight
+  tag destinations are recorded in repository state without requiring a
+  temporary local ref.
 - Blossom presence checks and upload responses now treat a server's MIME type
   as representation metadata rather than blob identity. Content-addressed bytes
   can be reused by files with different media types, so an existing empty blob

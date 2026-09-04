@@ -15,7 +15,7 @@ use git::{RepoActions, sha1_to_oid};
 use git_events::{
     generate_cover_letter_and_patch_events, generate_patch_event, get_commit_id_from_patch,
 };
-use git2::{Oid, Repository};
+use git2::Repository;
 use ngit::{
     client::{self, Client, get_event_from_cache_by_id, get_filter_state_events},
     git::{self, Repo, nostr_url::NostrUrlDecoded},
@@ -1109,13 +1109,9 @@ pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
                 }
                 continue;
             }
-            // handle annotated tags
-            if let Ok(annotated_tag) = git_repo
-                .git_repo
-                .find_reference(from)
-                .context(format!("cannot find ref {from}"))?
-                .peel(git2::ObjectType::Tag)
-            {
+            // Handle annotated tags. The source side of a push refspec may be
+            // an object ID (or another revision expression), not only a ref.
+            if let Some(annotated_tag) = resolve_annotated_tag_source(&git_repo.git_repo, from) {
                 if let Some(remote_value) = remote_value {
                     if annotated_tag.id().to_string() == *remote_value {
                         // remote already at correct state
@@ -1141,31 +1137,6 @@ pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
                     refspecs_for_remote.push(refspec.clone());
                 }
                 continue;
-            } else if let Some(remote_value) = remote_value {
-                if let Ok(oid) = Oid::from_str(refspec) {
-                    if git_repo
-                        .git_repo
-                        .find_object(oid, Some(git2::ObjectType::Tag))
-                        .is_ok()
-                    {
-                        if is_grasp_server {
-                            refspecs_for_remote.push(ensure_force_push_refspec(refspec));
-                        } else if refspec.starts_with('+') || refspec.starts_with(':') {
-                            refspecs_for_remote.push(refspec.clone());
-                        } else {
-                            rejected_refspecs
-                                .entry(refspec.clone())
-                                .and_modify(|a| a.push(url.clone()))
-                                .or_insert(vec![url.clone()]);
-                            term.write_line(
-                                format!(
-                                "ERROR: {short_name} {to} exists with a different reference. someone else may have pushed new updates. options:\r\n  1. review and integrate remote's tip available via `git checkout {remote_value}` \r\n  2. align remote state with nostr via `ngit sync --ref-name {to} --force` and try to push again",
-                                ).as_str(),
-                            )?;
-                        }
-                        continue;
-                    }
-                }
             }
 
             let from_tip = git_repo.get_commit_or_tip_of_reference(from)?;
@@ -1337,6 +1308,22 @@ fn ensure_force_push_refspec(refspec: &str) -> String {
     }
 }
 
+/// Resolve an annotated-tag source without assuming the source is a ref name.
+///
+/// Git permits any revision expression on the source side of a push refspec,
+/// including a raw object ID. A commit resolves successfully but cannot peel
+/// to a tag, so it naturally returns `None` and follows the normal commit path.
+fn resolve_annotated_tag_source<'repo>(
+    git_repo: &'repo Repository,
+    source: &str,
+) -> Option<git2::Object<'repo>> {
+    git_repo
+        .revparse_single(source)
+        .ok()?
+        .peel(git2::ObjectType::Tag)
+        .ok()
+}
+
 /// Also used by `ngit init`'s in-process initial-branch push (see
 /// [`create_rejected_refspecs_and_remotes_refspecs`]).
 pub(crate) fn generate_updated_state(
@@ -1386,23 +1373,19 @@ pub(crate) fn generate_updated_state(
                 new_state.remove(&format!("{to}{}", "^{}"));
             }
         } else if to.contains("refs/tags") {
-            if let Ok(annotated_tag) = git_repo
-                .git_repo
-                .find_reference(from)
-                .context(format!("cannot find ref {from} to push to {to}"))?
-                .peel(git2::ObjectType::Tag)
-            {
-                // this is an anotated tag so there is a tag oid
+            if let Some(annotated_tag) = resolve_annotated_tag_source(&git_repo.git_repo, from) {
+                // this is an annotated tag so there is a tag oid
                 // ref points to tag oid
                 new_state.insert(to.to_string(), annotated_tag.id().to_string());
                 // dereferenced tags ref points to commit at its head
                 new_state.insert(
                     format!("{to}{}", "^{}"),
-                    git_repo
-                        .get_commit_or_tip_of_reference(from)
+                    annotated_tag
+                        .peel_to_commit()
                         .context(format!(
-                            "cannot find commit from annotated tag ref {from} to push to {to}"
+                            "cannot find commit from annotated tag source {from} to push to {to}"
                         ))?
+                        .id()
                         .to_string(),
                 );
             } else {
@@ -2764,6 +2747,72 @@ mod tests {
         fn trailing_plus_stripped() {
             let (from, _) = refspec_to_from_to("+testing:testingb").unwrap();
             assert_eq!(from, "testing");
+        }
+    }
+
+    mod raw_commit_refspecs {
+        use super::*;
+
+        fn repo_with_initial_commit() -> Result<(tempfile::TempDir, Repo, git2::Oid)> {
+            let dir = tempfile::tempdir()?;
+            let git_repo = Repository::init(dir.path())?;
+            let commit_oid = {
+                let tree_oid = git_repo.index()?.write_tree()?;
+                let tree = git_repo.find_tree(tree_oid)?;
+                let signature = git2::Signature::now("Test User", "test@example.com")?;
+                git_repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "initial commit",
+                    &tree,
+                    &[],
+                )?
+            };
+
+            Ok((dir, Repo { git_repo }, commit_oid))
+        }
+
+        #[test]
+        fn planner_accepts_raw_commit_oid() -> Result<()> {
+            let (_dir, git_repo, commit_oid) = repo_with_initial_commit()?;
+            let refspec = format!("{commit_oid}:refs/heads/from-oid");
+            let refspecs = vec![refspec.clone()];
+            let server_url = "https://example.com/repo.git".to_string();
+            let list_outputs = HashMap::from([(
+                server_url.clone(),
+                (HashMap::<String, String>::new(), false),
+            )]);
+
+            let (rejected, plans) = create_rejected_refspecs_and_remotes_refspecs(
+                &Term::buffered_stderr(),
+                &git_repo,
+                &refspecs,
+                &HashMap::new(),
+                &list_outputs,
+            )?;
+
+            assert!(rejected.is_empty());
+            assert_eq!(plans.get(&server_url), Some(&vec![refspec]));
+            Ok(())
+        }
+
+        #[test]
+        fn state_generation_accepts_raw_commit_oid_for_branches_and_tags() -> Result<()> {
+            let (_dir, git_repo, commit_oid) = repo_with_initial_commit()?;
+            let branch = "refs/heads/from-oid";
+            let tag = "refs/tags/from-oid";
+            let refspecs = vec![
+                format!("{commit_oid}:{branch}"),
+                format!("{commit_oid}:{tag}"),
+            ];
+
+            let state = generate_updated_state(&git_repo, &HashMap::new(), &refspecs)?;
+
+            assert_eq!(state.get(branch), Some(&commit_oid.to_string()));
+            assert_eq!(state.get(tag), Some(&commit_oid.to_string()));
+            assert!(!state.contains_key(&format!("{tag}^{{}}")));
+            Ok(())
         }
     }
 
