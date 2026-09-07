@@ -838,6 +838,39 @@ that relationship, but the resolver accepts any valid active reciprocal
 subject's state after reciprocity even though ngit flags that shape for
 convergence; a `defer` copy cannot.
 
+#### Worked example: extending a lead-shaped roster
+
+Suppose the latest announcements contain these active relationships:
+
+```text
+Alice: M Bob, m Alice, m Carol
+Bob:   M Bob, m Alice
+Carol: M Alice
+```
+
+Starting from Alice, the `M` walk reaches Bob's self-`M`, so Bob seeds the
+confirmed component. Bob and Alice list one another, which confirms Alice.
+Alice can then extend the component to Carol because Alice lists Carol and
+Carol lists the now-confirmed Alice. All three are consequently in the same
+virtual repository even though Bob's own announcement does not list Carol.
+Starting from Bob produces the same component. Starting from Carol follows
+Carol → Alice → Bob → Bob and does too.
+
+An active `m Alice` in Carol's announcement would provide the same reciprocal
+membership edge as `M Alice`. If that announcement had no active `M`, however,
+Carol's selected coordinate would present a leadless view even though its
+reciprocal fixpoint contained the same three maintainers. That selected-root
+lead result differs from Alice's and Bob's even though current membership and
+state agree; canonical ngit output instead gives Carol a direct `M` to the
+resolved lead. If Carol listed only herself, she would not acknowledge Alice
+or Bob: she would remain an invitation from their component, while selecting
+Carol would seed a separate component.
+
+This is read-side tolerance, not a recommended write shape. Bob's lead roster
+omits Carol, and Alice carries an active third-party assignment. Ngit's
+membership-write checks require the lead to cover Carol and the co-maintainer
+to converge with `repo follow-lead` before relying on the canonical topology.
+
 Only syntactically valid, currently active `M` records create lead pointers. An
 `M` with malformed role history or a non-hex subject is ignored for authority
 and lead resolution
@@ -933,6 +966,49 @@ Alice → Bob pointer plus active self-`m`. Other co-maintainers may temporarily
 resolve Carol → Alice → Bob, but each is expected to republish Carol → Bob
 directly. A tied legacy co-maintainer topology remains leadless and continues
 to authorize all reciprocal members.
+
+#### Why an explicit pointer cycle fails closed
+
+Reversing the safe handover order can produce this superficially reciprocal
+shape if a publisher bypasses ngit's write checks:
+
+```text
+Alice: M Bob,   m Alice
+Bob:   M Alice, m Bob
+```
+
+Neither signer has ended their self-role, but neither self-role is an authority
+root. A self-`m` acknowledges an assignment; treating it as self-authorizing
+would let an arbitrary signer claim membership and would let a removed
+maintainer retain authority merely by refusing to record their departure. The
+active `M` records are current forwarding instructions, not lead votes. Their
+walk is Alice → Bob → Alice, with no terminal self-`M` whose roster can seed
+the confirmed component. Resolution therefore reports a `conflict` lead
+source and confirms no maintainer from that rooted view.
+
+Falling back to the selected maintainer or to legacy rules would make a relay
+partition change permissions. For example, after a valid handover Bob may
+remove Alice while Alice's coordinate still forwards to Bob. A client that
+sees Bob's current announcement excludes Alice. A client temporarily missing
+that announcement must not seed Alice instead: doing so would restore a
+removed signer and could authorize kind `30618` state that the complete view
+rejects. Falling back to an older, formerly valid announcement has the same
+problem and also violates NIP-01 replacement ordering, so clients with
+different caches could authorize different components.
+
+This rule distinguishes an invalid encoding from an unresolved valid
+instruction. A syntactically malformed `M` has no usable forwarding meaning
+and is ignored as described above. Two syntactically valid `M` records forming
+a cycle have clear but incompatible current meanings; silently treating them
+as absent would contradict both signed announcements.
+
+Failing closed does not delete announcements, Git objects, or historical
+state. It withholds current maintainer authority and reports the path as
+unhealthy until a signer publishes a valid replacement. The normal ngit
+handover prevents this state: Bob first publishes Bob → Bob with the complete
+roster, and only then may Alice publish Alice → Bob. A future two-phase
+handover could encode a separate pending nomination while retaining the old
+lead, but an active `M` alone does not express that contingency.
 
 Active `M` views outside the selected pointer path do not create a global
 conflict merely because they name another lead. They affect views rooted at
