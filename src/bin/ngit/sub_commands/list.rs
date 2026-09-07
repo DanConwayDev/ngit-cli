@@ -28,7 +28,7 @@ use crate::{
         CiReport, CiState, ListCiRow, ProjectionRequest, Target, Tier, build_report, list_ci_rows,
         pull_request_target, relay_coverage,
     },
-    cli::SignerParams,
+    cli::{LogTailMode, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
@@ -50,12 +50,13 @@ use crate::{
     },
 };
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn launch(
     status: String,
     labels: Vec<String>,
     json: bool,
     show_comments: bool,
+    log_tail: LogTailMode,
     id: Option<String>,
     offline: bool,
     auth: SignerParams<'_>,
@@ -254,6 +255,7 @@ pub async fn launch(
             target_id,
             json,
             show_comments,
+            log_tail,
             comment_count,
             &comments,
             &cover_note_events,
@@ -557,6 +559,7 @@ fn show_proposal_details(
     target_id: nostr::prelude::EventId,
     json: bool,
     show_comments: bool,
+    log_tail: LogTailMode,
     comment_count: usize,
     comments: &[nostr::prelude::Event],
     cover_note_events: &[nostr::prelude::Event],
@@ -609,7 +612,7 @@ fn show_proposal_details(
             "target_branch": tag_value(proposal, "b").ok(),
             // The same `ci` object `ngit ci status` emits, with the runs of
             // superseded revisions under `outdated`.
-            "ci": ci.to_ci_value(relay_hint),
+            "ci": ci.to_ci_value(relay_hint, log_tail),
         });
         if let Some(cn) = cover_note_json {
             json_obj["cover_note"] = cn;
@@ -687,7 +690,7 @@ fn show_proposal_details(
 
     // A repository with no CI for this PR gets no empty section.
     if ci.has_results() {
-        ci.print_checks();
+        ci.print_checks(log_tail);
     }
 
     if show_comments {

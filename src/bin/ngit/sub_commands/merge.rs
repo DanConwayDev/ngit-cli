@@ -23,7 +23,7 @@ use nostr::prelude::{EventId, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
 
 use crate::{
     ci_projection::{ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage},
-    cli::{CiTrustFloor, SignerParams},
+    cli::{CiTrustFloor, LogTailMode, SignerParams},
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -112,7 +112,7 @@ pub async fn launch(
         )
         .await?;
         if ci.has_results() {
-            ci.print_checks();
+            ci.print_checks(LogTailMode::Auto);
         }
         if let Some(reason) = ci.gate_failure(floor) {
             if crate::output::is_json() {

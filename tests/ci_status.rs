@@ -155,6 +155,71 @@ fn event_id_of(value: &Value) -> EventId {
         .event_id
 }
 
+fn job<'a>(json: &'a Value, job_id: &str) -> &'a Value {
+    for run in runs(json) {
+        if let Some(job) = run["jobs"]
+            .as_array()
+            .and_then(|jobs| jobs.iter().find(|job| job["job"].as_str() == Some(job_id)))
+        {
+            return job;
+        }
+    }
+    panic!("no job {job_id:?} in {json}")
+}
+
+#[tokio::test]
+async fn job_log_fields_follow_the_selected_json_output_mode() -> Result<()> {
+    let arranged = arrange("ci-job-logs").await?;
+    let head = arranged.publisher.rev_parse("HEAD").await?;
+    let success_tail = "build completed in 12 seconds";
+    let failure_tail = "[log-tail omitted=42]\nassertion failed";
+    let success_logs = "https://ci.example/jobs/build?attempt=1#raw";
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "run-job-logs",
+        head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(Some("failure"))
+    .job(
+        CiJob::new("build", "success", &arranged.coordinator)
+            .log_tail(success_tail)
+            .logs(success_logs),
+    )
+    .job(CiJob::new("test", "failure", &arranged.coordinator).log_tail(failure_tail));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+        .await?;
+
+    // `ci_status` parses the whole stdout stream, so any text before or after
+    // the JSON document also fails this integration test.
+    let (out, auto) = ci_status(&arranged.publisher, &[]).await?;
+    assert!(out.status.success());
+    assert_eq!(job(&auto, "build")["logs"], success_logs);
+    assert!(job(&auto, "build").get("log_tail").is_none());
+    assert_eq!(job(&auto, "test")["logs"], Value::Null);
+    assert_eq!(job(&auto, "test")["log_tail"], failure_tail);
+
+    let (out, all) = ci_status(&arranged.publisher, &["--offline", "--log-tail=all"]).await?;
+    assert!(out.status.success());
+    assert_eq!(job(&all, "build")["logs"], success_logs);
+    assert_eq!(job(&all, "build")["log_tail"], success_tail);
+    assert_eq!(job(&all, "test")["logs"], Value::Null);
+    assert_eq!(job(&all, "test")["log_tail"], failure_tail);
+
+    let (out, none) = ci_status(&arranged.publisher, &["--offline", "--log-tail=none"]).await?;
+    assert!(out.status.success());
+    assert_eq!(job(&none, "build")["logs"], success_logs);
+    assert!(job(&none, "build").get("log_tail").is_none());
+    assert_eq!(job(&none, "test")["logs"], Value::Null);
+    assert!(job(&none, "test").get("log_tail").is_none());
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn commit_ish_targets_resolve_and_carry_the_local_integrity_marker() -> Result<()> {
     let arranged = arrange("ci-commit").await?;

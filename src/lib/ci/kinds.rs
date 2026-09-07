@@ -337,6 +337,8 @@ pub struct JobResult {
     pub conclusion: Conclusion,
     pub queued_at: Option<Timestamp>,
     pub started_at: Option<Timestamp>,
+    /// Small tail excerpt from this job's log output.
+    pub log_tail: String,
     pub logs: Option<String>,
     /// A Job Result MAY quote the Manual Trigger, but never a Service
     /// Request: the coordinator made that authorization decision.
@@ -615,6 +617,7 @@ pub fn validate_job_result(event: &Event) -> Result<JobResult, ShapeReason> {
             .optional_value("started_at")?
             .map(|value| parse_timestamp("started_at", value))
             .transpose()?,
+        log_tail: event.content.clone(),
         logs: view.optional_value("logs")?.map(ToOwned::to_owned),
         provenance: quotes.provenance,
         common,
@@ -1572,6 +1575,24 @@ mod tests {
         assert_eq!(parsed.run.run_id, "run-1");
         assert_eq!(parsed.job_id, "build");
         assert_eq!(parsed.author, provider.public_key());
+    }
+
+    #[test]
+    fn job_result_preserves_log_tail_content() {
+        let provider = Keys::generate();
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let base = job_result(&provider, &coordinator, &owner, "run-1", "build", 100);
+        let event = EventBuilder::new(base.kind, "line one\nline two\n")
+            .tags(base.tags.iter().cloned().collect::<Vec<_>>())
+            .custom_created_at(base.created_at)
+            .finalize(&provider)
+            .unwrap();
+
+        assert_eq!(
+            validate_job_result(&event).unwrap().log_tail,
+            "line one\nline two\n"
+        );
     }
 
     #[test]

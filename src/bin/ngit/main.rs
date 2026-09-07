@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 
 use clap::Parser;
 use cli::{
-    AccountCommands, CiCommands, Cli, Commands, ContainerCommands, IssueCommands, PrCommands,
-    SignerParams, customise_template, extract_signer_cli_arguments,
+    AccountCommands, CiCommands, Cli, Commands, ContainerCommands, IssueCommands, LogTailMode,
+    PrCommands, SignerParams, customise_template, extract_signer_cli_arguments,
 };
 
 mod cli;
@@ -197,6 +197,7 @@ async fn main() {
                         labels.clone(),
                         cli.json,
                         false,
+                        LogTailMode::Auto,
                         id.clone(),
                         *offline,
                         signer_params,
@@ -206,6 +207,7 @@ async fn main() {
                 PrCommands::View {
                     id,
                     comments,
+                    log_tail,
                     offline,
                 } => {
                     sub_commands::list::launch(
@@ -213,6 +215,7 @@ async fn main() {
                         vec![],
                         cli.json,
                         *comments,
+                        *log_tail,
                         Some(id.clone()),
                         *offline,
                         signer_params,
@@ -483,12 +486,14 @@ async fn main() {
                 CiCommands::Status {
                     target,
                     require_ci_trust,
+                    log_tail,
                     offline,
                 } => {
                     sub_commands::ci_status::launch(
                         target.as_deref(),
                         *offline,
                         *require_ci_trust,
+                        *log_tail,
                         cli.json,
                         signer_params,
                     )

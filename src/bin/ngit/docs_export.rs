@@ -497,6 +497,40 @@ mod tests {
                 && argument["action"] == "set_true"
         }));
 
+        let ci_status = command_at_path(&export["command"], &["ci", "status"]);
+        assert!(
+            ci_status["long_about"]
+                .as_str()
+                .unwrap()
+                .contains("Each job line includes its provider-published log URL when present.")
+        );
+        assert!(
+            ci_status["long_about"].as_str().unwrap().contains(
+                "Signed per-job log tails are included for non-successful jobs by default"
+            )
+        );
+        assert!(
+            ci_status["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|argument| {
+                    argument["long"] == "log-tail"
+                        && argument["defaults"] == serde_json::json!(["auto"])
+                        && argument["possible_values"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|value| value["name"].as_str().unwrap())
+                            .eq(["auto", "all", "none"])
+                })
+        );
+
+        let pr_view = command_at_path(&export["command"], &["pr", "view"]);
+        assert!(pr_view["args"].as_array().unwrap().iter().any(|argument| {
+            argument["long"] == "log-tail" && argument["defaults"] == serde_json::json!(["auto"])
+        }));
+
         let release = command_at_path(&export["command"], &["release"]);
         assert!(
             release["aliases"]

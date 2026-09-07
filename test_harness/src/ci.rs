@@ -176,6 +176,10 @@ pub struct CiJob {
     pub conclusion: String,
     /// The compute provider signing the Job Result. May be the coordinator.
     pub provider: Keys,
+    /// The Job Result event content.
+    pub log_tail: String,
+    /// The provider-published full log URL, when available.
+    pub logs: Option<String>,
     /// Whether the Workflow Result quotes this Job Result. Only an accepted
     /// job carries coordinator trust to a separate provider.
     pub accepted: bool,
@@ -188,8 +192,22 @@ impl CiJob {
             job_id: job_id.into(),
             conclusion: conclusion.into(),
             provider: provider.clone(),
+            log_tail: String::new(),
+            logs: None,
             accepted: true,
         }
+    }
+
+    #[must_use]
+    pub fn log_tail(mut self, log_tail: impl Into<String>) -> Self {
+        self.log_tail = log_tail.into();
+        self
+    }
+
+    #[must_use]
+    pub fn logs(mut self, logs: impl Into<String>) -> Self {
+        self.logs = Some(logs.into());
+        self
     }
 
     #[must_use]
@@ -393,9 +411,13 @@ pub fn build_ci_run(coordinator: &Keys, spec: &CiRunSpec) -> Result<CiRunEvents>
             tag(&["job", &job.job_id]),
             tag(&["conclusion", &job.conclusion]),
         ]);
-        jobs.push(sign(
+        if let Some(logs) = &job.logs {
+            tags.push(tag(&["logs", logs]));
+        }
+        jobs.push(sign_with_content(
             &job.provider,
             KIND_CI_JOB_RESULT,
+            &job.log_tail,
             spec.created_at,
             tags,
         )?);
@@ -595,7 +617,17 @@ impl Harness {
 }
 
 fn sign(keys: &Keys, kind: Kind, created_at: u64, tags: Vec<Tag>) -> Result<Event> {
-    EventBuilder::new(kind, "")
+    sign_with_content(keys, kind, "", created_at, tags)
+}
+
+fn sign_with_content(
+    keys: &Keys,
+    kind: Kind,
+    content: &str,
+    created_at: u64,
+    tags: Vec<Tag>,
+) -> Result<Event> {
+    EventBuilder::new(kind, content)
         .tags(tags)
         .custom_created_at(Timestamp::from_secs(created_at))
         .finalize(keys)

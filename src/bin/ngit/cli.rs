@@ -1217,6 +1217,9 @@ pub enum PrCommands {
         /// Include full comment thread (default: show count only)
         #[arg(long)]
         comments: bool,
+        /// Which signed per-job log tails to include in human and JSON output
+        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
+        log_tail: LogTailMode,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1413,6 +1416,18 @@ impl CiTrustFloor {
     }
 }
 
+/// Which signed Job Result log tails a detail surface renders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogTailMode {
+    /// Include tails for every conclusion except success.
+    #[default]
+    Auto,
+    /// Include tails for every job.
+    All,
+    /// Do not include log tails.
+    None,
+}
+
 #[derive(Subcommand)]
 pub enum CiCommands {
     /// show CI results, with the trust context of every signer behind them
@@ -1424,7 +1439,7 @@ pub enum CiCommands {
         3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
         4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
         5. with no target, the HEAD commit\n\n\
-        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current.\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Each job line includes its provider-published log URL when present. Signed per-job log tails are included for non-successful jobs by default; `--log-tail` selects auto, all, or none for both human and JSON output.\n\n\
         Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
     )]
     Status {
@@ -1436,6 +1451,9 @@ pub enum CiCommands {
         /// run meets this trust floor
         #[arg(long, value_name = "LEVEL", value_enum)]
         require_ci_trust: Option<CiTrustFloor>,
+        /// Which signed per-job log tails to include in human and JSON output
+        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
+        log_tail: LogTailMode,
         /// Skip the relay fetch and NIP-05 trust verification, reading CI
         /// from the local cache
         #[arg(long)]
@@ -1698,9 +1716,34 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AccountCommands, CiTrustFloor, Cli, Commands, ContainerCommands, ReleaseAppCommands,
-        ReleaseAssetCommands, ReleaseCommands, extract_signer_cli_arguments, read_nsec_file,
+        AccountCommands, CiCommands, CiTrustFloor, Cli, Commands, ContainerCommands, LogTailMode,
+        PrCommands, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands,
+        extract_signer_cli_arguments, read_nsec_file,
     };
+
+    #[test]
+    fn ci_detail_log_tail_modes_default_to_auto() {
+        let cli = Cli::try_parse_from(["ngit", "ci", "status"]).unwrap();
+        let Some(Commands::Ci(args)) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommands::Status { log_tail, .. } = args.ci_command else {
+            panic!("expected ci status command");
+        };
+        assert_eq!(log_tail, LogTailMode::Auto);
+
+        let cli =
+            Cli::try_parse_from(["ngit", "pr", "view", "deadbeef", "--log-tail=none"]).unwrap();
+        let Some(Commands::Pr(args)) = cli.command else {
+            panic!("expected pr command");
+        };
+        let PrCommands::View { log_tail, .. } = args.pr_command else {
+            panic!("expected pr view command");
+        };
+        assert_eq!(log_tail, LogTailMode::None);
+
+        assert!(Cli::try_parse_from(["ngit", "ci", "status", "--log-tail=everything"]).is_err());
+    }
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {
         if command.has_subcommands() {

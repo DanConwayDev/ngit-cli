@@ -26,7 +26,7 @@ use crate::{
     ci_projection::{
         ProjectionRequest, Target, Tier, build_report, pull_request_target, relay_coverage, short,
     },
-    cli::{CiTrustFloor, SignerParams},
+    cli::{CiTrustFloor, LogTailMode, SignerParams},
     repo_ref::get_repo_coordinates_when_remote_unknown,
     sub_commands::{
         id_resolver::{parse_event_id, pr_description, resolve_pr_root_or_prefix},
@@ -45,6 +45,7 @@ pub async fn launch(
     target: Option<&str>,
     offline: bool,
     require_ci_trust: Option<CiTrustFloor>,
+    log_tail: LogTailMode,
     json: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
@@ -96,9 +97,14 @@ pub async fn launch(
     let gate = require_ci_trust.and_then(|floor| report.gate_failure(floor));
 
     if json {
-        crate::output::set_value(report.to_json(&target, repo_ref.relays.first(), gate.as_deref()));
+        crate::output::set_value(report.to_json(
+            &target,
+            repo_ref.relays.first(),
+            log_tail,
+            gate.as_deref(),
+        ));
     }
-    report.print(&target);
+    report.print(&target, log_tail);
 
     if let Some(reason) = gate {
         println!("{reason}");

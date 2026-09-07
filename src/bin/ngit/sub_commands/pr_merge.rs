@@ -22,7 +22,7 @@ use crate::{
     ci_projection::{
         CiReport, ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage,
     },
-    cli::{CiTrustFloor, SignerParams},
+    cli::{CiTrustFloor, LogTailMode, SignerParams},
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
         warn_if_invited_as_maintainer,
@@ -149,7 +149,7 @@ pub async fn launch(
     )
     .await?;
     if ci.has_results() {
-        ci.print_checks();
+        ci.print_checks(LogTailMode::Auto);
     }
 
     if let Some(reason) = require_ci_trust.and_then(|floor| ci.gate_failure(floor)) {
@@ -350,7 +350,7 @@ pub(super) fn merge_json(
         "action": if error.is_some() { "refused" } else { "merged" },
         "entity": "pr",
         "id": crate::output::event_id_to_nevent(proposal_id, relay),
-        "ci": ci.to_ci_value(relay),
+        "ci": ci.to_ci_value(relay, LogTailMode::Auto),
         "ci_warning": ci_warning,
     });
     if let Some(applied_event) = applied_event {

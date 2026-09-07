@@ -52,7 +52,10 @@ use nostr::prelude::{
 };
 use serde_json::{Value, json};
 
-use crate::{ci_commit::first_local_commit, cli::CiTrustFloor};
+use crate::{
+    ci_commit::first_local_commit,
+    cli::{CiTrustFloor, LogTailMode},
+};
 
 /// The trust floor a surface applies when the caller demanded none.
 ///
@@ -312,7 +315,49 @@ pub struct JobReport {
     pub job_id: String,
     pub conclusion: Conclusion,
     pub provider: PublicKey,
+    pub log_tail: String,
+    pub logs: Option<String>,
     pub resolution: TrustResolution,
+}
+
+impl JobReport {
+    fn human_line(&self) -> String {
+        let label = self
+            .resolution
+            .classification()
+            .map_or("Checking", TrustClassification::label);
+        let logs = self
+            .logs
+            .as_ref()
+            .map_or(String::new(), |logs| format!("  {logs}"));
+        format!(
+            "    job {} {} [{label}]{logs}",
+            self.job_id, self.conclusion
+        )
+    }
+
+    fn included_log_tail(&self, mode: LogTailMode) -> Option<&str> {
+        let include = match mode {
+            LogTailMode::Auto => self.conclusion != Conclusion::Success,
+            LogTailMode::All => true,
+            LogTailMode::None => false,
+        };
+        include
+            .then_some(self.log_tail.as_str())
+            .filter(|tail| !tail.is_empty())
+    }
+
+    fn human_lines(&self, mode: LogTailMode) -> String {
+        let mut output = self.human_line();
+        if let Some(tail) = self.included_log_tail(mode) {
+            output.push_str("\n      log tail:");
+            for line in tail.lines() {
+                output.push_str("\n        ");
+                output.push_str(line);
+            }
+        }
+        output
+    }
 }
 
 pub struct RunReport {
@@ -437,19 +482,19 @@ impl CiReport {
     /// supplied it, so an earlier revision's result can never be mistaken for
     /// the current one.
     #[must_use]
-    pub fn to_ci_value(&self, relay: Option<&RelayUrl>) -> Value {
+    pub fn to_ci_value(&self, relay: Option<&RelayUrl>, log_tail: LogTailMode) -> Value {
         let mut ci = json!({
             "state": self.state.as_str(),
             "conclusion": self.conclusion.map(Conclusion::as_str),
             "revision_matched": self.revision_matched,
             "coverage": self.coverage.as_str(),
-            "runs": self.runs.iter().map(RunReport::to_json).collect::<Vec<Value>>(),
+            "runs": self.runs.iter().map(|run| run.to_json(log_tail)).collect::<Vec<Value>>(),
         });
         if let Some(outdated) = &self.outdated {
             ci["outdated"] = outdated
                 .iter()
                 .map(|report| {
-                    let mut value = report.to_json();
+                    let mut value = report.to_json(log_tail);
                     value["revision"] = report.run.supplying_event.map_or(Value::Null, |id| {
                         json!(crate::output::event_id_to_nevent(id, relay))
                     });
@@ -470,13 +515,14 @@ impl CiReport {
         &self,
         target: &Target,
         relay: Option<&RelayUrl>,
+        log_tail: LogTailMode,
         gate_failure: Option<&str>,
     ) -> Value {
         let mut document = json!({
             "command_status": if gate_failure.is_some() { "error" } else { "ok" },
             "entity": "ci",
             "target": target.to_json(relay),
-            "ci": self.to_ci_value(relay),
+            "ci": self.to_ci_value(relay, log_tail),
         });
         if let Some(reason) = gate_failure {
             document["error"] = json!(reason);
@@ -485,9 +531,9 @@ impl CiReport {
     }
 
     /// The `ngit ci status` human rendering.
-    pub fn print(&self, target: &Target) {
+    pub fn print(&self, target: &Target, log_tail: LogTailMode) {
         println!("CI for {}", target.describe());
-        self.print_result_lines();
+        self.print_result_lines(log_tail);
         // Shape rejections are diagnostics for a publisher, not something a
         // reader of this repository can act on, so they follow ngit's
         // verbosity idiom. They stay in the JSON document unconditionally.
@@ -499,10 +545,10 @@ impl CiReport {
     }
 
     /// The `ngit pr view` "Checks" section.
-    pub fn print_checks(&self) {
+    pub fn print_checks(&self, log_tail: LogTailMode) {
         println!();
         println!("Checks:");
-        self.print_result_lines();
+        self.print_result_lines(log_tail);
     }
 
     /// The check lines every surface shares: the current runs (or the
@@ -514,7 +560,7 @@ impl CiReport {
     /// without `include_outdated` (`ci status`, `pr merge`) `outdated` is
     /// `None`, so this is the "any current run" guard those surfaces always
     /// had.
-    fn print_result_lines(&self) {
+    fn print_result_lines(&self, log_tail: LogTailMode) {
         if self.runs.is_empty() {
             if self.revision_matched {
                 println!("  no CI results");
@@ -523,14 +569,14 @@ impl CiReport {
             }
         }
         for run in &self.runs {
-            run.print();
+            run.print(log_tail);
         }
         if let Some(conclusion) = self.conclusion {
             println!("  {} ({conclusion})", self.state.as_str());
         } else if !self.runs.is_empty() {
             println!("  {}", self.state.as_str());
         }
-        self.print_outdated();
+        self.print_outdated(log_tail);
         if self.is_incomplete() && self.has_results() {
             println!("  {CONTEXT_INCOMPLETE_LABEL}");
         }
@@ -539,13 +585,13 @@ impl CiReport {
     /// Earlier revisions, under their own heading. A result for a superseded
     /// revision says nothing about the code under review now, so it is never
     /// mixed into the lines above.
-    fn print_outdated(&self) {
+    fn print_outdated(&self, log_tail: LogTailMode) {
         let Some(outdated) = self.outdated.as_ref().filter(|runs| !runs.is_empty()) else {
             return;
         };
         println!("  outdated (earlier revisions):");
         for run in outdated {
-            run.print();
+            run.print(log_tail);
         }
     }
 }
@@ -568,7 +614,24 @@ impl RunReport {
     }
 
     #[must_use]
-    pub fn to_json(&self) -> Value {
+    pub fn to_json(&self, log_tail: LogTailMode) -> Value {
+        let jobs = self
+            .jobs
+            .iter()
+            .map(|job| {
+                let mut value = json!({
+                    "job": job.job_id,
+                    "conclusion": job.conclusion.as_str(),
+                    "provider": npub(job.provider),
+                    "logs": job.logs,
+                    "classification": job.resolution.classification().map(TrustClassification::as_str),
+                });
+                if let Some(tail) = job.included_log_tail(log_tail) {
+                    value["log_tail"] = json!(tail);
+                }
+                value
+            })
+            .collect::<Vec<Value>>();
         json!({
             "workflow": self.run.workflow_path,
             "state": match self.state {
@@ -598,20 +661,11 @@ impl RunReport {
                 "commit_present": self.integrity.commit_present,
                 "workflow_hash_matches": self.integrity.workflow_hash_matches,
             },
-            "jobs": self
-                .jobs
-                .iter()
-                .map(|job| json!({
-                    "job": job.job_id,
-                    "conclusion": job.conclusion.as_str(),
-                    "provider": npub(job.provider),
-                    "classification": job.resolution.classification().map(TrustClassification::as_str),
-                }))
-                .collect::<Vec<Value>>(),
+            "jobs": jobs,
         })
     }
 
-    pub fn print(&self) {
+    pub fn print(&self, log_tail: LogTailMode) {
         let label = self
             .resolution
             .classification()
@@ -640,14 +694,7 @@ impl RunReport {
             },
         );
         for job in &self.jobs {
-            println!(
-                "    job {} {} [{}]",
-                job.job_id,
-                job.conclusion,
-                job.resolution
-                    .classification()
-                    .map_or("Checking", TrustClassification::label),
-            );
+            println!("{}", job.human_lines(log_tail));
         }
     }
 }
@@ -1023,6 +1070,8 @@ fn job_report(context: &CiTrustContext, run: &WorkflowRun, job: &JobResult) -> J
         job_id: job.job_id.clone(),
         conclusion: job.conclusion,
         provider: job.author,
+        log_tail: job.log_tail.clone(),
+        logs: job.logs.clone(),
         resolution: context.job_resolution(run, job),
     }
 }
@@ -1598,6 +1647,184 @@ mod tests {
             .expect("a workflow result groups into one run")
     }
 
+    /// A projected run whose Job Result is parsed from the same event shape
+    /// the commands consume.
+    fn run_report_with_job(
+        conclusion: Conclusion,
+        log_tail: &str,
+        logs: Option<&str>,
+    ) -> RunReport {
+        use nostr::prelude::{EventBuilder, Tag, event::FinalizeEvent};
+
+        let coordinator = Keys::generate();
+        let provider = Keys::generate();
+        let owner = Keys::generate();
+        let tag = |values: &[&str]| {
+            Tag::parse(
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<String>>(),
+            )
+            .expect("test tag parses")
+        };
+        let common_tags = || {
+            vec![
+                tag(&[
+                    "a",
+                    &format!(
+                        "{}:{}:repo",
+                        Kind::GitRepoAnnouncement.as_u16(),
+                        owner.public_key().to_hex()
+                    ),
+                ]),
+                tag(&["c", &"ab".repeat(20)]),
+                tag(&["w", "ci.yml", &"cd".repeat(32)]),
+                tag(&["o", "push"]),
+                tag(&["r", "refs/heads/main"]),
+            ]
+        };
+
+        let mut result_tags = common_tags();
+        result_tags.extend([
+            tag(&["r", "run"]),
+            tag(&["conclusion", conclusion.as_str()]),
+        ]);
+        let result = EventBuilder::new(kinds::KIND_CI_WORKFLOW_RESULT, "")
+            .tags(result_tags)
+            .custom_created_at(Timestamp::from_secs(200))
+            .finalize(&coordinator)
+            .expect("test workflow result finalizes");
+
+        let run_address = format!(
+            "{}:{}:run",
+            kinds::KIND_CI_WORKFLOW_PROGRESS.as_u16(),
+            coordinator.public_key().to_hex()
+        );
+        let mut job_tags = common_tags();
+        job_tags.extend([
+            tag(&["q", &run_address, "wss://relay.example"]),
+            tag(&["job", "build"]),
+            tag(&["conclusion", conclusion.as_str()]),
+        ]);
+        if let Some(logs) = logs {
+            job_tags.push(tag(&["logs", logs]));
+        }
+        let job = EventBuilder::new(kinds::KIND_CI_JOB_RESULT, log_tail)
+            .tags(job_tags)
+            .custom_created_at(Timestamp::from_secs(150))
+            .finalize(&provider)
+            .expect("test job result finalizes");
+
+        let run = group_workflow_runs([&result, &job])
+            .runs
+            .pop()
+            .expect("the job groups under its workflow result");
+        assert_eq!(run.jobs.len(), 1, "the projected run has one job");
+        let context = CiTrustContext::loading();
+        let job = job_report(&context, &run, &run.jobs[0]);
+        RunReport {
+            state: run.state(Timestamp::from_secs(300)),
+            attempt_of: 1,
+            resolution: context.run_resolution(&run),
+            integrity: Integrity {
+                commit_present: false,
+                workflow_hash_matches: None,
+            },
+            jobs: vec![job],
+            run,
+        }
+    }
+
+    #[test]
+    fn job_logs_round_trip_into_json_and_the_human_line() {
+        let logs = "https://ci.example/jobs/build?attempt=1#logs";
+        let report = run_report_with_job(Conclusion::Success, "", Some(logs));
+
+        assert_eq!(report.jobs[0].logs.as_deref(), Some(logs));
+        assert_eq!(report.to_json(LogTailMode::Auto)["jobs"][0]["logs"], logs);
+        assert_eq!(
+            report.jobs[0].human_line(),
+            format!("    job build success [Checking]  {logs}")
+        );
+    }
+
+    #[test]
+    fn a_job_without_logs_has_json_null_and_the_unchanged_human_line() {
+        let report = run_report_with_job(Conclusion::Success, "", None);
+
+        assert_eq!(report.jobs[0].logs, None);
+        assert_eq!(
+            report.to_json(LogTailMode::Auto)["jobs"][0]["logs"],
+            Value::Null
+        );
+        assert_eq!(
+            report.jobs[0].human_line(),
+            "    job build success [Checking]"
+        );
+    }
+
+    #[test]
+    fn auto_includes_a_failed_job_log_tail_in_json_and_human_output() {
+        let tail = "[log-tail omitted=42]\nassertion failed";
+        let report = run_report_with_job(Conclusion::Failure, tail, None);
+
+        assert_eq!(report.jobs[0].log_tail, tail);
+        assert_eq!(
+            report.to_json(LogTailMode::Auto)["jobs"][0]["log_tail"],
+            tail
+        );
+        assert_eq!(
+            report.jobs[0].human_lines(LogTailMode::Auto),
+            "    job build failure [Checking]\n      log tail:\n        [log-tail omitted=42]\n        assertion failed"
+        );
+    }
+
+    #[test]
+    fn auto_omits_a_successful_job_log_tail_but_all_includes_it() {
+        let tail = "build completed";
+        let report = run_report_with_job(Conclusion::Success, tail, None);
+
+        assert!(
+            report.to_json(LogTailMode::Auto)["jobs"][0]
+                .get("log_tail")
+                .is_none()
+        );
+        assert_eq!(
+            report.jobs[0].human_lines(LogTailMode::Auto),
+            "    job build success [Checking]"
+        );
+        assert_eq!(
+            report.to_json(LogTailMode::All)["jobs"][0]["log_tail"],
+            tail
+        );
+        assert_eq!(
+            report.jobs[0].human_lines(LogTailMode::All),
+            "    job build success [Checking]\n      log tail:\n        build completed"
+        );
+    }
+
+    #[test]
+    fn none_omits_failed_and_empty_log_tails() {
+        let failed = run_report_with_job(Conclusion::Failure, "failed", None);
+        let empty = run_report_with_job(Conclusion::Failure, "", None);
+
+        assert!(
+            failed.to_json(LogTailMode::None)["jobs"][0]
+                .get("log_tail")
+                .is_none()
+        );
+        assert_eq!(
+            failed.jobs[0].human_lines(LogTailMode::None),
+            "    job build failure [Checking]"
+        );
+        assert!(
+            empty.to_json(LogTailMode::All)["jobs"][0]
+                .get("log_tail")
+                .is_none()
+        );
+    }
+
     #[test]
     fn a_pr_target_splits_its_runs_by_revision() {
         let anchor = EventId::from_slice(&[0xab; 32]).expect("valid id");
@@ -1707,7 +1934,7 @@ mod tests {
         };
 
         assert_eq!(
-            report.to_ci_value(None)["outdated"][0]["revision"],
+            report.to_ci_value(None, LogTailMode::Auto)["outdated"][0]["revision"],
             Value::Null,
             "a run with no supplying event names no revision, rather than \
              borrowing the current one"
