@@ -184,6 +184,15 @@ fn example() -> Result<()> {
 
 ## Important Invariants
 
+### Maintainer protocol
+
+The cross-project implementation guide is maintained in the repository
+`nostr://danconwaydev.com/relay.ngit.dev/ngit-docs` at
+`docs/protocol/nip-34/maintainers/ai-implementers.md`. It is published as the
+[maintainer protocol for AI implementers](https://ngit.dev/protocol/nip-34/maintainers/ai-implementers).
+Check it when changing maintainer-role parsing, graph resolution, authority, or
+repository membership workflows.
+
 ### URL Handling
 
 1. **Grasp Server URLs**: Must contain npub in path format: `/{npub}/`

@@ -1,8 +1,8 @@
 # Maintainer Model Follow-up Actions
 
 This document tracks work still needed to reach the desired final behavior in
-[`maintainer-model.md`](maintainer-model.md). The wire format is specified by
-the sibling NIP-34 draft in `../nips/34.md`.
+the [maintainer protocol for AI implementers](https://ngit.dev/protocol/nip-34/maintainers/ai-implementers).
+The wire format is specified by the sibling NIP-34 draft in `../nips/34.md`.
 
 The current maintainer-model PR establishes the major-version API and the
 ordinary lead-shaped workflow. Unsupported graph and state transitions fail
@@ -11,9 +11,10 @@ safe, but must not silently guess at membership, history, or repository state.
 
 ## PR review gate
 
-- Review the complete PR against `maintainer-model.md`, treating that document
-  as the desired final outcome and `../nips/34.md` as the protocol
-  specification.
+- Review the complete PR against the
+  [maintainer protocol for AI implementers](https://ngit.dev/protocol/nip-34/maintainers/ai-implementers),
+  treating that document as the desired final outcome and `../nips/34.md` as
+  the protocol specification.
 - Classify every discrepancy as one of:
   - a wire-format or API incompatibility that must be fixed before the major
     release;

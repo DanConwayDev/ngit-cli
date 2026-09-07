@@ -104,9 +104,10 @@ A software application event has:
 
 ngit-created applications MUST include an `a` tag for every currently known
 coordinate of the repository. The selected maintainer's coordinate MUST be
-first, followed by the remaining coordinates in the ordering defined by
-[the maintainer model](architecture/maintainer-model.md). A canonical clone URL
-SHOULD be included in `repository` when one can be resolved.
+first, followed by the remaining coordinates in the ordering defined by the
+[maintainer protocol for AI implementers](https://ngit.dev/protocol/nip-34/maintainers/ai-implementers).
+A canonical clone URL SHOULD be included in `repository` when one can be
+resolved.
 
 For compatibility with historical zsp/Zapstore events, ngit also accepts an
 application `a` tag containing a kind `30063` release coordinate. It preserves

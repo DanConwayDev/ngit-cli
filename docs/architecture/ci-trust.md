@@ -24,9 +24,10 @@ model so a signature is never silently presented as maintainer endorsement.
 - **Reference implementation to port:** gitworkshop
   `src/lib/ciTrustContext.ts`, `src/lib/ciCoordinatorRelationship.ts`, and the
   evidence-assembly logic in `src/hooks/useCITrustContext.ts`.
-- **Maintainer model:** `docs/architecture/maintainer-model.md` in this
-  repository. Trust evidence requiring "a confirmed repository maintainer"
-  means `RepoRef::confirmed_maintainers()` — never invited maintainers.
+- **Maintainer model:** the
+  [maintainer protocol for AI implementers](https://ngit.dev/protocol/nip-34/maintainers/ai-implementers).
+  Trust evidence requiring "a confirmed repository maintainer" means
+  `RepoRef::confirmed_maintainers()` — never invited maintainers.
 
 ## Event vocabulary (consumed subset)
 

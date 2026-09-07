@@ -246,8 +246,9 @@ struct MaintainerEdgeJson {
     to: String,
 }
 
-/// One member in `ngit repo --json`: stable string values documented in
-/// `docs/architecture/maintainer-model.md`. `role` is `"lead"`,
+/// One member in `ngit repo --json`: stable string values documented in the
+/// <https://ngit.dev/protocol/nip-34/maintainers/ai-implementers> guide.
+/// `role` is `"lead"`,
 /// `"co-maintainer"` or `"moderator"`; `status` is `"confirmed"` or
 /// `"invited"` (an assigned-but-unacknowledged moderator is invited, like an
 /// unaccepted maintainer); `source` is `"role_tag"`, `"maintainers_tag"` or
