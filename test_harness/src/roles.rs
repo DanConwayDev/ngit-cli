@@ -200,6 +200,8 @@ pub struct FabricateAnnouncementOpts {
     pub clone_urls: Vec<String>,
     /// `name` tag value. `None` omits the tag.
     pub name: Option<String>,
+    /// Additional tags emitted verbatim after the fixture's typed fields.
+    pub extra_tags: Vec<Tag>,
     /// `["r", <oid>, "euc"]` earliest-unique-commit marker. `None` omits.
     pub euc: Option<String>,
     /// Explicit `created_at`. `None` uses `Timestamp::now()`. Tests that
@@ -222,6 +224,7 @@ impl FabricateAnnouncementOpts {
             relays: None,
             clone_urls: vec![],
             name: None,
+            extra_tags: vec![],
             euc: None,
             created_at: None,
             publish_to: None,
@@ -313,6 +316,7 @@ impl Harness {
                     .collect::<Vec<String>>(),
             ));
         }
+        tags.extend(opts.extra_tags);
 
         let created_at = opts.created_at.unwrap_or_else(Timestamp::now);
         let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")

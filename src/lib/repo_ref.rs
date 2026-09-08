@@ -1702,9 +1702,12 @@ impl RepoRef {
     /// Active maintainer records naming `author` or `lead` remain available
     /// for the normal role-transition generator. Every other active role is
     /// changed to a `defer`-ended copy so it carries history without making
-    /// an assignment from this announcement.
+    /// an assignment from this announcement. A legacy listing is classified
+    /// under the destination lead before deferral, so an existing relationship
+    /// to that lead materializes directly as untimed `M` rather than as an
+    /// `m`-to-`M` transition at publication time.
     pub fn defer_third_party_roles(&mut self, author: PublicKey, lead: PublicKey) {
-        self.role_tags = self.role_history_for_republish();
+        self.role_tags = self.role_history_for_republish_with_lead(Some(lead));
         let author = author.to_string();
         let lead = lead.to_string();
         for tag in &mut self.role_tags {
@@ -1764,7 +1767,7 @@ impl RepoRef {
             }));
 
         let mut records: Vec<(Vec<String>, bool)> = self
-            .role_history_for_republish()
+            .role_history_for_republish_with_lead(Some(new_lead))
             .into_iter()
             .map(|tag| (tag.as_slice().to_vec(), true))
             .collect();
@@ -1791,7 +1794,13 @@ impl RepoRef {
                 if replace_author || !relationship_subject {
                     records[index] = (parts, false);
                 }
-            } else {
+            } else if subject != &new_lead_hex || !role_entry_is_active(&parts) {
+                // The lead's view can supply replicated history, including
+                // ended intervals and an active old-lead role that this
+                // publisher will defer. It cannot supply evidence for a
+                // missing active publisher-to-new-lead relationship: that
+                // direct pointer is genuinely new and generate_role_tags
+                // starts it at the replacement timestamp.
                 records.push((parts, false));
             }
         }
@@ -7107,6 +7116,100 @@ mod tests {
             }
 
             #[test]
+            fn legacy_handover_classifies_the_existing_lead_before_deferring() {
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let alice = nostr::prelude::Keys::generate().public_key();
+                let third = nostr::prelude::Keys::generate().public_key();
+                let event = role_event(
+                    &bob_keys,
+                    vec![tag(&[
+                        "maintainers",
+                        &bob.to_string(),
+                        &alice.to_string(),
+                        &third.to_string(),
+                    ])],
+                );
+                let mut parsed = RepoRef::try_from((event, None)).unwrap();
+
+                parsed.defer_third_party_roles(bob, alice);
+                parsed.maintainers = vec![bob, alice];
+                parsed.lead = Some(alice);
+                let generated = parsed
+                    .generate_role_tags(&bob, NOW)
+                    .iter()
+                    .map(|role| role.as_slice().to_vec())
+                    .collect::<Vec<_>>();
+
+                assert_eq!(
+                    generated,
+                    vec![
+                        tag(&["m", &bob.to_string()]),
+                        tag(&["M", &alice.to_string()]),
+                        tag(&["m", &third.to_string(), "0", "defer"]),
+                    ],
+                );
+            }
+
+            #[test]
+            fn legacy_follow_preserves_an_existing_pointer_but_times_a_new_one() {
+                fn followed_roles(
+                    bob_keys: &nostr::prelude::Keys,
+                    alice: PublicKey,
+                    prior_maintainers: &[PublicKey],
+                    canonical: &RepoRef,
+                ) -> Vec<Vec<String>> {
+                    let bob = bob_keys.public_key();
+                    let mut legacy_listing = vec!["maintainers".to_string()];
+                    legacy_listing.extend(prior_maintainers.iter().map(PublicKey::to_string));
+                    let mut source =
+                        RepoRef::try_from((role_event(bob_keys, vec![legacy_listing]), None))
+                            .unwrap();
+                    source.role_tags = source
+                        .role_history_for_follow_lead(canonical, bob, bob, alice, true)
+                        .unwrap();
+                    source.maintainers = vec![bob, alice];
+                    source.lead = Some(alice);
+                    source
+                        .generate_role_tags(&bob, NOW)
+                        .iter()
+                        .map(|role| role.as_slice().to_vec())
+                        .collect()
+                }
+
+                let bob_keys = nostr::prelude::Keys::generate();
+                let bob = bob_keys.public_key();
+                let alice_keys = nostr::prelude::Keys::generate();
+                let alice = alice_keys.public_key();
+                let canonical = RepoRef::try_from((
+                    role_event(
+                        &alice_keys,
+                        vec![
+                            tag(&["M", &alice.to_string()]),
+                            tag(&["m", &bob.to_string()]),
+                        ],
+                    ),
+                    None,
+                ))
+                .unwrap();
+
+                assert_eq!(
+                    followed_roles(&bob_keys, alice, &[bob, alice], &canonical),
+                    vec![
+                        tag(&["m", &bob.to_string()]),
+                        tag(&["M", &alice.to_string()]),
+                    ],
+                );
+                assert_eq!(
+                    followed_roles(&bob_keys, alice, &[bob], &canonical),
+                    vec![
+                        tag(&["m", &bob.to_string()]),
+                        tag(&["M", &alice.to_string(), &NOW.to_string()]),
+                    ],
+                );
+            }
+
+            #[test]
             fn follower_keeps_self_and_old_lead_for_numeric_transition() {
                 let alice = nostr::prelude::Keys::generate().public_key();
                 let bob_keys = nostr::prelude::Keys::generate();
@@ -7120,7 +7223,6 @@ mod tests {
                         tag(&["M", &alice.to_string(), "200"]),
                         tag(&["m", &carol.to_string(), "200"]),
                         tag(&["o", &carol.to_string(), "210"]),
-                        tag(&["m", &bob.to_string(), "150", "defer"]),
                     ],
                 );
                 let mut carol_ref = RepoRef::try_from((carol_event, None)).unwrap();
@@ -7128,6 +7230,7 @@ mod tests {
                     &bob_keys,
                     vec![
                         tag(&["M", &bob.to_string(), "300"]),
+                        tag(&["m", &bob.to_string(), "100", "300"]),
                         tag(&["m", &alice.to_string(), "300"]),
                         tag(&["m", &carol.to_string(), "200"]),
                         tag(&["m", &dave.to_string(), "250"]),
@@ -7156,11 +7259,15 @@ mod tests {
                     "200",
                     &NOW.to_string()
                 ])));
-                assert!(generated.iter().any(|role| {
-                    role.first().map(String::as_str) == Some("M")
-                        && role.get(1) == Some(&bob.to_string())
-                        && role.len() % 2 == 1
-                }));
+                assert!(generated.contains(&tag(&["m", &alice.to_string(), "300", "defer"])));
+                assert!(
+                    generated.contains(&tag(&["M", &bob.to_string(), &NOW.to_string()])),
+                    "{generated:?}"
+                );
+                assert!(
+                    generated.contains(&tag(&["m", &bob.to_string(), "100", "300"])),
+                    "{generated:?}"
+                );
                 assert!(generated.contains(&tag(&["m", &dave.to_string(), "250", "defer"])));
             }
 

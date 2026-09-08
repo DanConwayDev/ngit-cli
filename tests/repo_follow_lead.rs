@@ -3,7 +3,8 @@
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use test_harness::{
-    CloneLogin, Harness, PublishRepoOpts, PublishedRepo, Repo, tag_value, tag_values,
+    CloneLogin, FabricateAnnouncementOpts, Harness, PublishRepoOpts, PublishedRepo, Repo,
+    tag_value, tag_values,
 };
 
 async fn latest_announcement(
@@ -58,6 +59,18 @@ fn active_role(event: &Event, letter: &str, pubkey: PublicKey) -> Option<Vec<Str
         })
 }
 
+fn role_entries(event: &Event, letter: &str, pubkey: PublicKey) -> Vec<Vec<String>> {
+    let pubkey = pubkey.to_string();
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .filter(|tag| {
+            tag.first().map(String::as_str) == Some(letter) && tag.get(1) == Some(&pubkey)
+        })
+        .collect()
+}
+
 async fn assert_selected_lead(repo: &Repo, lead: PublicKey) -> Result<()> {
     let lead_npub = lead.to_bech32()?;
     let origin = repo
@@ -73,6 +86,158 @@ async fn assert_selected_lead(repo: &Repo, lead: PublicKey) -> Result<()> {
         .await?
         .context("nostr.repo is missing after follow-lead")?;
     assert_eq!(Nip19Coordinate::from_bech32(&coordinate)?.public_key, lead,);
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_inferred_follow_materializes_existing_relationships_untimed() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (repo, state) = harness.arrange_init_state_b_coordinate_only().await?;
+    repo.git_ok(
+        ["config", "--local", "nostr.nostate", "true"],
+        "disable repository state for the legacy fixture",
+    )
+    .await?;
+    let bob = state.keys.public_key();
+    let alice_keys = Keys::generate();
+    let alice = alice_keys.public_key();
+    let carol_keys = Keys::generate();
+    let carol = carol_keys.public_key();
+
+    let previous = harness
+        .publish_fabricated_announcement(
+            &state.keys,
+            FabricateAnnouncementOpts {
+                maintainers_tag: Some(vec![bob, alice]),
+                name: Some("legacy follow metadata".to_string()),
+                extra_tags: vec![Tag::parse(["x-legacy", "opaque", "value"])?],
+                created_at: Some(Timestamp::now() - 30u64),
+                ..FabricateAnnouncementOpts::new(state.coordinate_identifier.clone(), vec![])
+            },
+        )
+        .await?;
+    harness
+        .publish_fabricated_announcement(
+            &alice_keys,
+            FabricateAnnouncementOpts {
+                maintainers_tag: Some(vec![alice, bob, carol]),
+                created_at: Some(Timestamp::now() - 30u64),
+                ..FabricateAnnouncementOpts::new(state.coordinate_identifier.clone(), vec![])
+            },
+        )
+        .await?;
+    harness
+        .publish_fabricated_announcement(
+            &carol_keys,
+            FabricateAnnouncementOpts {
+                maintainers_tag: Some(vec![carol, alice]),
+                created_at: Some(Timestamp::now() - 30u64),
+                ..FabricateAnnouncementOpts::new(state.coordinate_identifier.clone(), vec![])
+            },
+        )
+        .await?;
+
+    let follow = repo
+        .ngit(["repo", "follow-lead", "--json"])
+        .output()
+        .await?;
+    if !follow.status.success() {
+        bail!(
+            "ngit repo follow-lead exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            follow.status,
+            String::from_utf8_lossy(&follow.stdout),
+            String::from_utf8_lossy(&follow.stderr),
+        );
+    }
+    let alice_npub = alice.to_bech32()?;
+    let preparation_command = format!("ngit repo edit --lead-maintainer {alice_npub}");
+    let guidance = String::from_utf8_lossy(&follow.stderr);
+    assert!(
+        guidance.contains(&preparation_command),
+        "legacy convergence should identify the lead's required preparation command: {guidance}",
+    );
+    let follow_json: serde_json::Value = serde_json::from_slice(&follow.stdout)?;
+    assert_eq!(follow_json["action"], "followed_lead");
+    assert_eq!(
+        follow_json["pending_actions"],
+        serde_json::json!([{
+            "code": "prepare_legacy_lead",
+            "actor": alice_npub,
+            "command": preparation_command,
+        }]),
+    );
+
+    let selected = repo
+        .config("nostr.repo")
+        .await?
+        .context("nostr.repo is missing after following the inferred lead")?;
+    assert_eq!(Nip19Coordinate::from_bech32(&selected)?.public_key, alice);
+    let replacement = latest_announcement(&harness, bob, &state.coordinate_identifier).await?;
+    assert_ne!(
+        replacement.id, previous.id,
+        "Bob must publish a replacement"
+    );
+    assert_eq!(
+        role_entries(&replacement, "M", alice),
+        vec![vec!["M".to_string(), alice.to_string()]],
+        "Bob's existing untimed relationship to Alice must materialize directly as untimed M",
+    );
+    assert_eq!(
+        role_entries(&replacement, "m", bob),
+        vec![vec!["m".to_string(), bob.to_string()]],
+        "Bob's implicit legacy membership must materialize as untimed self-m",
+    );
+    assert!(
+        role_entries(&replacement, "m", alice).is_empty(),
+        "following the inferred lead must not fabricate an m-to-M transition for Alice",
+    );
+    assert_eq!(
+        role_entries(&replacement, "m", carol),
+        vec![vec![
+            "m".to_string(),
+            carol.to_string(),
+            "0".to_string(),
+            "defer".to_string(),
+        ]],
+        "unrelated legacy membership should remain as deferred history",
+    );
+    assert_eq!(
+        tag_values(&replacement, "maintainers")
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        [bob.to_string(), alice.to_string()].into_iter().collect(),
+    );
+    assert_eq!(
+        tag_value(&replacement, "name").as_deref(),
+        Some("legacy follow metadata"),
+    );
+    assert!(
+        replacement
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["x-legacy", "opaque", "value"]),
+        "unknown tags must survive legacy role materialization",
+    );
+    let info = repo.ngit(["repo", "--json", "--offline"]).output().await?;
+    if !info.status.success() {
+        bail!(
+            "ngit repo --json --offline exited non-zero ({:?})\nstdout: {}\nstderr: {}",
+            info.status,
+            String::from_utf8_lossy(&info.stdout),
+            String::from_utf8_lossy(&info.stderr),
+        );
+    }
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout)?;
+    assert_eq!(info["selected_maintainer"], alice_npub);
+    assert_eq!(info["lead_maintainer"], alice_npub);
+    assert_eq!(info["lead_source"], "legacy_inferred");
     Ok(())
 }
 

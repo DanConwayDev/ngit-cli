@@ -103,6 +103,7 @@ async fn arrange_three_member_announcement(
                 // the publish-success signal.
                 clone_urls: vec!["https://ngit-test-clone.invalid/repo.git".to_string()],
                 name: Some("example name".to_string()),
+                extra_tags: vec![Tag::parse(["x-legacy", "opaque", "value"])?],
                 euc: Some(state_b.root_oid.clone()),
                 // Back-date so ngit's republish unambiguously wins NIP-01
                 // replacement (established fixture convention).
@@ -203,7 +204,10 @@ async fn handover_to_prepared_lead_preserves_the_active_graph() -> Result<()> {
                     RoleEntry::co_maintainer(third),
                 ],
                 maintainers_tag: Some(vec![lead, me, third]),
-                created_at: Some(Timestamp::now() - 30u64),
+                name: Some("example name".to_string()),
+                // Bob must be the deterministic source for cascaded metadata
+                // and unknown tags during his replacement.
+                created_at: Some(existing.created_at - 1u64),
                 ..FabricateAnnouncementOpts::new(identifier.clone(), vec![])
             },
         )
@@ -225,13 +229,18 @@ async fn handover_to_prepared_lead_preserves_the_active_graph() -> Result<()> {
     assert_ne!(announcement.id, existing.id, "a republish must have landed");
     let lead_m_entries = role_entries(&announcement, "M", &lead);
     assert_eq!(
-        lead_m_entries.len(),
-        1,
-        "the designated lead should carry one M entry; got {lead_m_entries:?}",
+        lead_m_entries,
+        vec![vec!["M".to_string(), lead.to_string()]],
+        "Bob's existing untimed relationship to Alice must materialize directly as untimed M",
+    );
+    assert_eq!(
+        role_entries(&announcement, "m", &me),
+        vec![vec!["m".to_string(), me.to_string()]],
+        "Bob's implicit legacy membership must materialize as untimed self-m",
     );
     assert!(
-        lead_m_entries[0].len() < 4 || lead_m_entries[0].len() % 2 == 1,
-        "the lead's M entry must be active: {lead_m_entries:?}",
+        role_entries(&announcement, "m", &lead).is_empty(),
+        "migration must not fabricate an m-to-M transition for Alice",
     );
     let maintainers = tag_values(&announcement, "maintainers");
     assert!(
@@ -248,6 +257,17 @@ async fn handover_to_prepared_lead_preserves_the_active_graph() -> Result<()> {
         third_history[0].last().map(String::as_str),
         Some("defer"),
         "the old lead should retain third-party history without assigning it",
+    );
+    assert_eq!(
+        tag_value(&announcement, "name").as_deref(),
+        Some("example name")
+    );
+    assert!(
+        announcement
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["x-legacy", "opaque", "value"]),
+        "unknown tags from the latest announcement must survive cascaded field resolution",
     );
 
     Ok(())

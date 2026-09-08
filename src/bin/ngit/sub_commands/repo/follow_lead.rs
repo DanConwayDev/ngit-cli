@@ -202,11 +202,14 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         get_repo_ref_from_cache_for_lead_recovery(Some(git_repo_path), &selected_coordinate)
             .await?;
     let resolution = selected_ref.lead_resolution();
-    if resolution.source != LeadSource::Explicit {
+    if !matches!(
+        resolution.source,
+        LeadSource::Explicit | LeadSource::LegacyInferred
+    ) {
         return Err(cli_error(
-            "the selected repository has no complete explicit lead path",
+            "the selected repository has no complete explicit or legacy-inferred lead path",
             &[],
-            &["resolve the pending, conflicting, or legacy lead decision first"],
+            &["resolve the pending, conflicting, or leadless decision first"],
         ));
     }
     let lead = resolution.lead.context("the resolved lead is missing")?;
@@ -217,7 +220,7 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
             .any(|event| event.pubkey == *pubkey)
     }) {
         return Err(cli_error(
-            "the explicit lead path was not completely discovered",
+            "the resolved lead path was not completely discovered",
             &[],
             &["fetch again after every lead-path announcement is available"],
         ));
@@ -229,9 +232,18 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
     lead_coordinate.relays = canonical_lead.relays.clone();
     let lead_ref = get_repo_ref_from_cache(Some(git_repo_path), &lead_coordinate).await?;
     let lead_resolution = lead_ref.lead_resolution();
-    if lead_resolution.source != LeadSource::Explicit || lead_resolution.lead != Some(lead) {
+    let target_resolves_lead = lead_resolution.lead == Some(lead)
+        && match resolution.source {
+            LeadSource::Explicit => lead_resolution.source == LeadSource::Explicit,
+            LeadSource::LegacyInferred => matches!(
+                lead_resolution.source,
+                LeadSource::Explicit | LeadSource::LegacyInferred
+            ),
+            _ => false,
+        };
+    if !target_resolves_lead {
         return Err(cli_error(
-            "the lead coordinate does not resolve to its own prepared roster",
+            "the lead coordinate does not resolve to the inferred lead or its own prepared roster",
             &[],
             &["ask the lead to repair their announcement before following it"],
         ));
@@ -319,15 +331,40 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         &target_coordinate,
     )?;
 
+    let legacy_preparation = if resolution.source == LeadSource::LegacyInferred {
+        let lead_npub = lead.to_bech32()?;
+        Some((
+            lead_npub.clone(),
+            format!("ngit repo edit --lead-maintainer {lead_npub}"),
+        ))
+    } else {
+        None
+    };
     if crate::output::is_json() {
+        let pending_actions = legacy_preparation
+            .iter()
+            .map(|(actor, command)| {
+                serde_json::json!({
+                    "code": "prepare_legacy_lead",
+                    "actor": actor,
+                    "command": command,
+                })
+            })
+            .collect::<Vec<_>>();
         crate::output::set_value(serde_json::json!({
             "command_status": "ok",
             "action": "followed_lead",
             "lead": lead.to_string(),
             "coordinate": target_coordinate,
             "updated_remotes": matching_remotes.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            "pending_actions": pending_actions,
         }));
     }
     println!("now following lead maintainer {lead}.");
+    if let Some((_, command)) = legacy_preparation {
+        println!(
+            "ask the lead maintainer to run `{command}` to complete explicit lead convergence."
+        );
+    }
     Ok(())
 }
