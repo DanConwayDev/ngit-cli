@@ -7,10 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Summary:** Private repos via private GRASP service (GRASP-08), basic Buzz Git
-support, portable local and remote signer management, stacked PRs, target
-branches, a skill installer/upgrader, and NIP-5A site and OCI container
-publication.
+### Release overview
+
+ngit v3 brings substantial improvements to git collaboration over Nostr,
+private repository access, CI, software delivery, and automation. It aligns
+with GitWorkshop v4 across the protocols and workflows they share. These
+highlights are not exhaustive; the detailed entries below record many more
+features, compatibility changes, and fixes.
+
+- **Nostr CI:** Discover and control coordinators with standing service
+  requests, stops, and manual triggers; inspect workflow and per-job status,
+  logs, and trust evidence; and optionally require CI trust before merging.
+- **Private repositories and Buzz interoperability:** Clone, fetch, push, and
+  collaborate on GRASP-08 private repositories using scoped Nostr and Git
+  authentication. Basic Buzz support extends clone, pull-request, and
+  lifecycle-status workflows to Buzz repositories.
+- **Maintainers and repository authority:** Introduce an explicit lead,
+  role history, and non-maintainer moderators, with clearer invitations,
+  handovers, departures, roster changes, and historical authorization. These
+  substantial improvements are backwards compatible for existing repositories
+  and confirmed maintainer relationships. The one narrow breaking change is
+  that an invited maintainer has no Git-state authority until they accept. That
+  pending-invitation boundary is the SemVer reason for the v3 major version
+  bump.
+- **Pull requests and collaboration:** Add non-default target branches,
+  inferred and explicit stacked pull requests, deliberate checkout of
+  contributor branches, issue-resolution provenance, and safer merge flows.
+- **Software releases:** Publish NIP-82 applications, releases, and assets with
+  Zapstore-compatible metadata, and update ngit from signed releases.
+
+#### Additional ngit highlights
+
+- **Credential protection:** Move `nsec` and bunker credentials out of Git
+  config by default and into the OS credential store, with an ngit-specific,
+  user-only file as fallback. This reflects a changed threat model: coding
+  agents and other tools now routinely read Git config, making inadvertent
+  disclosure much more likely.
+- **Nsite and container publishing:** Publish nsites and OCI container images
+  through Nostr and Blossom.
+- **Accounts and automation:** Add portable local and remote signer selection,
+  deliberate credential export, global JSON output and repository selection,
+  plus a versioned agent skill installer and upgrader.
+- **Repository addresses:** Resolve path-scoped NIP-AD mappings from memorable
+  bare domains, with NIP-65 relay discovery when the repository announcement is
+  not already cached.
+- **Everyday Git compatibility:** Support guarded force pushes with
+  `--force-with-lease`, raw object IDs in refspecs, no-op pushes, Git-managed
+  tracking refs, and installed remote helpers for additional server protocols.
+- **Safer upgrades and recovery:** Update from exact signed NIP-82 releases,
+  preserve staged, unstaged, and untracked work through merges, and provide an
+  actionable merge recipe when synchronized refs have diverged.
+- **Private-network access:** Connect opportunistically to `.onion` relays and
+  clone URLs through Tor, and optionally trust host-installed certificate
+  authorities for private or development infrastructure.
 
 ### Added
 
