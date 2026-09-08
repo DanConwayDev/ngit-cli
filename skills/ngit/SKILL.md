@@ -3,7 +3,7 @@ name: ngit
 description: Provides commands and workflows for nostr:// git repositories, OCI container publication, and NIP-5A nsites using the ngit CLI and git-remote-nostr. Activates when working with nostr:// remotes or URLs, ngit commands, gitworkshop.dev repositories, Nostr CI status or workflow definitions, publishing OCI images through Nostr and Blossom, NIP-5A nsites, Blossom static-site publication, or generic collaboration requests such as opening an issue, creating or reviewing a PR, commenting, merging, or cloning. In a nostr repository it replaces GitHub/GitLab collaboration workflows and their APIs/CLIs.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.15"
+  version: "1.16"
 ---
 
 # ngit — Nostr Plugin for Git
@@ -67,6 +67,8 @@ Without `--repo`, ngit uses repository configuration and branch tracking to infe
 ```
 nostr://<npub>/<identifier>
 nostr://<npub>/<relay-hint>/<identifier>   # relay-hint is bare domain, e.g. relay.ngit.dev
+nostr://<user>@<domain>/<identifier>       # NIP-05, only when explicitly provided
+nostr://<domain>/<repository-path>         # NIP-AD sends the full /path URL-encoded to /.well-known/nostr.json?path=
 ```
 
 Standard git commands work directly with these URLs — `git-remote-nostr` resolves them transparently. See `reference/repositories.md` for publishing and cloning.

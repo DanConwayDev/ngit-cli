@@ -7,6 +7,8 @@ Part of the ngit skill. Read this when publishing a repository, cloning one, res
 ```
 nostr://<npub>/<identifier>
 nostr://<npub>/<relay-hint>/<identifier>   # relay-hint is bare domain, e.g. relay.ngit.dev
+nostr://<user>@<domain>/<identifier>       # NIP-05, only when explicitly provided
+nostr://<domain>/<repository-path>         # NIP-AD sends the full /path URL-encoded to /.well-known/nostr.json?path=
 ```
 
 Standard git commands work directly with these URLs — `git-remote-nostr` resolves them transparently.
@@ -25,6 +27,7 @@ ngit repo --json --offline                                           # view repo
 git clone nostr://<npub>/<relay-hint>/<identifier>   # preferred
 git clone nostr://<npub>/<identifier>                # slower discovery, no relay hint
 git clone nostr://user@domain.com/<identifier>       # NIP-05, only if given to you
+git clone nostr://ngit.dev/ngit.git                  # NIP-AD bare-domain path mapping
 ```
 
 ## Settings and membership
