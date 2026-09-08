@@ -2,7 +2,7 @@
 
 **Status:** all six work packages implemented — WP1 (`src/lib/ci/` core),
 WP2 (`provenance`, `domain`, `resolve`), WP3 (`ngit ci status`), WP4
-(`pr view` Checks, `pr list` CI column), WP5 (`pr merge` gating) and WP6
+(`pr view` Checks, `pr list` CI column), WP5 (merge gating) and WP6
 (`ngit ci request|stop|trigger`). The deferred list below still stands.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
@@ -130,7 +130,8 @@ source integrity.
     cached). Used by `pr list`. Coverage is `partial` when domain checks were
     skipped.
   - *full tier*: additionally fetch missing quoted events and perform NIP-05
-    domain verification. Used by `pr view`, `pr merge`, `ci status`.
+    domain verification. Used by `pr view`, `ci status`, and a merge with an
+    explicit CI trust gate.
 
 ### WP1 implementation decisions
 
@@ -288,7 +289,7 @@ reference left open:
   timeout alone is not enough: the candidate set is publisher-supplied, so
   resolving candidates one at a time let anyone who can add a signer add a
   distinct slow domain, and another whole timeout, to every full-tier
-  command — including a default, non-blocking `ngit pr merge`.
+  command — including a merge with an explicit CI trust gate.
   `verify_identities` therefore resolves each distinct address once however
   many signers name it, keeps at most `IDENTITY_LOOKUP_CONCURRENCY` (8)
   lookups in flight, tries at most `MAX_IDENTITY_LOOKUPS` (32) addresses,
@@ -464,12 +465,12 @@ reference left open:
 - **One projection module, three surfaces.** The target types, the run
   selection, the state machine, the integrity check, the cache reads and the
   JSON/human rendering moved out of `ci_status.rs` into
-  `src/bin/ngit/ci_projection.rs`. `ci status`, `pr view` and (WP5) `pr merge`
-  differ only in the `ProjectionRequest` they pass: which `Tier`, whether
-  earlier revisions are collected, and the caller's own coverage. The module
-  is bin-local because it renders (`crate::output`, the stdout-guarding
-  `println!`) and reads the `--require-ci-trust` floor; nothing in it belongs
-  in `ngit::ci`.
+  `src/bin/ngit/ci_projection.rs`. `ci status`, `pr view` and (WP5) a merge
+  with an explicit CI trust gate differ only in the `ProjectionRequest` they
+  pass: which `Tier`, whether earlier revisions are collected, and the
+  caller's own coverage. The module is bin-local because it renders
+  (`crate::output`, the stdout-guarding `println!`) and reads the
+  `--require-ci-trust` floor; nothing in it belongs in `ngit::ci`.
 - **`Target::select` splits rather than filters.** It now returns the
   current runs, the runs of superseded revisions, and `revision_matched`,
   computed from *this target's* runs rather than the whole query result.
@@ -550,13 +551,13 @@ reference left open:
 
 ### WP5 implementation decisions
 
-- **One shortfall, two consequences.** `CiReport::gate_failure` was split:
+- **One shortfall shared by every gate.** `CiReport::gate_failure` was split:
   `shortfall(floor)` returns the bare reason a current result does not meet a
   floor — not concluded, not green, or a weakest run below it — and the
-  gate is that reason prefixed with the flag that demanded it. `pr merge`'s
-  warning is the same call at the default floor. The two surfaces therefore
-  cannot drift into disagreeing about what "below the floor" means, and the
-  refusal wording `ci status` already emits is unchanged.
+  gate is that reason prefixed with the flag that demanded it. Merge and
+  `ci status` therefore cannot drift into disagreeing about what "below the
+  floor" means, and the refusal wording `ci status` already emits is
+  unchanged.
 - **One green predicate, and every surface calls it.** `is_green` decides
   which conclusions pass; the `pr list` glyph reads it directly and
   `shortfall` reads it for the rolled-up conclusion, so the set of results
@@ -571,21 +572,14 @@ reference left open:
   CI is green" is not a licence to block on a workflow that decided it had no
   work. `cancelled` is not green — nothing ran to completion — and neither is
   a target that has not concluded at all.
-- **The unnamed floor is `operationally-associated`.** The design fixed the
-  floor only for an explicit `--require-ci-trust`; the warning needs one
-  without a flag. It shares `pr list`'s, as `DEFAULT_TRUST_FLOOR`, so a row
-  that renders `✓` is never a merge that warns and `✓?` is never a merge that
-  is silent. Both call sites read the constant.
-- **A target CI was never asked about does not warn; one whose CI describes
-  another revision does.** `state: "none"` covers both, and only the first is
-  an absence of interest: warning there would fire on every merge in every
-  repository without CI. The second is `revision_matched: false` — CI ran for
-  this PR, just not for what is being merged — which is exactly what a
-  maintainer must not have to infer from silence, so it warns in its own
-  words. An explicit `--require-ci-trust` refuses either: a caller that
-  demanded a floor asked for a result, and there is none. A *running* target
-  also warns: it is the same "has not concluded" shortfall as `stale`, and
-  merging while CI is in flight is the case the warning exists for.
+- **The list's unnamed floor is `operationally-associated`.** `pr list` reads
+  `DEFAULT_TRUST_FLOOR` to distinguish `✓` from `✓?`. Merge evaluates CI only
+  when the caller explicitly supplies `--require-ci-trust`.
+- **A demanded floor requires a current result.** `state: "none"` covers both
+  a target CI was never asked about and one whose CI describes only another
+  revision. An explicit `--require-ci-trust` refuses either because the caller
+  requested evidence and no current result meets the floor. A running or
+  stale target is likewise not concluded and is refused.
 - **An unsettled trust context fails the floor.** `shortfall` used to return
   the "meets the floor" answer when the rollup had no classification, so a
   `TrustResolution::Loading` would have passed the gate silently. Both tiers
@@ -594,20 +588,17 @@ reference left open:
   the absence of a classification is evidence that has not settled, never
   evidence that met it.
 - **The gate runs before anything the command changes.** It is evaluated
-  immediately after the open/draft status check, ahead of the branch creation
-  and the `git merge`, so a refusal leaves no local branch, no merge commit
-  and no status event. Like `ci status`, the refusal is emitted as the
+  after proposal resolution but ahead of branch creation and `git merge`, so
+  a refusal leaves no local branch, no merge commit and no status event. Like
+  `ci status`, the refusal is emitted as the
   command's document through `output::finish_and_exit(1)` rather than
   `main`'s error path, which would replace the runs that explain it with
   `{"command_status":"error"}`.
-- **`ci_warning` is a field, always present.** The human output prints the
-  caveat; the JSON document carries it as `ci_warning`, `null` when there is
-  nothing to say, so a consumer never branches on a missing key — the same
-  rule the `pr list` row follows. It is always `null` when
-  `--require-ci-trust` was passed: there a shortfall is the refusal in
-  `error`, never a warning. `command_status`/`action` are derived from the
-  presence of `error` (`ok`/`merged` against `error`/`refused`), since a refusal is the
-  one outcome with an error and no published `event`.
+- **The gated document retains `ci_warning: null`.** A demanded floor produces
+  either a successful merge or the refusal in `error`, never a warning.
+  `command_status`/`action` are derived from the presence of `error`
+  (`ok`/`merged` against `error`/`refused`); neither outcome publishes an
+  `event`.
 - **The summary is the current revision only.** `include_outdated` is false,
   as in `ci status`: a merge is a decision about the revision being merged,
   and earlier revisions are `pr view`'s business. The document therefore
@@ -615,27 +606,11 @@ reference left open:
   where the surface groups by revision. The section itself is printed only
   when the PR has a result, as in `pr view`; a refusal prints its reason
   regardless.
-- **No new `--offline`.** `pr merge` already has one, and the tier falls
-  straight out of it: `Tier::Cache` offline, `Tier::Full` otherwise, with the
-  caller-side coverage taken from the fetch report exactly as `ci status`
-  takes it.
-- **An advisory merge stays on the full tier.** The review that produced the
-  identity-lookup bounds (WP2 decisions) asked whether a default,
-  non-blocking `pr merge` should default to the cache tier instead, to keep
-  it off the network. It should not. The cache tier skips the domain ladder
-  by definition, so every coordinator whose association *is* the repository's
-  listed infrastructure would fall to "no known context" and the unflagged
-  merge would warn about a correctly configured repository — a false alarm,
-  which WP6 already treats as worse than silence for an advisory check, and
-  which would invert what the warning means. The tier also answers "may this
-  surface go to the network at all", which is what `--offline` says, rather
-  than "is this output advisory"; splitting it by the presence of
-  `--require-ci-trust` would introduce an unstated third tier where quoted
-  requests are fetched but identities are not. Non-blocking behaviour is
-  preserved by the bound instead: the identity step costs at most one
-  five-second budget however many domains a publisher supplies, on a command
-  that already performs a repository fetch. `pr merge --offline` remains
-  cache tier.
+- **Both merge spellings share `--offline`.** For an explicitly requested
+  gate, the tier follows the flag directly: `Tier::Cache` offline,
+  `Tier::Full` otherwise, with caller-side coverage taken from the fetch report
+  exactly as `ci status` takes it. Without a requested gate, merge does not
+  build a CI projection at either tier.
 
 Fetching: the consumed CI kinds (9840–9844, 39842) are one further repository
 `#a` filter in `client::get_filter_ci_events`, added to the repository-scope
@@ -746,8 +721,8 @@ own — and its cost is one extra filter per repository relay.
   The caveat says the event may be ignored and that only the operator can
   accept another key. It is a `warning` field — always present, `null` when
   there is nothing to say, and carrying every caveat joined by newlines when
-  there is more than one — following the rule `pr merge`'s `ci_warning` and
-  the `pr list` row already follow.
+  there is more than one — following the structured publishing-result pattern
+  used by other commands.
 - **JSON is `entity: "ci"` with the action naming the control**:
   `service-requested`, `service-stopped`, `triggered`. The published event is
   an `nevent`, the coordinator an `npub` and the perspective an `naddr`, as
@@ -846,15 +821,14 @@ explains `?` and points at `ngit pr view`; column and footer appear only when
 a listed PR has CI. No network beyond the shared fetch; no NIP-05 lookups
 from the list path.
 
-### `ngit pr merge <id>`
+### `ngit pr merge <id>` / `ngit merge <id>`
 
-Print the Checks summary before merging. `--require-ci-trust` as above;
-without it, warn (non-blocking) when the current result is failing,
-unfinished (running or stale), below the floor, or describes only a
-superseded revision. Both read the same shortfall, so a merge that warns is
-exactly a merge `--require-ci-trust=operationally-associated` would have
-refused. The JSON document carries the shared `ci` object and a `ci_warning`
-field.
+The top-level spelling is a compatibility alias for the canonical command in
+the `pr` namespace. With `--require-ci-trust`, both print the Checks summary and
+apply the gate above.
+Without the flag they perform the local merge without fetching or projecting
+CI. Neither spelling publishes an applied-status event; the later Git push
+publishes repository state and proposal status together.
 
 ### JSON shape (all surfaces)
 
@@ -920,13 +894,25 @@ only for a patch thread later upgraded to a PR. A refused
 `--require-ci-trust` sets `command_status: "error"` and adds `error`, keeping
 the `ci` object that explains the refusal.
 
-`ngit pr merge` embeds the same object in its own document, beside
-`ci_warning` — the non-blocking caveat as a field, `null` when there is none:
+Either merge spelling embeds the same object when a CI trust gate was
+requested. `ci_warning` remains `null`, and there is no `event` because the
+local merge publishes nothing:
 
 ```jsonc
 { "command_status": "ok", "action": "merged", "entity": "pr", "id": "<nevent>",
-  "event": "<nevent>", "ci": { "...": "..." }, "ci_warning": null }
+  "ci": { "...": "..." }, "ci_warning": null }
 ```
+
+Without a requested gate, a successful command retains its stable command and
+PR identity fields while omitting `ci`, `ci_warning`, and `event`:
+
+```jsonc
+{ "command_status": "ok", "action": "merged", "entity": "pr", "id": "<nevent>" }
+```
+
+A merge handed back for manual conflict resolution has the same shape with
+`action: "conflicted"`; it exits successfully because the merge remains in
+progress for the user to complete.
 
 A refusal is `command_status: "error"`, `action: "refused"`, an `error`, no `event`,
 and `ci_warning: null`.
@@ -964,19 +950,17 @@ on WP1.
   signer with no context, the cache tier under `--offline`, one signer
   classified identically by `pr view` and `ci status`, and a row per glyph
   state.
-- **WP5 — `pr merge` gating** *(done)*: the Checks summary before the merge,
-  the non-blocking warning at the default floor, and `--require-ci-trust`
-  refusing before anything is changed. Integration tests
+- **WP5 — merge gating** *(done)*: the Checks summary before the merge and
+  `--require-ci-trust` refusing before anything is changed. Integration tests
   (`tests/pr_merge_ci.rs`): the blocked matrix (failing, no known context,
   stale, a stale workflow beside a successful one, no CI) each with the
   unflagged merge as a control and the refusal keeping the runs that explain
-  it, the allowed matrix (control-history
+  it; the allowed matrix (control-history
   coverage and a validated manual trigger, each isolated from the other's
-  route, plus the cache tier under `--offline`), and the warning path —
-  failing, running, a superseded revision, and a PR with no CI that must not
-  warn. A `neutral` and a `skipped` conclusion are exercised on every surface
-  that reads the green predicate — `ci status`, `pr list`, `pr view` and both
-  `pr merge` paths — asserting the one verdict.
+  route, plus the cache tier under `--offline`); and unflagged merges that do
+  not project CI. A `neutral` and a `skipped` conclusion are exercised on
+  every surface that reads the green predicate — `ci status`, `pr list`,
+  `pr view` and merge — asserting the one verdict.
 - **WP6 — maintainer controls** *(done)*: `ngit ci request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.

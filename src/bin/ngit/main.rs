@@ -300,17 +300,12 @@ async fn main() {
                     )
                     .await
                 }
-                PrCommands::Merge {
-                    id,
-                    squash,
-                    require_ci_trust,
-                    offline,
-                } => {
+                PrCommands::Merge(args) => {
                     sub_commands::pr_merge::launch(
-                        id,
-                        *squash,
-                        *require_ci_trust,
-                        *offline,
+                        args.id.as_deref(),
+                        args.offline,
+                        args.require_ci_trust,
+                        args.exclude_description,
                         signer_params,
                     )
                     .await
@@ -549,7 +544,7 @@ async fn main() {
             }
             Commands::Update(args) => sub_commands::self_update::launch(args).await,
             Commands::Merge(args) => {
-                sub_commands::merge::launch(
+                sub_commands::pr_merge::launch(
                     args.id.as_deref(),
                     args.offline,
                     args.require_ci_trust,

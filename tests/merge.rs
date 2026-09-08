@@ -1,6 +1,6 @@
-//! End-to-end coverage of the top-level `ngit merge` command.
+//! End-to-end coverage of `ngit pr merge` and its `ngit merge` alias.
 //!
-//! `ngit merge` creates a no-ff merge commit of a PR branch onto the
+//! Both spellings create a no-ff merge commit of a PR branch onto the
 //! repository's default branch with a `Merge #<id>: <title>` subject, records
 //! the PR's nevent and a `PR-Author:` trailer (npub always; display name only
 //! when the author's kind-0 metadata is cached), plus (unless
@@ -26,7 +26,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use nostr::nips::nip19::ToBech32;
+use nostr::prelude::{Filter, FromBech32, Kind, Nip19Event, ToBech32};
+use serde_json::Value;
 use test_harness::{CloneLogin, Harness, PublishRepoOpts, PublishedPr, PublishedRepo, Repo};
 
 struct Setup {
@@ -219,6 +220,51 @@ async fn current_branch_at(repo: &Repo, dir: &Path) -> Result<String> {
         .to_string())
 }
 
+#[derive(Debug, PartialEq)]
+struct LocalGitState {
+    current_branch: String,
+    head: String,
+    branch_refs: Vec<u8>,
+}
+
+async fn local_git_state(repo: &Repo) -> Result<LocalGitState> {
+    Ok(LocalGitState {
+        current_branch: current_branch(repo).await?,
+        head: rev_parse(repo, "HEAD").await?,
+        branch_refs: git_stdout_at(
+            repo,
+            repo.dir(),
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+            "git for-each-ref refs/heads",
+        )
+        .await?,
+    })
+}
+
+async fn assert_refusal_preserves_local_state(
+    repo: &Repo,
+    out: &std::process::Output,
+    expected: &LocalGitState,
+    label: &str,
+) -> Result<()> {
+    assert!(
+        !out.status.success(),
+        "{label} must refuse the proposal\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(
+        &local_git_state(repo).await?,
+        expected,
+        "{label} must not change HEAD or any local branch ref",
+    );
+    Ok(())
+}
+
 /// Full commit message (subject + body) of `<rev>`.
 async fn commit_message(repo: &Repo, rev: &str) -> Result<String> {
     let out = repo
@@ -260,6 +306,15 @@ async fn run_merge_at(repo: &Repo, dir: &Path, args: &[&str]) -> Result<std::pro
     let mut command = repo.ngit(argv);
     command.current_dir(dir);
     command.output().await.context("failed to spawn ngit merge")
+}
+
+async fn run_pr_merge(repo: &Repo, args: &[&str]) -> Result<std::process::Output> {
+    let mut argv = vec!["pr", "merge"];
+    argv.extend_from_slice(args);
+    repo.ngit(argv)
+        .output()
+        .await
+        .context("failed to spawn ngit pr merge")
 }
 
 async fn add_linked_worktree(repo: &Repo, dir: &Path, branch: &str) -> Result<()> {
@@ -812,7 +867,87 @@ async fn merge_without_id_off_pr_branch_fails() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 6. merge without id on a *bare* `pr/<name>` branch the current user pushed
+// 6. both spellings refuse proposals whose lifecycle is closed or applied.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn canonical_and_alias_refuse_closed_and_applied_prs() -> Result<()> {
+    let Setup {
+        harness: _h,
+        _published: _,
+        prs,
+        publisher,
+    } = setup().await?;
+    let closed = &prs[0];
+    let applied = &prs[1];
+
+    let closed_id = closed.event_id.to_hex();
+    let close = publisher
+        .ngit(["pr", "close", &closed_id])
+        .output()
+        .await
+        .context("failed to spawn ngit pr close")?;
+    anyhow::ensure!(
+        close.status.success(),
+        "ngit pr close exited {:?}\nstdout: {}\nstderr: {}",
+        close.status,
+        String::from_utf8_lossy(&close.stdout),
+        String::from_utf8_lossy(&close.stderr),
+    );
+
+    let applied_id = applied.event_id.to_hex();
+    let first_merge = run_pr_merge(&publisher, &[&applied_id]).await?;
+    anyhow::ensure!(
+        first_merge.status.success(),
+        "initial ngit pr merge exited {:?}\nstdout: {}\nstderr: {}",
+        first_merge.status,
+        String::from_utf8_lossy(&first_merge.stdout),
+        String::from_utf8_lossy(&first_merge.stderr),
+    );
+    publisher.nostr_push(["origin", "main"]).await?;
+
+    let state_before = local_git_state(&publisher).await?;
+    let closed_merge = run_pr_merge(&publisher, &[&closed_id]).await?;
+    assert_refusal_preserves_local_state(
+        &publisher,
+        &closed_merge,
+        &state_before,
+        "canonical ngit pr merge of a closed PR",
+    )
+    .await?;
+
+    let closed_alias = run_merge(&publisher, &[&closed_id]).await?;
+    assert_refusal_preserves_local_state(
+        &publisher,
+        &closed_alias,
+        &state_before,
+        "top-level ngit merge of a closed PR",
+    )
+    .await?;
+
+    let applied_canonical = run_pr_merge(&publisher, &[&applied_id]).await?;
+    assert_refusal_preserves_local_state(
+        &publisher,
+        &applied_canonical,
+        &state_before,
+        "canonical ngit pr merge of an applied PR",
+    )
+    .await?;
+
+    let applied_merge = run_merge(&publisher, &[&applied_id]).await?;
+    assert_refusal_preserves_local_state(
+        &publisher,
+        &applied_merge,
+        &state_before,
+        "top-level ngit merge of an applied PR",
+    )
+    .await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 7. merge without id on a *bare* `pr/<name>` branch the current user pushed
 //    themselves (via `git push -u origin pr/<name>`, which has no `(<id>)`
 //    shorthand) infers the PR.
 //
@@ -824,7 +959,7 @@ async fn merge_without_id_off_pr_branch_fails() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
+async fn pr_merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -882,10 +1017,10 @@ async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
     assert_eq!(current_branch(&author).await?, branch);
 
     // Merge with no id — must infer the PR from the self-submitted bare branch.
-    let out = run_merge(&author, &[]).await?;
+    let out = run_pr_merge(&author, &[]).await?;
     anyhow::ensure!(
         out.status.success(),
-        "ngit merge (no id) on a self-submitted bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
+        "ngit pr merge (no id) on a self-submitted bare pr/ branch exited {:?}\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -909,16 +1044,25 @@ async fn merge_without_id_infers_self_submitted_bare_pr_branch() -> Result<()> {
         "the merge commit's second parent should be the pushed PR tip",
     );
 
+    let applied = harness
+        .grasp("repo")
+        .events(Filter::new().kind(Kind::GitStatusApplied))
+        .await?;
+    assert!(
+        applied.is_empty(),
+        "a local PR merge must not publish an applied status before Git push",
+    );
+
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// 6b. a merge that conflicts is left in progress for manual resolution rather
-//     than aborted as a hard error. `ngit merge` exits 0, the repository is
-//     left mid-merge (MERGE_HEAD present) on the default branch, and the
-//     prepared MERGE_MSG carries ngit's composed message (subject + nevent +
-//     PR-Author trailer) so the user's eventual `git commit` keeps the nostr
-//     provenance rather than git's generic conflict message.
+// 8. a merge that conflicts is left in progress for manual resolution rather
+//    than aborted as a hard error. `ngit merge` exits 0, the repository is left
+//    mid-merge (MERGE_HEAD present) on the default branch, and the prepared
+//    MERGE_MSG carries ngit's composed message (subject + nevent + PR-Author
+//    trailer) so the user's eventual `git commit` keeps the nostr provenance
+//    rather than git's generic conflict message.
 // ---------------------------------------------------------------------------
 
 /// Read the contents of a git-relative path (e.g. `MERGE_HEAD`, `MERGE_MSG`)
@@ -948,7 +1092,7 @@ async fn read_git_path(repo: &Repo, name: &str) -> Result<Option<String>> {
 }
 
 #[tokio::test]
-async fn conflicting_merge_is_left_in_progress_for_manual_resolution() -> Result<()> {
+async fn conflicting_pr_merge_is_left_in_progress_for_manual_resolution() -> Result<()> {
     let Setup {
         harness: _h,
         _published: _,
@@ -973,14 +1117,32 @@ async fn conflicting_merge_is_left_in_progress_for_manual_resolution() -> Result
 
     // The merge conflicts. ngit must NOT treat this as a hard failure: it
     // hands the in-progress merge back to the user, exiting 0.
-    let out = run_merge(&publisher, &[&pr.event_id.to_hex()]).await?;
+    let out = run_pr_merge(&publisher, &[&pr.event_id.to_hex(), "--json"]).await?;
     anyhow::ensure!(
         out.status.success(),
-        "ngit merge should exit 0 and leave the conflicted merge in progress, got {:?}\nstdout: {}\nstderr: {}",
+        "ngit pr merge should exit 0 and leave the conflicted merge in progress, got {:?}\nstdout: {}\nstderr: {}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    let json: Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("conflicted merge stdout is not JSON: {:?}", out.stdout))?;
+    assert_eq!(json["command_status"], "ok", "{json}");
+    assert_eq!(json["action"], "conflicted", "{json}");
+    assert_eq!(json["entity"], "pr", "{json}");
+    let id = json["id"]
+        .as_str()
+        .with_context(|| format!("conflicted merge id is not a string: {json}"))?;
+    assert_eq!(
+        Nip19Event::from_bech32(id)
+            .context("conflicted merge id is not a valid nevent")?
+            .event_id,
+        pr.event_id,
+        "conflicted merge must identify the proposal: {json}",
+    );
+    assert!(json.get("ci").is_none(), "{json}");
+    assert!(json.get("ci_warning").is_none(), "{json}");
+    assert!(json.get("event").is_none(), "{json}");
 
     // Still on the default branch.
     assert_eq!(

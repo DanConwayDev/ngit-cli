@@ -92,6 +92,15 @@ publication.
 
 ### Changed
 
+- The top-level `ngit merge` command is now a compatibility alias for the
+  canonical `ngit pr merge` command. Both spellings create the same local
+  no-ff merge on the PR's declared target (or repository default), share
+  conflict handling and options, and refuse closed or already-applied PRs
+  before changing Git state. Preparing the local merge no longer requires a
+  maintainer identity; the later Git push enforces repository authority and
+  publishes the Nostr applied status. Ungated JSON keeps the PR `id`, `entity`,
+  and `action` (`merged` or `conflicted`) while omitting the unrequested CI
+  projection and unpublished event.
 - JSON command-result envelopes now use top-level `command_status: "ok" |
   "error"` instead of the ambiguous `status` field or `ok` boolean. Nested
   fields continue to describe domain results, so a successful `ci status`
@@ -128,6 +137,12 @@ publication.
 - Repeat `ngit init` on a repository that already has a state event republishes it as a fresh event (identical refs, new event id) through the same acceptance-gated flow as a push, so relays and git servers newly added to the announcement receive the repository state immediately instead of only on the next `git push`. Establishing the state during init now requires at least one reachable git server.
 - `ngit init` on a repository with a pre-existing reachable `origin` now records `refs/remotes/origin/*` remote-tracking refs for the branches covered by the published state, so ahead/behind reporting against the repointed nostr `origin` is correct before the first push.
 - The remote helper no longer creates, updates or deletes `refs/remotes/<remote>/*` tracking refs itself: git's own transport layer performs those updates for every ref the helper reports `ok`, mapping the destination through `remote.<name>.fetch`. The helper's only remaining local ref bookkeeping is deleting legacy tag tracking refs written by old ngit versions. Two behaviours deliberately change to match vanilla git semantics: a remote whose `remote.<name>.fetch` refspec has been narrowed no longer receives tracking refs for pushed branches outside that refspec, and `git push <nostr-url>` with no configured remote now completes without the helper's previous bookkeeping error, writing no tracking refs.
+
+### Removed
+
+- Remove the former `ngit pr merge --squash` option so the canonical command
+  and its top-level alias expose one identical no-ff merge interface. Use Git's
+  manual squash workflow when a single-parent result is desired.
 
 ### Fixed
 
