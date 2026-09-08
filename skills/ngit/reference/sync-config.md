@@ -1,54 +1,49 @@
 # Sync, flags, and configuration
 
-Part of the ngit skill. Read this when syncing refs, choosing flags, or tuning git config.
+Read when syncing refs, choosing flags, or tuning git config.
+Guides: https://ngit.dev/configuration and https://ngit.dev/troubleshooting
 
 ## Sync
 
 ```bash
-ngit sync --json                 # sync all refs from nostr state to git servers
-ngit sync --ref-name main --json # sync specific ref
+ngit sync --json                  # make git servers reflect the Nostr state for every ref
+ngit sync --ref-name main --json  # one ref
 ```
 
-## Key flags
+## Global flags
 
-| Flag                  | Description                            |
-| --------------------- | -------------------------------------- |
-| `-d`, `--defaults`    | Non-interactive; use sensible defaults |
-| `--offline`           | Local cache only, skip network         |
-| `--json`              | Structured output (ngit commands only) |
-| `--repo <TARGET>`     | Select remote, naddr, or nostr URL     |
-| `--repo-relay-only`   | Publish only to repository relays      |
-| `--signer <ALIAS|NPUB|NOSTR-DISPLAY-NAME>` | Use a stored signer for one ngit command |
-| `-n`, `--nsec <NSEC>` | Provide nsec or hex private key inline |
-| `--nsec-file <PATH>`  | Read a one-shot key from a private file|
-| `--nbunksec <NBUNKSEC>` | Provide an established bunker session inline |
-| `--nbunksec-file <PATH>` | Read a one-shot bunker session from a private file |
-| `-f`, `--force`       | Bypass safety guards                   |
-| `-v`, `--verbose`     | Verbose output                         |
+These accept any command position. `--offline` is per command; check
+`ngit <command> --help`.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--json` | One JSON document on stdout (ngit commands only) |
+| `-d`, `--defaults` | Non-interactive; accept defaults |
+| `-q`, `--quiet` | Hide non-essential stderr progress (not combinable with `-v`) |
+| `--repo <REMOTE\|NADDR\|NOSTR-URL>` | Select the target repository |
+| `--signer <ALIAS\|NPUB\|NAME>` | Use a stored signer for this command |
+| `--nsec-file`, `--nbunksec-file <PATH>` | One-shot key or bunker session from a private file (`--nsec`, `--nbunksec` take inline values) |
+| `--repo-relay-only` | Publish only to repository relays |
+| `-f`, `--force` | Bypass safety guards |
 
 ## git config
 
 ```bash
-ngit --customize                          # show all options
-git config nostr.repo-relay-only true     # don't broadcast to personal relays
-git config nostr.auto-pr-branches true    # fetch every open and draft PR branch
-git config nostr.http-io-timeout-ms 600000 # allow large GRASP pushes
-git config nostr.secret-storage file      # use ngit's user-only credential file
-git config nostr.signer alice             # select the local signer, including for git push
-git config nostr.signer-alias.alice npub1... # portable alias-to-npub mapping
-git -c nostr.signer=alice push origin pr/topic # select a signer for one Git command
-NGIT_CACHE_DIR=/writable/path ngit repo --json # override the global event-cache directory
+ngit --customize                                # list every option
+git config nostr.signer alice                   # repository signer, including for git push
+git config nostr.signer-alias.alice npub1...    # portable alias-to-npub mapping
+git config nostr.secret-storage file            # auto | file | git-config
+git config nostr.repo-relay-only true
+git config nostr.auto-pr-branches true          # fetch every open and draft PR as a pr/* branch (default false)
+git config nostr.http-io-timeout-ms 600000      # allow large grasp pushes
+NGIT_CACHE_DIR=/writable/path ngit repo --json  # override the global event-cache directory
 ```
 
-`nostr.auto-pr-branches` defaults to `false` and follows normal Git config
-precedence, so repository-local config overrides global config. Open and draft
-PRs are not advertised as `pr/*` branches until
-`ngit pr checkout <ID|nevent>` creates the matching local branch. That branch
-continues to work with `git fetch`, `git pull`, and `git push`. Set the option
-to `true` (and add `--global` if desired) to restore automatic PR branches. Run
-`git fetch --prune` once to remove PR branches fetched by an older ngit
-version; unset config uses the new default in both fresh and existing clones.
-To enable automatic PR branches during an initial clone, use
-`git clone --config nostr.auto-pr-branches=true <nostr-url>`.
+`nostr.auto-pr-branches` follows normal git config precedence. With the
+default `false`, PRs appear as branches only after `ngit pr checkout`; run
+`git fetch --prune` once to drop branches fetched by an older version, or use
+`git clone --config nostr.auto-pr-branches=true <nostr-url>` to opt in from
+the start.
 
-If the global cache directory is unavailable, ngit falls back to an in-memory cache. Repository caches do not: the Git common directory must be writable.
+If the global cache directory is unavailable ngit falls back to an in-memory
+cache; the repository's git common directory must still be writable.

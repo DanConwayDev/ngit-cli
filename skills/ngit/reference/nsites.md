@@ -1,130 +1,71 @@
 # Nsites — publish static sites
 
-Part of the ngit skill. Read this before publishing an already-built website
-with `ngit nsite` or diagnosing its Blossom uploads and NIP-5A manifest.
+Read before publishing an already-built website with `ngit nsite` or
+diagnosing its Blossom uploads and NIP-5A manifest.
+Guide: https://ngit.dev/releases/nsites (nsyte comparison, PR previews).
 
 ## Publish
 
-Pass the build output directory, not the source tree. Ngit includes every
-regular file, does not run a build or apply ignore files, and rejects symlinks,
+Pass the build output directory, not the source tree. ngit uploads every
+regular file, runs no build, applies no ignore files, and rejects symlinks,
 unsafe paths, and filenames without extensions.
 
-Ngit automatically reads nsyte's JSON `.nsite/config.json`, so an existing
-nsyte project can normally replace `nsyte deploy dist` with:
-
 ```bash
-ngit nsite publish dist --json
-```
-
-Supported config fields are `id`, `title`, `description`, `source`, `fallback`,
-`servers`, and `relays`. Use `--config PATH` for a different JSON file or
-`--no-config` to ignore it. Explicit CLI values win; supplying any repeatable
-`--blossom-server` or `--relay` values replaces that config array. The format
-is JSON, not YAML.
-
-```bash
-# Root kind-15128 site; discover servers from the account's kind-10063 event
-ngit nsite publish dist --title "My site" --json
-
-# Named kind-35128 site, using explicit Blossom servers and an extra relay
-ngit nsite publish dist \
-  --id docs \
+ngit nsite publish dist --json                               # reads nsyte's .nsite/config.json when present
+ngit nsite publish dist --title "My site" --json             # root kind-15128 site
+ngit nsite publish dist --id docs \
   --description-file site-description.txt \
   --source "nostr://<npub>/<identifier>" \
   --blossom-server https://blossom.example.com \
   --blossom-server https://mirror.example.com \
-  --relay wss://relay.example.com \
-  --json
-```
-
-Use `--title`, either `--description` or `--description-file`, and `--source`
-for manifest metadata. `--source` accepts `https://` or `nostr://`; omit it to
-infer the selected public repository. Ngit does not infer a private repository
-source into the public manifest. NIP-5A has no logo tag, so put a conventional
-`favicon.ico` or `favicon.svg` in the build output instead.
-
-`fallback` or `--fallback SITE_PATH` maps an existing HTML file to `/404.html`
-without another Blossom upload. The path must exist in the build output and
-have an HTML MIME type; it replaces an existing `/404.html` mapping. Configured
-or explicit relays are used for discovery and publication and emitted as
-manifest `relay` hints.
-
-Omit `--blossom-server` to use the active account's latest kind-10063 server
-list. Supplying the flag overrides discovery; repeat it for replication. The
-default `--concurrency 4` is a global limit across presence checks and uploads,
-not a per-server limit. Values from 1 through 64 are accepted.
-
-Nsyte's profile, relay-list, server-list, and NIP-89 app-handler publication
-options remain future work. Enabled `publishProfile`, `publishRelayList`,
-`publishServerList`, or `publishAppHandler` values produce a warning while the
-site is still published. Use ngit's account and signer options instead of any
-nsyte signer field.
-
-## Signers and CI
-
-Use an existing account alias for an ordinary publication:
-
-```bash
+  --relay wss://relay.example.com --json                     # named kind-35128 site
 ngit --signer <alias> nsite publish dist --json
+ngit --nbunksec-file /run/secrets/publisher-nbunksec nsite publish dist --json   # unattended NIP-46
 ```
 
-For unattended NIP-46 publication, reuse an established connection and keep
-the secret out of process arguments:
+- Config: `.nsite/config.json` (JSON, not YAML) fields `id`, `title`,
+  `description`, `source`, `fallback`, `servers`, and `relays` are read;
+  `--config PATH` selects another file and `--no-config` ignores it. Explicit
+  CLI values win, and any repeated `--blossom-server` or `--relay` replaces
+  that whole config array. Unsupported nsyte publication options
+  (`publishProfile`, `publishRelayList`, `publishServerList`,
+  `publishAppHandler`) produce a warning; nsyte signer fields are ignored.
+- Metadata: `--title`, `--description` or `--description-file`, and
+  `--source` (`https://` or `nostr://`; omitted, ngit infers the selected
+  public repository and never a private one). NIP-5A has no logo tag; ship a
+  `favicon.ico` or `favicon.svg` in the build output.
+- `--fallback SITE_PATH` (or config `fallback`) maps an existing HTML file in
+  the output to `/404.html` without another upload.
+- Servers: omit `--blossom-server` to use the account's latest kind-10063
+  list; repeat it for replication. `--concurrency` (default 4, range 1–64) is
+  a global limit across presence checks and uploads.
 
-```bash
-ngit --nbunksec-file /run/secrets/publisher-nbunksec \
-  nsite publish dist \
-  --title "My site" \
-  --description "Published by CI" \
-  --json
-```
+## Guarantees
 
-Read `reference/accounts.md` before creating, exporting, or storing signer
-credentials. Do not establish a fresh bunker pairing on each CI run.
+ngit snapshots the directory before network work, deduplicates content, checks
+every blob on every selected server, and uploads missing copies with BUD-11
+authorization. It signs the manifest only after every blob has at least one
+confirmed copy, so a failed deployment cannot point the live manifest at
+missing content. A server that fails three consecutive initial checks is
+skipped for the rest of that pass while the others continue.
 
-## Publication guarantees
+Rerun the same command after a failure: blobs already on a server are
+confirmed with `HEAD` and skipped, so continuation is per blob and server. An
+unchanged deployment reuses the current manifest without a new signature or
+relay write.
 
-Ngit snapshots the directory before network work and deduplicates identical
-content. It checks every blob on every selected server, signs BUD-11 upload
-authorization in batches of at most twenty missing hashes, and attempts to
-replicate each blob to every selected server. It signs the manifest only after
-every blob has at least one copy confirmed with matching size and MIME type. A
-failed deployment therefore cannot replace the live manifest with one that
-points at known-missing content.
+## JSON
 
-Presence checks share the global `--concurrency` limit. After three consecutive
-transient failures from one server, ngit skips that server's queued initial
-checks while continuing the others; `404` remains an ordinary upload
-candidate. Human progress distinguishes metadata differences from failed
-checks. These initial-check diagnostics remain in JSON but do not produce a
-final replication warning because no storage operation was attempted; failed
-uploads and post-upload verification still warn per server.
+Check `command_status`, then:
 
-Rerun the same command after a failure. Content-addressed blobs already stored
-on a server are confirmed with `HEAD` and skipped, so continuation works at
-whole-blob/server granularity. Blossom does not define resumable partial PUTs;
-an interrupted individual blob must be sent again unless the server completed
-it and the next presence check confirms it.
+- `result.changed`: publication versus an unchanged no-op;
+- `result.config_path`, `result.fallback`, `result.relays`: resolved settings;
+- `result.blossom.blobs[].servers[]`: each blob and server outcome;
+- `result.publication.relays[]`: manifest acknowledgements (at least one
+  relay must accept);
+- `warnings[]`: unknown MIME types, unsupported config publications, and
+  failed uploads or post-upload verification per server.
 
-An unchanged deployment reuses the current manifest without another manifest
-signature or relay write. A changed deployment waits for a strictly later
-observed second before signing once, ensuring that the new replaceable event
-wins without rapid relay writes or event-ID mining.
-
-## Interpreting JSON
-
-Use `--json` for automation. Check the terminal envelope's `ok` value, then
-inspect:
-
-- `result.changed` to distinguish publication from an unchanged no-op;
-- `result.config_path`, `result.fallback`, and `result.relays` for resolved
-  nsyte-compatible settings;
-- `result.blossom.blobs[].servers[]` for each blob/server outcome;
-- `result.publication.relays[]` for manifest acknowledgements;
-- `warnings[]` for unknown MIME types and unsupported future config
-  publications.
-
-On a Blossom failure, inspect `error.details.blobs` and
-`error.details.possible_orphan_blobs`, then rerun after correcting the server
-or signer problem. At least one relay must acknowledge the manifest, and every
-unique blob must be confirmed on at least one selected Blossom server.
+On a Blossom failure inspect `error.details.blobs` and
+`error.details.possible_orphan_blobs`, fix the server or signer problem, and
+rerun.

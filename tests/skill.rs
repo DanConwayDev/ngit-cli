@@ -120,7 +120,7 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
     fs::create_dir_all(canonical.parent().context("canonical skill has a parent")?)?;
     fs::write(
         &canonical,
-        "---\nname: ngit\nversion: \"0.1\"\n---\n\nolder\n",
+        "---\nname: ngit\nversion: \"0.1\"\n---\n\nstale canonical skill body\n",
     )?;
     let canonical_reference = repo.dir().join("skills/ngit/reference");
     fs::create_dir_all(&canonical_reference)?;
@@ -155,7 +155,7 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
         String::from_utf8_lossy(&install.stderr)
     );
 
-    assert!(!fs::read_to_string(&canonical)?.contains("older"));
+    assert!(!fs::read_to_string(&canonical)?.contains("stale canonical skill body"));
     assert!(!fs::read_to_string(canonical_reference.join("prs.md"))?.contains("placeholder"));
     for relative in [
         ".agents/skills/ngit/SKILL.md",

@@ -1,45 +1,43 @@
-# Repositories — publish, clone, and URLs
+# Repositories — publish, clone, URLs
 
-Part of the ngit skill. Read this when publishing a repository, cloning one, resolving `nostr://` URL forms, or managing maintainers, moderators, and roles.
+Read when publishing or cloning a repository or resolving `nostr://` URL
+forms. Guide: https://ngit.dev/repositories (hosting choices, migrating from
+a forge, mirrors, private repositories).
 
-## nostr:// URLs
+## URLs
 
 ```
 nostr://<npub>/<identifier>
-nostr://<npub>/<relay-hint>/<identifier>   # relay-hint is bare domain, e.g. relay.ngit.dev
+nostr://<npub>/<relay-hint>/<identifier>   # relay-hint is a bare domain, e.g. relay.ngit.dev
 nostr://<user>@<domain>/<identifier>       # NIP-05, only when explicitly provided
-nostr://<domain>/<repository-path>         # NIP-AD sends the full /path URL-encoded to /.well-known/nostr.json?path=
+nostr://<domain>/<repository-path>         # NIP-AD: the full /path is sent URL-encoded to /.well-known/nostr.json?path=
 ```
 
-Standard git commands work directly with these URLs — `git-remote-nostr` resolves them transparently.
-
-## Publishing a repo
+## Publish
 
 ```bash
-ngit init --name "My Project" --description "What it does" -d --json # uses user's preferred grasp server or falls back to defaults
-ngit repo edit --description "New description" --json               # update metadata
-ngit repo --json --offline                                           # view repo info (check nostr_url field)
+ngit init --name "My Project" --description "What it does" --defaults --json   # preferred grasp servers, else ngit defaults
+ngit repo --json --offline                                                     # metadata, nostr_url, roster
 ```
 
-## Cloning
+Hosting flags, metadata edits, and membership: `reference/repo-settings.md`.
+
+## Clone
 
 ```bash
-git clone nostr://<npub>/<relay-hint>/<identifier>   # preferred
-git clone nostr://<npub>/<identifier>                # slower discovery, no relay hint
+git clone nostr://<npub>/<relay-hint>/<identifier>   # relay hint skips discovery
+git clone nostr://<npub>/<identifier>
 git clone nostr://user@domain.com/<identifier>       # NIP-05, only if given to you
-git clone nostr://ngit.dev/ngit.git                  # NIP-AD bare-domain path mapping
+git clone nostr://ngit.dev/ngit.git                  # NIP-AD bare-domain path
 ```
 
-## Settings and membership
+Open and draft PRs are not fetched as branches unless `nostr.auto-pr-branches`
+is `true`; `ngit pr checkout <ID|nevent>` materialises one on demand.
 
-Read `reference/repo-settings.md` before changing hosting, metadata, maintainers,
-moderators, or the selected lead. It explains the distinction between
-grasp-derived and additional infrastructure, targeted edit actions, state
-republication, and the maintainer model.
+## Membership
 
 ```bash
-ngit repo accept --json                       # accept a co-maintainer invitation
-ngit repo accept --grasp-server <url> --json  # …and also host the git data there
+ngit repo accept --json                       # accept an invitation; add --grasp-server <url> to host the git data there too
 ngit repo leave --json                        # end your own role and republish
-ngit repo follow-lead --json                  # retain history and follow the lead
+ngit repo follow-lead --json                  # retain history and follow the resolved lead
 ```
