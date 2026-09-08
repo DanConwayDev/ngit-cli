@@ -269,3 +269,62 @@ async fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
     assert!(!git2::Config::open(&global_config)?.get_bool("nostr.skill-reminders")?);
     Ok(())
 }
+
+/// Release candidates bundled `reference/repo-settings.md`, which was later
+/// merged into `repositories.md`. Upgrading such an install must delete the
+/// stale copy and record the deletion in the guidance commit.
+#[tokio::test]
+async fn upgrade_removes_a_retired_reference_installed_by_a_release_candidate() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let install = repo.ngit(["skill", "install"]).output().await?;
+    assert!(
+        install.status.success(),
+        "skill install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let retired = [
+        ".agents/skills/ngit/reference/repo-settings.md",
+        ".claude/skills/ngit/reference/repo-settings.md",
+    ];
+    for relative in retired {
+        fs::write(repo.dir().join(relative), "superseded reference\n")?;
+    }
+    repo.git_ok(["add", "-A"], "stage the retired reference")
+        .await?;
+    repo.git_ok(
+        ["commit", "-m", "add a release-candidate reference"],
+        "commit the retired reference",
+    )
+    .await?;
+
+    let upgrade = repo.ngit(["skill", "upgrade"]).output().await?;
+    assert!(
+        upgrade.status.success(),
+        "skill upgrade failed: {}",
+        String::from_utf8_lossy(&upgrade.stderr)
+    );
+
+    for relative in retired {
+        assert!(
+            !repo.dir().join(relative).exists(),
+            "{relative} survived the upgrade"
+        );
+    }
+    let committed = repo
+        .git(["show", "--name-status", "--pretty=format:", "HEAD"])
+        .output()
+        .await?;
+    let lines = String::from_utf8(committed.stdout)?;
+    for relative in retired {
+        assert!(
+            lines
+                .lines()
+                .any(|line| line.starts_with('D') && line.ends_with(relative)),
+            "{relative} deletion missing from {lines}"
+        );
+    }
+    let worktree = repo.git(["status", "--porcelain"]).output().await?;
+    assert!(String::from_utf8(worktree.stdout)?.trim().is_empty());
+    Ok(())
+}

@@ -134,6 +134,62 @@ fn reference_paths() -> [&'static str; 16] {
     REFERENCE_PATHS
 }
 
+/// Reference files bundled by earlier ngit versions and since merged into
+/// other references. An upgrade deletes any installed copy so a stale document
+/// cannot outlive the guidance that superseded it, and stages that deletion in
+/// the guidance commit.
+const RETIRED_REFERENCE_FILES: &[&str] = &["repo-settings.md"];
+
+/// Retired reference locations in both discovery paths, mirroring
+/// [`REFERENCE_PATHS`].
+const RETIRED_REFERENCE_PATHS: [&str; 2] = [
+    ".agents/skills/ngit/reference/repo-settings.md",
+    ".claude/skills/ngit/reference/repo-settings.md",
+];
+
+fn is_retired_reference_path(relative: &str) -> bool {
+    RETIRED_REFERENCE_PATHS.contains(&relative)
+}
+
+fn validate_retired_reference_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    if !is_retired_reference_path(relative) {
+        bail!("unexpected retired reference path `{relative}`");
+    }
+    let expected_name = relative
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .expect("retired reference path has a file name");
+    resolve_managed_symlink(root, relative, expected_name, "reference")
+}
+
+/// Installed copies of retired references beside each existing skill,
+/// resolved through any canonical symlink. Only files that exist are returned.
+fn retired_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    for logical in existing_skills {
+        let Some(dir) = logical.rsplit_once('/').map(|(dir, _)| dir) else {
+            continue;
+        };
+        for name in RETIRED_REFERENCE_FILES {
+            let relative = format!("{dir}/reference/{name}");
+            match fs::symlink_metadata(root.join(&relative)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect retired reference `{relative}`")
+                    });
+                }
+            }
+            let path = validate_retired_reference_path(root, &relative)?;
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn is_reference_path(relative: &str) -> bool {
     REFERENCE_PATHS.contains(&relative)
 }
@@ -600,6 +656,15 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
     }
+    for path in retired_files(root, &existing_skills)? {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -708,10 +773,15 @@ pub fn set_global_reminders_enabled(enabled: bool) -> Result<()> {
 }
 
 pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
-    let paths = expected_changes(root)?
+    let mut paths = expected_changes(root)?
         .into_iter()
         .map(|(path, _)| validate_managed_path(root, &path))
         .collect::<Result<Vec<_>>>()?;
+    for path in retired_files(root, &existing_skill_paths(root)?)? {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
     Ok(paths)
 }
 
@@ -743,7 +813,10 @@ fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
     let relative = relative
         .to_str()
         .context("managed guidance path is not valid UTF-8")?;
-    if allowed_paths().contains(&relative) || is_reference_path(relative) {
+    if allowed_paths().contains(&relative)
+        || is_reference_path(relative)
+        || is_retired_reference_path(relative)
+    {
         return validate_managed_path(root, relative);
     }
     // A managed skill location may symlink to canonical skill files kept
@@ -756,6 +829,10 @@ fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
         || reference_paths()
             .iter()
             .filter_map(|reference| validate_reference_path(root, reference).ok())
+            .any(|resolved| resolved == path)
+        || RETIRED_REFERENCE_PATHS
+            .iter()
+            .filter_map(|reference| validate_retired_reference_path(root, reference).ok())
             .any(|resolved| resolved == path)
     {
         return Ok(path.to_path_buf());
@@ -872,7 +949,13 @@ fn commit_guidance_inner(
         let relative = path
             .strip_prefix(root)
             .context("guidance path outside worktree")?;
-        index.add_path(relative)?;
+        // A retired reference is deleted by the upgrade; stage its removal so
+        // the guidance commit reflects the installed file set.
+        if fs::symlink_metadata(&path).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
+            index.remove_path(relative)?;
+        } else {
+            index.add_path(relative)?;
+        }
     }
     let tree_id = index.write_tree_to(&repo.git_repo)?;
     if tree_id == tree.id() {
@@ -1025,6 +1108,122 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn retired_reference_paths_cover_every_retired_reference() {
+        let mut expected = vec![];
+        for dir in SKILL_DIRS {
+            for name in RETIRED_REFERENCE_FILES {
+                expected.push(format!("{dir}/reference/{name}"));
+            }
+        }
+        expected.sort();
+        let mut actual = RETIRED_REFERENCE_PATHS
+            .iter()
+            .map(|path| path.to_string())
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(actual, expected);
+        for name in RETIRED_REFERENCE_FILES {
+            assert!(
+                REFERENCE_FILES.iter().all(|(bundled, _)| bundled != name),
+                "{name} is both bundled and retired"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_removes_retired_references_and_stages_their_deletion() {
+        let root = temp_root();
+        setup(&root, false).unwrap();
+        let mut retired = vec![];
+        for dir in SKILL_DIRS {
+            let path = root.join(format!("{dir}/reference/repo-settings.md"));
+            fs::write(&path, "superseded reference\n").unwrap();
+            retired.push(path);
+        }
+        fs::write(
+            root.join(SKILL_PATH),
+            bundled_skill().replace(
+                &format!("version: \"{}\"", bundled_version().unwrap()),
+                "version: \"0.1\"",
+            ),
+        )
+        .unwrap();
+
+        let paths = paths_for_commit(&root).unwrap();
+        for path in &retired {
+            assert!(paths.contains(path), "{} not staged", path.display());
+        }
+        update(&root, false).unwrap();
+
+        for path in &retired {
+            assert!(!path.exists(), "{} survived the upgrade", path.display());
+        }
+        assert!(paths_for_commit(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_skill_still_drops_a_lingering_retired_reference() {
+        let root = temp_root();
+        setup(&root, false).unwrap();
+        let path = root.join(format!("{}/reference/repo-settings.md", SKILL_DIRS[0]));
+        fs::write(&path, "superseded reference\n").unwrap();
+
+        assert_eq!(paths_for_commit(&root).unwrap(), vec![path.clone()]);
+        update(&root, false).unwrap();
+
+        assert!(!path.exists());
+        assert!(status(&root).unwrap().modified_files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_removes_a_retired_reference_behind_a_canonical_symlink() {
+        let root = temp_root();
+        let canonical_dir = root.join("skills/ngit");
+        fs::create_dir_all(canonical_dir.join("reference")).unwrap();
+        fs::write(
+            canonical_dir.join("SKILL.md"),
+            bundled_skill().replace(
+                &format!("version: \"{}\"", bundled_version().unwrap()),
+                "version: \"0.1\"",
+            ),
+        )
+        .unwrap();
+        for (name, content) in REFERENCE_FILES {
+            fs::write(canonical_dir.join("reference").join(name), content).unwrap();
+        }
+        let retired = canonical_dir.join("reference/repo-settings.md");
+        fs::write(&retired, "superseded reference\n").unwrap();
+        for dir in SKILL_DIRS {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            symlink(
+                "../../../skills/ngit/SKILL.md",
+                root.join(dir).join("SKILL.md"),
+            )
+            .unwrap();
+            symlink(
+                "../../../skills/ngit/reference",
+                root.join(dir).join("reference"),
+            )
+            .unwrap();
+        }
+
+        let paths = paths_for_commit(&root).unwrap();
+        assert!(paths.contains(&retired), "{paths:?}");
+        update(&root, false).unwrap();
+
+        assert!(!retired.exists());
+        assert_eq!(
+            fs::read_to_string(canonical_dir.join("SKILL.md")).unwrap(),
+            bundled_skill()
+        );
+        assert!(paths_for_commit(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
