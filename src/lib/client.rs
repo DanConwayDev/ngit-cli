@@ -866,6 +866,10 @@ impl Connect for Client {
         let success_count = Arc::new(AtomicU64::new(0));
         let repository_success_count = Arc::new(AtomicU64::new(0));
         let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
+        let announcement_resolved = Arc::new(AtomicBool::new(false));
+        let announcement_resolution_coordinate = (!request.announcement_profile_authors.is_empty())
+            .then(|| selected_maintainer_coordinate.cloned())
+            .flatten();
 
         let mut processed_relay_scopes = HashSet::new();
         let mut repository_relay_attempts = 0;
@@ -882,6 +886,7 @@ impl Connect for Client {
                     .auth_policy
                     .register_private_repo_relays(request.repo_relays.iter().cloned()),
             }
+            let mut scheduled_relay_scopes = HashSet::new();
             let relay_requests = request
                 .repo_relays
                 .union(&request.user_relays_for_profiles)
@@ -889,12 +894,9 @@ impl Connect for Client {
                 .filter(|&r| !r.as_str().contains("nostr.mutinywallet.com"))
                 .filter_map(|relay| {
                     let scoped = request.scoped_to_relay(relay);
-                    let key = (
-                        relay.clone(),
-                        scoped.scope,
-                        scoped.fetches_private_relay_lists(),
-                    );
-                    (!processed_relay_scopes.contains(&key)).then_some(scoped)
+                    let key = scoped.relay_processing_key()?;
+                    (!processed_relay_scopes.contains(&key) && scheduled_relay_scopes.insert(key))
+                        .then_some(scoped)
                 })
                 .collect::<Vec<_>>();
             if relay_requests.is_empty() {
@@ -914,15 +916,11 @@ impl Connect for Client {
             let success_count_for_loop = success_count.clone();
             let repository_success_count_for_loop = repository_success_count.clone();
             let current_timeout_for_loop = current_timeout.clone();
+            let announcement_resolved_for_loop = announcement_resolved.clone();
             let total_relays = relay_requests.len() as u64;
             let processed_this_round = relay_requests
                 .iter()
-                .filter_map(|request| {
-                    request
-                        .selected_relay
-                        .clone()
-                        .map(|relay| (relay, request.scope, request.fetches_private_relay_lists()))
-                })
+                .filter_map(FetchRequest::relay_processing_key)
                 .collect::<Vec<_>>();
 
             let futures: Vec<_> = relay_requests
@@ -932,9 +930,16 @@ impl Connect for Client {
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
                     let current_timeout_clone = current_timeout_for_loop.clone();
+                    let announcement_resolved_clone = announcement_resolved_for_loop.clone();
+                    let announcement_resolution_coordinate =
+                        announcement_resolution_coordinate.clone();
                     let progress = progress.clone();
                     let total_relays_clone = total_relays;
                     let is_repository_relay = request.scope == RelayFetchScope::Repository;
+                    let is_author_announcement_relay = request
+                        .selected_relay
+                        .as_ref()
+                        .is_some_and(|relay| request.author_announcement_relays.contains(relay));
                     async move {
                         let relay_column_width = request.relay_column_width;
 
@@ -1008,19 +1013,30 @@ impl Connect for Client {
 
                         let timeout_future = async {
                             let check_interval = Duration::from_millis(100);
-                            let long_timeout_end = tokio::time::Instant::now() + Duration::from_secs(long_timeout());
+                            // Author write relays are the prescribed fallback
+                            // when a NIP-AD coordinate omits relay hints.
+                            // Success from an unrelated indexer must not cut
+                            // that required discovery work short.
+                            let full_timeout = long_timeout();
+                            let long_timeout_end = tokio::time::Instant::now()
+                                + Duration::from_secs(full_timeout);
 
                             loop {
                                 let current_success_count = success_count_clone.load(Ordering::Relaxed);
                                 let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
 
-                                if current_success_count >= threshold {
+                                if !author_announcement_discovery_pending(
+                                    is_author_announcement_relay,
+                                    &announcement_resolved_clone,
+                                )
+                                    && current_success_count >= threshold
+                                {
                                     tokio::time::sleep(Duration::from_secs(short_timeout())).await;
-                                    return "short";
+                                    return short_timeout();
                                 }
 
                                 if tokio::time::Instant::now() >= long_timeout_end {
-                                    return "long";
+                                    return full_timeout;
                                 }
 
                                 tokio::time::sleep(check_interval).await;
@@ -1030,6 +1046,19 @@ impl Connect for Client {
                         #[allow(clippy::large_futures)]
                         let result = tokio::select! {
                             result = &mut fetch_future => {
+                                if !announcement_resolved_clone.load(Ordering::Acquire) {
+                                    if let Some(coordinate) =
+                                        &announcement_resolution_coordinate
+                                    {
+                                        if get_repo_ref_from_cache(git_repo_path, coordinate)
+                                            .await
+                                            .is_ok()
+                                        {
+                                            announcement_resolved_clone
+                                                .store(true, Ordering::Release);
+                                        }
+                                    }
+                                }
                                 if result.is_ok() {
                                     let new_count = success_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
                                     if is_repository_relay {
@@ -1043,15 +1072,16 @@ impl Connect for Client {
                                 }
                                 result
                             }
-                            timeout_type = timeout_future => {
-                                Err(anyhow!("timeout after {}s timeout",
-                                    if timeout_type == "long" { long_timeout() } else { short_timeout() }))
+                            timeout_seconds = timeout_future => {
+                                Err(anyhow!("timeout after {timeout_seconds}s timeout"))
                             }
                         };
 
                         match result {
                             Err(error) => {
-                                if error.to_string().contains("connection timeout") || error.to_string().contains("timeout after") {
+                                if error.to_string().contains("connection timeout")
+                                    || error.to_string().contains("timeout after")
+                                {
                                     self.skip_relay_for_session(relay_url.clone(), error.to_string());
                                 }
                                 let msg = style_progress_bar_with_error(
@@ -1088,17 +1118,25 @@ impl Connect for Client {
             }
             processed_relay_scopes.extend(processed_this_round);
 
-            if !request.lock_repository_relays {
+            let selected_repo_ref =
                 if let Some(selected_maintainer_coordinate) = selected_maintainer_coordinate {
-                    if let Ok(repo_ref) =
-                        get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate).await
-                    {
-                        if repo_ref.private {
-                            request.repo_auth_mode = RelayAuthMode::Required;
-                        }
-                        request.repo_relays = repo_ref.relays.iter().cloned().collect();
+                    get_repo_ref_from_cache(git_repo_path, selected_maintainer_coordinate)
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+            let selected_announcement_resolved = selected_repo_ref.is_some();
+            if !request.lock_repository_relays {
+                if let Some(repo_ref) = &selected_repo_ref {
+                    if repo_ref.private {
+                        request.repo_auth_mode = RelayAuthMode::Required;
                     }
+                    request.repo_relays = repo_ref.relays.iter().cloned().collect();
                 }
+            }
+            if selected_announcement_resolved {
+                request.complete_hintless_announcement_discovery();
             }
 
             request.user_relays_for_profiles = if request.repository_relays_only {
@@ -1121,6 +1159,21 @@ impl Connect for Client {
                 }
                 set
             };
+            if !selected_announcement_resolved && !request.repository_relays_only {
+                if let Some(author) = request.announcement_profile_authors.iter().next().copied() {
+                    if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, &author).await {
+                        // A relay list learned in the preceding round becomes
+                        // an announcement route in the next round.
+                        request.add_author_announcement_relays(
+                            user_ref
+                                .relays
+                                .write()
+                                .into_iter()
+                                .filter_map(|relay| RelayUrl::parse(&relay).ok()),
+                        );
+                    }
+                }
+            }
         }
 
         progress_reporter.fetch_relay_health = FetchRelayHealth {
@@ -1328,6 +1381,13 @@ impl Connect for Client {
 }
 
 static SUCCESS_THRESHOLD: f64 = 0.5; // 50% of relays must succeed to switch to short timeout
+
+fn author_announcement_discovery_pending(
+    is_author_announcement_relay: bool,
+    announcement_resolved: &AtomicBool,
+) -> bool {
+    is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
+}
 
 fn long_timeout() -> u64 {
     if std::env::var("NGITTEST").is_ok() {
@@ -2557,6 +2617,15 @@ async fn create_relays_request(
     };
     let repository_relays_only =
         restrict_repository_relays(repository_relays_only, cached_repository_is_private);
+    // NIP-AD permits relay hints to be omitted. Bootstrap the selected
+    // author's NIP-65 relay list on the ordinary announcement indexers, then
+    // treat its write relays as additional announcement locations below.
+    // Applying this to every hint-less coordinate also improves the equivalent
+    // npub/identifier URL without changing hinted or private discovery.
+    let hintless_coordinate_author = (!repository_relays_only && repo_ref.is_none())
+        .then(|| selected_maintainer_coordinate.filter(|coordinate| coordinate.relays.is_empty()))
+        .flatten()
+        .map(|coordinate| coordinate.public_key);
     let lock_repository_relays = repository_relays_only
         && coordinate_hints_are_allowed(cached_repository_is_private)
         && selected_maintainer_coordinate.is_some_and(|coordinate| !coordinate.relays.is_empty());
@@ -2660,6 +2729,7 @@ async fn create_relays_request(
     let profiles_to_fetch_from_user_relays = {
         let mut user_profiles = user_profiles.clone();
         user_profiles.extend(private_relay_list_authors.iter().copied());
+        user_profiles.extend(hintless_coordinate_author);
         if let Some(git_repo_path) = git_repo_path {
             if let Ok(Some(current_user)) = get_likely_logged_in_user(git_repo_path).await {
                 user_profiles.insert(current_user);
@@ -2794,11 +2864,36 @@ async fn create_relays_request(
                 .collect::<HashSet<_>>();
             let mut relays = announcement_indexer_relays;
             relays.extend(coordinate_hint_relays.iter().cloned());
+            if let Some(author) = hintless_coordinate_author {
+                if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, &author).await {
+                    relays.extend(
+                        user_ref
+                            .relays
+                            .write()
+                            .into_iter()
+                            .filter_map(|relay| RelayUrl::parse(&relay).ok()),
+                    );
+                }
+            }
             if repo_relays.is_empty() && coordinate_hint_relays.is_empty() {
                 relays.extend(fallback_relays);
             }
             relays
         }
+    };
+    let author_announcement_relays = if let Some(author) = hintless_coordinate_author {
+        if let Ok(user_ref) = get_user_ref_from_cache(git_repo_path, &author).await {
+            user_ref
+                .relays
+                .write()
+                .into_iter()
+                .filter_map(|relay| RelayUrl::parse(&relay).ok())
+                .collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
     };
 
     let relay_column_width = repo_relays
@@ -2821,6 +2916,8 @@ async fn create_relays_request(
         selected_relay: None,
         repo_relays,
         announcement_indexer_relays,
+        author_announcement_relays,
+        announcement_profile_authors: hintless_coordinate_author.into_iter().collect(),
         scope: RelayFetchScope::Repository,
         repo_auth_mode,
         repository_relays_only,
@@ -3755,6 +3852,12 @@ enum RelayFetchScope {
 pub struct FetchRequest {
     repo_relays: HashSet<RelayUrl>,
     announcement_indexer_relays: HashSet<RelayUrl>,
+    /// NIP-65 write relays that must complete announcement discovery rather
+    /// than being curtailed by the adaptive success threshold.
+    author_announcement_relays: HashSet<RelayUrl>,
+    /// Authors whose relay lists must be bootstrapped from announcement
+    /// indexers before their write relays can also locate an announcement.
+    announcement_profile_authors: HashSet<PublicKey>,
     repository_relays_only: bool,
     lock_repository_relays: bool,
     selected_relay: Option<RelayUrl>,
@@ -3784,6 +3887,37 @@ pub struct FetchRequest {
 }
 
 impl FetchRequest {
+    fn relay_processing_key(&self) -> Option<(RelayUrl, RelayFetchScope, bool)> {
+        let relay = self.selected_relay.clone()?;
+        let scope = match self.scope {
+            RelayFetchScope::Repository => RelayFetchScope::Repository,
+            RelayFetchScope::Auxiliary { announcements, .. } => {
+                // Bootstrap profiles are fetched as part of an announcement
+                // indexer query. Once the announcement resolves, clearing the
+                // bootstrap author must not make the same indexer query look
+                // new. Profile work independently assigned to this user's
+                // relay remains part of the key so later scope upgrades run.
+                RelayFetchScope::Auxiliary {
+                    announcements,
+                    profiles: self.user_relays_for_profiles.contains(&relay),
+                }
+            }
+        };
+        Some((relay, scope, self.fetches_private_relay_lists()))
+    }
+
+    fn complete_hintless_announcement_discovery(&mut self) {
+        self.announcement_profile_authors.clear();
+        self.author_announcement_relays.clear();
+    }
+
+    fn add_author_announcement_relays(&mut self, relays: impl IntoIterator<Item = RelayUrl>) {
+        let relays = relays.into_iter().collect::<Vec<_>>();
+        self.announcement_indexer_relays
+            .extend(relays.iter().cloned());
+        self.author_announcement_relays.extend(relays);
+    }
+
     fn fetches_private_relay_lists(&self) -> bool {
         self.selected_relay.as_ref().is_some_and(|relay| {
             self.user_relays_for_profiles.contains(relay)
@@ -3817,7 +3951,9 @@ impl FetchRequest {
         }
 
         let announcements = self.announcement_indexer_relays.contains(relay);
-        let profiles = self.user_relays_for_profiles.contains(relay);
+        let user_profiles = self.user_relays_for_profiles.contains(relay);
+        let bootstrap_profiles = announcements && !self.announcement_profile_authors.is_empty();
+        let profiles = user_profiles || bootstrap_profiles;
         scoped.scope = RelayFetchScope::Auxiliary {
             announcements,
             profiles,
@@ -3830,17 +3966,23 @@ impl FetchRequest {
         scoped.issue_ids.clear();
         scoped.non_proposal_event_ids.clear();
         if profiles {
-            scoped.missing_contributor_profiles = self
-                .missing_contributor_profiles
-                .union(
-                    &self
-                        .profiles_to_fetch_from_user_relays
-                        .clone()
-                        .into_keys()
-                        .collect(),
-                )
-                .copied()
-                .collect();
+            scoped.missing_contributor_profiles = if user_profiles {
+                self.missing_contributor_profiles
+                    .union(
+                        &self
+                            .profiles_to_fetch_from_user_relays
+                            .clone()
+                            .into_keys()
+                            .collect(),
+                    )
+                    .copied()
+                    .collect()
+            } else {
+                self.announcement_profile_authors.clone()
+            };
+            scoped
+                .profiles_to_fetch_from_user_relays
+                .retain(|author, _| scoped.missing_contributor_profiles.contains(author));
         } else {
             scoped.missing_contributor_profiles.clear();
             scoped.profiles_to_fetch_from_user_relays.clear();
@@ -4914,7 +5056,10 @@ mod tests {
     use std::{io, sync::atomic::AtomicUsize};
 
     use indicatif::{ProgressDrawTarget, TermLike};
-    use nostr::prelude::event::{FinalizeUnsignedEvent, SignEvent};
+    use nostr::prelude::{
+        Keys,
+        event::{FinalizeUnsignedEvent, SignEvent},
+    };
 
     use super::*;
 
@@ -5110,6 +5255,230 @@ mod tests {
             filters[1].authors,
             Some(std::collections::BTreeSet::from_iter([profile]))
         );
+    }
+
+    #[tokio::test]
+    async fn hintless_coordinate_schedules_its_author_relay_list() {
+        let author = Keys::generate().public_key();
+        let coordinate = Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: author,
+                identifier: "repo".to_owned(),
+            },
+            relays: vec![],
+        };
+
+        let request = create_relays_request(
+            None,
+            Some(&coordinate),
+            &HashSet::new(),
+            &HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            request
+                .profiles_to_fetch_from_user_relays
+                .contains_key(&author)
+        );
+        assert_eq!(
+            request.announcement_profile_authors,
+            HashSet::from([author])
+        );
+    }
+
+    #[tokio::test]
+    async fn hinted_coordinate_does_not_bootstrap_its_author_profile() {
+        let author = Keys::generate().public_key();
+        let coordinate = Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: author,
+                identifier: "repo".to_owned(),
+            },
+            relays: vec![RelayUrl::parse("wss://hint.example").unwrap()],
+        };
+
+        let request = create_relays_request(
+            None,
+            Some(&coordinate),
+            &HashSet::new(),
+            &HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !request
+                .profiles_to_fetch_from_user_relays
+                .contains_key(&author)
+        );
+        assert!(request.announcement_profile_authors.is_empty());
+    }
+
+    #[test]
+    fn announcement_indexer_bootstraps_only_the_hintless_author_profile() {
+        let author = Keys::generate().public_key();
+        let unrelated = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://indexer.example").unwrap();
+        let request = FetchRequest {
+            announcement_indexer_relays: HashSet::from([relay.clone()]),
+            announcement_profile_authors: HashSet::from([author]),
+            profiles_to_fetch_from_user_relays: HashMap::from([
+                (
+                    author,
+                    (Timestamp::from(0), Timestamp::from(0), Timestamp::from(0)),
+                ),
+                (
+                    unrelated,
+                    (Timestamp::from(0), Timestamp::from(0), Timestamp::from(0)),
+                ),
+            ]),
+            missing_contributor_profiles: HashSet::from([author, unrelated]),
+            ..FetchRequest::default()
+        };
+
+        let scoped = request.scoped_to_relay(&relay);
+
+        assert_eq!(
+            scoped.scope,
+            RelayFetchScope::Auxiliary {
+                announcements: true,
+                profiles: true,
+            }
+        );
+        assert_eq!(scoped.missing_contributor_profiles, HashSet::from([author]));
+        assert_eq!(
+            scoped
+                .profiles_to_fetch_from_user_relays
+                .into_keys()
+                .collect::<HashSet<_>>(),
+            HashSet::from([author])
+        );
+    }
+
+    #[test]
+    fn author_write_relay_can_fetch_both_profile_and_announcement() {
+        let author = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://author.example").unwrap();
+        let coordinate = Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: author,
+                identifier: "repo".to_owned(),
+            },
+            relays: vec![],
+        };
+        let request = FetchRequest {
+            announcement_indexer_relays: HashSet::from([relay.clone()]),
+            user_relays_for_profiles: HashSet::from([relay.clone()]),
+            repo_coordinates_without_relays: vec![(coordinate, None)],
+            profiles_to_fetch_from_user_relays: HashMap::from([(
+                author,
+                (Timestamp::from(0), Timestamp::from(0), Timestamp::from(0)),
+            )]),
+            ..FetchRequest::default()
+        };
+
+        let scoped = request.scoped_to_relay(&relay);
+
+        assert_eq!(
+            scoped.scope,
+            RelayFetchScope::Auxiliary {
+                announcements: true,
+                profiles: true,
+            }
+        );
+        assert_eq!(scoped.repo_coordinates_without_relays.len(), 1);
+        assert!(
+            scoped
+                .profiles_to_fetch_from_user_relays
+                .contains_key(&author)
+        );
+    }
+
+    #[test]
+    fn resolved_announcement_stops_mandatory_author_relay_discovery() {
+        let author = Keys::generate().public_key();
+        let indexer = RelayUrl::parse("wss://indexer.example").unwrap();
+        let author_relay = RelayUrl::parse("wss://author.example").unwrap();
+        let mut request = FetchRequest {
+            announcement_indexer_relays: HashSet::from([indexer.clone(), author_relay.clone()]),
+            author_announcement_relays: HashSet::from([author_relay]),
+            announcement_profile_authors: HashSet::from([author]),
+            ..FetchRequest::default()
+        };
+
+        request.complete_hintless_announcement_discovery();
+
+        assert!(request.author_announcement_relays.is_empty());
+        assert!(request.announcement_profile_authors.is_empty());
+        assert!(
+            request.announcement_indexer_relays.contains(&indexer),
+            "completing bootstrap must not remove configured indexers"
+        );
+    }
+
+    #[test]
+    fn completed_bootstrap_does_not_reschedule_the_announcement_indexer() {
+        let author = Keys::generate().public_key();
+        let indexer = RelayUrl::parse("wss://indexer.example").unwrap();
+        let mut request = FetchRequest {
+            announcement_indexer_relays: HashSet::from([indexer.clone()]),
+            announcement_profile_authors: HashSet::from([author]),
+            ..FetchRequest::default()
+        };
+
+        let bootstrap_request = request.scoped_to_relay(&indexer);
+        assert_eq!(
+            bootstrap_request.scope,
+            RelayFetchScope::Auxiliary {
+                announcements: true,
+                profiles: true,
+            }
+        );
+
+        request.complete_hintless_announcement_discovery();
+        let completed_request = request.scoped_to_relay(&indexer);
+        assert_eq!(
+            completed_request.scope,
+            RelayFetchScope::Auxiliary {
+                announcements: true,
+                profiles: false,
+            }
+        );
+        assert_eq!(
+            bootstrap_request.relay_processing_key(),
+            completed_request.relay_processing_key(),
+            "bootstrap-only profile work must not change the processed relay key"
+        );
+    }
+
+    #[test]
+    fn sibling_resolution_releases_author_relay_to_the_adaptive_timeout() {
+        let announcement_resolved = AtomicBool::new(false);
+
+        assert!(author_announcement_discovery_pending(
+            true,
+            &announcement_resolved
+        ));
+        announcement_resolved.store(true, Ordering::Release);
+        assert!(!author_announcement_discovery_pending(
+            true,
+            &announcement_resolved
+        ));
+        assert!(!author_announcement_discovery_pending(
+            false,
+            &AtomicBool::new(false)
+        ));
     }
 
     #[test]

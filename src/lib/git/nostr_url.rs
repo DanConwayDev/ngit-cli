@@ -4,11 +4,11 @@ use std::{collections::HashMap, str::FromStr};
 use anyhow::{Context, Error, Result, anyhow, bail};
 use directories::BaseDirs;
 use nostr::prelude::{
-    FromBech32, PublicKey, RelayUrl, ToBech32, Url, nip01::Coordinate, nip19::Nip19Coordinate,
+    FromBech32, Kind, PublicKey, RelayUrl, ToBech32, Url, nip01::Coordinate, nip19::Nip19Coordinate,
 };
 
 use super::{Repo, get_git_config_item, save_git_config_item};
-use crate::{client::nip05_query, output_mode::TransientLine};
+use crate::{client::nip05_query, nip_ad, output_mode::TransientLine};
 
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum ServerProtocol {
@@ -100,10 +100,18 @@ impl fmt::Display for NostrUrlDecoded {
     }
 }
 
-static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123 or nostr://npub123/my-repo or nostr://ssh/npub123/relay.damus.io/my-repo";
+static INCORRECT_NOSTR_URL_FORMAT_ERROR: &str = "incorrect nostr git url format. try nostr://naddr123, nostr://npub123/my-repo, nostr://domain.example/path, or nostr://ssh/npub123/relay.damus.io/my-repo";
 
 impl NostrUrlDecoded {
     pub async fn parse_and_resolve(url: &str, git_repo: &Option<&Repo>) -> Result<Self> {
+        Self::parse_and_resolve_with_nip_ad_origin(url, git_repo, None).await
+    }
+
+    async fn parse_and_resolve_with_nip_ad_origin(
+        url: &str,
+        git_repo: &Option<&Repo>,
+        nip_ad_origin: Option<&Url>,
+    ) -> Result<Self> {
         let mut protocol = None;
         let mut ssh_key_file = None;
         let mut relays = vec![];
@@ -169,6 +177,80 @@ impl NostrUrlDecoded {
                 parts.remove(0);
             }
         }
+
+        // A bare domain is ambiguous with the historical root-NIP-05 form.
+        // Resolve NIP-AD first, including after a protocol/key prefix was
+        // stripped, and use root NIP-05 only as the fallback.
+        let nip_ad_candidate = NipAdAddress::from_stripped_parts(&parts)?;
+        let mut nip_ad_error = None;
+        if let Some(address) = nip_ad_candidate {
+            if let Ok(mut coordinate) = resolve_nip_ad_from_git_config_cache(&address, git_repo) {
+                if !relays.is_empty() {
+                    coordinate.relays = relays;
+                }
+                return Ok(Self {
+                    original_string: url.to_string(),
+                    coordinate,
+                    protocol,
+                    ssh_key_file,
+                    nip05: None,
+                });
+            }
+
+            let term = console::Term::stderr();
+            let progress = TransientLine::write(
+                &term,
+                &format!("resolving nostr web address at {}...", address.domain),
+            )?;
+            let lookup = match nip_ad_origin {
+                Some(origin) => nip_ad::query_from_origin(origin, &address.path).await,
+                None => nip_ad::query(&address.domain, &address.path).await,
+            };
+            progress.clear()?;
+            match lookup {
+                Ok(nip_ad::NipAdLookup::Found(profile)) => {
+                    let profile = *profile;
+                    let coordinate = profile.git_repository_coordinate().with_context(|| {
+                        format!(
+                            "NIP-AD mapping for {}{} does not identify a git repository",
+                            address.domain, address.path
+                        )
+                    })?;
+                    let mut coordinate = Nip19Coordinate {
+                        coordinate,
+                        relays: profile.relays,
+                    };
+                    let _ = save_nip_ad_to_git_config_cache(&address, &coordinate, git_repo);
+                    if !relays.is_empty() {
+                        coordinate.relays = relays;
+                    }
+                    return Ok(Self {
+                        original_string: url.to_string(),
+                        coordinate,
+                        protocol,
+                        ssh_key_file,
+                        nip05: None,
+                    });
+                }
+                Ok(nip_ad::NipAdLookup::Missing) => {
+                    nip_ad_error = Some(anyhow!(
+                        "NIP-AD document has no mapping for path {:?}",
+                        address.path
+                    ));
+                }
+                Ok(nip_ad::NipAdLookup::Invalid(error)) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "invalid NIP-AD mapping for {}{}",
+                            address.domain, address.path
+                        )
+                    });
+                }
+                Err(error) => {
+                    nip_ad_error = Some(error);
+                }
+            }
+        }
         // extract naddr npub/<optional-relays>/identifer
         let part = parts.first().context(INCORRECT_NOSTR_URL_FORMAT_ERROR)?;
         // naddr used
@@ -222,9 +304,15 @@ impl NostrUrlDecoded {
                             &term,
                             &format!("fetching pubic key info from {domain}..."),
                         )?;
-                        let res = nip05_query(npub_or_nip05).await.context(format!(
-                            "failed to get nostr public key for {npub_or_nip05} from {domain}"
-                        ))?;
+                        let res = nip05_query(npub_or_nip05).await.with_context(|| {
+                            let fallback = nip_ad_error
+                                .as_ref()
+                                .map(|error| format!("; NIP-AD resolution failed: {error:#}"))
+                                .unwrap_or_default();
+                            format!(
+                                "failed to get nostr public key for {npub_or_nip05} from {domain}{fallback}"
+                            )
+                        })?;
                         progress.clear()?;
                         nip05 = Some(npub_or_nip05.to_string());
                         let _ = save_nip05_to_git_config_cache(
@@ -279,6 +367,94 @@ impl NostrUrlDecoded {
         }
         None
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NipAdAddress {
+    domain: String,
+    path: String,
+}
+
+impl NipAdAddress {
+    fn from_stripped_parts(parts: &[&str]) -> Result<Option<Self>> {
+        if parts.len() < 2 {
+            return Ok(None);
+        }
+        let parsed = Url::parse(&format!("nostr://{}", parts.join("/")))?;
+        if parsed.scheme() != "nostr"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Ok(None);
+        }
+        let Some(host) = parsed.host_str() else {
+            return Ok(None);
+        };
+        // npubs/naddrs and ngit's protocol prefixes are not web domains. A
+        // dot (or an IP-literal colon) keeps this detection conservative and
+        // retains the established URL grammar for all other forms.
+        if PublicKey::parse(host).is_ok()
+            || Nip19Coordinate::from_bech32(host).is_ok()
+            || (!host.contains('.') && !host.contains(':'))
+        {
+            return Ok(None);
+        }
+        let path = parsed.path();
+        if path.is_empty() || path == "/" {
+            return Ok(None);
+        }
+        let path = urlencoding::decode(path)
+            .context("could not percent-decode path in NIP-AD nostr URL")?
+            .into_owned();
+        let domain = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_owned(),
+        };
+        Ok(Some(Self { domain, path }))
+    }
+
+    fn cache_key(&self) -> String {
+        format!("https://{}{}", self.domain, self.path)
+    }
+}
+
+const NIP_AD_CACHE_CONFIG: &str = "nostr.nip-ad";
+
+fn resolve_nip_ad_from_git_config_cache(
+    address: &NipAdAddress,
+    git_repo: &Option<&Repo>,
+) -> Result<Nip19Coordinate> {
+    let encoded = load_nip_ad_cache(git_repo)?
+        .remove(&address.cache_key())
+        .context("NIP-AD address not stored in local git config cache")?;
+    let coordinate = Nip19Coordinate::from_bech32(&encoded)
+        .context("cached NIP-AD coordinate is not a valid naddr")?;
+    if coordinate.kind != Kind::GitRepoAnnouncement {
+        bail!("cached NIP-AD coordinate is not a Git repository announcement");
+    }
+    Ok(coordinate)
+}
+
+fn save_nip_ad_to_git_config_cache(
+    address: &NipAdAddress,
+    coordinate: &Nip19Coordinate,
+    git_repo: &Option<&Repo>,
+) -> Result<()> {
+    let mut cache = load_nip_ad_cache(git_repo)?;
+    cache.insert(address.cache_key(), coordinate.to_bech32()?);
+    save_git_config_item(
+        git_repo,
+        NIP_AD_CACHE_CONFIG,
+        &serde_json::to_string(&cache).context("could not serialize NIP-AD cache")?,
+    )
+    .context("could not save NIP-AD cache in git config")
+}
+
+fn load_nip_ad_cache(git_repo: &Option<&Repo>) -> Result<HashMap<String, String>> {
+    let Some(stored) = get_git_config_item(git_repo, NIP_AD_CACHE_CONFIG)? else {
+        return Ok(HashMap::new());
+    };
+    Ok(serde_json::from_str(&stored).unwrap_or_default())
 }
 
 fn resolve_nip05_from_git_config_cache(nip05: &str, git_repo: &Option<&Repo>) -> Result<PublicKey> {
@@ -1522,6 +1698,361 @@ mod tests {
             }
         }
     }
+
+    mod nip_ad_address {
+        use std::time::Duration;
+
+        use serde_json::{Value, json};
+        use tempfile::TempDir;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            task::JoinHandle,
+        };
+
+        use super::*;
+
+        const AUTHOR: &str = "a008def15796fba9a0d6fab04e8fd57089285d9fd505da5a83fe8aad57a3564d";
+        const OTHER_AUTHOR: &str =
+            "0000000000000000000000000000000000000000000000000000000000000001";
+
+        fn repository_document(path: &str, filter: Value, relays: Value) -> Value {
+            json!({
+                (path): {
+                    "filter": filter,
+                    "relays": relays,
+                },
+            })
+        }
+
+        fn repository_filter() -> Value {
+            json!({
+                "kinds": [30617],
+                "#d": ["ngit"],
+                "authors": [AUTHOR],
+                "limit": 1,
+            })
+        }
+
+        fn temporary_repo() -> (TempDir, Repo) {
+            let directory = TempDir::new().unwrap();
+            git2::Repository::init(directory.path()).unwrap();
+            let repo = Repo::from_path(&directory.path().to_path_buf()).unwrap();
+            (directory, repo)
+        }
+
+        async fn serve_document(document: Value, expected_target: &str) -> (Url, JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = serde_json::to_vec(&document).unwrap();
+            let expected_target = expected_target.to_owned();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let bytes_read = stream.read(&mut chunk).await.unwrap();
+                    assert!(bytes_read > 0, "request ended before its headers");
+                    request.extend_from_slice(&chunk[..bytes_read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(request.len() < 16 * 1024, "request headers are too large");
+                }
+                let request = String::from_utf8_lossy(&request);
+                assert!(
+                    request.starts_with(&format!("GET {expected_target} HTTP/1.1\r\n")),
+                    "unexpected request: {request}"
+                );
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            (Url::parse(&format!("http://{address}")).unwrap(), server)
+        }
+
+        async fn finish_server(server: JoinHandle<()>) {
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("NIP-AD test server timed out")
+                .unwrap();
+        }
+
+        #[test]
+        fn accepts_a_bare_domain_and_preserves_the_complete_path() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["ngit.dev", "projects", "ngit.git"]).unwrap(),
+                Some(NipAdAddress {
+                    domain: "ngit.dev".to_owned(),
+                    path: "/projects/ngit.git".to_owned(),
+                })
+            );
+        }
+
+        #[test]
+        fn preserves_a_non_default_domain_port() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["git.example:8443", "ngit.git"]).unwrap(),
+                Some(NipAdAddress {
+                    domain: "git.example:8443".to_owned(),
+                    path: "/ngit.git".to_owned(),
+                })
+            );
+        }
+
+        #[test]
+        fn leaves_explicit_nip05_addresses_to_nip05() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["dan@gitworkshop.dev", "ngit"]).unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn leaves_npub_and_naddr_forms_to_the_existing_parser() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&[
+                    "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr",
+                    "ngit",
+                ])
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&[
+                    "naddr1qqzxuemfwsqs6amnwvaz7tmwdaejumr0dspzpgqgmmc409hm4xsdd74sf68a2uyf9pwel4g9mfdg8l5244t6x4jdqvzqqqrhnym0k2qj",
+                ])
+                .unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn requires_a_non_root_path() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["ngit.dev", ""]).unwrap(),
+                None
+            );
+        }
+
+        #[test]
+        fn preserves_an_ipv6_host_and_port_without_double_brackets() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["[::1]:8443", "ngit.git"]).unwrap(),
+                Some(NipAdAddress {
+                    domain: "[::1]:8443".to_owned(),
+                    path: "/ngit.git".to_owned(),
+                })
+            );
+        }
+
+        #[test]
+        fn decodes_the_path_used_as_the_document_key() {
+            assert_eq!(
+                NipAdAddress::from_stripped_parts(&["ngit.dev", "my%20repo.git"]).unwrap(),
+                Some(NipAdAddress {
+                    domain: "ngit.dev".to_owned(),
+                    path: "/my repo.git".to_owned(),
+                })
+            );
+        }
+
+        #[tokio::test]
+        async fn resolves_a_key_and_protocol_prefixed_url_end_to_end() {
+            let (_directory, repo) = temporary_repo();
+            let (origin, server) = serve_document(
+                repository_document(
+                    "/ngit.git",
+                    repository_filter(),
+                    json!(["wss://document.example"]),
+                ),
+                "/.well-known/nostr.json?path=%2Fngit.git",
+            )
+            .await;
+            let url = "nostr://work@ssh/ngit.dev/ngit.git?relay=query.example";
+
+            let decoded = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                url,
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap();
+            finish_server(server).await;
+
+            assert_eq!(decoded.coordinate.identifier, "ngit");
+            assert_eq!(
+                decoded.coordinate.public_key,
+                PublicKey::parse(AUTHOR).unwrap()
+            );
+            assert_eq!(decoded.protocol, Some(ServerProtocol::Ssh));
+            assert_eq!(decoded.ssh_key_file, Some("work".to_owned()));
+            assert_eq!(
+                decoded.coordinate.relays,
+                vec![RelayUrl::parse("wss://query.example").unwrap()]
+            );
+
+            // The cache is path-scoped and stores document hints rather than
+            // the one-off relay override from the URL.
+            let unreachable = Url::parse("http://127.0.0.1:0").unwrap();
+            let cached = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/ngit.git",
+                &Some(&repo),
+                Some(&unreachable),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                cached.coordinate.relays,
+                vec![RelayUrl::parse("wss://document.example").unwrap()]
+            );
+        }
+
+        #[tokio::test]
+        async fn cached_root_nip05_does_not_disable_nip_ad() {
+            let (_directory, repo) = temporary_repo();
+            save_nip05_to_git_config_cache(
+                "ngit.dev",
+                &PublicKey::parse(OTHER_AUTHOR).unwrap(),
+                &Some(&repo),
+            )
+            .unwrap();
+            let (origin, server) = serve_document(
+                repository_document("/ngit.git", repository_filter(), json!([])),
+                "/.well-known/nostr.json?path=%2Fngit.git",
+            )
+            .await;
+
+            let decoded = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/ngit.git",
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap();
+            finish_server(server).await;
+
+            assert_eq!(
+                decoded.coordinate.public_key,
+                PublicKey::parse(AUTHOR).unwrap()
+            );
+            assert_eq!(decoded.nip05, None);
+        }
+
+        #[tokio::test]
+        async fn missing_mapping_falls_back_to_cached_root_nip05() {
+            let (_directory, repo) = temporary_repo();
+            let fallback_author = PublicKey::parse(OTHER_AUTHOR).unwrap();
+            save_nip05_to_git_config_cache("ngit.dev", &fallback_author, &Some(&repo)).unwrap();
+            let (origin, server) = serve_document(
+                json!({ "names": { "_": OTHER_AUTHOR } }),
+                "/.well-known/nostr.json?path=%2Fngit.git",
+            )
+            .await;
+
+            let decoded = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/ngit.git",
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap();
+            finish_server(server).await;
+
+            assert_eq!(decoded.coordinate.public_key, fallback_author);
+            assert_eq!(decoded.coordinate.identifier, "ngit.git");
+            assert_eq!(decoded.nip05, Some("ngit.dev".to_owned()));
+        }
+
+        #[tokio::test]
+        async fn present_invalid_filter_does_not_fall_back_to_nip05() {
+            let (_directory, repo) = temporary_repo();
+            save_nip05_to_git_config_cache(
+                "ngit.dev",
+                &PublicKey::parse(OTHER_AUTHOR).unwrap(),
+                &Some(&repo),
+            )
+            .unwrap();
+            let invalid_filter = json!({
+                "kinds": [1],
+                "#d": ["ngit"],
+                "authors": [AUTHOR],
+            });
+            let (origin, server) = serve_document(
+                repository_document("/ngit.git", invalid_filter, json!([])),
+                "/.well-known/nostr.json?path=%2Fngit.git",
+            )
+            .await;
+
+            let error = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/ngit.git",
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap_err();
+            finish_server(server).await;
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not identify a git repository")
+            );
+        }
+
+        #[tokio::test]
+        async fn present_malformed_mapping_does_not_fall_back_to_nip05() {
+            let (_directory, repo) = temporary_repo();
+            save_nip05_to_git_config_cache(
+                "ngit.dev",
+                &PublicKey::parse(OTHER_AUTHOR).unwrap(),
+                &Some(&repo),
+            )
+            .unwrap();
+            let (origin, server) = serve_document(
+                repository_document("/ngit.git", repository_filter(), json!(["not a relay"])),
+                "/.well-known/nostr.json?path=%2Fngit.git",
+            )
+            .await;
+
+            let error = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/ngit.git",
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap_err();
+            finish_server(server).await;
+
+            assert!(error.to_string().contains("invalid NIP-AD mapping"));
+        }
+
+        #[tokio::test]
+        async fn decoded_path_drives_the_request_and_document_lookup() {
+            let (_directory, repo) = temporary_repo();
+            let (origin, server) = serve_document(
+                repository_document("/my repo.git", repository_filter(), json!([])),
+                "/.well-known/nostr.json?path=%2Fmy+repo.git",
+            )
+            .await;
+
+            let decoded = NostrUrlDecoded::parse_and_resolve_with_nip_ad_origin(
+                "nostr://ngit.dev/my%20repo.git",
+                &Some(&repo),
+                Some(&origin),
+            )
+            .await
+            .unwrap();
+            finish_server(server).await;
+
+            assert_eq!(decoded.coordinate.identifier, "ngit");
+        }
+    }
+
     mod nostr_url_ssh_key_file_path {
         use super::*;
 

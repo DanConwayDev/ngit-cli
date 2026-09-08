@@ -14,6 +14,10 @@ publication.
 
 ### Added
 
+- Bare-domain `nostr://` repository URLs can resolve path-scoped NIP-AD
+  mappings, including protocol and SSH-key prefixes. NIP-AD mappings and the
+  existing hint-less `nostr://<npub>/<identifier>` form now bootstrap missing
+  repository announcements through the author's NIP-65 write relays.
 - `ngit release publish` can derive its version and source commit from one
   exact Git tag, so tagged CI builds need no positional arguments. Schema-1
   manifests accept Zapstore-compatible local APK `release_source`; ngit

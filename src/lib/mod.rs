@@ -15,6 +15,7 @@ pub mod git_http_auth;
 pub mod list;
 pub mod login;
 pub mod mbox_parser;
+pub mod nip_ad;
 pub mod nsite;
 pub mod oci;
 pub mod output_mode;
