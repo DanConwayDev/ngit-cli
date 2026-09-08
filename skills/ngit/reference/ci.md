@@ -90,6 +90,7 @@ verify that the workflow existed at that commit, its trigger matched, and the
 query refreshed the repository relays before concluding that CI did not run.
 
 A successful push does not enforce CI by itself. Before merging a pull
-request, use `ngit merge <ID|nevent> --require-ci-trust maintainer-directed
---json` when a failing, unfinished, untrusted, or absent result must block the
-merge.
+request, use
+`ngit pr merge <ID|nevent> --require-ci-trust maintainer-directed --json` when
+a failing, unfinished, untrusted, or absent result must block the merge. The
+top-level `ngit merge` spelling is a compatibility alias.

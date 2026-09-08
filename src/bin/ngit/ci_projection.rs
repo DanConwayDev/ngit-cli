@@ -59,9 +59,8 @@ use crate::{
 
 /// The trust floor a surface applies when the caller demanded none.
 ///
-/// `pr list`'s `✓` and `ngit pr merge`'s non-blocking warning both need a
-/// floor without one being named on the command line. They share this one so
-/// a row that renders `✓` is never a merge that warns.
+/// `pr list` uses this floor to distinguish a trusted pass from a pass whose
+/// signer has no known context.
 pub const DEFAULT_TRUST_FLOOR: CiTrustFloor = CiTrustFloor::OperationallyAssociated;
 
 /// How much work a surface is willing to do to settle its evidence.
@@ -408,8 +407,7 @@ impl CiReport {
     ///
     /// The rollup this reads is computed from the current runs alone, over
     /// classifications that saw every run known for the target. Every surface
-    /// that acts on a trust floor — the `--require-ci-trust` gate and
-    /// `pr merge`'s warning — goes through here, so they cannot disagree
+    /// that acts on a trust floor goes through here, so they cannot disagree
     /// about what "below the floor" means.
     ///
     /// What counts as a green conclusion is [`is_green`], the same predicate
@@ -450,29 +448,6 @@ impl CiReport {
     pub fn gate_failure(&self, floor: CiTrustFloor) -> Option<String> {
         self.shortfall(floor)
             .map(|reason| format!("--require-ci-trust={}: {reason}", floor.as_str()))
-    }
-
-    /// The non-blocking caveat `ngit pr merge` prints when no floor was
-    /// demanded, or `None` when there is nothing to say.
-    ///
-    /// The same shortfall the gate refuses on, measured against
-    /// [`DEFAULT_TRUST_FLOOR`], with one exception: a target CI was never
-    /// asked about is not a failing, unfinished or weakly-signed result, and
-    /// warning there would fire on every merge in every repository without
-    /// CI.
-    ///
-    /// "Never asked about" is `state: "none"` *and* `revision_matched`. CI
-    /// that ran only for a superseded revision is also `none` — an earlier
-    /// revision's result is never presented as current — but it is precisely
-    /// the case a merging maintainer must not be left to infer from silence.
-    #[must_use]
-    pub fn merge_warning(&self) -> Option<String> {
-        if self.state == CiState::None {
-            return (!self.revision_matched).then(|| {
-                "CI results exist for this PR but not for the revision being merged".to_owned()
-            });
-        }
-        self.shortfall(DEFAULT_TRUST_FLOOR)
     }
 
     /// The `ci` object every surface embeds.
@@ -557,9 +532,9 @@ impl CiReport {
     /// skip diagnostics — stays with each surface.
     ///
     /// The caveat is guarded by [`Self::has_results`]: on a surface built
-    /// without `include_outdated` (`ci status`, `pr merge`) `outdated` is
-    /// `None`, so this is the "any current run" guard those surfaces always
-    /// had.
+    /// without `include_outdated` (`ci status`, or a merge with an explicit
+    /// CI trust gate) `outdated` is `None`, so this is the "any current run"
+    /// guard those surfaces always had.
     fn print_result_lines(&self, log_tail: LogTailMode) {
         if self.runs.is_empty() {
             if self.revision_matched {
@@ -1185,10 +1160,10 @@ fn conclusion_severity(conclusion: Conclusion) -> u8 {
 
 /// The one green predicate, read by every surface.
 ///
-/// The `pr list` glyph calls it directly and [`CiReport::shortfall`] — the
-/// `--require-ci-trust` gate on `ngit ci status` and `ngit pr merge`, and
-/// `pr merge`'s unflagged warning — calls it for the rolled-up conclusion, so
-/// a row that renders `✓` can never be a merge the gate refuses.
+/// The `pr list` glyph calls it directly and [`CiReport::shortfall`] uses it
+/// for the `--require-ci-trust` gate on `ngit ci status` and both merge
+/// command spellings, so a row that renders `✓` can never be a merge the gate
+/// refuses.
 ///
 /// `neutral` and `skipped` are green. They are *concluded* runs reporting
 /// that there was nothing to do, which is why the worst-of rollup already
@@ -1480,7 +1455,6 @@ mod tests {
             "`--require-ci-trust` blocks until CI is green, and a target one \
              of whose workflows never completed is not green"
         );
-        assert!(report.merge_warning().is_some());
     }
 
     #[test]
@@ -1965,74 +1939,6 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_warning_is_the_gate_shortfall_at_the_default_floor() {
-        let failing = rolled_up(
-            CiState::Concluded,
-            Some(Conclusion::Failure),
-            TrustClassification::MaintainerDirected,
-        );
-        let stale = rolled_up(
-            CiState::Stale,
-            None,
-            TrustClassification::MaintainerDirected,
-        );
-        let weak = rolled_up(
-            CiState::Concluded,
-            Some(Conclusion::Success),
-            TrustClassification::NoKnownContext,
-        );
-        for report in [&failing, &stale, &weak] {
-            assert_eq!(
-                report.merge_warning(),
-                report.shortfall(DEFAULT_TRUST_FLOOR),
-                "the warning is the gate's own shortfall, so a merge that \
-                 warns is a merge `--require-ci-trust` would refuse"
-            );
-            assert!(report.merge_warning().is_some());
-        }
-
-        let passing = rolled_up(
-            CiState::Concluded,
-            Some(Conclusion::Success),
-            TrustClassification::OperationallyAssociated,
-        );
-        assert_eq!(passing.merge_warning(), None);
-        assert!(
-            passing
-                .gate_failure(CiTrustFloor::MaintainerDirected)
-                .is_some(),
-            "the default floor is not the strictest one: a stricter floor \
-             still refuses what the warning is silent about"
-        );
-    }
-
-    #[test]
-    fn a_target_with_no_ci_at_all_does_not_warn_on_merge() {
-        let none = rolled_up(CiState::None, None, TrustClassification::NoKnownContext);
-        assert_eq!(
-            none.merge_warning(),
-            None,
-            "no CI is not a failing, unfinished or weakly-signed result"
-        );
-        assert!(
-            none.gate_failure(DEFAULT_TRUST_FLOOR).is_some(),
-            "a caller that demanded a floor is still refused: there is no \
-             result to meet it"
-        );
-    }
-
-    #[test]
-    fn ci_for_a_superseded_revision_only_warns_on_merge() {
-        let mut superseded = rolled_up(CiState::None, None, TrustClassification::NoKnownContext);
-        superseded.revision_matched = false;
-        assert!(
-            superseded.merge_warning().is_some(),
-            "a PR whose only CI describes an earlier revision must not be \
-             merged in silence"
-        );
-    }
-
-    #[test]
     fn an_unsettled_trust_context_fails_the_floor_rather_than_passing_it() {
         let unsettled = CiReport {
             rollup: TrustResolution::Loading,
@@ -2047,7 +1953,6 @@ mod tests {
             "an absent classification is evidence that has not settled, not \
              evidence that met the floor"
         );
-        assert!(unsettled.merge_warning().is_some());
     }
 
     #[test]
@@ -2076,11 +1981,6 @@ mod tests {
                  says",
             );
             assert_eq!(
-                report.merge_warning().is_none(),
-                green,
-                "`{conclusion}` must warn exactly as it gates",
-            );
-            assert_eq!(
                 row(CiState::Concluded, Some(conclusion), true).glyph() == "✓",
                 green,
                 "`{conclusion}` must render exactly as it gates: a row that \
@@ -2105,8 +2005,6 @@ mod tests {
                 None,
                 "a concluded `{conclusion}` run meets the floor its trust met",
             );
-            assert_eq!(report.merge_warning(), None);
-
             // The trust floor still applies to it: green is about the
             // conclusion, never about who signed it.
             let weak = rolled_up(

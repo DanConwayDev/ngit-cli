@@ -1,12 +1,9 @@
-//! CI gating for both merge commands: the blocked/allowed matrix for
-//! `--require-ci-trust`, plus `ngit pr merge`'s non-blocking warning without
-//! it.
+//! CI gating for `ngit pr merge` and its top-level `ngit merge` alias.
 //!
 //! The gate reads the same projection `ngit ci status` and `ngit pr view`
 //! render, so these tests assert on what a merge *did*: the exit status, the
-//! JSON document, whether the default branch advanced, and whether a
-//! kind-1631 applied status event reached the repository relay. The warning
-//! text itself is never asserted on — its presence is a JSON field.
+//! JSON document, whether the default branch advanced, and that no kind-1631
+//! applied status is published before the later Git push.
 //!
 //! CI fixture events are signed by [`test_harness::ci`] and published
 //! straight to a relay the repository announcement lists, so everything a
@@ -16,7 +13,7 @@
 //! fetch would have written to.
 
 use anyhow::{Context, Result, bail};
-use nostr::prelude::{Keys, SingleLetterTag, Timestamp};
+use nostr::prelude::{FromBech32, Keys, Nip19Event, SingleLetterTag, Timestamp};
 use nostr_sdk::prelude::{Event, Filter, Kind};
 use serde_json::Value;
 use test_harness::{
@@ -29,7 +26,7 @@ const WORKFLOW: &str = "name: ci\non: push\n";
 
 struct Arranged {
     harness: Harness,
-    /// The maintainer's clone: the only identity `ngit pr merge` accepts.
+    /// The maintainer's clone used to arrange CI control events and merges.
     publisher: Repo,
     /// One contributor clone, reused for every PR a test needs.
     contributor: Repo,
@@ -222,7 +219,8 @@ async fn pr_merge(repo: &Repo, id: &str, extra: &[&str]) -> Result<(std::process
     Ok((out, json))
 }
 
-/// Run top-level `ngit merge <id> [extra…] --json` and parse stdout.
+/// Run the top-level `ngit merge <id> [extra…] --json` compatibility alias and
+/// parse stdout.
 async fn top_level_merge(
     repo: &Repo,
     id: &str,
@@ -247,8 +245,8 @@ async fn top_level_merge(
     Ok((out, json))
 }
 
-/// The applied (kind-1631) status events on the repository relay naming
-/// `proposal` — what a completed `ngit pr merge` publishes.
+/// Applied (kind-1631) status events on the repository relay naming
+/// `proposal`. A local merge must not publish one before its later Git push.
 async fn applied_status_events(harness: &Harness, pr: &PublishedPr) -> Result<Vec<Event>> {
     harness
         .grasp("repo")
@@ -291,8 +289,8 @@ async fn assert_not_merged(arranged: &Arranged, pr: &PublishedPr, main_before: &
     Ok(())
 }
 
-/// Assert the merge completed: a two-parent merge commit on the default
-/// branch, and an applied status event on the repository relay.
+/// Assert the merge completed locally as a two-parent merge commit on the
+/// default branch without publishing an applied status event.
 async fn assert_merged(arranged: &Arranged, pr: &PublishedPr, main_before: &str) -> Result<()> {
     let main_after = arranged.publisher.rev_parse("main").await?;
     assert_ne!(
@@ -305,10 +303,9 @@ async fn assert_merged(arranged: &Arranged, pr: &PublishedPr, main_before: &str)
         "a no-ff merge produces a two-parent merge commit",
     );
     let applied = applied_status_events(&arranged.harness, pr).await?;
-    assert_eq!(
-        applied.len(),
-        1,
-        "a completed merge publishes exactly one applied status event",
+    assert!(
+        applied.is_empty(),
+        "a local merge must not publish an applied status before Git push",
     );
     Ok(())
 }
@@ -638,21 +635,16 @@ async fn a_workflow_that_never_concluded_blocks_the_merge_beside_a_successful_on
     );
     assert_eq!(status["ci"]["state"], "stale", "{status}");
 
-    // The control: with no floor demanded the merge goes through, warned
-    // about — so the refusal above is the gate's doing and not a merge that
-    // could never have run.
+    // The control: with no floor demanded the merge goes through, so the
+    // refusal above is the gate's doing and not a merge that could never have
+    // run.
     let (out, json) = pr_merge(&arranged.publisher, &id, &[]).await?;
     assert!(
         out.status.success(),
-        "the warning is non-blocking: {json}\nstderr: {}",
+        "the unflagged merge should proceed: {json}\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert!(
-        json["ci_warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("stale")),
-        "merging past a workflow that never finished is not silent: {json}"
-    );
+    assert!(json.get("ci").is_none(), "{json}");
     assert_merged(&arranged, &pr, &main_before).await?;
 
     Ok(())
@@ -771,8 +763,8 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
         );
         assert_eq!(json["ci_warning"], Value::Null, "{json}");
         assert!(
-            json["event"].is_string(),
-            "a completed merge reports the applied status event it published: {json}"
+            json.get("event").is_none(),
+            "a local merge must not report an applied status event: {json}"
         );
         if offline {
             assert_eq!(
@@ -789,12 +781,10 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
 }
 
 #[tokio::test]
-async fn a_neutral_or_skipped_conclusion_is_merged_rather_than_refused_or_warned_about()
--> Result<()> {
+async fn a_neutral_or_skipped_conclusion_is_accepted_by_the_merge_gate() -> Result<()> {
     let arranged = arrange("merge-green").await?;
-    // Both runs rest on this standing request through the control history,
-    // so the only thing the gate and the warning can be reacting to is the
-    // conclusion.
+    // Both runs rest on this standing request through the control history, so
+    // the only thing the gate can be reacting to is the conclusion.
     arranged.service_request().await?;
 
     let neutral = arranged.open_pr("neutral").await?;
@@ -867,8 +857,7 @@ async fn a_neutral_or_skipped_conclusion_is_merged_rather_than_refused_or_warned
     );
     assert_eq!(status["ci"]["conclusion"], "skipped", "{status}");
 
-    // And with no floor demanded there is nothing to say about it: a green
-    // result is not a failing, unfinished or weakly-signed one.
+    // With no floor demanded, merge does not project CI at all.
     let main_before = arranged.publisher.rev_parse("main").await?;
     let (out, json) = pr_merge(&arranged.publisher, &id, &[]).await?;
     assert!(
@@ -876,25 +865,19 @@ async fn a_neutral_or_skipped_conclusion_is_merged_rather_than_refused_or_warned
         "{json}\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(json["ci"]["conclusion"], "skipped", "{json}");
-    assert_eq!(
-        json["ci_warning"],
-        Value::Null,
-        "a `skipped` conclusion is a pass, so merging past it is not warned \
-         about: {json}"
-    );
+    assert!(json.get("ci").is_none(), "{json}");
     assert_merged(&arranged, &skipped, &main_before).await?;
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Warn: without the flag a shortfall is reported, and the merge proceeds.
+// Without a requested gate, merge does not fetch or project CI.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn without_the_flag_a_failing_result_warns_and_the_merge_proceeds() -> Result<()> {
-    let arranged = arrange("merge-warn").await?;
+async fn without_the_flag_ci_is_not_projected_and_the_merge_proceeds() -> Result<()> {
+    let arranged = arrange("merge-without-gate").await?;
 
     let failing = arranged.open_pr("failing").await?;
     arranged
@@ -904,8 +887,7 @@ async fn without_the_flag_a_failing_result_warns_and_the_merge_proceeds() -> Res
         )
         .await?;
 
-    // A run still executing: the same "has not concluded" shortfall the gate
-    // refuses on, so merging while CI is in flight is not silent either.
+    // A run still executing would be refused by a requested gate.
     let running = arranged.open_pr("running").await?;
     arranged
         .publish_run(
@@ -917,8 +899,7 @@ async fn without_the_flag_a_failing_result_warns_and_the_merge_proceeds() -> Res
         )
         .await?;
 
-    // A PR nothing ran CI for: no result is failing, unfinished or weakly
-    // signed, so there is nothing to warn about.
+    // A PR nothing ran CI for exercises the empty-CI case.
     let quiet = arranged.open_pr("quiet").await?;
 
     arranged
@@ -926,57 +907,52 @@ async fn without_the_flag_a_failing_result_warns_and_the_merge_proceeds() -> Res
         .git_ok(["fetch", "origin"], "git fetch origin")
         .await?;
 
-    let main_before = arranged.publisher.rev_parse("main").await?;
-    let (out, json) = pr_merge(&arranged.publisher, &failing.event_id.to_hex(), &[]).await?;
-    assert!(
-        out.status.success(),
-        "without --require-ci-trust a failing result is a warning, not a \
-         refusal: {json}\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert_eq!(json["command_status"], "ok", "{json}");
-    assert_eq!(json["ci"]["conclusion"], "failure", "{json}");
-    assert!(
-        json["ci_warning"]
+    for pr in [&failing, &running, &quiet] {
+        let main_before = arranged.publisher.rev_parse("main").await?;
+        let (out, json) = pr_merge(&arranged.publisher, &pr.event_id.to_hex(), &[]).await?;
+        assert!(
+            out.status.success(),
+            "without --require-ci-trust the merge should proceed: {json}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert_eq!(json["command_status"], "ok", "{json}");
+        assert_eq!(json["action"], "merged", "{json}");
+        assert_eq!(json["entity"], "pr", "{json}");
+        let id = json["id"]
             .as_str()
-            .is_some_and(|warning| warning.contains("failure")),
-        "the warning is carried as a field, not left to the printed text: {json}"
-    );
-    assert_merged(&arranged, &failing, &main_before).await?;
-
-    let main_before = arranged.publisher.rev_parse("main").await?;
-    let (out, json) = pr_merge(&arranged.publisher, &running.event_id.to_hex(), &[]).await?;
-    assert!(out.status.success(), "{json}");
-    assert_eq!(json["ci"]["state"], "running", "{json}");
-    assert!(
-        json["ci_warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("running")),
-        "merging while CI is still in flight is warned about: {json}"
-    );
-    assert_merged(&arranged, &running, &main_before).await?;
-
-    let main_before = arranged.publisher.rev_parse("main").await?;
-    let (out, json) = pr_merge(&arranged.publisher, &quiet.event_id.to_hex(), &[]).await?;
-    assert!(out.status.success(), "{json}");
-    assert_eq!(json["ci"]["state"], "none", "{json}");
-    assert_eq!(
-        json["ci_warning"],
-        Value::Null,
-        "a PR with no CI at all is not warned about: {json}"
-    );
-    assert_merged(&arranged, &quiet, &main_before).await?;
+            .with_context(|| format!("ungated merge id is not a string: {json}"))?;
+        assert_eq!(
+            Nip19Event::from_bech32(id)
+                .context("ungated merge id is not a valid nevent")?
+                .event_id,
+            pr.event_id,
+            "ungated merge must identify the proposal it merged: {json}",
+        );
+        assert!(
+            json.get("ci").is_none(),
+            "an unrequested CI projection should not be included: {json}"
+        );
+        assert!(
+            json.get("ci_warning").is_none(),
+            "an ungated merge should not carry a CI warning field: {json}"
+        );
+        assert!(
+            json.get("event").is_none(),
+            "a local merge must not report an unpublished event: {json}"
+        );
+        assert_merged(&arranged, pr, &main_before).await?;
+    }
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// A PR whose only CI describes a superseded revision: `none`, but not the
-// `none` that means nobody asked.
+// A PR whose only CI describes a superseded revision is also merged without
+// projecting CI when no floor was requested.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn ci_for_a_superseded_revision_warns_rather_than_merging_in_silence() -> Result<()> {
+async fn ci_for_a_superseded_revision_is_not_projected_without_a_gate() -> Result<()> {
     let arranged = arrange("merge-superseded").await?;
 
     let pr = arranged.open_pr("revised").await?;
@@ -998,22 +974,10 @@ async fn ci_for_a_superseded_revision_warns_rather_than_merging_in_silence() -> 
     let (out, json) = pr_merge(&arranged.publisher, &pr.event_id.to_hex(), &[]).await?;
     assert!(
         out.status.success(),
-        "the warning is non-blocking: {json}\nstderr: {}",
+        "the unflagged merge should proceed: {json}\nstderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(
-        json["ci"]["state"], "none",
-        "an earlier revision's result is never presented as current: {json}"
-    );
-    assert_eq!(
-        json["ci"]["revision_matched"], false,
-        "CI exists for this PR, just not for what is being merged: {json}"
-    );
-    assert!(
-        json["ci_warning"].is_string(),
-        "a result that describes something other than the merged revision \
-         must not be indistinguishable from no CI at all: {json}"
-    );
+    assert!(json.get("ci").is_none(), "{json}");
     assert_merged(&arranged, &pr, &main_before).await?;
 
     Ok(())

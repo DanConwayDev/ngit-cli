@@ -10,8 +10,8 @@
 //!   canonical [`CONTEXT_INCOMPLETE_LABEL`] caveat applies. `pr list` uses it.
 //! - The **full tier** ([`resolve_full_tier`]) additionally obtains the missing
 //!   quoted requests through an injected fetcher and verifies NIP-05 identities
-//!   through an injected lookup. `pr view`, `pr merge` and `ci status` use it.
-//!   Only the signers in [`identity_lookup_signers`] are resolved, and the
+//!   through an injected lookup. `pr view`, `ci status`, and merge CI gates use
+//!   it. Only the signers in [`identity_lookup_signers`] are resolved, and the
 //!   lookups themselves are bounded in count and in total time, so a publisher
 //!   cannot scale the wait by naming more domains.
 //!
@@ -444,9 +444,9 @@ fn described_signers(runs: &[WorkflowRun], controls: &[ServiceControl]) -> Vec<P
 /// coordinator this repository has no relationship with and no surface
 /// describes, so resolving it would buy nothing — while letting an unrelated
 /// publisher add a domain of their choosing to the identity step of every
-/// command that runs the full tier, including a default, non-blocking
-/// `ngit pr merge`. Such a coordinator keeps its (empty) resolution and its
-/// unassociated relationship; only the lookup is withheld.
+/// command that runs the full tier, including a merge with an explicit CI
+/// gate. Such a coordinator keeps its (empty) resolution and its unassociated
+/// relationship; only the lookup is withheld.
 #[must_use]
 pub fn identity_lookup_signers(
     runs: &[WorkflowRun],

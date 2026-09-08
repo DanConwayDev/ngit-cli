@@ -413,10 +413,9 @@ pub enum Commands {
         long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
     )]
     Pr(PrSubCommandArgs),
-    /// merge a PR into its declared target, or the default branch, as a no-ff
-    /// merge commit (does not push)
+    /// merge a PR as a local no-ff merge commit (alias for `ngit pr merge`)
     #[command(
-        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nthis is an alias for `ngit pr merge`; run without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
     )]
     Merge(MergeSubCommandArgs),
     /// work with issues
@@ -1324,25 +1323,12 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// merge a PR into the current branch (maintainer only)
+    /// merge a PR into its declared target, or the default branch, as a no-ff
+    /// merge commit (does not push)
     #[command(
-        long_about = "merge a PR into the current branch (maintainer only)\n\nperforms a git merge of the PR branch; push afterwards to update the nostr state\n\nthe PR's CI results and the trust context of every signer behind them are printed before the merge. Without --require-ci-trust a result that is failing, unfinished, or signed only by signers with no known context is a warning, not a refusal."
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
     )]
-    Merge {
-        /// Proposal event-id (hex) or nevent (bech32)
-        #[arg(value_name = "ID|nevent")]
-        id: String,
-        /// Use squash merge
-        #[arg(long)]
-        squash: bool,
-        /// Refuse to merge unless the current CI result is a success whose
-        /// weakest run meets this trust floor
-        #[arg(long, value_name = "LEVEL", value_enum)]
-        require_ci_trust: Option<CiTrustFloor>,
-        /// Use local cache only, skip network fetch
-        #[arg(long)]
-        offline: bool,
-    },
+    Merge(MergeSubCommandArgs),
     /// add one or more labels to a PR (author or maintainer only)
     Label {
         /// Proposal event-id (hex) or nevent (bech32)
@@ -1801,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_merge_accepts_ci_trust_gate() {
+    fn top_level_merge_alias_accepts_ci_trust_gate() {
         let cli = Cli::try_parse_from([
             "ngit",
             "merge",
@@ -1809,7 +1795,7 @@ mod tests {
             "--require-ci-trust",
             "maintainer-directed",
         ])
-        .expect("top-level merge should accept a CI trust floor");
+        .expect("top-level merge alias should accept a CI trust floor");
         let Some(Commands::Merge(args)) = cli.command else {
             panic!("expected merge command");
         };
@@ -1817,6 +1803,56 @@ mod tests {
             args.require_ci_trust,
             Some(CiTrustFloor::MaintainerDirected)
         ));
+    }
+
+    #[test]
+    fn top_level_merge_alias_uses_the_pr_merge_arguments() {
+        let canonical = Cli::try_parse_from([
+            "ngit",
+            "pr",
+            "merge",
+            "deadbeef",
+            "--offline",
+            "--exclude-description",
+            "--require-ci-trust",
+            "maintainer-directed",
+        ])
+        .expect("canonical pr merge arguments should parse");
+        let alias = Cli::try_parse_from([
+            "ngit",
+            "merge",
+            "deadbeef",
+            "--offline",
+            "--exclude-description",
+            "--require-ci-trust",
+            "maintainer-directed",
+        ])
+        .expect("top-level merge alias should accept the same arguments");
+
+        let Some(Commands::Pr(canonical)) = canonical.command else {
+            panic!("expected pr command");
+        };
+        let PrCommands::Merge(canonical) = canonical.pr_command else {
+            panic!("expected canonical pr merge command");
+        };
+        let Some(Commands::Merge(alias)) = alias.command else {
+            panic!("expected top-level merge alias");
+        };
+
+        assert_eq!(alias.id, canonical.id);
+        assert_eq!(alias.offline, canonical.offline);
+        assert!(alias.require_ci_trust == canonical.require_ci_trust);
+        assert_eq!(alias.exclude_description, canonical.exclude_description);
+
+        let canonical_without_id = Cli::try_parse_from(["ngit", "pr", "merge"])
+            .expect("canonical pr merge should infer an omitted PR id");
+        let Some(Commands::Pr(canonical_without_id)) = canonical_without_id.command else {
+            panic!("expected pr command");
+        };
+        let PrCommands::Merge(canonical_without_id) = canonical_without_id.pr_command else {
+            panic!("expected canonical pr merge command");
+        };
+        assert!(canonical_without_id.id.is_none());
     }
 
     #[test]
