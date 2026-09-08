@@ -141,6 +141,20 @@ features, compatibility changes, and fixes.
 
 ### Changed
 
+- The bundled coding-agent skill is rewritten around the guides published at
+  https://ngit.dev. `SKILL.md` keeps the rules agents get wrong and points each
+  task slice at its bundled reference, the matching guide, and
+  `ngit <command> --help`; the reference files drop material the guides cover
+  better, describe capabilities instead of choosing workflow policy, and gain a
+  rule to preserve choices the user or repository already made. The skill now
+  states that it documents ngit v3 and how to install or update an older host,
+  merges `reference/repo-settings.md` into `reference/repositories.md`, and
+  corrects the `setup-ngit` action tag (`v3`), the issue auto-resolution
+  keywords, and the canonical `ngit pr merge` behaviour.
+- `ngit skill install` and `upgrade` delete reference files that a later ngit
+  no longer bundles, resolving the same canonical symlinks as bundled files,
+  and stage the deletion in the guidance commit. A lingering retired file is
+  reconciled even when the skill version is already current.
 - The top-level `ngit merge` command is now a compatibility alias for the
   canonical `ngit pr merge` command. Both spellings create the same local
   no-ff merge on the PR's declared target (or repository default), share
