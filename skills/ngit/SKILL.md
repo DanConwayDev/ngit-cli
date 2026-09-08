@@ -84,7 +84,7 @@ ngit repo --json --offline            # full metadata when needed
 `ngit repo` always exits 0, and `is_nostr_repo: false` can be a cold-cache
 false negative: if a remote shows `nostr://`, run `git fetch origin` and
 retry. The output includes the roster (`members`, `lead_source`, `lead_path`,
-`pending_actions`, `health`); read `reference/repo-settings.md` before
+`pending_actions`, `health`); read `reference/repositories.md` before
 changing membership or hosting.
 
 ## nostr:// URLs
@@ -105,8 +105,7 @@ adds tutorials and background.
 
 | Task | Bundled reference | ngit.dev guide |
 | ---- | ----------------- | -------------- |
-| Publish or clone repositories, URL forms | `reference/repositories.md` | `/repositories` |
-| Hosting, metadata, maintainers, moderators | `reference/repo-settings.md` | `/maintainers`, `/maintainers/going-deeper` |
+| Publish, clone, host repositories; maintainers, moderators | `reference/repositories.md` | `/repositories`, `/maintainers` |
 | Open, update, stack, review, merge PRs | `reference/prs.md` | `/pull-requests` |
 | Issues | `reference/issues.md` | `/issues` |
 | CI results, trust, workflows, ngit in CI jobs | `reference/ci.md` | `/ci`, `/ci/workflows/` |

@@ -52,10 +52,6 @@ const REFERENCE_FILES: &[(&str, &str)] = &[
         include_str!("../../skills/ngit/reference/repositories.md"),
     ),
     (
-        "repo-settings.md",
-        include_str!("../../skills/ngit/reference/repo-settings.md"),
-    ),
-    (
         "sync-config.md",
         include_str!("../../skills/ngit/reference/sync-config.md"),
     ),
@@ -115,7 +111,7 @@ fn skill_paths() -> [&'static str; 2] {
 /// Managed reference locations: `<skill dir>/reference/<file>` for every
 /// bundled reference in both discovery paths. Kept static so per-path checks
 /// never allocate.
-const REFERENCE_PATHS: [&str; 18] = [
+const REFERENCE_PATHS: [&str; 16] = [
     ".agents/skills/ngit/reference/accounts.md",
     ".agents/skills/ngit/reference/ci.md",
     ".agents/skills/ngit/reference/containers.md",
@@ -123,7 +119,6 @@ const REFERENCE_PATHS: [&str; 18] = [
     ".agents/skills/ngit/reference/nsites.md",
     ".agents/skills/ngit/reference/prs.md",
     ".agents/skills/ngit/reference/repositories.md",
-    ".agents/skills/ngit/reference/repo-settings.md",
     ".agents/skills/ngit/reference/sync-config.md",
     ".claude/skills/ngit/reference/accounts.md",
     ".claude/skills/ngit/reference/ci.md",
@@ -132,11 +127,10 @@ const REFERENCE_PATHS: [&str; 18] = [
     ".claude/skills/ngit/reference/nsites.md",
     ".claude/skills/ngit/reference/prs.md",
     ".claude/skills/ngit/reference/repositories.md",
-    ".claude/skills/ngit/reference/repo-settings.md",
     ".claude/skills/ngit/reference/sync-config.md",
 ];
 
-fn reference_paths() -> [&'static str; 18] {
+fn reference_paths() -> [&'static str; 16] {
     REFERENCE_PATHS
 }
 
