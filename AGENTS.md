@@ -333,9 +333,12 @@ exactly these patterns. They are non-negotiable:
 
 A release is a `chore: release vX.Y.Z` commit updating `CHANGELOG.md`,
 `Cargo.toml`, and `Cargo.lock`, followed by an annotated `vX.Y.Z` tag on that
-commit. Pushing the tag triggers `.github/workflows/release.yml`, which builds
-the platform archives; the signed release assets are then published with
-`ngit release publish` (see `docs/releases.md`).
+commit. Release candidates publish `main` and the tag to every release remote.
+Stable releases add a third required ref: fast-forward `stable` to the tag, then
+push `main`, the tag, and `stable` together to every release remote (currently
+`origin` and `github`). Pushing the tag triggers `.github/workflows/release.yml`,
+which builds the platform archives; the signed release assets are then
+published with `ngit release publish` (see `docs/releases.md`).
 
 ### Bump the `stable` branch (mandatory for stable releases)
 
@@ -351,14 +354,17 @@ push it as part of the release steps:
 
 ```bash
 git branch -f stable vX.Y.Z
-git push origin stable
+git push origin main stable refs/tags/vX.Y.Z
+git push github main stable refs/tags/vX.Y.Z
 ```
 
 Rules:
 
 1. Release candidates (`vX.Y.Z-rc.N`) never move `stable`.
-2. Never point `stable` at an untagged commit or move it backwards.
-3. Do not skip the push: an unbumped `stable` silently serves an old release
+2. A stable release pushes the same tagged commit through `main`, `stable`, and
+   `refs/tags/vX.Y.Z` to every release remote.
+3. Never point `stable` at an untagged commit or move it backwards.
+4. Do not skip the push: an unbumped `stable` silently serves an old release
    to every documented Nix install path.
 
 The `readme_nix_install_tracks_the_stable_branch` test in
