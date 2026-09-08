@@ -9,19 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Release overview
 
-ngit v3 brings substantial improvements to git collaboration over Nostr,
-private repository access, CI, software delivery, and automation. It aligns
-with GitWorkshop v4 across the protocols and workflows they share. These
-highlights are not exhaustive; the detailed entries below record many more
-features, compatibility changes, and fixes.
+ngit v3 is its biggest release yet. With CI, private repositories, software
+releases, and plenty more, ngit, powered by GRASP, is quickly becoming a fully
+fledged development solution. It launches in tandem with ngit-grasp v3,
+GitWorkshop v4, and the new ngit-ci 0.1 as one coordinated release across the
+ngit family of tools. These are the changes that define the release. [Read the
+full launch story](https://ngit.dev/v3) to see how all four releases fit
+together; the detailed entries below record every feature, compatibility
+change, and fix.
 
-- **Nostr CI:** Discover and control coordinators with standing service
-  requests, stops, and manual triggers; inspect workflow and per-job status,
-  logs, and trust evidence; and optionally require CI trust before merging.
-- **Private repositories and Buzz interoperability:** Clone, fetch, push, and
-  collaborate on GRASP-08 private repositories using scoped Nostr and Git
-  authentication. Basic Buzz support extends clone, pull-request, and
-  lifecycle-status workflows to Buzz repositories.
+- **CI is here:** One of the biggest gaps holding projects back from ngit is
+  now closed. Discover maintainer-selected coordinators, request, trigger, and
+  stop runs, follow workflows down to individual job logs and trust evidence,
+  and optionally require a trusted CI result before merging.
+- **Private repositories without surrendering identity:** Clone, fetch, push,
+  and collaborate on GRASP-08 private repositories using scoped Nostr and Git
+  authentication. The repository remains a signed Nostr identity instead of
+  becoming an account owned by its server. Basic Buzz support extends clone,
+  pull-request, and lifecycle-status workflows to Buzz repositories.
 - **Maintainers and repository authority:** Introduce an explicit lead,
   role history, and non-maintainer moderators, with clearer invitations,
   handovers, departures, roster changes, and historical authorization. These
@@ -30,11 +35,14 @@ features, compatibility changes, and fixes.
   that an invited maintainer has no Git-state authority until they accept. That
   pending-invitation boundary is the SemVer reason for the v3 major version
   bump.
-- **Pull requests and collaboration:** Add non-default target branches,
-  inferred and explicit stacked pull requests, deliberate checkout of
-  contributor branches, issue-resolution provenance, and safer merge flows.
-- **Software releases:** Publish NIP-82 applications, releases, and assets with
-  Zapstore-compatible metadata, and update ngit from signed releases.
+- **Pull requests that fit real projects:** Target non-default branches, build
+  inferred or explicit pull-request stacks, check out contributor branches on
+  demand, record issue-resolution provenance, and merge with stronger safety
+  checks.
+- **Software releases without the platform:** Think GitHub Releases without
+  GitHub, made resilient through Blossom replication. Publish signed NIP-82
+  applications, releases, and assets with Zapstore-compatible metadata, then
+  update ngit itself from its verified releases.
 
 #### Additional ngit highlights
 
