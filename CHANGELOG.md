@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-09-08
+
 ### Release overview
 
 ngit v3 is its biggest release yet. With CI, private repositories, software
