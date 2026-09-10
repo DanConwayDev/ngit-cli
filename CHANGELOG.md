@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The bundled skill uses conservative CommonMark formatting to reduce avoidable
+  formatter churn without imposing formatter configuration on consuming
+  repositories.
+
 ## [3.0.0] - 2026-09-08
 
 ### Release overview
