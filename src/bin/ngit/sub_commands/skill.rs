@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use ngit::{
     agent_guidance,
@@ -20,10 +22,28 @@ struct SkillContext {
 
 #[derive(Serialize)]
 struct Output {
+    command_status: &'static str,
     #[serde(flatten)]
     guidance: agent_guidance::GuidanceStatus,
     is_maintainer: Option<bool>,
     reminders_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ReconcileOutput {
+    command_status: &'static str,
+    action: &'static str,
+    changed_files: Vec<String>,
+    changes_uncommitted: bool,
+    is_maintainer: Option<bool>,
+    #[serde(flatten)]
+    guidance: agent_guidance::GuidanceStatus,
+}
+
+#[derive(Default)]
+struct UncommittedPathReport {
+    changed_files: Vec<String>,
+    warnings: Vec<String>,
 }
 
 pub async fn launch(
@@ -38,9 +58,12 @@ pub async fn launch(
 
     let context = resolve_context()?;
     match command {
-        SkillCommands::Install | SkillCommands::Upgrade => reconcile(&context, force, auth).await,
+        SkillCommands::Install | SkillCommands::Upgrade => {
+            reconcile(&context, force, json, auth).await
+        }
         SkillCommands::Status => {
             let output = Output {
+                command_status: "ok",
                 guidance: agent_guidance::status(&context.root)?,
                 is_maintainer: resolve_maintainer(&context, auth).await,
                 reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
@@ -72,85 +95,148 @@ fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
     Ok(())
 }
 
-async fn reconcile(context: &SkillContext, force: bool, auth: SignerParams<'_>) -> Result<()> {
+async fn reconcile(
+    context: &SkillContext,
+    force: bool,
+    json: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     let is_maintainer = resolve_maintainer(context, auth).await;
-    reconcile_for_account(context, force, is_maintainer)
+    reconcile_for_account(context, force, json, is_maintainer)
 }
 
 fn reconcile_for_account(
     context: &SkillContext,
     force: bool,
+    json: bool,
     is_maintainer: Option<bool>,
 ) -> Result<()> {
     let before = agent_guidance::status(&context.root)?;
-    let paths_for_commit = agent_guidance::paths_for_commit(&context.root)?;
-    let changes_needed = !paths_for_commit.is_empty();
-    let commit_kind = if before.installed {
-        agent_guidance::GuidanceCommitKind::Upgrade
-    } else {
-        agent_guidance::GuidanceCommitKind::Install
-    };
-    let commit_preflight = changes_needed.then(|| {
-        agent_guidance::preflight_dedicated_commit(&context.repo, &context.root, &paths_for_commit)
+    let mut attempted_paths = vec![];
+    let update = agent_guidance::update_with_report(&context.root, force, &mut |path: &Path| {
+        let path = path.to_path_buf();
+        if !attempted_paths.contains(&path) {
+            attempted_paths.push(path);
+        }
     });
-    agent_guidance::update(&context.root, force)?;
-    let commit_created = match commit_preflight {
-        Some(Ok(())) => {
-            match agent_guidance::commit_guidance(
-                &context.repo,
-                &context.root,
-                &paths_for_commit,
-                commit_kind,
-            ) {
-                Ok(created) => created,
-                Err(error) => {
-                    eprintln!(
-                        "could not create repository skill commit; changes remain uncommitted: {error:#}"
-                    );
-                    false
-                }
-            }
-        }
-        Some(Err(error)) => {
-            eprintln!(
-                "could not create repository skill commit; changes remain uncommitted: {error:#}"
-            );
-            false
-        }
-        None => false,
-    };
-    if commit_created {
-        eprintln!("created repository skill commit");
-        if is_maintainer == Some(false) {
-            eprintln!(
-                "tip: you are not a repository maintainer; push this commit from a `pr/` branch to open a pull request"
-            );
-        }
+    let inspection = uncommitted_paths(context, &attempted_paths);
+    for warning in inspection.warnings {
+        eprintln!("warning: {warning}");
     }
-    let after = agent_guidance::status(&context.root)?;
+    let changed_files = inspection.changed_files;
+    let changes_uncommitted = !changed_files.is_empty();
+    let after = match update {
+        Ok(after) => after,
+        Err(error) => {
+            print_changed_files(&changed_files, true, is_maintainer);
+            if json {
+                crate::output::set_value(serde_json::json!({
+                    "command_status": "error",
+                    "action": "failed",
+                    "error": format!("{error:#}"),
+                    "changed_files": changed_files,
+                    "changes_uncommitted": changes_uncommitted,
+                    "is_maintainer": is_maintainer,
+                }));
+            }
+            return Err(error);
+        }
+    };
+    let action;
     if !before.installed {
+        action = "installed";
         eprintln!(
             "installed ngit repository skill version {}",
             after.bundled_version
         );
     } else if before.update_available {
+        action = "upgraded";
         eprintln!(
             "upgraded ngit repository skill from {} to {}",
             before.installed_version.as_deref().unwrap_or("unknown"),
             after.bundled_version
         );
-    } else if changes_needed {
-        eprintln!(
-            "reconciled ngit repository skill at bundled version {}",
-            after.bundled_version
-        );
-    } else {
+    } else if attempted_paths.is_empty() {
+        action = "unchanged";
         eprintln!(
             "ngit repository skill is already at bundled version {}",
             after.bundled_version
         );
+    } else {
+        action = "reconciled";
+        eprintln!(
+            "reconciled ngit repository skill at bundled version {}",
+            after.bundled_version
+        );
+    }
+    print_changed_files(&changed_files, false, is_maintainer);
+    if json {
+        crate::output::set(ReconcileOutput {
+            command_status: "ok",
+            action,
+            changed_files,
+            changes_uncommitted,
+            is_maintainer,
+            guidance: after,
+        })?;
     }
     Ok(())
+}
+
+fn uncommitted_paths(context: &SkillContext, attempted_paths: &[PathBuf]) -> UncommittedPathReport {
+    inspect_uncommitted_paths(attempted_paths, |relative| {
+        context.repo.git_repo.status_file(relative)
+    })
+}
+
+fn inspect_uncommitted_paths(
+    attempted_paths: &[PathBuf],
+    mut status_file: impl FnMut(&Path) -> std::result::Result<git2::Status, git2::Error>,
+) -> UncommittedPathReport {
+    let mut report = UncommittedPathReport::default();
+    for relative in attempted_paths {
+        let status = match status_file(relative) {
+            Ok(status) => status,
+            Err(error) if error.code() == git2::ErrorCode::NotFound => continue,
+            Err(error) => {
+                report.warnings.push(format!(
+                    "failed to inspect repository skill path `{}`: {error}",
+                    relative.display()
+                ));
+                continue;
+            }
+        };
+        if status == git2::Status::CURRENT || status.contains(git2::Status::IGNORED) {
+            continue;
+        }
+        let relative = relative.to_string_lossy().into_owned();
+        if !report.changed_files.contains(&relative) {
+            report.changed_files.push(relative);
+        }
+    }
+    report
+}
+
+fn print_changed_files(changed_files: &[String], partial: bool, is_maintainer: Option<bool>) {
+    if changed_files.is_empty() {
+        return;
+    }
+    if partial {
+        eprintln!("repository skill update stopped with changed files:");
+    } else {
+        eprintln!("changed repository skill files:");
+    }
+    for path in changed_files {
+        eprintln!("  {path}");
+    }
+    eprintln!(
+        "changes remain uncommitted; review and commit them with this repository's normal validation workflow"
+    );
+    if is_maintainer == Some(false) {
+        eprintln!(
+            "tip: you are not a repository maintainer; commit these changes on a `pr/` branch to open a pull request"
+        );
+    }
 }
 
 fn print_status(output: &Output) {
@@ -375,96 +461,21 @@ mod tests {
     }
 
     #[test]
-    fn guidance_commit_updates_the_real_index() {
+    fn install_leaves_changes_uncommitted() {
         let (repo, root) = repository();
-        let paths = agent_guidance::paths_for_commit(&root).unwrap();
-        agent_guidance::setup(&root, false).unwrap();
-
-        assert!(
-            agent_guidance::commit_guidance(
-                &repo,
-                &root,
-                &paths,
-                agent_guidance::GuidanceCommitKind::Install,
-            )
-            .unwrap()
-        );
-
-        let mut index = repo.git_repo.index().unwrap();
-        let head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(index.write_tree().unwrap(), head.tree_id());
-        assert_eq!(
-            head.message().unwrap(),
-            "chore: install ngit repository skill\n\n\
-             Add repository guidance for supported coding agents."
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn failed_guidance_commit_restores_the_index_and_leaves_changes() {
-        let (repo, root) = repository();
-        let original_head = repo.git_repo.head().unwrap().peel_to_commit().unwrap();
-        let head_name = repo.git_repo.head().unwrap().name().unwrap().to_owned();
-        let paths = agent_guidance::paths_for_commit(&root).unwrap();
-        agent_guidance::setup(&root, false).unwrap();
-        let lock_path = repo.git_repo.path().join(format!("{head_name}.lock"));
-        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        fs::write(&lock_path, "locked\n").unwrap();
-
-        assert!(
-            agent_guidance::commit_guidance(
-                &repo,
-                &root,
-                &paths,
-                agent_guidance::GuidanceCommitKind::Install,
-            )
-            .is_err()
-        );
-
-        let reopened = git2::Repository::open(&root).unwrap();
-        let head = reopened.head().unwrap().peel_to_commit().unwrap();
-        let mut index = reopened.index().unwrap();
-        assert_eq!(head.id(), original_head.id());
-        assert_eq!(index.write_tree().unwrap(), original_head.tree_id());
-        assert!(
-            reopened
-                .status_file(std::path::Path::new(agent_guidance::SKILL_PATH))
-                .unwrap()
-                .contains(git2::Status::WT_NEW)
-        );
-        fs::remove_file(lock_path).unwrap();
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn guidance_commit_refuses_a_dirty_index() {
-        let (repo, root) = repository();
-        let paths = agent_guidance::paths_for_commit(&root).unwrap();
-        fs::write(root.join("staged.txt"), "staged\n").unwrap();
-        let mut index = repo.git_repo.index().unwrap();
-        index.add_path(std::path::Path::new("staged.txt")).unwrap();
-        index.write().unwrap();
-
-        assert!(
-            agent_guidance::preflight_dedicated_commit(&repo, &root, &paths)
-                .unwrap_err()
-                .to_string()
-                .contains("index contains changes")
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn non_maintainer_install_creates_a_dedicated_commit() {
-        let (repo, root) = repository();
-        let original_head = repo.git_repo.head().unwrap().peel_to_commit().unwrap().id();
         let context = SkillContext {
             repo,
             root: root.clone(),
         };
+        let original_head = context
+            .repo
+            .git_repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
 
-        reconcile_for_account(&context, false, Some(false)).unwrap();
+        reconcile_for_account(&context, false, false, None).unwrap();
 
         let head = context
             .repo
@@ -473,17 +484,22 @@ mod tests {
             .unwrap()
             .peel_to_commit()
             .unwrap();
-        assert_ne!(head.id(), original_head);
-        assert_eq!(
-            head.message().unwrap(),
-            "chore: install ngit repository skill\n\n\
-             Add repository guidance for supported coding agents."
+        let mut index = context.repo.git_repo.index().unwrap();
+        assert_eq!(head.id(), original_head.id());
+        assert_eq!(index.write_tree().unwrap(), original_head.tree_id());
+        assert!(
+            context
+                .repo
+                .git_repo
+                .status_file(std::path::Path::new(agent_guidance::SKILL_PATH))
+                .unwrap()
+                .contains(git2::Status::WT_NEW)
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn non_maintainer_install_leaves_changes_when_index_is_dirty() {
+    fn install_preserves_existing_index_changes() {
         let (repo, root) = repository();
         fs::write(root.join("staged.txt"), "staged\n").unwrap();
         let mut index = repo.git_repo.index().unwrap();
@@ -494,7 +510,7 @@ mod tests {
             root: root.clone(),
         };
 
-        reconcile_for_account(&context, false, Some(false)).unwrap();
+        reconcile_for_account(&context, false, false, None).unwrap();
 
         assert!(root.join(agent_guidance::SKILL_PATH).is_file());
         assert!(
@@ -514,5 +530,22 @@ mod tests {
                 .contains(git2::Status::WT_NEW)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn status_inspection_errors_preserve_other_observed_changes() {
+        let paths = vec![PathBuf::from("unreadable"), PathBuf::from("changed")];
+        let report = inspect_uncommitted_paths(&paths, |path| {
+            if path == Path::new("unreadable") {
+                Err(git2::Error::from_str("corrupt index"))
+            } else {
+                Ok(git2::Status::WT_MODIFIED)
+            }
+        });
+
+        assert_eq!(report.changed_files, vec!["changed".to_string()]);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("unreadable"));
+        assert!(report.warnings[0].contains("corrupt index"));
     }
 }
