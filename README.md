@@ -139,8 +139,16 @@ to use ngit. The command installs the skill in the Codex and Claude discovery
 locations and adds a compact pointer to existing `AGENTS.md` or `CLAUDE.md`
 files without creating either file. Use `ngit skill upgrade` to update existing
 copies from the version in the skill metadata; it does not restore a copy that
-was removed after installation. Install and upgrade create a dedicated commit;
-contributors who are not maintainers should push it from a `pr/` branch to
-propose the change as a pull request.
+was removed after installation. Install and upgrade leave their changes
+uncommitted so the repository's normal validation and commit workflow can run.
+Contributors who are not maintainers should commit the changes on a `pr/`
+branch and push it to propose a pull request. With `--json`, `changed_files`
+lists the managed paths that remain as Git changes and `changes_uncommitted`
+states whether there is anything to commit. Git-ignored managed files are
+installed but omitted from those fields because ordinary Git staging excludes
+them. Successful commands set `action` to `installed`, `upgraded`,
+`reconciled`, or `unchanged`; partial update failures use `failed`, report the
+same change fields for files already left in the worktree, and omit post-update
+guidance status fields.
 
 Run `ngit skill --help` for status and reminder opt-out commands.

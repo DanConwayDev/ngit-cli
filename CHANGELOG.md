@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ngit skill install` and `upgrade` now leave managed files uncommitted so each
+  repository can apply its own validation and commit workflow, with exact
+  non-ignored changed paths available in both human and JSON output.
 - The bundled skill uses conservative CommonMark formatting to reduce avoidable
   formatter churn without imposing formatter configuration on consuming
   repositories.

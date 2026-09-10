@@ -274,9 +274,9 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
         .get("refs/heads/main")
         .context("refs/heads/main missing after skill install")?
         .clone();
-    assert_ne!(
+    assert_eq!(
         skill_oid, initial_oid,
-        "maintainer skill install did not create its dedicated commit"
+        "maintainer skill install moved main instead of leaving changes uncommitted"
     );
 
     let edit = repo
@@ -364,7 +364,7 @@ async fn init_defaults_preserves_staged_changes_without_installing_guidance() ->
     );
     assert!(
         !repo.dir().join(".agents/ngit-guidance.json").exists(),
-        "guidance state was written despite the staged-index preflight failure"
+        "init unexpectedly installed repository guidance"
     );
     assert_eq!(
         repo.snapshot()?
@@ -372,7 +372,7 @@ async fn init_defaults_preserves_staged_changes_without_installing_guidance() ->
             .get("refs/heads/main")
             .context("refs/heads/main missing after init")?,
         &initial_oid,
-        "init created a guidance commit despite staged changes"
+        "init moved main despite staged changes"
     );
     let cached = repo.git(["diff", "--cached", "--quiet"]).output().await?;
     assert!(

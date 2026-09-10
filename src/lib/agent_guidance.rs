@@ -130,14 +130,9 @@ const REFERENCE_PATHS: [&str; 16] = [
     ".claude/skills/ngit/reference/sync-config.md",
 ];
 
-fn reference_paths() -> [&'static str; 16] {
-    REFERENCE_PATHS
-}
-
 /// Reference files bundled by earlier ngit versions and since merged into
 /// other references. An upgrade deletes any installed copy so a stale document
-/// cannot outlive the guidance that superseded it, and stages that deletion in
-/// the guidance commit.
+/// cannot outlive the guidance that superseded it.
 const RETIRED_REFERENCE_FILES: &[&str] = &["repo-settings.md"];
 
 /// Retired reference locations in both discovery paths, mirroring
@@ -204,10 +199,6 @@ fn validate_managed_skill_file(root: &Path, relative: &str) -> Result<PathBuf> {
     } else {
         validate_reference_path(root, relative)
     }
-}
-
-fn allowed_paths() -> [&'static str; 4] {
-    [AGENTS_PATH, CLAUDE_PATH, SKILL_PATH, CLAUDE_SKILL_PATH]
 }
 
 fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -559,15 +550,27 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
 }
 
 pub fn setup(root: &Path, force: bool) -> Result<GuidanceStatus> {
-    write_guidance(root, force)?;
+    write_guidance(root, force, &mut |_| {})?;
     status(root)
 }
 
 pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
-    write_guidance(root, force).and_then(|_| status(root))
+    update_with_report(root, force, &mut |_| {})
 }
 
-fn write_guidance(root: &Path, force: bool) -> Result<()> {
+/// Update managed guidance and report each repository-relative path immediately
+/// before a write or removal is attempted. Reporting before the operation lets
+/// callers inspect the worktree even when an I/O error leaves a partial write.
+pub fn update_with_report(
+    root: &Path,
+    force: bool,
+    report: &mut impl FnMut(&Path),
+) -> Result<GuidanceStatus> {
+    write_guidance(root, force, report)?;
+    status(root)
+}
+
+fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> Result<()> {
     let existing_skills = existing_skill_paths(root)?;
     let files = expected_files(root, &existing_skills)?;
     for (relative, _) in &files {
@@ -652,11 +655,19 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
             validate_managed_path(root, relative)?
         };
         if read_optional_text(&path)?.as_deref() != Some(content) {
+            report(
+                path.strip_prefix(root)
+                    .context("managed guidance path outside worktree")?,
+            );
             fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
     }
     for path in retired_files(root, &existing_skills)? {
+        report(
+            path.strip_prefix(root)
+                .context("managed guidance path outside worktree")?,
+        );
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -666,31 +677,6 @@ fn write_guidance(root: &Path, force: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn expected_changes(root: &Path) -> Result<Vec<(String, String)>> {
-    let existing_skills = existing_skill_paths(root)?;
-    let files = expected_files(root, &existing_skills)?;
-    let mut changes = vec![];
-    for (relative, expected) in files {
-        let path = if is_managed_skill_file(&relative) {
-            validate_managed_skill_file(root, &relative)?
-        } else {
-            validate_managed_path(root, &relative)?
-        };
-        let actual = read_optional_text(&path)?.unwrap_or_default();
-        if actual != expected {
-            let actual_relative = path
-                .strip_prefix(root)
-                .context("managed guidance path outside worktree")?
-                .to_string_lossy()
-                .into_owned();
-            if !changes.iter().any(|(path, _)| path == &actual_relative) {
-                changes.push((actual_relative, expected));
-            }
-        }
-    }
-    Ok(changes)
 }
 
 #[must_use]
@@ -772,213 +758,6 @@ pub fn set_global_reminders_enabled(enabled: bool) -> Result<()> {
     )
 }
 
-pub fn paths_for_commit(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = expected_changes(root)?
-        .into_iter()
-        .map(|(path, _)| validate_managed_path(root, &path))
-        .collect::<Result<Vec<_>>>()?;
-    for path in retired_files(root, &existing_skill_paths(root)?)? {
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuidanceCommitKind {
-    Install,
-    Upgrade,
-}
-
-impl GuidanceCommitKind {
-    fn message(self) -> &'static str {
-        match self {
-            Self::Install => {
-                "chore: install ngit repository skill\n\n\
-                 Add repository guidance for supported coding agents."
-            }
-            Self::Upgrade => {
-                "chore: upgrade ngit repository skill\n\n\
-                 Update repository guidance for supported coding agents."
-            }
-        }
-    }
-}
-
-fn validate_target_path(root: &Path, path: &Path) -> Result<PathBuf> {
-    let relative = path
-        .strip_prefix(root)
-        .context("guidance path outside worktree")?;
-    let relative = relative
-        .to_str()
-        .context("managed guidance path is not valid UTF-8")?;
-    if allowed_paths().contains(&relative)
-        || is_reference_path(relative)
-        || is_retired_reference_path(relative)
-    {
-        return validate_managed_path(root, relative);
-    }
-    // A managed skill location may symlink to canonical skill files kept
-    // elsewhere in the repository. Guidance updates those resolved files, so a
-    // guidance commit has to be able to stage them as well.
-    if skill_paths()
-        .iter()
-        .filter_map(|skill| validate_skill_path(root, skill).ok())
-        .any(|resolved| resolved == path)
-        || reference_paths()
-            .iter()
-            .filter_map(|reference| validate_reference_path(root, reference).ok())
-            .any(|resolved| resolved == path)
-        || RETIRED_REFERENCE_PATHS
-            .iter()
-            .filter_map(|reference| validate_retired_reference_path(root, reference).ok())
-            .any(|resolved| resolved == path)
-    {
-        return Ok(path.to_path_buf());
-    }
-    bail!("unexpected guidance commit path `{relative}`")
-}
-
-/// Validate that a guidance-only commit can be made without absorbing any
-/// unrelated repository changes. This deliberately happens before setup writes
-/// its files, so callers can safely treat a failure as a no-op.
-pub fn preflight_dedicated_commit(
-    repo: &crate::git::Repo,
-    root: &Path,
-    target_paths: &[PathBuf],
-) -> Result<()> {
-    for path in target_paths {
-        let _ = validate_target_path(root, path)?;
-    }
-    let head = repo
-        .git_repo
-        .head()
-        .context("cannot create a dedicated guidance commit without HEAD")?;
-    if !head.is_branch() || repo.git_repo.head_detached()? {
-        bail!("cannot create a guidance commit while HEAD is detached");
-    }
-    let parent = head.peel_to_commit()?;
-    if repo.git_repo.state() != git2::RepositoryState::Clean {
-        bail!("cannot create a guidance commit while a Git operation is in progress");
-    }
-    let mut index = repo.git_repo.index()?;
-    if index.has_conflicts() || index.write_tree()? != parent.tree_id() {
-        bail!("cannot create a guidance commit while the Git index contains changes");
-    }
-    for path in target_paths {
-        let relative = path
-            .strip_prefix(root)
-            .context("guidance path outside worktree")?;
-        let status = match repo.git_repo.status_file(relative) {
-            Ok(status) => status,
-            Err(error) if error.code() == git2::ErrorCode::NotFound => {
-                // A target that is absent from HEAD, the index, and the
-                // worktree is the normal first-install case.
-                continue;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to inspect guidance target `{}`", relative.display())
-                });
-            }
-        };
-        if status.intersects(
-            git2::Status::WT_NEW
-                | git2::Status::WT_MODIFIED
-                | git2::Status::WT_DELETED
-                | git2::Status::WT_RENAMED
-                | git2::Status::WT_TYPECHANGE
-                | git2::Status::CONFLICTED,
-        ) {
-            bail!(
-                "cannot create a guidance commit while target file `{}` has unstaged changes",
-                relative.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Create a commit containing only the installed guidance files. The caller
-/// must run [`preflight_dedicated_commit`] before changing the worktree.
-pub fn commit_guidance(
-    repo: &crate::git::Repo,
-    root: &Path,
-    target_paths: &[PathBuf],
-    kind: GuidanceCommitKind,
-) -> Result<bool> {
-    let index_path = repo.git_repo.path().join("index");
-    let original_index = if index_path.exists() {
-        Some(
-            fs::read(&index_path)
-                .with_context(|| format!("failed to read {}", index_path.display()))?,
-        )
-    } else {
-        None
-    };
-    let result = commit_guidance_inner(repo, root, target_paths, kind);
-    if let Err(error) = result {
-        match original_index {
-            Some(contents) => fs::write(&index_path, contents).map(|_| ()),
-            None if index_path.exists() => fs::remove_file(&index_path),
-            None => Ok(()),
-        }
-        .with_context(|| format!("failed to restore {}", index_path.display()))?;
-        return Err(error);
-    }
-    result
-}
-
-fn commit_guidance_inner(
-    repo: &crate::git::Repo,
-    root: &Path,
-    target_paths: &[PathBuf],
-    kind: GuidanceCommitKind,
-) -> Result<bool> {
-    let head = repo
-        .git_repo
-        .head()
-        .context("cannot create a dedicated guidance commit without HEAD")?;
-    let parent = head.peel_to_commit()?;
-    let tree = parent.tree()?;
-    let mut index = repo.git_repo.index()?;
-    index.read_tree(&tree)?;
-    for path in target_paths {
-        let path = validate_target_path(root, path)?;
-        let relative = path
-            .strip_prefix(root)
-            .context("guidance path outside worktree")?;
-        // A retired reference is deleted by the upgrade; stage its removal so
-        // the guidance commit reflects the installed file set.
-        if fs::symlink_metadata(&path).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
-            index.remove_path(relative)?;
-        } else {
-            index.add_path(relative)?;
-        }
-    }
-    let tree_id = index.write_tree_to(&repo.git_repo)?;
-    if tree_id == tree.id() {
-        return Ok(false);
-    }
-    let signature = repo
-        .git_repo
-        .signature()
-        .context("cannot determine Git author for guidance commit")?;
-    // Write the real index before moving HEAD. This means a successful commit
-    // cannot subsequently fail while trying to make the index match it.
-    index.write()?;
-    repo.git_repo.commit(
-        Some("HEAD"),
-        &signature,
-        &signature,
-        kind.message(),
-        &repo.git_repo.find_tree(tree_id)?,
-        &[&parent],
-    )?;
-    Ok(true)
-}
-
 /// Best-effort only: this deliberately uses the cached public account key and
 /// repository announcement, so it neither prompts nor asks a NIP-46 signer to
 /// sign. Errors are swallowed by callers because a warning must never affect
@@ -1033,6 +812,17 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         path
     }
+
+    fn update_report(root: &Path, force: bool) -> (Result<GuidanceStatus>, Vec<PathBuf>) {
+        let mut paths = vec![];
+        let result = update_with_report(root, force, &mut |path| {
+            let path = path.to_path_buf();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        });
+        (result, paths)
+    }
     #[test]
     fn newer_versions_are_decided_without_io() {
         assert!(version_is_newer("1.0", "1.1"));
@@ -1046,19 +836,6 @@ mod tests {
             .find(|(name, _)| *name == "containers.md")
             .expect("container reference should be bundled");
         assert!(reference.contains("ncontainer.io/<npub>/<repository>:<tag>"));
-    }
-    #[test]
-    fn generated_commit_messages_have_distinct_subjects_and_bodies() {
-        assert_eq!(
-            GuidanceCommitKind::Install.message(),
-            "chore: install ngit repository skill\n\n\
-             Add repository guidance for supported coding agents."
-        );
-        assert_eq!(
-            GuidanceCommitKind::Upgrade.message(),
-            "chore: upgrade ngit repository skill\n\n\
-             Update repository guidance for supported coding agents."
-        );
     }
     #[test]
     fn warning_messages_are_exact() {
@@ -1134,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_removes_retired_references_and_stages_their_deletion() {
+    fn upgrade_removes_retired_references() {
         let root = temp_root();
         setup(&root, false).unwrap();
         let mut retired = vec![];
@@ -1152,16 +929,19 @@ mod tests {
         )
         .unwrap();
 
-        let paths = paths_for_commit(&root).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
         for path in &retired {
-            assert!(paths.contains(path), "{} not staged", path.display());
+            let relative = path.strip_prefix(&root).unwrap();
+            assert!(paths.iter().any(|path| path == relative));
         }
-        update(&root, false).unwrap();
 
         for path in &retired {
             assert!(!path.exists(), "{} survived the upgrade", path.display());
         }
-        assert!(paths_for_commit(&root).unwrap().is_empty());
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert!(paths.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1172,8 +952,9 @@ mod tests {
         let path = root.join(format!("{}/reference/repo-settings.md", SKILL_DIRS[0]));
         fs::write(&path, "superseded reference\n").unwrap();
 
-        assert_eq!(paths_for_commit(&root).unwrap(), vec![path.clone()]);
-        update(&root, false).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert_eq!(paths, vec![path.strip_prefix(&root).unwrap().to_path_buf()]);
 
         assert!(!path.exists());
         assert!(status(&root).unwrap().modified_files.is_empty());
@@ -1213,16 +994,21 @@ mod tests {
             .unwrap();
         }
 
-        let paths = paths_for_commit(&root).unwrap();
-        assert!(paths.contains(&retired), "{paths:?}");
-        update(&root, false).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert!(
+            paths.iter().any(|path| root.join(path) == retired),
+            "{paths:?}"
+        );
 
         assert!(!retired.exists());
         assert_eq!(
             fs::read_to_string(canonical_dir.join("SKILL.md")).unwrap(),
             bundled_skill()
         );
-        assert!(paths_for_commit(&root).unwrap().is_empty());
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert!(paths.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1347,8 +1133,9 @@ mod tests {
         let custom = [0xff, 0xfe, 0xfd];
         fs::write(root.join(AGENTS_PATH), custom).unwrap();
 
-        assert!(paths_for_commit(&root).unwrap().is_empty());
-        update(&root, false).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert!(paths.is_empty());
 
         assert_eq!(fs::read(root.join(AGENTS_PATH)).unwrap(), custom);
         assert!(status(&root).unwrap().modified_files.is_empty());
@@ -1369,6 +1156,31 @@ mod tests {
         assert!(!root.join(SKILL_PATH).exists());
         assert!(!root.join(AGENTS_PATH).exists());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_update_reports_paths_attempted_before_the_error() {
+        let root = temp_root();
+        let mut paths = vec![];
+        let mut blocked_later_path = false;
+
+        let result = update_with_report(&root, false, &mut |path| {
+            paths.push(path.to_path_buf());
+            if !blocked_later_path {
+                fs::create_dir_all(root.join(CLAUDE_SKILL_PATH)).unwrap();
+                blocked_later_path = true;
+            }
+        });
+
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("failed to read managed file"),
+            "{error:#}"
+        );
+        assert!(paths.contains(&PathBuf::from(SKILL_PATH)));
+        assert!(root.join(SKILL_PATH).is_file());
+        assert!(!paths.contains(&PathBuf::from(CLAUDE_SKILL_PATH)));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1565,11 +1377,9 @@ mod tests {
         );
         fs::write(root.join(SKILL_PATH), older).unwrap();
 
-        assert_eq!(
-            paths_for_commit(&root).unwrap(),
-            vec![root.join(SKILL_PATH)]
-        );
-        update(&root, false).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert_eq!(paths, vec![PathBuf::from(SKILL_PATH)]);
 
         assert!(
             fs::symlink_metadata(root.join(".claude/skills/ngit"))
@@ -1642,9 +1452,9 @@ mod tests {
         assert_eq!(before.installed_version.as_deref(), Some("0.1"));
         assert_eq!(before.managed_files, vec![SKILL_PATH, CLAUDE_SKILL_PATH]);
         // The shared target is updated once, not once per managed location.
-        assert_eq!(paths_for_commit(&root).unwrap(), vec![canonical.clone()]);
-
-        update(&root, false).unwrap();
+        let (result, paths) = update_report(&root, false);
+        result.unwrap();
+        assert_eq!(paths, vec![PathBuf::from("skills/ngit/SKILL.md")]);
 
         assert_eq!(fs::read_to_string(&canonical).unwrap(), bundled_skill());
         for (name, content) in REFERENCE_FILES {
