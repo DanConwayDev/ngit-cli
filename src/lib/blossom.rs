@@ -3934,8 +3934,10 @@ mod tests {
     async fn steadily_progressing_upload_can_outlive_the_idle_timeout() -> Result<()> {
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
         let (complete_tx, complete_rx) = oneshot::channel();
-        let request =
-            async { Ok::<_, reqwest::Error>(complete_rx.await.expect("complete request")) };
+        let request = async {
+            complete_rx.await.expect("complete request");
+            Ok::<_, reqwest::Error>(())
+        };
         let started = tokio::time::Instant::now();
         let upload = monitor_upload_progress(
             request,
