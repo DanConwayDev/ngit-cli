@@ -50,6 +50,19 @@ jobs:
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test
+      - name: Publish release tag to crates.io
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(nix eval --impure --raw --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')"
+          if [[ "$GITHUB_REF" != "refs/tags/v$version" ]]; then
+            echo "release tag must match Cargo.toml version v$version" >&2
+            exit 1
+          fi
+          : "${CARGO_REGISTRY_TOKEN:?Configure the repository CARGO_REGISTRY_TOKEN secret in ngit-ci}"
+          nix develop --command cargo publish --locked --registry crates-io --package ngit
       - name: Prune Rust build cache
         if: ${{ always() }}
         run: |

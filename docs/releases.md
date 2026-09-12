@@ -4,6 +4,24 @@
 Software Release events linked to the current repository. The default project
 manifest is `.ngit/release.yaml` (singular).
 
+## Publishing the ngit crate
+
+Nostr CI publishes `ngit` to crates.io after the existing lint, formatting and
+test steps pass for a `v*` tag push. The tag must exactly match `v` followed by
+the package version in `Cargo.toml`, including any prerelease suffix. Branch
+pushes and pull requests do not publish crates.
+
+Configure the repository's `CARGO_REGISTRY_TOKEN` secret in ngit-ci with a
+crates.io token scoped to publishing `ngit`. The token is supplied only to the
+publication step; Cargo does not write a login credential file. The workflow
+uses `cargo publish --locked --registry crates-io --package ngit`, including
+Cargo's package verification. It fails if the token is missing or the version
+is already published; it does not overwrite or automatically bump releases.
+
+This runs independently of the platform archive/NIP-82 release workflow and
+requires no GitHub registry authentication. The workflow must be included in
+the tagged commit; adding it does not backfill existing tags.
+
 ## Quick start
 
 For one local file, pass its path and every platform supported by those exact
