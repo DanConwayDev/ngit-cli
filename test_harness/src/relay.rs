@@ -51,8 +51,11 @@ impl VanillaRelay {
             .set_nonblocking(true)
             .context("set relay listener nonblocking")?;
         let listener = tokio::net::TcpListener::from_std(listener)?;
-        let url = format!("ws://{}", listener.local_addr()?);
-        let mut builder = LocalRelay::builder();
+        let addr = listener.local_addr()?;
+        let url = format!("ws://{addr}");
+        // Embedded connections must validate NIP-42 against the reserved
+        // listener, not an unrelated address allocated by the SDK.
+        let mut builder = LocalRelay::builder().addr(addr.ip()).port(addr.port());
         if let Some(nip42) = nip42 {
             builder = builder.nip42(nip42);
         }
