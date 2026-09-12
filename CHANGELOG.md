@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent fast profile and indexer responses from prematurely timing out
+  repository-history fetches. Repository completion thresholds now count only
+  repository requests in the current discovery round. Keep deadlines within
+  their original budget and report actual elapsed time in timeout errors.
+
 ## [3.0.1] - 2026-09-10
 
 ### Changed

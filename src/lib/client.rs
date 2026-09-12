@@ -863,9 +863,7 @@ impl Connect for Client {
         let mut progress_reporter = RelayProgressReporter::fetching();
         let progress = progress_reporter.handle();
 
-        let success_count = Arc::new(AtomicU64::new(0));
         let repository_success_count = Arc::new(AtomicU64::new(0));
-        let current_timeout = Arc::new(AtomicU64::new(long_timeout()));
         let announcement_resolved = Arc::new(AtomicBool::new(false));
         let announcement_resolution_coordinate = (!request.announcement_profile_authors.is_empty())
             .then(|| selected_maintainer_coordinate.cloned())
@@ -913,11 +911,9 @@ impl Connect for Client {
                     .context("failed to add relay")?;
             }
 
-            let success_count_for_loop = success_count.clone();
+            let round_progress = Arc::new(FetchRoundProgress::new(&relay_requests));
             let repository_success_count_for_loop = repository_success_count.clone();
-            let current_timeout_for_loop = current_timeout.clone();
             let announcement_resolved_for_loop = announcement_resolved.clone();
-            let total_relays = relay_requests.len() as u64;
             let processed_this_round = relay_requests
                 .iter()
                 .filter_map(FetchRequest::relay_processing_key)
@@ -926,15 +922,15 @@ impl Connect for Client {
             let futures: Vec<_> = relay_requests
                 .into_iter()
                 .map(|request| {
-                    let success_count_clone = success_count_for_loop.clone();
+                    let peers = round_progress.clone();
+                    let scope = request.scope;
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
-                    let current_timeout_clone = current_timeout_for_loop.clone();
+                    let current_timeout_clone = Arc::new(AtomicU64::new(long_timeout()));
                     let announcement_resolved_clone = announcement_resolved_for_loop.clone();
                     let announcement_resolution_coordinate =
                         announcement_resolution_coordinate.clone();
                     let progress = progress.clone();
-                    let total_relays_clone = total_relays;
                     let is_repository_relay = request.scope == RelayFetchScope::Repository;
                     let is_author_announcement_relay = request
                         .selected_relay
@@ -1011,35 +1007,28 @@ impl Connect for Client {
                         let fetch_future = self.fetch_all_from_relay(git_repo_path, request, &pb_clone);
                         tokio::pin!(fetch_future);
 
+                        let mut deadline = FetchDeadline::new(
+                            Duration::from_secs(long_timeout()),
+                            Duration::from_secs(short_timeout()),
+                        );
                         let timeout_future = async {
-                            let check_interval = Duration::from_millis(100);
-                            // Author write relays are the prescribed fallback
-                            // when a NIP-AD coordinate omits relay hints.
-                            // Success from an unrelated indexer must not cut
-                            // that required discovery work short.
-                            let full_timeout = long_timeout();
-                            let long_timeout_end = tokio::time::Instant::now()
-                                + Duration::from_secs(full_timeout);
-
                             loop {
-                                let current_success_count = success_count_clone.load(Ordering::Relaxed);
-                                let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
-
-                                if !author_announcement_discovery_pending(
-                                    is_author_announcement_relay,
-                                    &announcement_resolved_clone,
-                                )
-                                    && current_success_count >= threshold
-                                {
-                                    tokio::time::sleep(Duration::from_secs(short_timeout())).await;
-                                    return short_timeout();
+                                let now = tokio::time::Instant::now();
+                                let may_shorten = peers.has_quorum(scope)
+                                    && !author_announcement_discovery_pending(
+                                        is_author_announcement_relay,
+                                        &announcement_resolved_clone,
+                                    );
+                                deadline.update(now, may_shorten);
+                                current_timeout_clone.store(
+                                    deadline.budget().as_secs(), Ordering::Relaxed,
+                                );
+                                if now >= deadline.end {
+                                    return now.duration_since(deadline.start);
                                 }
-
-                                if tokio::time::Instant::now() >= long_timeout_end {
-                                    return full_timeout;
-                                }
-
-                                tokio::time::sleep(check_interval).await;
+                                tokio::time::sleep_until(
+                                    deadline.end.min(now + Duration::from_millis(100)),
+                                ).await;
                             }
                         };
 
@@ -1060,20 +1049,16 @@ impl Connect for Client {
                                     }
                                 }
                                 if result.is_ok() {
-                                    let new_count = success_count_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                                    peers.record_success(scope);
                                     if is_repository_relay {
                                         repository_success_count_clone.fetch_add(1, Ordering::Relaxed);
                                     }
-                                    let threshold = (total_relays_clone as f64 * SUCCESS_THRESHOLD).ceil() as u64;
 
-                                    if new_count >= threshold {
-                                        current_timeout_clone.store(short_timeout(), Ordering::Relaxed);
-                                    }
                                 }
                                 result
                             }
-                            timeout_seconds = timeout_future => {
-                                Err(anyhow!("timeout after {timeout_seconds}s timeout"))
+                            elapsed = timeout_future => {
+                                Err(anyhow!("timeout after {:.1}s", elapsed.as_secs_f64()))
                             }
                         };
 
@@ -1380,7 +1365,83 @@ impl Connect for Client {
     }
 }
 
-static SUCCESS_THRESHOLD: f64 = 0.5; // 50% of relays must succeed to switch to short timeout
+/// Repository history requires repository responses. Auxiliary work keeps the
+/// overall threshold so an isolated metadata request cannot hold up a round.
+struct FetchRoundProgress {
+    repository: FetchScopeProgress,
+    overall: FetchScopeProgress,
+}
+
+struct FetchScopeProgress {
+    total: u64,
+    successes: AtomicU64,
+}
+
+impl FetchScopeProgress {
+    fn has_quorum(&self) -> bool {
+        self.total > 0 && self.successes.load(Ordering::Relaxed) >= self.total.div_ceil(2)
+    }
+}
+
+impl FetchRoundProgress {
+    fn new(requests: &[FetchRequest]) -> Self {
+        Self {
+            repository: FetchScopeProgress {
+                total: requests
+                    .iter()
+                    .filter(|r| r.scope == RelayFetchScope::Repository)
+                    .count() as u64,
+                successes: AtomicU64::new(0),
+            },
+            overall: FetchScopeProgress {
+                total: requests.len() as u64,
+                successes: AtomicU64::new(0),
+            },
+        }
+    }
+
+    fn record_success(&self, scope: RelayFetchScope) {
+        if scope == RelayFetchScope::Repository {
+            self.repository.successes.fetch_add(1, Ordering::Relaxed);
+        }
+        self.overall.successes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn has_quorum(&self, scope: RelayFetchScope) -> bool {
+        match scope {
+            RelayFetchScope::Repository => self.repository.has_quorum(),
+            RelayFetchScope::Auxiliary { .. } => self.overall.has_quorum(),
+        }
+    }
+}
+
+struct FetchDeadline {
+    start: tokio::time::Instant,
+    end: tokio::time::Instant,
+    grace: Duration,
+}
+
+impl FetchDeadline {
+    fn new(maximum: Duration, grace: Duration) -> Self {
+        let start = tokio::time::Instant::now();
+        Self {
+            start,
+            end: start + maximum,
+            grace,
+        }
+    }
+
+    fn update(&mut self, now: tokio::time::Instant, may_shorten: bool) {
+        if may_shorten {
+            // A late quorum must not extend the original absolute deadline.
+            self.end = self.end.min(now + self.grace);
+        }
+    }
+
+    fn budget(&self) -> Duration {
+        self.end.duration_since(self.start)
+    }
+}
 
 fn author_announcement_discovery_pending(
     is_author_announcement_relay: bool,
@@ -1825,9 +1886,8 @@ fn pb_style(current_timeout: Arc<AtomicU64>) -> Result<ProgressStyle> {
             "timeout_in",
             move |state: &ProgressState, w: &mut dyn Write| {
                 let elapsed = state.elapsed().as_secs();
-                // Adaptive timeout display: reads the actual current timeout value
-                // which starts at LONG_TIMEOUT and switches to SHORT_TIMEOUT after
-                // the first relay succeeds
+                // Each relay displays its own deadline measured from fetch start.
+                // Equivalent successful peers may shorten that deadline.
                 if elapsed > 3 {
                     let dim = Style::new().color256(247);
                     let timeout = current_timeout.load(Ordering::Relaxed);
@@ -5460,6 +5520,109 @@ mod tests {
             completed_request.relay_processing_key(),
             "bootstrap-only profile work must not change the processed relay key"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_deadlines_preserve_repository_work_after_auxiliary_successes() {
+        let auxiliary = RelayFetchScope::Auxiliary {
+            announcements: true,
+            profiles: false,
+        };
+        let requests: Vec<_> = (0..10)
+            .map(|index| FetchRequest {
+                scope: if index < 5 {
+                    RelayFetchScope::Repository
+                } else {
+                    auxiliary
+                },
+                ..FetchRequest::default()
+            })
+            .collect();
+        let progress = FetchRoundProgress::new(&requests);
+        for _ in 0..5 {
+            progress.record_success(auxiliary);
+        }
+        let mut deadline = FetchDeadline::new(Duration::from_secs(45), Duration::from_secs(7));
+        tokio::time::advance(Duration::from_secs(8)).await;
+        deadline.update(
+            tokio::time::Instant::now(),
+            progress.has_quorum(RelayFetchScope::Repository),
+        );
+        assert_eq!(deadline.budget(), Duration::from_secs(45));
+        // Three of five repository peers establish actual repository redundancy.
+        for _ in 0..3 {
+            progress.record_success(RelayFetchScope::Repository);
+        }
+        deadline.update(
+            tokio::time::Instant::now(),
+            progress.has_quorum(RelayFetchScope::Repository),
+        );
+        assert_eq!(deadline.budget(), Duration::from_secs(15));
+        // Subsequent discovery work must not inherit the previous round's quorum.
+        let next_round = FetchRoundProgress::new(&requests[..1]);
+        assert!(!next_round.has_quorum(RelayFetchScope::Repository));
+        assert!(!next_round.has_quorum(auxiliary));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_deadlines_shorten_isolated_metadata_after_overall_quorum() {
+        let auxiliary = RelayFetchScope::Auxiliary {
+            announcements: false,
+            profiles: true,
+        };
+        let requests: Vec<_> = [
+            RelayFetchScope::Repository,
+            RelayFetchScope::Repository,
+            auxiliary,
+        ]
+        .into_iter()
+        .map(|scope| FetchRequest {
+            scope,
+            ..FetchRequest::default()
+        })
+        .collect();
+        let progress = FetchRoundProgress::new(&requests);
+        let mut deadline = FetchDeadline::new(Duration::from_secs(45), Duration::from_secs(7));
+        progress.record_success(RelayFetchScope::Repository);
+        assert!(!progress.has_quorum(auxiliary));
+        progress.record_success(RelayFetchScope::Repository);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        deadline.update(tokio::time::Instant::now(), progress.has_quorum(auxiliary));
+        assert_eq!(deadline.budget(), Duration::from_secs(9));
+
+        // Metadata-only discovery still uses the overall threshold, even
+        // when the requests have different auxiliary scopes.
+        let discovery = RelayFetchScope::Auxiliary {
+            announcements: true,
+            profiles: false,
+        };
+        let requests = [
+            FetchRequest {
+                scope: auxiliary,
+                ..FetchRequest::default()
+            },
+            FetchRequest {
+                scope: discovery,
+                ..FetchRequest::default()
+            },
+        ];
+        let progress = FetchRoundProgress::new(&requests);
+        progress.record_success(discovery);
+        assert!(progress.has_quorum(auxiliary));
+        assert!(!progress.has_quorum(RelayFetchScope::Repository));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_deadline_is_absolute_and_never_slides_or_extends() {
+        let mut deadline = FetchDeadline::new(Duration::from_secs(45), Duration::from_secs(7));
+        tokio::time::advance(Duration::from_secs(44)).await;
+        deadline.update(tokio::time::Instant::now(), true);
+        assert_eq!(deadline.budget(), Duration::from_secs(45));
+        let mut early = FetchDeadline::new(Duration::from_secs(45), Duration::from_secs(7));
+        early.update(tokio::time::Instant::now(), true);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        early.update(tokio::time::Instant::now(), true);
+        assert_eq!(early.budget(), Duration::from_secs(7));
     }
 
     #[test]
