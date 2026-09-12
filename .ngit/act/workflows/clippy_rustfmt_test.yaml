@@ -49,7 +49,7 @@ jobs:
           .#devShells.x86_64-linux.default
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
-      - run: nix develop --command cargo test
+      - run: nix develop --command cargo test --workspace
       - name: Test pinned Buzz compatibility
         run: nix develop --command cargo test --test private_buzz -- --ignored
       - name: Publish release tag to crates.io
