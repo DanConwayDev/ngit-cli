@@ -398,6 +398,11 @@ binaries retain the bounded startup compatibility fallback. This is a private
 test protocol, not deployment configuration. Readiness requires a complete
 HTTP status line; TCP connection success alone is insufficient.
 
+**Git fixture shutdown:** the accept loop owns all connection tasks. Explicit
+stop cancels and joins them; drop cancels the owner. Git subprocesses are
+cancelled with their request, and stdin, stdout and stderr are driven
+concurrently so pipe backpressure cannot deadlock an integration test.
+
 **Long-term (deferred):** if subprocess startup becomes the
 bottleneck, library embedding becomes worth the upstream changes
 (`embed::start()`, `bind :0` native, shutdown signal, embedded
