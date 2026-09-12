@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository-history fetches. Repository completion thresholds now count only
   repository requests in the current discovery round. Keep deadlines within
   their original budget and report actual elapsed time in timeout errors.
+- Reject incomplete relay queries that disconnect or expire before EOSE
+  instead of reporting partial history as a successful fetch.
 
 ## [3.0.1] - 2026-09-10
 

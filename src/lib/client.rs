@@ -47,7 +47,7 @@ use nostr_sdk::{
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
     proxy::Proxy,
-    relay::{RelayLimits, ReqExitPolicy},
+    relay::{RelayLimits, RelayNotification, RelayStatus},
 };
 use serde_json::Value;
 
@@ -1589,18 +1589,59 @@ async fn get_events_of(
         return Ok(Vec::new());
     }
 
-    let fetched_events = relay
-        .fetch_events(filters)
-        // Use a very long timeout; actual timeout is controlled by outer tokio::select!
-        .timeout(std::time::Duration::from_secs(long_timeout()))
-        .policy(ReqExitPolicy::ExitOnEOSE)
-        .await?;
+    fetch_complete_events(relay, filters, Duration::from_secs(long_timeout())).await
+}
 
-    // no Event is being mutated, just new items added to the set
-    #[allow(clippy::mutable_key_type)]
-    let mut events: HashSet<Event> = HashSet::new();
-    events.extend(fetched_events);
-    Ok(events.into_iter().collect())
+async fn fetch_complete_events(
+    relay: &nostr_sdk::relay::Relay,
+    filters: Vec<Filter>,
+    timeout: Duration,
+) -> Result<Vec<Event>> {
+    use nostr::prelude::{RelayMessage, SubscriptionId};
+
+    // The SDK stream can end successfully on timeout or disconnection. Only
+    // this subscription's EOSE proves that the relay completed its history.
+    // Keep SDK validation and AUTH retry handling on the event stream itself.
+    let id = SubscriptionId::generate();
+    let mut notifications = relay.notifications();
+    tokio::time::timeout(timeout, async {
+        let mut stream = relay.stream_events(filters).with_id(id.clone()).await?;
+        #[allow(clippy::mutable_key_type)]
+        let mut events = HashSet::new();
+        let mut received_eose = false;
+        let mut drained = false;
+        while !received_eose || !drained {
+            tokio::select! {
+                event = stream.next(), if !drained => {
+                    match event {
+                        Some(Ok(event)) => {
+                            // Preserve the SDK fetch API's default buffer bound.
+                            if events.len() >= 10_000 && !events.contains(&event) {
+                                bail!("too many fetched events");
+                            }
+                            events.insert(event);
+                        }
+                        Some(Err(error)) => return Err(error.into()),
+                        None => drained = true,
+                    }
+                }
+                notification = notifications.next(), if !received_eose => {
+                    match notification {
+                        Some(RelayNotification::Message { message }) => {
+                            if matches!(*message, RelayMessage::EndOfStoredEvents(ref subscription) if subscription.as_ref() == &id) {
+                                received_eose = true;
+                            }
+                        }
+                        Some(RelayNotification::RelayStatus {
+                            status: RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned,
+                        }) | None => bail!("relay disconnected before EOSE"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(events.into_iter().collect())
+    }).await.context("timed out before complete EOSE")?
 }
 
 pub struct Params {
@@ -6886,5 +6927,100 @@ mod role_discovery_expansion_tests {
 
         assert!(added_pubkeys(&report).contains(&moderator));
         assert!(maintainer_listed.contains(&co));
+    }
+}
+
+#[cfg(test)]
+mod fetch_completion_tests {
+    use futures::SinkExt;
+    use nostr::prelude::{FinalizeEvent, Keys};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_requires_eose_instead_of_accepting_partial_history() {
+        // Exercise complete, empty, disconnected and silent responses over real
+        // sockets.
+        for (send_event, send_eose, disconnect) in [
+            (true, true, false),
+            (false, true, false),
+            (true, false, true),
+            (true, false, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let event = EventBuilder::new(Kind::TextNote, "history")
+                .finalize(&Keys::generate())
+                .unwrap();
+            let expected = event.clone();
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    while let Some(frame) = ws.next().await {
+                        let frame = frame.unwrap();
+                        if !frame.is_text() {
+                            continue;
+                        }
+                        let request: Value =
+                            serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                        if request[0] != "REQ" {
+                            continue;
+                        }
+                        if send_event {
+                            ws.send(Message::Text(
+                                serde_json::json!(["EVENT", request[1], event])
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        }
+                        if send_eose {
+                            ws.send(Message::Text(
+                                serde_json::json!(["EOSE", request[1]]).to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        }
+                        if disconnect {
+                            ws.close(None).await.unwrap();
+                        }
+                        let _ = stopped.await;
+                        break;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            crate::tls::install_default_crypto_provider();
+            let client = nostr_sdk::client::Client::default();
+            client.add_relay(&url).await.unwrap();
+            let relay = client.relay(&url).await.unwrap().unwrap();
+            relay
+                .try_connect()
+                .timeout(Duration::from_secs(2))
+                .await
+                .unwrap();
+            let result = fetch_complete_events(
+                &relay,
+                vec![Filter::new().kind(Kind::TextNote)],
+                Duration::from_millis(250),
+            )
+            .await;
+            client.disconnect().await;
+            let _ = stop.send(());
+            server.await.unwrap();
+            if send_eose {
+                assert_eq!(
+                    result.unwrap(),
+                    if send_event { vec![expected] } else { vec![] }
+                );
+            } else {
+                assert!(result.is_err(), "partial history accepted: {result:?}");
+            }
+        }
     }
 }

@@ -22,3 +22,9 @@ period as though it were the entire operation. These are total fetch deadlines,
 including connection setup, query rounds and processing, not inactivity timers.
 A successful fetch can still transfer cached history before reporting that it
 found no new events; this change does not add incremental synchronization.
+
+A query succeeds only after observing its own EOSE and draining its validated
+SDK event stream. Disconnection or expiration without EOSE is an error even
+if some events arrived. This prevents incomplete history from counting toward
+quorum or being reported as a successful empty fetch. Dropping the SDK stream
+on cancellation retains its ordinary subscription cleanup and AUTH behavior.

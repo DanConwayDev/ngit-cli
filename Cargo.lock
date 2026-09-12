@@ -2249,6 +2249,7 @@ dependencies = [
  "tempfile",
  "test_harness",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "urlencoding",
  "windows-sys 0.61.2",
