@@ -769,12 +769,30 @@ async fn upload_snapshot_with_authorization_inner(
 
 async fn send_upload_request_with_progress_timeout(
     request: reqwest::RequestBuilder,
-    mut activity: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    activity: tokio::sync::mpsc::UnboundedReceiver<u64>,
     deadline: tokio::time::Instant,
     idle_timeout: Duration,
     total_bytes: u64,
 ) -> std::result::Result<reqwest::Response, BlobRequestError> {
-    let request = request.send();
+    monitor_upload_progress(
+        request.send(),
+        activity,
+        deadline,
+        idle_timeout,
+        total_bytes,
+    )
+    .await
+}
+
+// Keep timeout policy independent of socket scheduling so its clock boundaries
+// can be exercised with deterministic request futures.
+async fn monitor_upload_progress<T>(
+    request: impl std::future::Future<Output = reqwest::Result<T>>,
+    mut activity: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    deadline: tokio::time::Instant,
+    idle_timeout: Duration,
+    total_bytes: u64,
+) -> std::result::Result<T, BlobRequestError> {
     tokio::pin!(request);
     let total_timer = tokio::time::sleep_until(deadline);
     tokio::pin!(total_timer);
@@ -3912,8 +3930,87 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn steadily_progressing_upload_can_outlive_the_idle_timeout() -> Result<()> {
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (complete_tx, complete_rx) = oneshot::channel();
+        let request =
+            async { Ok::<_, reqwest::Error>(complete_rx.await.expect("complete request")) };
+        let started = tokio::time::Instant::now();
+        let upload = monitor_upload_progress(
+            request,
+            activity_rx,
+            started + Duration::from_secs(2),
+            Duration::from_millis(80),
+            5,
+        );
+        tokio::pin!(upload);
+        assert!(futures::poll!(&mut upload).is_pending());
+        for sent in 1..=5 {
+            tokio::time::advance(Duration::from_millis(40)).await;
+            activity_tx.send(sent)?;
+            // Consume each progress notification before advancing the clock.
+            assert!(futures::poll!(&mut upload).is_pending());
+        }
+        assert!(started.elapsed() > Duration::from_millis(80));
+        complete_tx.send(()).expect("request receiver remains open");
+        upload.await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_idle_timeout_restarts_from_last_progress() -> Result<()> {
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let upload = monitor_upload_progress(
+            std::future::pending::<reqwest::Result<()>>(),
+            activity_rx,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            Duration::from_millis(80),
+            5,
+        );
+        tokio::pin!(upload);
+        assert!(futures::poll!(&mut upload).is_pending());
+        tokio::time::advance(Duration::from_millis(40)).await;
+        activity_tx.send(1)?;
+        assert!(futures::poll!(&mut upload).is_pending());
+        // Closing the body channel must not disable the response idle timeout.
+        drop(activity_tx);
+        assert!(futures::poll!(&mut upload).is_pending());
+        tokio::time::advance(Duration::from_millis(79)).await;
+        assert!(futures::poll!(&mut upload).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let error = upload.await.unwrap_err();
+        assert!(format!("{error:#}").contains("no progress"));
+        assert!(format!("{error:#}").contains("1/5 bytes"));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_progress_cannot_extend_the_total_timeout() -> Result<()> {
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let upload = monitor_upload_progress(
+            std::future::pending::<reqwest::Result<()>>(),
+            activity_rx,
+            tokio::time::Instant::now() + Duration::from_millis(200),
+            Duration::from_millis(80),
+            5,
+        );
+        tokio::pin!(upload);
+        assert!(futures::poll!(&mut upload).is_pending());
+        for sent in 1..=4 {
+            tokio::time::advance(Duration::from_millis(40)).await;
+            activity_tx.send(sent)?;
+            assert!(futures::poll!(&mut upload).is_pending());
+        }
+        tokio::time::advance(Duration::from_millis(40)).await;
+        let error = upload.await.unwrap_err();
+        assert!(format!("{error:#}").contains("total timeout"));
+        assert!(format!("{error:#}").contains("4/5 bytes"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_upload_retains_all_bytes() -> Result<()> {
         let (server_url, server) = spawn_one_shot_server(|_| TestResponse {
             status: "200 OK",
             headers: Vec::new(),
@@ -3926,7 +4023,6 @@ mod tests {
             if chunk == chunk_count {
                 return None;
             }
-            tokio::time::sleep(Duration::from_millis(40)).await;
             let sent = chunk + 1;
             let _ = activity.send(sent);
             Some((Ok::<Vec<u8>, std::io::Error>(vec![b'x']), (sent, activity)))
@@ -3939,8 +4035,8 @@ mod tests {
         send_upload_request_with_progress_timeout(
             request,
             activity_rx,
-            tokio::time::Instant::now() + Duration::from_secs(2),
-            Duration::from_millis(80),
+            tokio::time::Instant::now() + SERVER_TIMEOUT,
+            IDLE_TIMEOUT,
             chunk_count,
         )
         .await?;
@@ -4759,21 +4855,32 @@ mod tests {
             let _ = headers_sent.send(());
             std::future::pending::<Result<()>>().await
         });
-        let signer = NgitSigner::Keys(Keys::generate());
-        let upload =
-            upload_snapshot_with_timeout(&server_url, &snapshot, &signer, Duration::from_secs(1));
-        tokio::pin!(upload);
-
-        tokio::select! {
-            result = &mut upload => {
-                server.abort();
-                bail!("upload completed before the partial descriptor was observed: {result:?}");
-            }
-            observed = tokio::time::timeout(SERVER_TIMEOUT, headers_received) => {
-                observed.context("timed out waiting for partial descriptor")??;
-            }
-        }
-        let error = upload.await.unwrap_err();
+        // Establish the real HTTP response before testing its logical deadline;
+        // signing and socket scheduling must not race a one-second test timer.
+        let response = tokio::time::timeout(
+            SERVER_TIMEOUT,
+            blossom_streaming_http_client()?
+                .put(format!("{server_url}/upload"))
+                .body("release")
+                .send(),
+        )
+        .await
+        .context("timed out receiving descriptor headers")??;
+        tokio::time::timeout(SERVER_TIMEOUT, headers_received)
+            .await
+            .context("timed out observing partial descriptor")?
+            .context("partial descriptor observed")?;
+        tokio::time::pause();
+        let read = read_store_response(
+            response,
+            &snapshot,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            "upload",
+        );
+        tokio::pin!(read);
+        assert!(futures::poll!(&mut read).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = read.await.unwrap_err();
         assert!(format!("{error:#}").contains("total timeout"));
         server.abort();
         let _ = (&mut server).await;

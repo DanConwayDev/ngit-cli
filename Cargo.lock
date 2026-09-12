@@ -3677,6 +3677,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "nostr",
  "nostr-sdk",
  "reqwest",
@@ -3684,6 +3685,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

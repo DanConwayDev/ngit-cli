@@ -385,8 +385,23 @@ Reqwest, including for loopback HTTP. Its dev-dependencies enable the same
 `rustls-no-provider` feature as ngit so standalone tests exercise the same
 initialization contract as a workspace-wide run with unified features.
 
-**Standalone vanilla relay (`with_relay`):** uses
-`nostr-relay-builder` in-process. Crates.io 0.44.x.
+**Standalone vanilla relay (`with_relay`):** uses the SDK's `LocalRelay`
+with an owned listener. The reservation transfers directly into the accept
+loop; neither allocation nor startup releases its port. The last fixture
+clone cancels the listener and its accepted connection tasks.
+
+**Subprocess listener ownership:** on Unix the harness probes Grasp with
+`--internal-test-listener-support`. A supporting binary receives the reserved
+socket through `NGIT_TEST_LISTENER_FD` with `NGIT_TEST=1`, avoiding a gap
+between releasing a port and binding it in the child. Older released Grasp
+binaries retain the bounded startup compatibility fallback. This is a private
+test protocol, not deployment configuration. Readiness requires a complete
+HTTP status line; TCP connection success alone is insufficient.
+
+**Git fixture shutdown:** the accept loop owns all connection tasks. Explicit
+stop cancels and joins them; drop cancels the owner. Git subprocesses are
+cancelled with their request, and stdin, stdout and stderr are driven
+concurrently so pipe backpressure cannot deadlock an integration test.
 
 **Long-term (deferred):** if subprocess startup becomes the
 bottleneck, library embedding becomes worth the upstream changes

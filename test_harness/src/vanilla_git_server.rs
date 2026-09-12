@@ -89,11 +89,11 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::TcpListener,
     process::Command as TokioCommand,
     sync::oneshot,
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 
 use crate::port::PortReservation;
@@ -116,7 +116,7 @@ pub struct VanillaGitServer {
     nostr_authorization_requests: Arc<AtomicUsize>,
     /// Shutdown signal sender. `take()`n in `Drop` (and consumed by `stop`).
     shutdown_tx: Option<oneshot::Sender<()>>,
-    /// Accept loop join handle. Awaited synchronously in `Drop`.
+    /// Accept loop join handle. Awaited by `stop`, aborted by `Drop`.
     handle: Option<JoinHandle<()>>,
     /// Holds the bare repo. Cleaned up on drop.
     _temp_dir: TempDir,
@@ -283,6 +283,7 @@ impl VanillaGitServer {
         let serve_nostr_authorization_requests = Arc::clone(&nostr_authorization_requests);
 
         let handle: JoinHandle<()> = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     accept = listener.accept() => {
@@ -292,7 +293,7 @@ impl VanillaGitServer {
                                 let nostr_authorization_requests =
                                     Arc::clone(&serve_nostr_authorization_requests);
                                 let io = TokioIo::new(stream);
-                                tokio::spawn(async move {
+                                connections.spawn(async move {
                                     let service = service_fn(move |req| {
                                         let repo = Arc::clone(&repo);
                                         let nostr_authorization_requests =
@@ -329,35 +330,19 @@ impl VanillaGitServer {
                             }
                         }
                     }
+                    _ = connections.join_next(), if !connections.is_empty() => {},
                     _ = &mut shutdown_rx => break,
                 }
             }
+            connections.shutdown().await;
         });
 
         let url = format!("http://127.0.0.1:{port}");
 
-        // Readiness probe. The `TcpListener::from_std` above is already in
-        // a listening state, but the spawned accept loop has not yet been
-        // polled by the runtime — on `current_thread` `#[tokio::test]`
-        // executors that matters, because the test calling `start()`
-        // synchronously then does its first connect (e.g. `git clone`)
-        // before yielding back to the runtime. Doing one async connect
-        // here forces the runtime to schedule the accept loop and
-        // confirms the wire path is live before we return.
-        //
-        // Note this is a *liveness* check on the wire, not a hard
-        // serialisation point — see the multi-thread runtime requirement
-        // in the module-level docs for why blocking sync git calls from
-        // the test thread still need a worker thread to be available.
-        for _ in 0..50 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        // The listener has remained bound since reservation. Requests can
+        // queue immediately; the runtime drives the accept loop when polled.
+        // Synchronous Git clients still require another runtime worker, as
+        // described in this module's documentation.
 
         Ok(Self {
             role,
@@ -443,7 +428,7 @@ impl VanillaGitServer {
     }
 
     /// Explicit shutdown. Equivalent to dropping, but `await`able and
-    /// surfaces task-join errors. Prefer drop in tests.
+    /// waits for connection tasks to be cancelled. Prefer drop in tests.
     pub async fn stop(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -461,17 +446,9 @@ impl Drop for VanillaGitServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        // We can't `await` here, and synchronously joining a tokio task
-        // from a `Drop` impl requires either being inside a multi-thread
-        // runtime block (`block_in_place`) or accepting a leaked task.
-        // The accept loop watches `shutdown_rx` and exits promptly once
-        // signalled; the spawn'd connection handlers are detached and
-        // will finish on their own. The tempdir cleanup runs unconditionally
-        // via `_temp_dir`'s own `Drop`.
-        //
-        // We deliberately do not `block_on(handle)` here: nested
-        // block_on inside a `current_thread` runtime panics, which is
-        // a worse failure mode than a momentarily-lingering task.
+        // Aborting the accept task drops its JoinSet, cancelling every
+        // connection and its kill-on-drop Git child. `stop` also waits for
+        // connection cancellation before returning.
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
@@ -592,6 +569,7 @@ impl Service {
 /// author would assume on a vanilla test server.
 fn build_git_command(service: Service) -> TokioCommand {
     let mut cmd = TokioCommand::new("git");
+    cmd.kill_on_drop(true);
     match service {
         Service::UploadPack => {
             cmd.arg("-c")
@@ -633,7 +611,7 @@ async fn handle_info_refs(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -644,22 +622,18 @@ async fn handle_info_refs(
         }
     };
 
-    let mut stdout_buf = Vec::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_end(&mut stdout_buf).await;
-    }
-    let mut stderr_buf = Vec::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_end(&mut stderr_buf).await;
-    }
-    if let Ok(status) = child.wait().await {
-        if !status.success() {
-            eprintln!(
-                "[VanillaGitServer] {} --advertise-refs failed: {}",
-                service.git_subcommand(),
-                String::from_utf8_lossy(&stderr_buf)
-            );
+    let output = match child.wait_with_output().await {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("[VanillaGitServer] collecting advertisement failed: {error}");
+            return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "git IO failed");
         }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "[VanillaGitServer] advertisement failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // Smart-HTTP advertisement framing: pkt-line("# service=<name>\n"),
@@ -670,7 +644,7 @@ async fn handle_info_refs(
     body.extend_from_slice(format!("{header_len:04x}").as_bytes());
     body.extend_from_slice(service_line.as_bytes());
     body.extend_from_slice(b"0000");
-    body.extend_from_slice(&stdout_buf);
+    body.extend_from_slice(&output.stdout);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -707,7 +681,7 @@ async fn handle_rpc(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -718,37 +692,43 @@ async fn handle_rpc(
         }
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(&body_bytes).await {
-            eprintln!("[VanillaGitServer] writing stdin to git failed: {e}");
+    let output = match collect_git_output(child, &body_bytes).await {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("[VanillaGitServer] collecting RPC response failed: {error}");
+            return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "git IO failed");
         }
-        drop(stdin);
-    }
-
-    let mut stdout_buf = Vec::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_end(&mut stdout_buf).await;
-    }
-    let mut stderr_buf = Vec::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_end(&mut stderr_buf).await;
-    }
-    if let Ok(status) = child.wait().await {
-        if !status.success() {
-            eprintln!(
-                "[VanillaGitServer] {} --stateless-rpc failed: {}",
-                service.git_subcommand(),
-                String::from_utf8_lossy(&stderr_buf)
-            );
-        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "[VanillaGitServer] RPC failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", service.result_content_type())
         .header("Cache-Control", "no-cache")
-        .body(Full::new(Bytes::from(stdout_buf)))
+        .body(Full::new(Bytes::from(output.stdout)))
         .unwrap()
+}
+
+/// Feed input while draining both output pipes so neither pipe can block Git.
+/// Cancelling this future drops the child, whose command enables kill-on-drop.
+async fn collect_git_output(
+    mut child: tokio::process::Child,
+    input: &[u8],
+) -> std::io::Result<std::process::Output> {
+    let stdin = child.stdin.take();
+    let write = async {
+        if let Some(mut stdin) = stdin {
+            stdin.write_all(input).await?;
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let (_, output) = tokio::try_join!(write, child.wait_with_output())?;
+    Ok(output)
 }
 
 fn plain_response(status: StatusCode, msg: &'static str) -> Response<Full<Bytes>> {
@@ -992,6 +972,65 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_closes_active_keep_alive_connections() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let server = VanillaGitServer::start_empty("shutdown", reserve_port().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", server.port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut status = String::new();
+            reader.read_line(&mut status).await.unwrap();
+            assert!(status.starts_with("HTTP/1.1 404"));
+            // Receiving a response proves that the connection task exists;
+            // shutdown must cancel it even though keep-alive remains open.
+            server.stop().await;
+            let mut remaining = Vec::new();
+            reader.read_to_end(&mut remaining).await.unwrap();
+        })
+        .await
+        .expect("shutdown must close accepted connections");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_io_drains_output_while_writing_input() {
+        use std::process::Stdio;
+
+        let directory = TempDir::new().unwrap();
+        let payload = vec![b'x'; 1024 * 1024];
+        let path = directory.path().join("payload");
+        std::fs::write(&path, &payload).unwrap();
+        let child = tokio::process::Command::new("sh")
+            .args(["-c", "cat \"$1\"; cat \"$1\" >&2; cat", "test-io"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::collect_git_output(child, &payload),
+        )
+        .await
+        .expect("all three pipes must make progress")
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, payload.repeat(2));
+        assert_eq!(output.stderr, payload);
     }
 
     /// `start_empty` produces a server whose backing repo has zero refs
