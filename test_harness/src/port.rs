@@ -15,30 +15,15 @@
 //! the failure mode (`Address already in use (os error 98)`) is a hard
 //! test fail with no useful information for the next debugger.
 //!
-//! ngit-grasp's in-process fixtures (`MockRelay`, `SmartGitServer`)
-//! eliminate the race entirely by **keeping the listener bound** and
-//! handing it straight to their tokio accept loop. We can't do that here:
-//! `LocalRelay::run()` binds internally on a port number, and
-//! `ngit-grasp` is a subprocess that binds itself from `NGIT_BIND_ADDRESS`.
-//! Neither accepts a pre-bound listener without significant rework
-//! (rewriting the hyper accept loop, or fd inheritance via `pre_exec`
-//! respectively).
+//! In-process services consume the bound listener directly. Supported Grasp
+//! subprocesses inherit it, retaining ownership across startup. Compatibility
+//! paths for older binaries and third-party services release immediately before
+//! spawning and retry bind failures; only those paths retain a handoff race.
 //!
-//! ## The reservation pattern
-//!
-//! Instead, [`reserve_port`] returns a [`PortReservation`] that **holds the
-//! bound `TcpListener`** until the caller is about to start the real
-//! service. While any reservation is live, no other call to
-//! `reserve_port` in this process can be handed the same port — the
-//! kernel won't reissue a port that is currently bound.
-//!
-//! The caller drops the reservation immediately before the real bind,
-//! shrinking the TOCTOU window from "however long the fixture takes to
-//! spawn" to "a few microseconds inside the start function". The retry
-//! loops in `relay.rs` and `grasp.rs` are belt-and-braces for that
-//! residual window — they have never been observed to fire in our local
-//! stress testing post-reservation, but the cost is zero when they
-//! don't.
+//! [`reserve_port`] returns a [`PortReservation`] that holds its listener until
+//! ownership is transferred with [`PortReservation::into_std_listener`]. The
+//! kernel cannot assign that address to another listener while it remains
+//! bound.
 
 use std::net::{SocketAddr, TcpListener};
 
@@ -48,17 +33,9 @@ use anyhow::{Context, Result};
 /// a live `TcpListener` so that no other [`reserve_port`] call in this
 /// process can be handed the same number.
 ///
-/// The reservation is released by:
-///
-/// - calling [`PortReservation::release`] to consume the reservation and return
-///   the port number (preferred — makes the release explicit at the call site),
-///   or
-/// - simply dropping the value (also fine, but the release point is then tied
-///   to lexical scope).
-///
-/// The caller should release **immediately** before the consuming service
-/// performs its own `bind` so that the TOCTOU window between
-/// reservation-release and service-bind is as small as possible.
+/// Transfer the listener with [`PortReservation::into_std_listener`] whenever
+/// possible. [`PortReservation::release`] exists for services that cannot
+/// accept a listener; those callers must handle a competing bind after release.
 #[derive(Debug)]
 pub struct PortReservation {
     port: u16,
@@ -74,9 +51,8 @@ impl PortReservation {
     }
 
     /// Consume the reservation, dropping the underlying listener and
-    /// returning the port number. The port is now free for the caller's
-    /// real service to bind. Prefer this over relying on lexical drop —
-    /// it makes the release point explicit at the call site.
+    /// returning the port number. Another service may acquire it immediately,
+    /// so callers must handle bind failures. Prefer transferring the listener.
     pub fn release(self) -> u16 {
         let port = self.port;
         // `self` is consumed; the listener inside is dropped here.
@@ -183,16 +159,14 @@ mod tests {
         assert_ne!(a.port(), c.port());
     }
 
-    /// After `release`, the returned port is actually bindable.
+    /// Transferring ownership preserves the reservation without a rebind gap.
     #[test]
-    fn released_port_is_bindable() {
+    fn transferred_listener_keeps_port_reserved() {
         let reservation = reserve_port().unwrap();
-        let port = reservation.release();
-        // The kernel held the port for us until release; immediately after,
-        // we must be able to bind it again ourselves.
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .expect("port should be bindable immediately after release");
-        drop(listener);
+        let port = reservation.port();
+        let listener = reservation.into_std_listener();
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        assert!(TcpListener::bind(listener.local_addr().unwrap()).is_err());
     }
 
     #[tokio::test]

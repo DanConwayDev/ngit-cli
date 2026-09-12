@@ -23,6 +23,10 @@ nostr-sdk = { version = "0.45.2", features = ["local-relay"] }
 serde_json = "1.0.151"
 tempfile = "3.27"
 tokio = { version = "1.53.1", features = ["full"] }
+tokio-tungstenite = "0.28"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # Drives the Blossom fixture's own tests through the same HTTP client ngit

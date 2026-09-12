@@ -35,10 +35,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use tempfile::TempDir;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    time::sleep,
-};
+use tokio::{io::AsyncWriteExt, time::sleep};
 
 use crate::{
     port::{self, PortReservation},
@@ -49,22 +46,11 @@ use crate::{
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Poll interval for the readiness probe.
 const READY_POLL: Duration = Duration::from_millis(100);
-/// Tiny grace period after the first successful HTTP probe, mirroring the
-/// upstream pattern.
-const READY_GRACE: Duration = Duration::from_millis(100);
 /// Per-attempt timeout for the HTTP readiness probe once TCP connects.
 const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-/// How many fresh port reservations to attempt before giving up. The
-/// subprocess binds itself from `NGIT_BIND_ADDRESS`, so there is a
-/// microsecond-scale TOCTOU window between [`PortReservation::release`]
-/// and the subprocess's own `bind`. If that window loses the race the
-/// subprocess exits before its TCP listener accepts, and our readiness
-/// check picks that up via `try_wait` so we can retry on a fresh port
-/// instead of hanging for the full 15s readiness timeout.
-///
-/// In practice this loop has never been observed to fire in local
-/// stress testing — kept as defense-in-depth for CI / loaded hardware.
-/// Matches the cap in `relay.rs`.
+/// Compatibility limit for older Grasp binaries that bind their own port.
+/// Binaries supporting listener handoff retain the socket and never retry an
+/// early exit: such an exit is a startup error, not a possible bind race.
 const MAX_BIND_ATTEMPTS: usize = 5;
 
 /// A spawned `ngit-grasp` subprocess plus the tempdir holding its git data.
@@ -93,19 +79,8 @@ impl GraspServer {
     /// Spawn ngit-grasp on the port held by `reservation`, wait for it to
     /// be ready, then return.
     ///
-    /// The reservation is released (its `TcpListener` dropped) immediately
-    /// before `Command::spawn()`, so no other `reserve_port` call in this
-    /// process can be handed the same port while ngit-grasp is starting
-    /// up. There is a small TOCTOU window between release and the
-    /// subprocess's own `bind` — passing a pre-bound fd into a subprocess
-    /// would close it entirely, but isn't worth the Unix-specific
-    /// `pre_exec` plumbing for a residual race that hasn't been observed
-    /// in local stress testing.
-    ///
-    /// If the subprocess exits before becoming ready (the signature of
-    /// having lost the bind race), we retry with a fresh reservation up
-    /// to [`MAX_BIND_ATTEMPTS`] times. Defense-in-depth — never observed
-    /// to fire locally; kept for CI / loaded hardware.
+    /// New Grasp binaries inherit the reserved listener on Unix. Older binaries
+    /// retain the bounded release-and-retry fallback for compatibility.
     pub(crate) async fn start(
         role: impl Into<String>,
         reservation: PortReservation,
@@ -126,7 +101,7 @@ impl GraspServer {
     /// (`NGIT_GRASP06_ENABLE=true`).
     ///
     /// Identical to [`start`][Self::start] in every other respect: same
-    /// port reservation logic, same retry-on-early-exit loop, same GRASP-01
+    /// port reservation logic, same listener handoff, same GRASP-01
     /// relay surface. The only difference is the additional env var that
     /// opts the process into serving
     /// `/prs/<npub>/<percent-encoded-identifier>.git` as described in
@@ -197,7 +172,9 @@ impl GraspServer {
             .await
             {
                 Ok(server) => return Ok(server),
-                Err(StartFailure::EarlyExit { status }) if attempt < MAX_BIND_ATTEMPTS => {
+                Err(StartFailure::EarlyExit { status })
+                    if attempt < MAX_BIND_ATTEMPTS && !supports_listener_handoff(&binary) =>
+                {
                     eprintln!(
                         "[test_harness] ngit-grasp exited early on attempt \
                          {attempt}/{MAX_BIND_ATTEMPTS} (status: {status:?}); \
@@ -284,11 +261,30 @@ impl GraspServer {
                 .env("NGIT_PRIVATE_PUBLIC_ORIGIN", &url);
         }
 
-        // Release the port reservation immediately before spawning the
-        // subprocess that will bind it. Holding the reservation through
-        // env-var setup above is what keeps any concurrent
-        // `reserve_port()` calls from picking this same number.
-        let _ = reservation.release();
+        // Keep the bound socket through exec when the binary supports it.
+        // Only older binaries need the release-and-bind compatibility path.
+        let inherited_listener = if supports_listener_handoff(binary) {
+            Some(reservation.into_std_listener())
+        } else {
+            let _ = reservation.release();
+            None
+        };
+        #[cfg(unix)]
+        if let Some(listener) = &inherited_listener {
+            use std::os::{fd::AsRawFd, unix::process::CommandExt};
+            let fd = listener.as_raw_fd();
+            cmd.env("NGIT_TEST_LISTENER_FD", fd.to_string());
+            // SAFETY: fcntl is async-signal-safe and the listener stays owned
+            // in the parent through spawn. Only the child's descriptor changes.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
 
         let process = cmd
             .spawn()
@@ -338,7 +334,7 @@ impl GraspServer {
                 Ok(_) => {
                     // HTTP service handled a request successfully, so the
                     // accept loop, Hyper service, and relay wiring are ready.
-                    sleep(READY_GRACE).await;
+
                     return Ok(());
                 }
                 Err(_) if Instant::now() < deadline => {
@@ -367,8 +363,10 @@ impl GraspServer {
             );
             stream.write_all(request.as_bytes()).await?;
 
-            let mut response = [0_u8; 64];
-            let read = stream.read(&mut response).await?;
+            let mut response = Vec::new();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let read =
+                tokio::io::AsyncBufReadExt::read_until(&mut reader, b'\n', &mut response).await?;
             if read == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -624,4 +622,29 @@ fn locate_binary() -> Result<PathBuf> {
          See docs/architecture/test-harness.md.",
         sibling.display()
     );
+}
+
+/// Probe the private protocol once per binary path. Older released binaries
+/// reject this flag and continue to use the compatibility startup path.
+fn supports_listener_handoff(binary: &Path) -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    static SUPPORT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, bool>>,
+    > = std::sync::OnceLock::new();
+    let mut cache = SUPPORT
+        .get_or_init(Default::default)
+        .lock()
+        .expect("listener support cache");
+    *cache.entry(binary.to_path_buf()).or_insert_with(|| {
+        Command::new(binary)
+            .arg("--internal-test-listener-support")
+            .env_remove("NGIT_TEST_LISTENER_FD")
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|output| {
+                output.status.success() && output.stdout == b"ngit-test-listener-v1\n"
+            })
+    })
 }

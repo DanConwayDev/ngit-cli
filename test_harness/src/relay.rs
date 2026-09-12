@@ -4,43 +4,23 @@
 //! Accepts arbitrary events with the builder's default `Generic` mode —
 //! suitable for user metadata (kind 0), relay lists (kind 10002), signer
 //! connect events, etc. Not a GRASP server (no git smart-http, no repo-only
-//! filtering); a future PR adds GRASP via subprocess.
+//! filtering); Grasp fixtures use a separate subprocess.
 //!
-//! Shutdown is `Drop`-driven: `LocalRelay` is internally an
-//! `AtomicDestructor`, so the listener thread terminates when every clone
-//! goes out of scope.
+//! The listener and its connection tasks remain owned until the last fixture
+//! clone drops. Startup transfers the original reservation without rebinding.
 
-use std::{
-    error::Error,
-    io,
-    net::{IpAddr, Ipv4Addr},
-};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nostr_sdk::{
-    error::{Error as SdkError, ErrorKind},
     local_relay::{LocalRelay, LocalRelayBuilderNip42},
     prelude::*,
 };
 
-use crate::{
-    port::{self, PortReservation},
-    query,
-};
+use crate::{port::PortReservation, query};
 
-/// How many fresh port reservations to attempt before giving up. The
-/// reservation pattern in `port.rs` already prevents same-process
-/// collisions while reservations are held; this retry exists purely to
-/// cover the microsecond-scale TOCTOU window between
-/// [`PortReservation::release`] and `LocalRelay::run`'s internal `bind`.
-///
-/// In practice this loop has never been observed to fire in local
-/// stress testing — kept as defense-in-depth for CI / loaded hardware
-/// where the residual race may surface. Five tries is plenty: each
-/// retry draws a brand-new kernel-assigned port, so two consecutive
-/// `AddrInUse` failures would require two independent races back to
-/// back.
-const MAX_BIND_ATTEMPTS: usize = 5;
+mod listener;
+use listener::ListenerTask;
 
 /// A vanilla nostr relay bound to a fixed loopback port.
 ///
@@ -51,72 +31,39 @@ const MAX_BIND_ATTEMPTS: usize = 5;
 pub struct VanillaRelay {
     role: String,
     url: String,
-    /// Held purely for its `Drop` side-effect — `LocalRelay` is an
-    /// `AtomicDestructor` that shuts the listener down when the last clone
-    /// is dropped. We never call methods on it after `run()`.
+    /// Keeps the SDK relay state alive for the fixture's connection tasks.
     #[allow(dead_code)]
     relay: LocalRelay,
+    _listener: Arc<ListenerTask>,
 }
 
 impl VanillaRelay {
-    /// Start a relay on the port held by `reservation` and run it.
-    ///
-    /// The reservation is released (its `TcpListener` dropped) immediately
-    /// before `LocalRelay::run()` performs its own internal `bind`. This
-    /// shrinks the TOCTOU window and ensures that no other `reserve_port`
-    /// call in this process can be handed the same port number while this
-    /// fixture is starting up.
-    ///
-    /// On the off-chance another parallel test grabs the port in the
-    /// microseconds between release and bind, we retry with a fresh
-    /// reservation up to [`MAX_BIND_ATTEMPTS`] times. The retry has not
-    /// been observed to fire in local stress runs — it's defense-in-depth
-    /// for CI / loaded hardware.
+    /// Transfer the reserved listener into the relay without releasing its
+    /// port.
     pub(crate) async fn start(
         role: impl Into<String>,
-        mut reservation: PortReservation,
+        reservation: PortReservation,
         nip42: Option<LocalRelayBuilderNip42>,
     ) -> Result<Self> {
         let role = role.into();
-        for attempt in 1..=MAX_BIND_ATTEMPTS {
-            // Release the reservation right before LocalRelay performs its
-            // own bind. The two operations are not atomic — `LocalRelay::run`
-            // takes the port number, not a pre-bound listener — but
-            // releasing here narrows the gap to microseconds, and parallel
-            // `reserve_port` calls in this process cannot have been handed
-            // this port number while we held the reservation.
-            let port = reservation.release();
-            let mut builder = LocalRelay::builder()
-                .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                .port(port);
-            if let Some(nip42) = nip42.clone() {
-                builder = builder.nip42(nip42);
-            }
-            let relay = builder.build();
-            match relay.run().await {
-                Ok(()) => {
-                    let url = relay.url().await.to_string();
-                    return Ok(Self { role, url, relay });
-                }
-                Err(e) if is_addr_in_use(&e) && attempt < MAX_BIND_ATTEMPTS => {
-                    // Lost the race against another parallel test in the
-                    // post-release window. Get a brand new port from the
-                    // kernel and try again.
-                    reservation = port::reserve_port().context(
-                        "failed to reserve replacement port after AddrInUse on LocalRelay bind",
-                    )?;
-                    continue;
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::from(e).context(format!(
-                        "failed to start LocalRelay (attempt {attempt}/{MAX_BIND_ATTEMPTS})"
-                    )));
-                }
-            }
+        let listener = reservation.into_std_listener();
+        listener
+            .set_nonblocking(true)
+            .context("set relay listener nonblocking")?;
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        let url = format!("ws://{}", listener.local_addr()?);
+        let mut builder = LocalRelay::builder();
+        if let Some(nip42) = nip42 {
+            builder = builder.nip42(nip42);
         }
-        // Unreachable: the loop either returns `Ok` or returns an `Err`
-        // on the final iteration via the second `Err` arm.
-        unreachable!("MAX_BIND_ATTEMPTS loop terminated without returning")
+        let relay = builder.build();
+        let task = ListenerTask::start(listener, relay.clone());
+        Ok(Self {
+            role,
+            url,
+            relay,
+            _listener: Arc::new(task),
+        })
     }
 
     /// Role label this relay was registered under (e.g. `"default"`).
@@ -140,11 +87,71 @@ impl VanillaRelay {
     }
 }
 
-/// `true` iff `e` is an I/O `AddrInUse` (EADDRINUSE) — the signature of
-/// having lost the port-allocation race.
-fn is_addr_in_use(e: &SdkError) -> bool {
-    e.kind() == ErrorKind::IO
-        && e.source()
-            .and_then(|source| source.downcast_ref::<io::Error>())
-            .is_some_and(|io_err| io_err.kind() == io::ErrorKind::AddrInUse)
+#[cfg(test)]
+mod tests {
+    use std::{net::TcpListener, time::Duration};
+
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+    use crate::port::reserve_port;
+
+    #[tokio::test]
+    async fn listener_stays_owned_until_last_relay_clone_drops() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let reservation = reserve_port().unwrap();
+            let address = format!("127.0.0.1:{}", reservation.port());
+            let relay = VanillaRelay::start("lifetime", reservation, None)
+                .await
+                .unwrap();
+            assert_eq!(relay.url(), format!("ws://{address}"));
+            assert!(TcpListener::bind(&address).is_err());
+            assert!(relay.events(Filter::new()).await.unwrap().is_empty());
+
+            let clone = relay.clone();
+            drop(relay);
+            assert!(TcpListener::bind(&address).is_err());
+            assert!(clone.events(Filter::new()).await.unwrap().is_empty());
+
+            // Keep an unfinished handshake open: cancelling the fixture must
+            // close accepted connections as well as the listening socket.
+            let mut connection = tokio::net::TcpStream::connect(&address).await.unwrap();
+            drop(clone);
+            let mut byte = [0];
+            match connection.read(&mut byte).await {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                result => panic!("connection should close with the last fixture: {result:?}"),
+            }
+        })
+        .await
+        .expect("relay lifecycle must complete within the deadline");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_relays_keep_their_original_reserved_addresses() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut starts = tokio::task::JoinSet::new();
+            for _ in 0..32 {
+                let reservation = reserve_port().unwrap();
+                let port = reservation.port();
+                starts.spawn(async move {
+                    let relay = VanillaRelay::start("parallel", reservation, None)
+                        .await
+                        .unwrap();
+                    assert_eq!(relay.url(), format!("ws://127.0.0.1:{port}"));
+                    assert!(relay.events(Filter::new()).await.unwrap().is_empty());
+                    relay
+                });
+            }
+            let mut relays = Vec::new();
+            while let Some(result) = starts.join_next().await {
+                relays.push(result.unwrap());
+            }
+            let urls: std::collections::HashSet<_> = relays.iter().map(VanillaRelay::url).collect();
+            assert_eq!(urls.len(), 32);
+        })
+        .await
+        .expect("parallel relay startup must complete within the deadline");
+    }
 }
