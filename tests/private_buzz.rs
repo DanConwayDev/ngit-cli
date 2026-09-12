@@ -89,6 +89,7 @@ async fn publish_member_relay_lists(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned Buzz service stack; CI runs it explicitly"]
 async fn ngit_clones_and_pushes_a_buzz_channel_repo_without_public_fanout() -> Result<()> {
     let owner = Keys::generate();
     let owner_nsec = owner.secret_key().to_bech32()?;

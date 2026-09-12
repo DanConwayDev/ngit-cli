@@ -142,9 +142,11 @@ Three relay primitives:
   revision pinned in `flake.lock`, backed by isolated Postgres, Redis,
   and Garage processes. Tests create channels and announcements over
   authenticated Nostr, then exercise Buzz's `buzz-channel` ACL and
-  repository-scoped NIP-98 through ngit. The fixture is Linux-only and
-  requires `nix develop`, which supplies `BUZZ_RELAY_BIN` and the
-  service binaries.
+  repository-scoped NIP-98 through ngit. The fixture is Linux-only and its
+  integration test is ignored by the default Cargo test suite because it
+  starts four external services. CI runs it explicitly with
+  `cargo test --test private_buzz -- --ignored` inside `nix develop`, which
+  supplies `BUZZ_RELAY_BIN` and the service binaries.
 
 GRASP cannot stand in for a vanilla relay. Tests that publish user
 profiles, relay lists, or NIP-46 signer events need at least one
