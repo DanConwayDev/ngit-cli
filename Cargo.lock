@@ -3680,6 +3680,7 @@ dependencies = [
  "nostr",
  "nostr-sdk",
  "reqwest",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",

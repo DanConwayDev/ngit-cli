@@ -142,9 +142,11 @@ Three relay primitives:
   revision pinned in `flake.lock`, backed by isolated Postgres, Redis,
   and Garage processes. Tests create channels and announcements over
   authenticated Nostr, then exercise Buzz's `buzz-channel` ACL and
-  repository-scoped NIP-98 through ngit. The fixture is Linux-only and
-  requires `nix develop`, which supplies `BUZZ_RELAY_BIN` and the
-  service binaries.
+  repository-scoped NIP-98 through ngit. The fixture is Linux-only and its
+  integration test is ignored by the default Cargo test suite because it
+  starts four external services. CI runs it explicitly with
+  `cargo test --test private_buzz -- --ignored` inside `nix develop`, which
+  supplies `BUZZ_RELAY_BIN` and the service binaries.
 
 GRASP cannot stand in for a vanilla relay. Tests that publish user
 profiles, relay lists, or NIP-46 signer events need at least one
@@ -371,9 +373,17 @@ fallback (2) picks it up. Or set `NGIT_GRASP_BIN` in `.envrc`.
 **CI:** `ngit-grasp` is wired in via a pinned flake input on the
 root `flake.nix`. The dev shell builds it (`doCheck = false`),
 exposes the binary on `buildInputs`, and exports `NGIT_GRASP_BIN`
-from `shellHook`. CI runs `nix develop --command cargo test`.
+from `shellHook`. CI runs `nix develop --command cargo test --workspace`,
+which includes the harness's own fixture tests as well as ngit's tests.
+Plain `cargo test` selects only the root ngit package. The fixture tests can
+also run independently with `cargo test -p test_harness --lib`.
 Bumping ngit-grasp requires changing the immutable `rev` and `fetchgit` hash
 in `flake.nix`; it is deliberately not a flake input and has no lock entry.
+
+The Blossom fixture's test client explicitly selects Ring before building
+Reqwest, including for loopback HTTP. Its dev-dependencies enable the same
+`rustls-no-provider` feature as ngit so standalone tests exercise the same
+initialization contract as a workspace-wide run with unified features.
 
 **Standalone vanilla relay (`with_relay`):** uses
 `nostr-relay-builder` in-process. Crates.io 0.44.x.

@@ -904,6 +904,11 @@ mod tests {
     const BLOB: &[u8] = b"deterministic blossom fixture blob\n";
 
     fn client() -> reqwest::Client {
+        // Reqwest initializes TLS even for loopback HTTP. Match ngit's Ring
+        // selection, preserving any provider installed by an earlier caller.
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
         // Mirrors the parts of ngit's Blossom client which decide what a
         // failure looks like: no redirect following, bounded idle reads.
         reqwest::Client::builder()

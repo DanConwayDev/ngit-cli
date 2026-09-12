@@ -27,5 +27,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 [dev-dependencies]
 # Drives the Blossom fixture's own tests through the same HTTP client ngit
 # uses, so the fixture's socket-level behaviour is asserted as reqwest sees it.
-# Loopback HTTP needs no TLS backend.
-reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "json"] }
+# Match ngit's TLS feature even when these tests run without the root package.
+# Workspace feature unification otherwise enables it only in workspace runs.
+reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "json", "rustls-no-provider"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
