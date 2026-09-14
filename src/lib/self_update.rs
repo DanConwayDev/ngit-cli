@@ -234,14 +234,29 @@ pub fn classify_installation(current_exe: &Path, latest: &str) -> Result<Install
         .to_path_buf();
     let receipt_path = directory.join(INSTALL_RECEIPT_FILENAME);
     if !receipt_path.is_file() {
-        let manager = if path_contains(&executable, ".cargo") {
+        ensure!(
+            receipt_path.symlink_metadata().is_err(),
+            "standalone installer receipt is not a readable regular file; repair it before updating"
+        );
+        let root = directory.parent();
+        let manager = if directory.file_name() == Some(OsStr::new("bin"))
+            && root.is_some_and(|root| {
+                root.file_name() == Some(OsStr::new(".cargo"))
+                    || root.join(".crates.toml").is_file()
+                    || root.join(".crates2.json").is_file()
+            }) {
             "cargo"
         } else {
             "unknown"
         };
         let guidance = if manager == "cargo" {
+            let options = if cfg!(windows) {
+                "-Method standalone to install a separate copy with an installer receipt"
+            } else {
+                "--method standalone to install a separate copy with ngit update support (on NixOS also pass --standalone)"
+            };
             format!(
-                "this ngit appears to be managed by Cargo; run `cargo install ngit --locked --version {latest}`"
+                "this ngit is managed by Cargo; ngit update runs `cargo install ngit --locked --version {latest}` with the detected installation root. To switch methods, rerun the installer from https://ngit.dev/install with {options} and follow its PATH instructions."
             )
         } else {
             format!(
@@ -258,7 +273,7 @@ pub fn classify_installation(current_exe: &Path, latest: &str) -> Result<Install
     let receipt: InstallReceipt = serde_json::from_slice(
         &fs::read(&receipt_path).context("failed to read standalone installer receipt")?,
     )
-    .context("standalone installer receipt is invalid JSON")?;
+    .context("standalone installer receipt is invalid JSON; rerun the pinned installer with its repair option (--repair on Unix, -Repair on Windows)")?;
     ensure!(
         receipt.schema == INSTALL_RECEIPT_SCHEMA,
         "unsupported standalone installer receipt schema {}",
@@ -276,9 +291,8 @@ pub fn classify_installation(current_exe: &Path, latest: &str) -> Result<Install
 
     let git_remote_nostr = directory.join(executable_name("git-remote-nostr"));
     ensure!(
-        git_remote_nostr.is_file(),
-        "standalone installation is missing {}",
-        git_remote_nostr.display()
+        !git_remote_nostr.is_dir(),
+        "standalone helper path is a directory"
     );
     Ok(Installation::Standalone(StandaloneInstallation {
         directory,
@@ -290,11 +304,6 @@ pub fn classify_installation(current_exe: &Path, latest: &str) -> Result<Install
 
 fn is_nix_store_path(path: &Path) -> bool {
     path.starts_with("/nix/store")
-}
-
-fn path_contains(path: &Path, component: &str) -> bool {
-    path.components()
-        .any(|part| part.as_os_str() == OsStr::new(component))
 }
 
 fn executable_name(name: &'static str) -> &'static str {
@@ -309,6 +318,69 @@ fn executable_name(name: &'static str) -> &'static str {
     }
 }
 
+/// Keep a Cargo-owned installation managed by Cargo, including custom roots.
+pub async fn install_cargo_update(
+    installation: &ExternalInstallation,
+    version: &str,
+) -> Result<InstalledUpdate> {
+    let Installation::External(current) = classify_installation(&installation.executable, version)?
+    else {
+        bail!("installation ownership changed; rerun ngit update");
+    };
+    ensure!(
+        current.manager == "cargo",
+        "installation is not managed by Cargo"
+    );
+    let root = current
+        .executable
+        .parent()
+        .and_then(Path::parent)
+        .context("Cargo installation has no installation root")?;
+    eprintln!(
+        "Updating ngit to v{version} through Cargo in {}",
+        root.display()
+    );
+    install_cargo_with_command(tokio::process::Command::new("cargo"), root, version).await
+}
+
+async fn install_cargo_with_command(
+    mut command: tokio::process::Command,
+    root: &Path,
+    version: &str,
+) -> Result<InstalledUpdate> {
+    let status = command
+        .args([
+            "install",
+            "ngit",
+            "--locked",
+            "--version",
+            version,
+            "--root",
+        ])
+        .arg(root)
+        // Cargo/build output must not corrupt ngit's JSON response on stdout.
+        .stdout(std::io::stderr())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .status()
+        .await
+        .context("failed to start Cargo; install Cargo or rerun the installer with --method standalone (-Method standalone on Windows)")?;
+    ensure!(
+        status.success(),
+        "Cargo update failed ({status}); see Cargo's output above"
+    );
+    let directory = root.join("bin");
+    let ngit = directory.join(executable_name("ngit"));
+    let git_remote_nostr = directory.join(executable_name("git-remote-nostr"));
+    verify_binary_version(&ngit, &format!("ngit {version}"))?;
+    verify_binary_version(&git_remote_nostr, &format!("v{version}"))?;
+    Ok(InstalledUpdate {
+        version: version.to_string(),
+        ngit,
+        git_remote_nostr,
+    })
+}
+
 pub async fn install_update(
     installation: &StandaloneInstallation,
     update: &AvailableUpdate,
@@ -317,7 +389,7 @@ pub async fn install_update(
     {
         let _ = (installation, update);
         bail!(
-            "automatic replacement is not yet supported on this platform; use the generated pinned installer"
+            "automatic replacement is not yet supported on this platform; rerun the pinned installer from https://ngit.dev/install (it also repairs existing standalone installations)"
         );
     }
     #[cfg(unix)]
@@ -331,6 +403,7 @@ async fn install_update_unix(
 ) -> Result<InstalledUpdate> {
     use std::os::unix::fs::PermissionsExt;
 
+    let _lock = InstallLock::acquire(&installation.directory)?;
     let staging = tempfile::Builder::new()
         .prefix(".ngit-update-")
         .tempdir_in(&installation.directory)
@@ -387,6 +460,27 @@ async fn install_update_unix(
         ngit: installation.ngit.clone(),
         git_remote_nostr: installation.git_remote_nostr.clone(),
     })
+}
+
+#[cfg(unix)]
+struct InstallLock(PathBuf);
+
+#[cfg(unix)]
+impl InstallLock {
+    fn acquire(directory: &Path) -> Result<Self> {
+        let path = directory.join(".ngit-install-lock");
+        fs::create_dir(&path).context(
+            "installation is not writable, another installer is running, or .ngit-install-lock remains from an interrupted installation; inspect it before retrying",
+        )?;
+        Ok(Self(path))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
 }
 
 fn extract_binaries(archive: &Path, filename: &str, destination: &Path) -> Result<()> {
@@ -467,16 +561,16 @@ fn verify_binary_version(binary: &Path, expected: &str) -> Result<()> {
     let output = Command::new(binary)
         .arg("--version")
         .output()
-        .with_context(|| format!("failed to execute staged binary {}", binary.display()))?;
+        .with_context(|| format!("failed to execute binary {}", binary.display()))?;
     ensure!(
         output.status.success(),
-        "staged binary {} failed its version check",
+        "binary {} failed its version check",
         binary.display()
     );
-    let actual = String::from_utf8(output.stdout).context("staged binary version is not UTF-8")?;
+    let actual = String::from_utf8(output.stdout).context("binary version is not UTF-8")?;
     ensure!(
         actual.trim() == expected,
-        "staged binary {} reported {:?}, expected {:?}",
+        "binary {} reported {:?}, expected {:?}",
         binary.display(),
         actual.trim(),
         expected
@@ -497,36 +591,60 @@ fn replace_binaries(
         .collect::<Vec<_>>();
     for backup in &backups {
         ensure!(
-            !backup.exists(),
+            backup.symlink_metadata().is_err(),
             "stale update backup exists at {}",
             backup.display()
         );
     }
 
+    let mut installed = [false; 2];
     let result = (|| -> Result<()> {
         for ((_, target), backup) in replacements.iter().zip(&backups) {
-            fs::rename(target, backup)
-                .with_context(|| format!("failed to stage backup for {}", target.display()))?;
+            match target.symlink_metadata() {
+                Ok(_) => fs::rename(target, backup)
+                    .with_context(|| format!("failed to stage backup for {}", target.display()))?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to inspect {}", target.display()));
+                }
+            }
         }
-        for (staged, target) in replacements {
+        for (index, (staged, target)) in replacements.iter().enumerate() {
             fs::rename(staged, target)
                 .with_context(|| format!("failed to install {}", target.display()))?;
+            installed[index] = true;
         }
         write_receipt(receipt_path, version)?;
         Ok(())
     })();
 
     if let Err(error) = result {
-        for ((_, target), backup) in replacements.iter().zip(&backups) {
-            if backup.exists() {
-                let _ = fs::remove_file(target);
-                let _ = fs::rename(backup, target);
+        let mut failures = Vec::new();
+        for (index, ((_, target), backup)) in replacements.iter().zip(&backups).enumerate() {
+            if installed[index] {
+                if let Err(error) = fs::remove_file(target) {
+                    failures.push(format!("remove {}: {error}", target.display()));
+                }
             }
+            if backup.symlink_metadata().is_ok() {
+                if let Err(error) = fs::rename(backup, target) {
+                    failures.push(format!("restore {}: {error}", backup.display()));
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(error.context(format!(
+                "rollback incomplete; preserve remaining ngit-backup files and restore them before retrying: {}",
+                failures.join("; ")
+            )));
         }
         return Err(error.context("the previous standalone installation was restored"));
     }
     for backup in backups {
-        fs::remove_file(backup)?;
+        if backup.symlink_metadata().is_ok() {
+            fs::remove_file(backup)?;
+        }
     }
     Ok(())
 }
@@ -572,8 +690,8 @@ mod tests {
     #[test]
     fn valid_receipt_owns_only_sibling_binaries() {
         let temp = tempfile::tempdir().unwrap();
-        let ngit = temp.path().join("ngit");
-        let remote = temp.path().join("git-remote-nostr");
+        let ngit = temp.path().join(executable_name("ngit"));
+        let remote = temp.path().join(executable_name("git-remote-nostr"));
         fs::write(&ngit, b"binary").unwrap();
         fs::write(&remote, b"binary").unwrap();
         write_receipt(&temp.path().join(INSTALL_RECEIPT_FILENAME), "2.6.3").unwrap();
@@ -583,7 +701,142 @@ mod tests {
             panic!("valid receipt was not recognized");
         };
         assert_eq!(installation.ngit, ngit.canonicalize().unwrap());
-        assert_eq!(installation.git_remote_nostr, remote);
+        assert_eq!(
+            installation.git_remote_nostr,
+            remote.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn custom_cargo_roots_are_recognized_without_a_cargo_path_component() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let executable = bin.join("ngit");
+        fs::write(&executable, b"binary").unwrap();
+        fs::write(temp.path().join(".crates2.json"), b"{}").unwrap();
+        let Installation::External(external) = classify_installation(&executable, "3.0.1").unwrap()
+        else {
+            panic!("Cargo install was adopted");
+        };
+        assert_eq!(external.manager, "cargo");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cargo_updates_use_the_selected_version_and_preserve_custom_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("custom Cargo root");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(root.join(".crates2.json"), b"Cargo metadata").unwrap();
+        let log = temp.path().join("arguments");
+        let script = temp.path().join("cargo.sh");
+        fs::write(
+            &script,
+            r#"
+printf '%s\n' "$@" > "$TEST_LOG"
+printf '#!/usr/bin/env bash\necho "ngit 3.0.1"\n' > "$TEST_BIN_DIR/ngit"
+printf '#!/usr/bin/env bash\necho "v3.0.1"\n' > "$TEST_BIN_DIR/git-remote-nostr"
+chmod +x "$TEST_BIN_DIR/ngit" "$TEST_BIN_DIR/git-remote-nostr"
+"#,
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .arg(script)
+            .env("TEST_LOG", &log)
+            .env("TEST_BIN_DIR", &bin);
+        let installed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            install_cargo_with_command(command, &root, "3.0.1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(),
+            [
+                "install",
+                "ngit",
+                "--locked",
+                "--version",
+                "3.0.1",
+                "--root",
+                root.to_str().unwrap()
+            ]
+        );
+        assert_eq!(installed.ngit, bin.join("ngit"));
+        assert_eq!(installed.git_remote_nostr, bin.join("git-remote-nostr"));
+        assert_eq!(
+            fs::read(root.join(".crates2.json")).unwrap(),
+            b"Cargo metadata"
+        );
+        assert!(!bin.join(INSTALL_RECEIPT_FILENAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cargo_failure_does_not_adopt_or_replace_existing_binaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("ngit"), b"old ngit").unwrap();
+        let log = temp.path().join("cargo-called");
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .args(["-c", "touch \"$TEST_LOG\"; exit 17", "fake-cargo"])
+            .env("TEST_LOG", &log);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            install_cargo_with_command(command, temp.path(), "3.0.1"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(log.exists());
+        assert!(error.to_string().contains("Cargo update failed"));
+        assert_eq!(fs::read(bin.join("ngit")).unwrap(), b"old ngit");
+        assert!(!bin.join(INSTALL_RECEIPT_FILENAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_helper_can_be_repaired_by_a_standalone_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let ngit = temp.path().join("ngit");
+        let receipt = temp.path().join(INSTALL_RECEIPT_FILENAME);
+        fs::write(&ngit, b"old").unwrap();
+        write_receipt(&receipt, "1.6.0").unwrap();
+        let Installation::Standalone(installation) = classify_installation(&ngit, "3.0.1").unwrap()
+        else {
+            panic!("standalone receipt was not recognized");
+        };
+        let staged_ngit = temp.path().join("new-ngit");
+        let staged_helper = temp.path().join("new-helper");
+        fs::write(&staged_ngit, b"new").unwrap();
+        fs::write(&staged_helper, b"helper").unwrap();
+        replace_binaries(
+            [
+                (&staged_ngit, &ngit),
+                (&staged_helper, &installation.git_remote_nostr),
+            ],
+            "3.0.1",
+            &receipt,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&ngit).unwrap(), b"new");
+        assert_eq!(fs::read(&installation.git_remote_nostr).unwrap(), b"helper");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_lock_excludes_concurrent_installers_and_releases_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock = InstallLock::acquire(temp.path()).unwrap();
+        assert!(InstallLock::acquire(temp.path()).is_err());
+        drop(lock);
+        assert!(InstallLock::acquire(temp.path()).is_ok());
     }
 
     #[cfg(unix)]
@@ -646,5 +899,33 @@ mod tests {
         assert_eq!(fs::read(&remote).unwrap(), b"old helper");
         let receipt: InstallReceipt = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(receipt.version, "2.6.3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn obstructed_rollback_reports_failure_and_preserves_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let ngit = temp.path().join("ngit");
+        let helper = temp.path().join("git-remote-nostr");
+        let staged_ngit = temp.path().join("new-ngit");
+        let staged_helper = temp.path().join("new-helper");
+        let receipt = temp.path().join(INSTALL_RECEIPT_FILENAME);
+        fs::write(&ngit, b"old ngit").unwrap();
+        fs::write(&helper, b"old helper").unwrap();
+        fs::write(&staged_ngit, b"new ngit").unwrap();
+        // Simulate filesystem interference after staging validation: receipt
+        // publication fails, and a directory blocks helper restoration.
+        fs::create_dir(&staged_helper).unwrap();
+        fs::create_dir(&receipt).unwrap();
+        let error = replace_binaries(
+            [(&staged_ngit, &ngit), (&staged_helper, &helper)],
+            "3.0.1",
+            &receipt,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rollback incomplete"));
+        assert_eq!(fs::read(&ngit).unwrap(), b"old ngit");
+        let backup = helper.with_extension(format!("ngit-backup-{}", std::process::id()));
+        assert_eq!(fs::read(backup).unwrap(), b"old helper");
     }
 }

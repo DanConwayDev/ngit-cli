@@ -31,17 +31,34 @@ older-version installs without treating prerelease status itself as a problem.
 If the selected version is behind a newer eligible tag, ngit prints a note.
 Stable automatic checks continue to ignore prerelease tags.
 
-Without `--check`, ngit automatically replaces only installations bearing the
-standalone receipt written by the official bootstrap installer. The updater
-canonicalizes its own executable before classifying ownership. It never writes
-into `/nix/store`, invokes `sudo`, or adopts an unreceipted Cargo, package
-manager, or source installation. Those installations receive non-mutating,
-actionable guidance instead.
+Without `--check`, ngit updates installations made by the official installer
+or Cargo. It announces Cargo updates and runs
+`cargo install ngit --locked --version VERSION --root ROOT`, preserving the
+original installation root. Cargo output goes to stderr so `ngit update --json`
+remains valid JSON. Cargo failures are reported without switching installation
+methods, and both installed programs must pass their version checks before
+ngit reports success. `--check` never runs Cargo.
+
+The updater canonicalizes its own executable before identifying its installation
+method. A standalone receipt takes precedence over the directory name; Cargo
+roots are recognized by the standard `.cargo/bin` layout or Cargo's installation
+metadata. Other package-manager and source installations receive guidance
+instead. The updater never writes into `/nix/store` or invokes `sudo`.
+
+Cargo builds use Cargo's registry and source verification, not the prebuilt
+archive's hash. Release discovery still selects the exact signed release
+version before invoking Cargo.
 
 For a standalone update, ngit downloads the asset URL from the signed NIP-82
 event, verifies its SHA-256 and size, extracts both `ngit` and
 `git-remote-nostr`, executes their version checks, and stages rollback copies
 before replacing either binary.
+
+An update can restore a missing helper when a newer release is available.
+For same-version repairs, rerun the pinned installer. The native updater shares
+`.ngit-install-lock` with the installer; inspect leftovers after an interrupted
+run before retrying. If rollback fails, the error identifies the remaining
+`ngit-backup` files instead of claiming the originals were restored.
 
 ## Website installer handoff
 

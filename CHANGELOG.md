@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Let standalone updates restore a missing helper, exclude concurrent installers,
+  and report incomplete rollback accurately. Recognize custom Cargo installation
+  roots and explain the choice between Cargo upgrades and standalone migration.
 - Make the bootstrap installers a direct, pinned install/repair path independent
   of the installed updater. Validate both binaries before replacement and restore
   originals on failure. Require an explicit Cargo/standalone choice for existing

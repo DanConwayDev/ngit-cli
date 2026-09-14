@@ -56,6 +56,11 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
         } => {
             let current_exe = env::current_exe()?;
             match ngit::self_update::classify_installation(&current_exe, &update.version)? {
+                ngit::self_update::Installation::External(external)
+                    if external.manager == "cargo" =>
+                {
+                    update_with_cargo(&update, &external, newer_candidate.as_deref()).await?;
+                }
                 ngit::self_update::Installation::External(external) => {
                     set_ready_output(
                         &update,
@@ -91,6 +96,33 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
             print_newer_candidate_notice(Some(&update.version), newer_candidate.as_deref());
         }
     }
+    Ok(())
+}
+
+async fn update_with_cargo(
+    update: &ngit::version_check::AvailableUpdate,
+    installation: &ngit::self_update::ExternalInstallation,
+    newer_candidate: Option<&str>,
+) -> Result<()> {
+    let installed = ngit::self_update::install_cargo_update(installation, &update.version).await?;
+    output::set_value(json!({
+        "command_status": "ok",
+        "command": "update",
+        "result": {
+            "state": "installed",
+            "method": "cargo",
+            "previous_version": update.current,
+            "version": installed.version,
+            "newer_candidate_version": newer_candidate,
+            "ngit": installed.ngit,
+            "git_remote_nostr": installed.git_remote_nostr,
+            "release_event_id": update.release.raw_event.id.to_hex(),
+        }
+    }));
+    println!(
+        "updated ngit from v{} to v{} through Cargo",
+        update.current, update.version
+    );
     Ok(())
 }
 
