@@ -120,7 +120,7 @@ async fn update_with_cargo(
         }
     }));
     println!(
-        "updated ngit from v{} to v{} through Cargo",
+        "updated ngit from v{} to v{} through Cargo (default registry and default features)",
         update.current, update.version
     );
     Ok(())

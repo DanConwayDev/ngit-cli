@@ -337,7 +337,7 @@ pub async fn install_cargo_update(
         .and_then(Path::parent)
         .context("Cargo installation has no installation root")?;
     eprintln!(
-        "Updating ngit to v{version} through Cargo in {}",
+        "Updating ngit to v{version} through Cargo in {} (default registry and default features)",
         root.display()
     );
     install_cargo_with_command(tokio::process::Command::new("cargo"), root, version).await

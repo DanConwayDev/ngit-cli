@@ -220,7 +220,7 @@ function Invoke-NgitInstall {
     if ($Method -eq "cargo") {
         if (-not $cargoRoot) { Fail-Install "the active ngit is not a recognized Cargo installation" }
         if ($InstallDirectory -or $Repair) { Fail-Install "-InstallDirectory and -Repair apply only to standalone installation" }
-        Write-Info "Updating ngit to v$version through Cargo in $cargoRoot"
+        Write-Info "Updating ngit to v$version through Cargo in $cargoRoot (default registry and default features)"
         & cargo install ngit --locked --version $version --root $cargoRoot
         if ($LASTEXITCODE -ne 0) { Fail-Install "Cargo installation failed" }
         Show-PathGuidance $existingDirectory

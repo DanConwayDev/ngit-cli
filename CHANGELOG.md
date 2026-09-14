@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The one-line installer now works with older ngit versions that do not have
   `ngit update`.
 - If you installed ngit with Cargo, `ngit update` and the one-line installer
-  now upgrade it through Cargo automatically and tell you what they are doing.
+  now upgrade it automatically using Cargo's default registry and default
+  features. This keeps your installation location, not custom source or feature
+  selections.
   You can still choose downloaded binaries with `--method standalone`; the
   installer warns if your terminal is still using the old copy.
 - Make installation and repair safer on Unix and Windows: check downloaded

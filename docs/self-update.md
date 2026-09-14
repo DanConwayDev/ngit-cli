@@ -47,7 +47,11 @@ instead. The updater never writes into `/nix/store` or invokes `sudo`.
 
 Cargo builds use Cargo's registry and source verification, not the prebuilt
 archive's hash. Release discovery still selects the exact signed release
-version before invoking Cargo.
+version before invoking Cargo. Both `ngit update` and the installers use Cargo's
+default registry and default features, keeping the installation root. They do
+not reuse custom Git/path sources, explicitly selected registries, or feature
+flags from the previous install. The Cargo progress message states this policy;
+use your original Cargo command to keep a customized build.
 
 For a standalone update, ngit downloads the asset URL from the signed NIP-82
 event, verifies its SHA-256 and size, extracts both `ngit` and

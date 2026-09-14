@@ -347,7 +347,7 @@ main() {
         [ -z "$INSTALL_DIR" ] && [ "$REPAIR" -eq 0 ] || fail '--install-dir and --repair apply only to standalone installation'
         check_downgrade "$ngit_existing"
         command_exists cargo || fail 'Cargo is not available; install Cargo or rerun with --method standalone to use downloaded binaries'
-        info "Updating ngit to v$VERSION through Cargo in $ngit_cargo_root"
+        info "Updating ngit to v$VERSION through Cargo in $ngit_cargo_root (default registry and default features)"
         cargo install ngit --locked --version "$VERSION" --root "$ngit_cargo_root"
         ngit_dir=$ngit_existing_dir
         report_path
