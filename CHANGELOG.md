@@ -9,16 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Let standalone updates restore a missing helper, exclude concurrent installers,
-  and report incomplete rollback accurately. Recognize custom Cargo installation
-  roots and explain the choice between Cargo upgrades and standalone migration.
-- Make the bootstrap installers a direct, pinned install/repair path independent
-  of the installed updater. Validate both binaries before replacement and restore
-  originals on failure. Require an explicit Cargo/standalone choice for existing
-  external installations, protect unreceipted files, and preserve Cargo roots.
-  Add explicit repair and downgrade options, resolve installation symlinks, and
-  check PATH precedence for both commands. Windows gains matching replacement
-  safeguards and installation choices.
+- The one-line installer now works with older ngit versions that do not have
+  `ngit update`.
+- If you installed ngit with Cargo, `ngit update` and the one-line installer
+  now upgrade it through Cargo automatically and tell you what they are doing.
+  You can still choose downloaded binaries with `--method standalone`; the
+  installer warns if your terminal is still using the old copy.
+- Make installation and repair safer on Unix and Windows: check downloaded
+  programs before replacing existing files, recover from failed replacements,
+  and require explicit permission to install an older version.
+- Fix `ngit update` failing when ngit's Git integration tool
+  (`git-remote-nostr`) is missing.
 - Keep usable accounts visible in `ngit account whoami` when a stale inventory
   entry cannot resolve its credentials. Report unavailable candidates separately
   in human and JSON output, with backend-specific lookup diagnostics.
