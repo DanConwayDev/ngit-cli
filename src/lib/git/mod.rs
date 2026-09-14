@@ -2226,9 +2226,11 @@ index ce01362..a21e91c 100644\n\
             let oid = test_repo.populate()?;
 
             let git_repo = Repo::from_path(&test_repo.dir)?;
+            let (major, minor, patch) = git2::Version::get().libgit2_version();
 
             assert_eq!(
-                "\
+                format!(
+                    "\
                 From 431b84edc0d2fa118d63faa3c2db9c73d630a5ae Mon Sep 17 00:00:00 2001\n\
                 From: Joe Bloggs <joe.bloggs@pm.me>\n\
                 Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
@@ -2248,9 +2250,10 @@ index ce01362..a21e91c 100644\n\
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.7\n\
+                libgit2 {major}.{minor}.{patch}\n\
                 \n\
-                ",
+                "
+                ),
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &None)?,
             );
             Ok(())
@@ -2262,9 +2265,11 @@ index ce01362..a21e91c 100644\n\
             let oid = test_repo.populate()?;
 
             let git_repo = Repo::from_path(&test_repo.dir)?;
+            let (major, minor, patch) = git2::Version::get().libgit2_version();
 
             assert_eq!(
-                "\
+                format!(
+                    "\
                 From 431b84edc0d2fa118d63faa3c2db9c73d630a5ae Mon Sep 17 00:00:00 2001\n\
                 From: Joe Bloggs <joe.bloggs@pm.me>\n\
                 Date: Thu, 1 Jan 1970 00:00:00 +0000\n\
@@ -2284,9 +2289,10 @@ index ce01362..a21e91c 100644\n\
                 +some content1\n\\ \
                 No newline at end of file\n\
                 --\n\
-                libgit2 1.9.7\n\
+                libgit2 {major}.{minor}.{patch}\n\
                 \n\
-                ",
+                "
+                ),
                 git_repo.make_patch_from_commit(&oid_to_sha1(&oid), &Some((3, 5)))?,
             );
             Ok(())
