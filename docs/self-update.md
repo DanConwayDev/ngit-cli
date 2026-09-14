@@ -73,10 +73,25 @@ unreferenced, or invalid assets. The generated `/install.sh` and
 `/install.ps1` are updated only after all release events and Blossom placements
 are queryable.
 
-The template remains a bootstrap mechanism. When it finds an existing
-receipted installation with `ngit update`, it delegates to the native
-updater so release policy and replacement logic are not maintained in shell.
-On NixOS it shows an exact tagged `nix profile add` command using ngit.dev's
+The shell installer uses `ngit update` only when the existing installation has
+a standalone installer receipt, reports v3 or later, and accepts
+`ngit update --help`. This keeps native release validation and rollback for
+supported standalone installations.
+
+For older versions without `ngit update`, the script skips that command and
+downloads the pinned release archive directly. It replaces both `ngit` and
+`git-remote-nostr` in the existing standalone directory when that directory has
+an installer receipt, is writable, and the `ngit` executable is not a symlink.
+
+An old Cargo installation normally has no standalone receipt. In that case,
+the script also skips `ngit update`, but selects a standalone installation
+directory, normally `~/.local/bin`, rather than upgrading through Cargo. The old
+Cargo binary can therefore remain on disk and take precedence on PATH. The
+script reports its destination and, if needed, explains how to put that
+directory first on PATH and identifies the binary taking precedence. To
+replace the Cargo installation in place instead, run `cargo install ngit --locked`.
+
+On NixOS it shows a stable-branch `nix profile add` command using ngit.dev's
 GRASP-backed Git alias, then exits without changing the profile. `--standalone`
 is an explicit escape hatch which selects the static musl archive for a
 user-owned x86_64 installation. Other NixOS architectures remain Nix-managed

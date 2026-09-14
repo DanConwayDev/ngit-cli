@@ -116,6 +116,14 @@ sha256() {
 }
 
 find_install_dir() {
+    if command_exists ngit; then
+        ngit_existing=$(command -v ngit)
+        ngit_existing_dir=$(dirname "$ngit_existing")
+        if [ ! -L "$ngit_existing" ] && [ -f "$ngit_existing_dir/$RECEIPT_FILENAME" ] && [ -w "$ngit_existing_dir" ]; then
+            printf '%s\n' "$ngit_existing_dir"
+            return 0
+        fi
+    fi
     for ngit_dir in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
         if mkdir -p "$ngit_dir" 2>/dev/null && [ -w "$ngit_dir" ]; then
             printf '%s\n' "$ngit_dir"
@@ -145,9 +153,27 @@ delegate_existing_install() {
     ngit_existing=$(command -v ngit)
     ngit_existing_dir=$(dirname "$ngit_existing")
     if [ ! -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+        info "Found $ngit_existing without a standalone installer receipt; skipping ngit update."
+        info 'Installing a standalone copy instead. To upgrade a Cargo installation in place, run: cargo install ngit --locked'
+        return 1
+    fi
+    # Older CLIs may accept --help without recognizing the update subcommand.
+    ngit_existing_version=$("$ngit_existing" --version 2>/dev/null) || {
+        info 'Could not read the installed version; downloading the release directly without ngit update.'
+        return 1
+    }
+    if ! printf '%s\n' "$ngit_existing_version" | awk '
+        /^ngit [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$/ {
+            split($2, version, ".")
+            if (version[1] >= 3) supported = 1
+        }
+        END { exit !supported }
+    '; then
+        info "Installed version '$ngit_existing_version' is older than v3 or unrecognized; downloading the release directly without ngit update."
         return 1
     fi
     if ! ngit update --help >/dev/null 2>&1; then
+        info 'The installed ngit does not support the updater; downloading the release directly without ngit update.'
         return 1
     fi
     info 'Delegating the existing standalone installation to ngit update'
@@ -194,6 +220,7 @@ EOF
     esac
 
     ngit_dir=$(find_install_dir) || fail 'no writable standalone installation directory is available'
+    info "Installing ngit and git-remote-nostr to $ngit_dir, replacing any existing copies there."
     for ngit_binary in $BINARIES; do
         ngit_source=$(find "$ngit_extract" -type f -name "$ngit_binary" -print -quit)
         [ -n "$ngit_source" ] || fail "release archive is missing $ngit_binary"
@@ -208,6 +235,14 @@ EOF
     [ "$ngit_remote_reported" = "v$VERSION" ] || fail "installed git-remote-nostr reported an unexpected version: $ngit_remote_reported"
     write_receipt "$ngit_dir"
     info "Installed ngit v$VERSION to $ngit_dir"
+    hash -r
+    ngit_active=$(command -v ngit || true)
+    if [ "$ngit_active" != "$ngit_dir/ngit" ]; then
+        warn "Add $ngit_dir to the front of PATH to use the installed version."
+        if [ -n "$ngit_active" ]; then
+            warn "The ngit currently on PATH is $ngit_active; update it with its original installation tool or remove it."
+        fi
+    fi
 }
 
 main "$@"

@@ -51,3 +51,118 @@ fn windows_template_requires_stable_https_zip_assets() {
     assert!(WINDOWS_TEMPLATE.contains("Join-Path $installDirectory \"ngit.exe\""));
     assert!(WINDOWS_TEMPLATE.contains("Join-Path $installDirectory \"git-remote-nostr.exe\""));
 }
+
+#[cfg(unix)]
+#[test]
+fn unix_installer_only_delegates_to_supported_receipted_versions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (version, receipt, supports_update, delegated) in [
+        ("ngit 1.6.0", true, true, false),
+        ("ngit 2.6.3", true, true, false),
+        ("unknown", true, true, false),
+        ("ngit 3.0.1", true, false, false),
+        ("ngit 3.0.1", false, true, false),
+        ("ngit 3.0.1", true, true, true),
+        ("ngit 3.0.0-rc.3", true, true, true),
+        ("ngit 10.0.0", true, true, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("ngit");
+        fs::write(
+            &executable,
+            format!(
+                "#!/usr/bin/env bash\ncase \"$*\" in\n  --version) echo '{version}' ;;\n  'update --help') touch \"$PROBED\"; exit {} ;;\n  update) touch \"$DELEGATED\" ;;\n  *) exit 1 ;;\nesac\n",
+                if supports_update { 0 } else { 1 },
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        if receipt {
+            fs::write(directory.path().join(".ngit-install-receipt.json"), "{}").unwrap();
+        }
+        let script = directory.path().join("test.sh");
+        fs::write(
+            &script,
+            format!(
+                "{}\ndelegate_existing_install || touch \"$FALLBACK\"\n",
+                UNIX_TEMPLATE.strip_suffix("main \"$@\"\n").unwrap(),
+            ),
+        )
+        .unwrap();
+        let output = Command::new("bash")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    directory.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("PROBED", directory.path().join("probed"))
+            .env("DELEGATED", directory.path().join("delegated"))
+            .env("FALLBACK", directory.path().join("fallback"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert_eq!(
+            directory.path().join("delegated").exists(),
+            delegated,
+            "{version}"
+        );
+        assert_eq!(
+            directory.path().join("fallback").exists(),
+            !delegated,
+            "{version}"
+        );
+        if version == "ngit 1.6.0" || version == "ngit 2.6.3" || version == "unknown" {
+            assert!(!directory.path().join("probed").exists(), "{version}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_installer_fallback_reuses_receipted_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("custom/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join("ngit");
+    fs::write(&executable, "#!/usr/bin/env bash\nexit 1\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    for receipt in [false, true] {
+        if receipt {
+            fs::write(bin.join(".ngit-install-receipt.json"), "{}").unwrap();
+        }
+        let script = directory.path().join("test.sh");
+        fs::write(
+            &script,
+            format!(
+                "{}\nchosen=$(find_install_dir)\n[ \"$chosen\" = \"$EXPECTED\" ]\n",
+                UNIX_TEMPLATE.strip_suffix("main \"$@\"\n").unwrap(),
+            ),
+        )
+        .unwrap();
+        let output = Command::new("bash")
+            .arg(&script)
+            .env("HOME", directory.path())
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env(
+                "EXPECTED",
+                if receipt {
+                    bin.clone()
+                } else {
+                    directory.path().join(".local/bin")
+                },
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "receipt={receipt}: {output:?}");
+    }
+}
