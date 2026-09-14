@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   announcement is still missing. Public and unclassified discovery failures
   no longer trigger decryption. Explicitly public clones skip private relay
   caches, and unrelated cached relay failures cannot veto a found announcement.
+  Follow discovered announcements to their repository relays for canonical refs
+  and proposals, even when the announcement came from a separate URL hint.
 - Keep usable accounts visible in `ngit account whoami` when a stale inventory
   entry cannot resolve its credentials. Report unavailable candidates separately
   in human and JSON output, with backend-specific lookup diagnostics.

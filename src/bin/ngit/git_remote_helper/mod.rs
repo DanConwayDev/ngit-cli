@@ -605,8 +605,8 @@ async fn process_args(args: &[String]) -> Result<Option<(Option<String>, NostrUr
 }
 
 /// Combine cached account locations with URL hints for one initial probe.
-/// Only independently classified private relays are registered for NIP-42;
-/// adding a public URL hint here does not grant it signer authorization.
+/// Cached private locations and explicitly supplied URL hints are authenticated
+/// discovery targets when a signer is attached.
 fn combine_private_relay_hints(
     discovery: PrivateGitRelayDiscovery,
     url_hints: &[nostr::prelude::RelayUrl],
@@ -671,7 +671,7 @@ async fn fetching_with_report_for_helper(
             bail!("private Git relay discovery is unavailable: {error}");
         }
     }
-    let private_probe =
+    let mut private_probe =
         cached_repo_ref.is_none() && private_discovery.requires_repository_only_probe();
     let mut repository_relays_only = cached_repo_ref
         .as_ref()
@@ -698,21 +698,27 @@ async fn fetching_with_report_for_helper(
             .await?;
         finish_fetch_progress(&relay_reports, progress_reporter)?;
         let outcome = consolidate_fetch_outcome(relay_reports);
-        if repository_relays_only && private_probe && !repository_is_known_private {
-            // A resolved announcement is sufficient even when an unrelated
-            // cached private relay failed. Only a miss needs every private
-            // probe to finish before discovery may expand to public relays.
+        if repository_relays_only && private_probe {
+            // Discovery hints locate the announcement; its relays supply state
+            // and proposals. Fetch those next even if an unrelated hint failed,
+            // keeping the follow-up confined to the resolved repository.
             match get_repo_ref_from_cache(Some(git_repo_path), selected_maintainer_coordinate).await
             {
                 Ok(repo_ref) => {
                     selected_maintainer_coordinate.relays = repo_ref.relays;
+                    private_probe = false;
+                    continue;
                 }
                 Err(_)
-                    if outcome.all_required_relays_completed(private_discovery.relays().len()) =>
+                    if !repository_is_known_private
+                        && outcome
+                            .all_required_relays_completed(private_discovery.relays().len()) =>
                 {
                     repository_relays_only = false;
                     continue;
                 }
+                // The caller can refresh the private list after a known-private miss.
+                Err(_) if repository_is_known_private => {}
                 Err(_) => {
                     bail!(
                         "private repository relay probe failed; refusing to query public discovery relays"

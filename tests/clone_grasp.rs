@@ -416,6 +416,102 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         }
     }
 
+    // An announcement-only hint must lead to the repository's state relays.
+    // Keep it outside the publisher's harness so no push can put state here.
+    let indexer = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("indexer")
+    .build()
+    .await?;
+    let indexer_client = Client::default();
+    indexer_client
+        .add_relay(indexer.relay("indexer").url())
+        .await?;
+    indexer_client.connect().await;
+    let published = indexer_client.send_event(announcement).await?;
+    assert!(published.failed.is_empty(), "indexer announcement rejected");
+    indexer_client.disconnect().await;
+    assert!(
+        indexer
+            .relay("indexer")
+            .events(Filter::new().kind(Kind::Custom(KIND_REPO_STATE)))
+            .await?
+            .is_empty(),
+        "the announcement hint must not contain repository state",
+    );
+
+    // A transport-only branch exposes fallback to Git-server refs even though
+    // the canonical main object is available on that same server.
+    git2::Repository::open_bare(&bare_repo_path)?.reference(
+        "refs/heads/transport-only",
+        git2::Oid::from_str(&main_oid)?,
+        false,
+        "fixture: branch absent from canonical Nostr state",
+    )?;
+    let indexer_hint = urlencoding::encode(indexer.relay("indexer").url());
+    let indexed_url = format!("nostr://{npub}/{indexer_hint}/{identifier}");
+    let indexed_clone = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cloner
+            .git([
+                "clone",
+                "--template",
+                template
+                    .path()
+                    .to_str()
+                    .context("template path is not UTF-8")?,
+                "--config",
+                &account_config,
+                &indexed_url,
+                "public-from-announcement-indexer",
+            ])
+            .env("XDG_CACHE_HOME", plaintext_cache.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("indexed clone exceeded its deadline")??;
+    assert!(
+        indexed_clone.status.success(),
+        "indexed clone failed: {}",
+        String::from_utf8_lossy(&indexed_clone.stderr),
+    );
+    let indexed_path = cloner.dir().join("public-from-announcement-indexer");
+    let indexed_repository = git2::Repository::open(&indexed_path)?;
+    assert_eq!(
+        indexed_repository
+            .refname_to_id("refs/heads/main")?
+            .to_string(),
+        main_oid,
+    );
+    assert!(
+        indexed_repository
+            .find_reference("refs/remotes/origin/transport-only")
+            .is_err(),
+        "clone used Git-server refs instead of canonical Nostr state",
+    );
+    let indexed_cache =
+        nostr_lmdb::NostrLmdb::open(indexed_path.join(".git/nostr-cache.lmdb")).await?;
+    let fetched_state = indexed_cache
+        .query(
+            Filter::new()
+                .author(pubkey)
+                .kind(Kind::Custom(KIND_REPO_STATE)),
+        )
+        .await?;
+    assert!(
+        state_events
+            .iter()
+            .any(|event| fetched_state.iter().any(|cached| cached.id == event.id)),
+        "clone never fetched the state held on the announcement's repository relays",
+    );
+    drop(indexed_cache);
+    git2::Repository::open_bare(&bare_repo_path)?
+        .find_reference("refs/heads/transport-only")?
+        .delete()?;
+
     // Git sends `option verbosity 0` to remote helpers for `clone -q`.
     // Exercise a second real clone because checking the protocol response
     // alone would miss setup output emitted before ngit reads the option.

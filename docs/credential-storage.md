@@ -249,6 +249,9 @@ an older cached list is not reused when a newer list is known.
 An explicitly public clone (`--config nostr.private=false`) skips these private
 locations. Once an announcement is found, an unrelated cached private relay's
 failure does not block the clone or cause discovery to expand to public indexers.
+ngit then fetches state and proposals from the relays named in the announcement.
+An explicitly supplied URL hint may request relay authentication from the
+configured signer during discovery.
 
 If the announcement is still missing and the repository is known private,
 ngit refreshes the account's private relay list and decrypts it if necessary,
