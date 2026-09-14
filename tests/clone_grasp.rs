@@ -303,6 +303,215 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
         "cloned refs/heads/main ({cloned_oid}) does not match publisher's ({main_oid})",
     );
 
+    // A fresh public clone must not depend on decrypting the account's
+    // private relay list. Validly sign an undecryptable list: the former
+    // eager discovery path fails closed on this event before cloning.
+    let unrelated_account = Keys::generate();
+    let private_list = EventBuilder::new(Kind::Custom(10318), "invalid NIP-44 ciphertext")
+        .finalize(&unrelated_account)?;
+    let relay_client = Client::default();
+    relay_client
+        .add_relay(harness.relay("default").url())
+        .await?;
+    relay_client.connect().await;
+    let published = relay_client.send_event(&private_list).await?;
+    assert!(published.failed.is_empty(), "private list fixture rejected");
+    let account_relays = RelayList::new([(RelayUrl::parse(harness.relay("default").url())?, None)])
+        .finalize(&unrelated_account)?;
+    let published = relay_client.send_event(&account_relays).await?;
+    assert!(published.failed.is_empty(), "account relay list rejected");
+    relay_client.disconnect().await;
+
+    let account_config = format!("nostr.nsec={}", unrelated_account.secret_key().to_bech32()?);
+    let public_clone = cloner
+        .git([
+            "clone",
+            "--config",
+            &account_config,
+            &clone_url,
+            "public-with-private-account",
+        ])
+        .output()
+        .await?;
+    assert!(
+        public_clone.status.success(),
+        "public clone depended on private-list decryption: {}",
+        String::from_utf8_lossy(&public_clone.stderr),
+    );
+    assert_eq!(
+        read_local_ref_oid(
+            &cloner.dir().join("public-with-private-account"),
+            "refs/heads/main",
+        )?,
+        main_oid,
+    );
+
+    // An unrelated cached private relay must not veto a public announcement.
+    // Keep the listener bound without answering WebSocket handshakes so its
+    // failure is deterministic and no other test can claim its port.
+    let unavailable = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    unavailable.set_nonblocking(true)?;
+    let cached_relay = format!("ws://{}", unavailable.local_addr()?);
+    let template = tempfile::tempdir()?;
+    let plaintext_cache = tempfile::tempdir()?;
+    let database =
+        nostr_lmdb::NostrLmdb::open(template.path().join("test-global-cache.lmdb")).await?;
+    database.save_event(&private_list).await?;
+    drop(database);
+    let cache_dir = plaintext_cache.path().join("ngit/private-git-relay-lists");
+    std::fs::create_dir_all(&cache_dir)?;
+    std::fs::write(
+        cache_dir.join(format!(
+            "{}-{}.json",
+            unrelated_account.public_key().to_hex(),
+            private_list.id.to_hex(),
+        )),
+        serde_json::to_vec(&vec![vec!["g".to_string(), cached_relay]])?,
+    )?;
+    for (privacy, directory) in [
+        (
+            Some("nostr.private=false"),
+            "explicit-public-with-private-cache",
+        ),
+        (None, "public-with-private-cache"),
+    ] {
+        let mut args = vec![
+            "clone",
+            "--template",
+            template
+                .path()
+                .to_str()
+                .context("template path is not UTF-8")?,
+            "--config",
+            &account_config,
+        ];
+        if let Some(privacy) = privacy {
+            args.extend(["--config", privacy]);
+        }
+        args.extend([&clone_url, directory]);
+        let cached_clone = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            cloner
+                .git(args)
+                .env("XDG_CACHE_HOME", plaintext_cache.path())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("public clone exceeded its deadline")??;
+        assert!(
+            cached_clone.status.success(),
+            "public clone was blocked by an unrelated private relay: {}",
+            String::from_utf8_lossy(&cached_clone.stderr),
+        );
+        assert_eq!(
+            read_local_ref_oid(&cloner.dir().join(directory), "refs/heads/main")?,
+            main_oid,
+        );
+        if privacy.is_some() {
+            assert!(
+                matches!(unavailable.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "an explicitly public clone contacted a cached private relay",
+            );
+        }
+    }
+
+    // An announcement-only hint must lead to the repository's state relays.
+    // Keep it outside the publisher's harness so no push can put state here.
+    let indexer = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("indexer")
+    .build()
+    .await?;
+    let indexer_client = Client::default();
+    indexer_client
+        .add_relay(indexer.relay("indexer").url())
+        .await?;
+    indexer_client.connect().await;
+    let published = indexer_client.send_event(announcement).await?;
+    assert!(published.failed.is_empty(), "indexer announcement rejected");
+    indexer_client.disconnect().await;
+    assert!(
+        indexer
+            .relay("indexer")
+            .events(Filter::new().kind(Kind::Custom(KIND_REPO_STATE)))
+            .await?
+            .is_empty(),
+        "the announcement hint must not contain repository state",
+    );
+
+    // A transport-only branch exposes fallback to Git-server refs even though
+    // the canonical main object is available on that same server.
+    git2::Repository::open_bare(&bare_repo_path)?.reference(
+        "refs/heads/transport-only",
+        git2::Oid::from_str(&main_oid)?,
+        false,
+        "fixture: branch absent from canonical Nostr state",
+    )?;
+    let indexer_hint = urlencoding::encode(indexer.relay("indexer").url());
+    let indexed_url = format!("nostr://{npub}/{indexer_hint}/{identifier}");
+    let indexed_clone = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        cloner
+            .git([
+                "clone",
+                "--template",
+                template
+                    .path()
+                    .to_str()
+                    .context("template path is not UTF-8")?,
+                "--config",
+                &account_config,
+                &indexed_url,
+                "public-from-announcement-indexer",
+            ])
+            .env("XDG_CACHE_HOME", plaintext_cache.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("indexed clone exceeded its deadline")??;
+    assert!(
+        indexed_clone.status.success(),
+        "indexed clone failed: {}",
+        String::from_utf8_lossy(&indexed_clone.stderr),
+    );
+    let indexed_path = cloner.dir().join("public-from-announcement-indexer");
+    let indexed_repository = git2::Repository::open(&indexed_path)?;
+    assert_eq!(
+        indexed_repository
+            .refname_to_id("refs/heads/main")?
+            .to_string(),
+        main_oid,
+    );
+    assert!(
+        indexed_repository
+            .find_reference("refs/remotes/origin/transport-only")
+            .is_err(),
+        "clone used Git-server refs instead of canonical Nostr state",
+    );
+    let indexed_cache =
+        nostr_lmdb::NostrLmdb::open(indexed_path.join(".git/nostr-cache.lmdb")).await?;
+    let fetched_state = indexed_cache
+        .query(
+            Filter::new()
+                .author(pubkey)
+                .kind(Kind::Custom(KIND_REPO_STATE)),
+        )
+        .await?;
+    assert!(
+        state_events
+            .iter()
+            .any(|event| fetched_state.iter().any(|cached| cached.id == event.id)),
+        "clone never fetched the state held on the announcement's repository relays",
+    );
+    drop(indexed_cache);
+    git2::Repository::open_bare(&bare_repo_path)?
+        .find_reference("refs/heads/transport-only")?
+        .delete()?;
+
     // Git sends `option verbosity 0` to remote helpers for `clone -q`.
     // Exercise a second real clone because checking the protocol response
     // alone would miss setup output emitted before ngit reads the option.
