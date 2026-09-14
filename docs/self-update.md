@@ -73,26 +73,108 @@ unreferenced, or invalid assets. The generated `/install.sh` and
 `/install.ps1` are updated only after all release events and Blossom placements
 are queryable.
 
-The shell installer uses `ngit update` only when the existing installation has
-a standalone installer receipt, reports v3 or later, and accepts
-`ngit update --help`. This keeps native release validation and rollback for
-supported standalone installations.
+The installers always use the exact pinned release archive directly. They do
+not call an installed `ngit update`, so installation and repair work even when
+the old CLI lacks that command, its helper is missing, or its relay discovery
+is unavailable. Both binaries are validated in a staging directory before
+replacement. On ordinary replacement errors, the previous binaries and receipt
+are restored. An installation lock excludes concurrent installers.
 
-For older versions without `ngit update`, the script skips that command and
-downloads the pinned release archive directly. It replaces both `ngit` and
-`git-remote-nostr` in the existing standalone directory when that directory has
-an installer receipt, is writable, and the `ngit` executable is not a symlink.
+### Existing installations and Cargo choices
 
-An old Cargo installation normally has no standalone receipt. In that case,
-the script also skips `ngit update`, but selects a standalone installation
-directory, normally `~/.local/bin`, rather than upgrading through Cargo. The old
-Cargo binary can therefore remain on disk and take precedence on PATH. The
-script reports its destination and, if needed, explains how to put that
-directory first on PATH and identifies the binary taking precedence. To
-replace the Cargo installation in place instead, run `cargo install ngit --locked`.
+A valid standalone receipt allows replacement in the existing directory.
+Executable and directory symlinks are resolved when finding that installation.
+For an existing Cargo installation, the installer automatically announces and
+runs a Cargo upgrade, preserving the detected root. This works even when the
+old ngit has no `update` command:
 
-On NixOS it shows a stable-branch `nix profile add` command using ngit.dev's
-GRASP-backed Git alias, then exits without changing the profile. `--standalone`
-is an explicit escape hatch which selects the static musl archive for a
-user-owned x86_64 installation. Other NixOS architectures remain Nix-managed
-until a matching static asset is published.
+```bash
+curl -fsSL https://ngit.dev/install.sh | bash
+```
+
+`--method cargo` explicitly selects the same behaviour. If Cargo is unavailable
+or fails, the installer reports the failure; it does not switch methods.
+Other installations without a receipt still require an explicit choice to
+install standalone separately. The direct-download path never falls back into
+`~/.cargo/bin` or overwrites unreceipted files in the selected destination.
+
+To switch to a standalone copy that supports `ngit update`:
+
+```bash
+curl -fsSL https://ngit.dev/install.sh | bash -s -- --method standalone
+```
+
+The standalone copy normally goes into `~/.local/bin`. The Cargo binaries and
+Cargo's installation records stay intact. Follow the printed PATH command to
+make the standalone copy active, and keep that setting in your shell startup
+file. The installer checks both `ngit` and `git-remote-nostr`; either can be
+masked by an older copy. Removing the Cargo copy later with `cargo uninstall
+ngit` is optional (reuse its custom `--root`, if applicable).
+
+Use `--install-dir /absolute/path` to choose a different standalone directory.
+An existing unreceipted executable in that directory is never overwritten;
+choose an empty directory or update through its original installation tool.
+This also applies to package-manager and source-built installations.
+
+### Repair and version policy
+
+Rerun the installer to repair a missing helper or reinstall the pinned stable
+release. For an invalid standalone receipt, use `--repair`; combine it with
+`--install-dir` when the intended installation is not the active `ngit` on PATH.
+A missing receipt does not authorize replacement of existing binaries: choose
+a separate directory. Unknown receipt schemas require explicit repair, too.
+
+Replacing a newer release or an executable whose version cannot be read
+requires `--allow-downgrade`. This also applies when switching from a newer
+prerelease to the website's older stable release. A prerelease of the same
+major/minor/patch version can be replaced by the final stable release. The
+installer does not silently downgrade an inactive copy in the chosen directory.
+
+If the process is forcibly killed or rollback itself fails, preserve the
+`.ngit-install.*` (Unix) or `.ngit-install-*` (Windows) staging directory and
+its `old` backups. Restore the originals
+before removing a leftover `.ngit-install-lock` and retrying. Normal errors and
+handled termination signals clean up automatically; power-loss recovery is
+manual.
+
+On NixOS the default standalone path shows a stable-branch `nix profile add`
+command using ngit.dev's GRASP-backed Git alias, then exits without changing the
+profile when no Cargo installation was selected. `--standalone` explicitly
+selects the static musl archive for a user-owned x86_64 installation. Other NixOS architectures remain Nix-managed
+until a matching static asset is published. Existing Cargo installations also
+update through Cargo automatically on NixOS; `--method cargo` selects that
+method explicitly. Neither installer path adopts files in the Nix store.
+
+### Windows
+
+Save the pinned `install.ps1` from the installation page and run it normally
+to upgrade an existing Cargo installation through Cargo automatically. Use
+`-Method standalone` to switch to a separate downloaded copy, or `-Method cargo`
+to select Cargo explicitly. The matching options are `-InstallDirectory`,
+`-Repair`, and `-AllowDowngrade`. The default standalone destination is
+`%LOCALAPPDATA%\Programs\ngit\bin`. The installer validates and stages both
+binaries, restores originals on replacement failure, and moves its directory
+to the front of the user PATH. Restart the terminal afterward. An earlier
+system PATH entry can still mask it; warnings identify the affected commands.
+Close running ngit processes before replacement if Windows reports a locked
+file. Preserve the printed backup directory if restoration is blocked too.
+Windows standalone updates currently require rerunning this installer;
+`ngit update` reports that native replacement is unsupported.
+
+### Installer regression tests
+
+`cargo test --test installer_templates` uses temporary directories, fixture
+archives, fake executables, and subprocess-only environment settings. It does
+not contact release servers, invoke real Cargo/ngit installations, or modify
+user profiles. Unix tests expose only the required shell tools on PATH and
+exercise the real download verification, extraction, selection, and replacement
+logic. PowerShell transaction tests run when `pwsh` is available; otherwise
+that portion is skipped explicitly. On Nix, run the full installer checks with:
+
+```bash
+nix shell nixpkgs#powershell --command cargo test --test installer_templates
+```
+
+The PowerShell tests use version fixtures, so they run on Unix as well as
+Windows without executing platform-specific release binaries. Actual Windows
+file-lock and terminal behaviour still require Windows verification.

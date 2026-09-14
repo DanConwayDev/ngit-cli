@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Check the installed version before the shell installer delegates to
-  `ngit update`. Older or unsupported versions use a direct download instead,
-  replacing writable standalone installations in their existing directory.
-  Explain when an installation without a receipt (such as Cargo) gets a
-  separate standalone copy, and warn if an older binary takes precedence on PATH.
+- Make the bootstrap installers a direct, pinned install/repair path independent
+  of the installed updater. Validate both binaries before replacement and restore
+  originals on failure. Require an explicit Cargo/standalone choice for existing
+  external installations, protect unreceipted files, and preserve Cargo roots.
+  Add explicit repair and downgrade options, resolve installation symlinks, and
+  check PATH precedence for both commands. Windows gains matching replacement
+  safeguards and installation choices.
 - Keep usable accounts visible in `ngit account whoami` when a stale inventory
   entry cannot resolve its credentials. Report unavailable candidates separately
   in human and JSON output, with backend-specific lookup diagnostics.

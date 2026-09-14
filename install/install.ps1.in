@@ -4,6 +4,13 @@
 # validated NIP-82 main-channel release. This script intentionally does not
 # discover "latest" or execute unpinned downloads at runtime.
 
+param(
+    [ValidateSet("auto", "cargo", "standalone")][string]$Method = "auto",
+    [string]$InstallDirectory = "",
+    [switch]$Repair,
+    [switch]$AllowDowngrade
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -44,8 +51,9 @@ function Select-ReleaseAsset {
 function Add-UserPath([string]$InstallDirectory) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $entries = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($entries.Where({ $_.TrimEnd("\") -ieq $InstallDirectory.TrimEnd("\") }).Count -eq 0) {
-        $updated = (@($entries) + $InstallDirectory) -join ";"
+    $remaining = @($entries | Where-Object { $_.TrimEnd("\") -ine $InstallDirectory.TrimEnd("\") })
+    $updated = (@($InstallDirectory) + $remaining) -join ";"
+    if ($updated -ne $userPath) {
         [Environment]::SetEnvironmentVariable("Path", $updated, "User")
         Write-Info "Added $InstallDirectory to the user PATH; restart the terminal to use it"
     }
@@ -62,10 +70,180 @@ function Write-Receipt([string]$InstallDirectory) {
     Move-Item -LiteralPath $temporary -Destination (Join-Path $InstallDirectory $receiptFilename) -Force
 }
 
+function Get-CanonicalPath([string]$Path, [int]$Depth = 0) {
+    if ($Depth -gt 40) { Fail-Install "too many symlinks resolving $Path" }
+    $item = Get-Item -LiteralPath $Path -Force
+    $target = $item.PSObject.Properties["Target"]
+    if ($null -ne $target -and $target.Value) {
+        $link = @($target.Value)[0]
+        if (-not [IO.Path]::IsPathRooted($link)) { $link = Join-Path (Split-Path -Parent $item.FullName) $link }
+        return Get-CanonicalPath $link ($Depth + 1)
+    }
+    $parent = Split-Path -Parent $item.FullName
+    if ($parent -and $parent -ne $item.FullName) {
+        return Join-Path (Get-CanonicalPath $parent ($Depth + 1)) $item.Name
+    }
+    return $item.FullName
+}
+
+function Test-Receipt([string]$Directory) {
+    try {
+        $receipt = Get-Content -LiteralPath (Join-Path $Directory $receiptFilename) -Raw | ConvertFrom-Json
+        return $receipt.schema -eq 1 -and $receipt.method -eq "standalone" -and
+            $receipt.version -match '^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$'
+    } catch { return $false }
+}
+
+function Get-BinaryVersion([string]$Executable) {
+    $reported = & $Executable --version
+    if ($LASTEXITCODE -ne 0) { Fail-Install "version check failed: $Executable" }
+    return $reported
+}
+
+function Assert-Version([string]$Executable) {
+    if ($AllowDowngrade -or -not (Test-Path -LiteralPath $Executable)) { return }
+    $reported = Get-BinaryVersion $Executable
+    if ($reported -notmatch '^ngit (\d+\.\d+\.\d+)([-+][0-9A-Za-z.+-]+)?$') {
+        Fail-Install "cannot recognize the installed version; use -AllowDowngrade to authorize replacement"
+    }
+    if ([version]$Matches[1] -gt [version]$version) {
+        Fail-Install "installed $reported is newer than v$version; use -AllowDowngrade to authorize replacement"
+    }
+}
+
+function Assert-Destination([string]$Directory) {
+    $receiptPath = Join-Path $Directory $receiptFilename
+    if (Test-Path -LiteralPath $receiptPath) {
+        if (-not (Test-Receipt $Directory) -and -not $Repair) {
+            Fail-Install "invalid installer receipt; rerun with -Repair to repair this standalone installation"
+        }
+    } else {
+        foreach ($binary in $binaryNames) {
+            if (Test-Path -LiteralPath (Join-Path $Directory $binary)) {
+                Fail-Install "refusing to overwrite $binary without an installer receipt; choose a separate -InstallDirectory"
+            }
+        }
+    }
+    foreach ($name in (@($binaryNames) + $receiptFilename)) {
+        $path = Join-Path $Directory $name
+        if (Test-Path -LiteralPath $path) {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                Fail-Install "destination must be a regular file: $path"
+            }
+        }
+    }
+}
+
+function Show-PathGuidance([string]$Directory) {
+    foreach ($binary in $binaryNames) {
+        $active = Get-Command $binary -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $expected = Join-Path $Directory $binary
+        if (-not $active -or (Get-CanonicalPath $active.Source) -ine $expected) {
+            $location = if ($active) { $active.Source } else { "not found" }
+            Write-Warning "$binary on PATH: $location; installed copy: $expected. Put $Directory first on PATH and restart your terminal. An earlier system PATH entry may also need to be removed."
+        }
+    }
+}
+
+function Install-Binaries([string]$Directory, [hashtable]$Sources) {
+    $lock = Join-Path $Directory ".ngit-install-lock"
+    try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null }
+    catch { Fail-Install "installation is not writable, another installer is running, or $lock remains from an interrupted installation; inspect it before retrying" }
+    $stage = Join-Path $Directory ".ngit-install-$([Guid]::NewGuid())"
+    $touched = @()
+    $preserve = $false
+    try {
+        Assert-Destination $Directory
+        Assert-Version (Join-Path $Directory "ngit.exe")
+        New-Item -ItemType Directory -Path (Join-Path $stage "new") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $stage "old") | Out-Null
+        foreach ($binary in $binaryNames) {
+            Copy-Item -LiteralPath $Sources[$binary] -Destination (Join-Path $stage "new/$binary")
+        }
+        if ((Get-BinaryVersion (Join-Path $stage "new/ngit.exe")) -ne "ngit $version" -or
+            (Get-BinaryVersion (Join-Path $stage "new/git-remote-nostr.exe")) -ne "v$version") { Fail-Install "staged release failed its version checks" }
+        Write-Receipt (Join-Path $stage "new")
+        foreach ($binary in (@($binaryNames) + $receiptFilename)) {
+            $path = Join-Path $Directory $binary
+            if (Test-Path -LiteralPath $path) {
+                Copy-Item -LiteralPath $path -Destination (Join-Path $stage "old/$binary")
+            }
+        }
+        foreach ($binary in (@($binaryNames) + $receiptFilename)) {
+            $touched += $binary
+            Move-Item -LiteralPath (Join-Path $stage "new/$binary") -Destination (Join-Path $Directory $binary) -Force
+        }
+        $installedNgit = Get-BinaryVersion (Join-Path $Directory "ngit.exe")
+        if ($installedNgit -ne "ngit $version") { Fail-Install "installed ngit failed its version check" }
+        $installedRemote = Get-BinaryVersion (Join-Path $Directory "git-remote-nostr.exe")
+        if ($installedRemote -ne "v$version") { Fail-Install "installed helper failed its version check" }
+    } catch {
+        $failure = $_
+        foreach ($binary in $touched) {
+            try {
+                $backup = Join-Path $stage "old/$binary"
+                $path = Join-Path $Directory $binary
+                if (Test-Path -LiteralPath $backup) { Copy-Item -LiteralPath $backup -Destination $path -Force }
+                elseif (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+            } catch { $preserve = $true; Write-Warning "Could not restore ${binary}: $_" }
+        }
+        if ($preserve) { Write-Warning "Rollback incomplete; preserve $stage/old and restore it before retrying." }
+        throw $failure
+    } finally {
+        if (-not $preserve -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        Remove-Item -LiteralPath $lock -Force
+    }
+}
+
 function Invoke-NgitInstall {
     if ($version -notmatch '^\d+\.\d+\.\d+$') {
         Fail-Install "installer template was not rendered with a stable release"
     }
+
+    $existing = Get-Command ngit -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $existingDirectory = ""
+    $cargoRoot = ""
+    if ($existing) {
+        $existingPath = Get-CanonicalPath $existing.Source
+        $existingDirectory = Split-Path -Parent $existingPath
+        $root = Split-Path -Parent $existingDirectory
+        $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
+        if ((Split-Path -Leaf $existingDirectory) -eq "bin" -and
+            ((Test-Path -LiteralPath (Join-Path $root ".crates.toml")) -or
+            (Test-Path -LiteralPath (Join-Path $root ".crates2.json")) -or $root -eq $cargoHome)) { $cargoRoot = $root }
+        Assert-Version $existingPath
+    }
+    if ($Method -eq "auto" -and $cargoRoot -and -not (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))) {
+        $Method = "cargo"
+    }
+    if ($Method -eq "cargo") {
+        if (-not $cargoRoot) { Fail-Install "the active ngit is not a recognized Cargo installation" }
+        if ($InstallDirectory -or $Repair) { Fail-Install "-InstallDirectory and -Repair apply only to standalone installation" }
+        Write-Info "Updating ngit to v$version through Cargo in $cargoRoot"
+        & cargo install ngit --locked --version $version --root $cargoRoot
+        if ($LASTEXITCODE -ne 0) { Fail-Install "Cargo installation failed" }
+        Show-PathGuidance $existingDirectory
+        return
+    }
+    if ($existing -and $Method -eq "auto" -and -not (Test-Receipt $existingDirectory) -and -not $Repair) {
+        if (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename)) {
+            Fail-Install "invalid standalone receipt; rerun with -Repair to repair it"
+        }
+        Fail-Install "Existing installation: $existingPath. For Cargo, rerun with -Method cargo. To install a separate standalone copy, use -Method standalone."
+    }
+    if (-not $InstallDirectory) {
+        if ($existingDirectory -and ((Test-Receipt $existingDirectory) -or ($Repair -and (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))))) {
+            $InstallDirectory = $existingDirectory
+        } else {
+            $InstallDirectory = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs/ngit/bin"
+        }
+    }
+    if (-not [IO.Path]::IsPathRooted($InstallDirectory)) { Fail-Install "-InstallDirectory must be an absolute path" }
+    New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
+    $InstallDirectory = Get-CanonicalPath $InstallDirectory
+    Assert-Destination $InstallDirectory
+    Assert-Version (Join-Path $InstallDirectory "ngit.exe")
 
     $asset = Select-ReleaseAsset
     $url = $asset[1]
@@ -107,30 +285,18 @@ function Invoke-NgitInstall {
             }
             $sources[$binary] = $found[0].FullName
         }
-        $ngitReported = & $sources["ngit.exe"] --version
+        $ngitReported = Get-BinaryVersion $sources["ngit.exe"]
         if ($ngitReported -ne "ngit $version") {
             Fail-Install "release archive ngit reported an unexpected version: $ngitReported"
         }
-        $remoteReported = & $sources["git-remote-nostr.exe"] --version
+        $remoteReported = Get-BinaryVersion $sources["git-remote-nostr.exe"]
         if ($remoteReported -ne "v$version") {
             Fail-Install "release archive git-remote-nostr reported an unexpected version: $remoteReported"
         }
 
-        $installDirectory = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\ngit\bin"
-        New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-        foreach ($binary in $binaryNames) {
-            $staged = Join-Path $installDirectory ".$binary.new.$PID"
-            Copy-Item -LiteralPath $sources[$binary] -Destination $staged -Force
-            Move-Item -LiteralPath $staged -Destination (Join-Path $installDirectory $binary) -Force
-        }
-
-        $installedNgit = & (Join-Path $installDirectory "ngit.exe") --version
-        $installedRemote = & (Join-Path $installDirectory "git-remote-nostr.exe") --version
-        if ($installedNgit -ne "ngit $version" -or $installedRemote -ne "v$version") {
-            Fail-Install "the installed binaries did not report ngit v$version"
-        }
-        Write-Receipt $installDirectory
+        Install-Binaries $InstallDirectory $sources
         Add-UserPath $installDirectory
+        Show-PathGuidance $installDirectory
         Write-Info "Installed ngit v$version to $installDirectory"
     }
     finally {
@@ -138,6 +304,7 @@ function Invoke-NgitInstall {
     }
 }
 
+# Installer entry point.
 try {
     Invoke-NgitInstall
 }
