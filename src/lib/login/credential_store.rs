@@ -201,10 +201,7 @@ impl fmt::Display for LookupError {
                 f,
                 "credential '{name}' was not found in the credential store"
             ),
-            Self::Unavailable(error) => write!(
-                f,
-                "credential store is unavailable: {error}. Restore access to the OS credential store or ngit's file store, or use --nsec / --bunker-uri with --bunker-app-key for one command"
-            ),
+            Self::Unavailable(error) => write!(f, "credential store is unavailable: {error}"),
             Self::Invalid(error) => write!(f, "invalid credential-store entry: {error}"),
         }
     }
@@ -330,6 +327,16 @@ fn os_store_disabled() -> bool {
     {
         false
     }
+}
+
+// The file redirect always isolates tests from the real OS keychain. Allow
+// subprocess tests to exercise an unavailable backend within that isolation.
+fn disabled_os_lookup(name: &str) -> LookupError {
+    #[cfg(debug_assertions)]
+    if std::env::var("NGIT_TEST_OS_STORE_UNAVAILABLE").as_deref() == Ok("true") {
+        return LookupError::Unavailable(anyhow!("test OS credential backend unavailable"));
+    }
+    LookupError::Missing(name.to_string())
 }
 
 /// Store `keys`, read-back-verified, in the OS credential store — or in
@@ -835,7 +842,7 @@ fn retrieve_value(name: &str) -> std::result::Result<String, LookupError> {
 
 fn retrieve_value_from(name: &str, backend: Backend) -> std::result::Result<String, LookupError> {
     match backend {
-        Backend::Os if os_store_disabled() => Err(LookupError::Missing(name.to_string())),
+        Backend::Os if os_store_disabled() => Err(disabled_os_lookup(name)),
         Backend::Os => match os_store::get_value(name) {
             Ok(value) => Ok(value),
             Err(OsError::NoEntry) => Err(LookupError::Missing(name.to_string())),
@@ -938,7 +945,7 @@ pub fn retrieve(name: &str) -> std::result::Result<Keys, LookupError> {
 pub fn retrieve_from(name: &str, backend: Backend) -> std::result::Result<Keys, LookupError> {
     let expected = parse_pointer(name).ok_or_else(|| LookupError::Missing(name.to_string()))?;
     match backend {
-        Backend::Os if os_store_disabled() => Err(LookupError::Missing(name.to_string())),
+        Backend::Os if os_store_disabled() => Err(disabled_os_lookup(name)),
         Backend::Os => match os_store::get(name) {
             Ok(keys) if key_matches_npub(&keys, expected) => {
                 remember_account_for_listing(expected);

@@ -30,6 +30,13 @@ pub struct SubCommandArgs {
 #[derive(Debug, Serialize)]
 struct WhoamiJson {
     accounts: Vec<AccountJson>,
+    unavailable_accounts: Vec<UnavailableAccountJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct UnavailableAccountJson {
+    npub: String,
+    error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,10 +180,22 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     }
 
     let mut available_npubs = Vec::new();
+    let mut unavailable_accounts = Vec::new();
     for npub in candidate_npubs {
-        if aliases_by_npub.contains_key(&npub) || signer_is_available(&git_repo_ref, &npub)? {
-            available_npubs.push(npub);
-        }
+        let availability = if aliases_by_npub.contains_key(&npub) {
+            Ok(true)
+        } else {
+            signer_is_available(&git_repo_ref, &npub)
+        };
+        let error = match availability {
+            Ok(true) => {
+                available_npubs.push(npub);
+                continue;
+            }
+            Ok(false) => "no stored signer credential found".to_string(),
+            Err(error) => format!("{error:#}"),
+        };
+        unavailable_accounts.push(UnavailableAccountJson { npub, error });
     }
 
     let mut accounts = load_accounts(
@@ -208,9 +227,16 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     if json {
         crate::output::set(WhoamiJson {
             accounts: accounts.into_iter().map(Account::into_json).collect(),
+            unavailable_accounts,
         })?;
     } else {
         print_human(&accounts);
+        for account in unavailable_accounts {
+            eprintln!(
+                "warning: inventory account {} is unavailable: {}",
+                account.npub, account.error
+            );
+        }
     }
     Ok(())
 }

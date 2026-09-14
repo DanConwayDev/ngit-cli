@@ -762,7 +762,9 @@ fn resolve_signer_for_npub(
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
             credential_store::LookupError::Unavailable(_) => {
-                store_error = Some(anyhow::Error::new(error));
+                store_error = Some(anyhow::Error::new(error).context(format!(
+                    "OS credential store lookup failed for local-key entry {expected_npub}"
+                )));
             }
             credential_store::LookupError::Invalid(_) => {
                 return Err(anyhow::Error::new(error));
@@ -782,7 +784,9 @@ fn resolve_signer_for_npub(
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
             credential_store::LookupError::Unavailable(_) => {
-                store_error = Some(anyhow::Error::new(error));
+                store_error = Some(anyhow::Error::new(error).context(format!(
+                    "file credential store lookup failed for local-key entry {expected_npub}"
+                )));
             }
             credential_store::LookupError::Invalid(_) => {
                 return Err(anyhow::Error::new(error));
@@ -818,7 +822,9 @@ fn resolve_signer_for_npub(
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
             credential_store::LookupError::Unavailable(_) => {
-                store_error = Some(anyhow::Error::new(error));
+                store_error = Some(anyhow::Error::new(error).context(format!(
+                    "OS credential store lookup failed for remote-signer entry {expected_npub}"
+                )));
             }
             credential_store::LookupError::Invalid(_) => {
                 return Err(anyhow::Error::new(error));
@@ -840,7 +846,9 @@ fn resolve_signer_for_npub(
         Err(error) => match &error {
             credential_store::LookupError::Missing(_) => {}
             credential_store::LookupError::Unavailable(_) => {
-                store_error = Some(anyhow::Error::new(error));
+                store_error = Some(anyhow::Error::new(error).context(format!(
+                    "file credential store lookup failed for remote-signer entry {expected_npub}"
+                )));
             }
             credential_store::LookupError::Invalid(_) => {
                 return Err(anyhow::Error::new(error));
@@ -895,7 +903,7 @@ fn resolve_signer_for_npub(
 
     if let Some(error) = store_error.take() {
         return Err(error.context(format!(
-            "failed to resolve bunker record for selected signer {expected_npub}"
+            "failed to resolve stored credentials for account {expected_npub}"
         )));
     }
 

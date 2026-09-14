@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep usable accounts visible in `ngit account whoami` when a stale inventory
+  entry cannot resolve its credentials. Report unavailable candidates separately
+  in human and JSON output, with backend-specific lookup diagnostics.
 - Prevent fast profile and indexer responses from prematurely timing out
   repository-history fetches. Repository completion thresholds now count only
   repository requests in the current discovery round. Keep deadlines within
