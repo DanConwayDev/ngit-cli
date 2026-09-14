@@ -242,6 +242,22 @@ one-shot command asks the remote signer for `get_public_key`. Logging in with
 stored connection; later commands use the stored npub and validate every
 returned event against it.
 
+A fresh clone consults an already-decrypted cached private relay list alongside
+the URL's relay hint. This initial lookup does not ask the signer to decrypt.
+The plaintext must match the newest list event in the account's event cache;
+an older cached list is not reused when a newer list is known.
+An explicitly public clone (`--config nostr.private=false`) skips these private
+locations. Once an announcement is found, an unrelated cached private relay's
+failure does not block the clone or cause discovery to expand to public indexers.
+
+If the announcement is still missing and the repository is known private,
+ngit refreshes the account's private relay list and decrypts it if necessary,
+then retries discovery on those relays. A GRASP-08 advertisement establishes
+privacy automatically. For a private URL without a relay hint or cached
+announcement, `git clone --config nostr.private=true <url>` supplies that
+classification. Missing public or unclassified announcements never trigger
+decryption, and known-private discovery never falls back to public indexers.
+
 `ngit account export-keys` exports the matching portable credential for the
 selected account: `npub` plus `nsec` for a local-key account, or `npub` plus
 `nbunksec` for a remote-signer account. The `nbunksec` is an established

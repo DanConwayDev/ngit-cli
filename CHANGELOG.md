@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and require explicit permission to install an older version.
 - Fix `ngit update` failing when ngit's Git integration tool
   (`git-remote-nostr`) is missing.
+- Try hinted relays alongside cached decrypted private relay lists first
+  when cloning a `nostr://` repository;
+  only request private-list decryption if a known-private repository's
+  announcement is still missing. Public and unclassified discovery failures
+  no longer trigger decryption. Explicitly public clones skip private relay
+  caches, and unrelated cached relay failures cannot veto a found announcement.
 - Keep usable accounts visible in `ngit account whoami` when a stale inventory
   entry cannot resolve its credentials. Report unavailable candidates separately
   in human and JSON output, with backend-specific lookup diagnostics.

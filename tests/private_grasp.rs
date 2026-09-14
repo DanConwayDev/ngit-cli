@@ -80,6 +80,7 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
     .with_relay("blaster")
     .with_relay("signer_fallback")
     .with_private_grasp_server("repo", &member_pubkey)
+    .with_private_grasp_server("empty_hint", &member_pubkey)
     .with_child_env("NGIT_SECRET_STORAGE", "file")
     .with_child_env(
         "NGIT_KEYRING_FILE",
@@ -287,6 +288,93 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
     assert!(
         member_clone.config("nostr.signer").await?.is_none(),
         "command-scoped clone selection must not persist a configured signer",
+    );
+    // The hinted relay identifies the transport as private but does not
+    // hold this repository. Only after that lookup should ngit consult the
+    // member's encrypted list and find the actual repository relay.
+    let empty_hint = urlencoding::encode(&harness.grasp("empty_hint").relay_url()).into_owned();
+    let misplaced_url = format!("nostr://{member_npub}/{empty_hint}/{identifier}");
+    let recovered = harness
+        .clone_url_with_git_config(&misplaced_url, &[("nostr.signer", "member")])
+        .await
+        .context("private clone did not recover from an empty GRASP-08 hint")?;
+    assert_eq!(
+        recovered.snapshot()?.refs.get("refs/heads/main"),
+        Some(&initial_oid),
+    );
+    // Seed the cache into a fresh clone through Git's template mechanism.
+    // The payload cannot be decrypted, so finding the repository proves the
+    // initial probe used the cached plaintext alongside the empty URL hint.
+    let template = tempfile::tempdir()?;
+    let plaintext_cache = tempfile::tempdir()?;
+    let cached_event = EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, "undecryptable")
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 1))
+        .finalize(&member)?;
+    let database =
+        nostr_lmdb::NostrLmdb::open(template.path().join("test-global-cache.lmdb")).await?;
+    database.save_event(&cached_event).await?;
+    drop(database);
+    let cache_dir = plaintext_cache.path().join("ngit/private-git-relay-lists");
+    std::fs::create_dir_all(&cache_dir)?;
+    std::fs::write(
+        cache_dir.join(format!(
+            "{}-{}.json",
+            member_pubkey.to_hex(),
+            cached_event.id.to_hex()
+        )),
+        serde_json::to_vec(&vec![vec![
+            "g".to_string(),
+            harness.grasp("repo").relay_url(),
+        ]])?,
+    )?;
+    let cached_clone = member_clone
+        .git([
+            "-c",
+            "nostr.signer=member",
+            "clone",
+            "--template",
+            template
+                .path()
+                .to_str()
+                .context("template path is not UTF-8")?,
+            &misplaced_url,
+            "private-from-plaintext-cache",
+        ])
+        .env("XDG_CACHE_HOME", plaintext_cache.path())
+        .output()
+        .await?;
+    require_success("private clone using cached plaintext", &cached_clone)?;
+    assert_eq!(
+        Repository::open(member_clone.dir().join("private-from-plaintext-cache"))?
+            .refname_to_id("refs/heads/main")?
+            .to_string(),
+        initial_oid,
+    );
+    // Without a relay hint, explicitly marking the clone private still
+    // permits account-level discovery. The harness gives each clone its own
+    // event cache, so the preceding hinted clone cannot supply its relays.
+    let unhinted_url = format!("nostr://{member_npub}/{identifier}");
+    let unhinted_clone = member_clone
+        .git([
+            "-c",
+            "nostr.signer=member",
+            "clone",
+            "--config",
+            "nostr.private=true",
+            &unhinted_url,
+            "private-without-hint",
+        ])
+        .output()
+        .await?;
+    require_success(
+        "explicitly private clone without a relay hint",
+        &unhinted_clone,
+    )?;
+    assert_eq!(
+        Repository::open(member_clone.dir().join("private-without-hint"))?
+            .refname_to_id("refs/heads/main")?
+            .to_string(),
+        initial_oid,
     );
     let list = member_clone
         .ngit(["--signer", "member", "pr", "list"])

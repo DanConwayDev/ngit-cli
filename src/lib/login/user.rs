@@ -581,6 +581,68 @@ async fn cached_private_git_relay_list(
     }
 }
 
+/// Read only plaintext already cached for the newest known account list.
+/// This path deliberately takes a public key, not a signer: cache misses
+/// must never turn an initial repository lookup into a decryption request.
+pub async fn cached_private_git_relay_discovery(
+    git_repo_path: Option<&Path>,
+    public_key: &PublicKey,
+) -> PrivateGitRelayDiscovery {
+    #[cfg(test)]
+    {
+        let _ = (git_repo_path, public_key);
+        PrivateGitRelayDiscovery::Absent
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(dirs) = get_dirs() else {
+            return PrivateGitRelayDiscovery::Absent;
+        };
+        let events = get_event_from_global_cache(
+            git_repo_path,
+            vec![
+                nostr::prelude::Filter::new()
+                    .kind(KIND_PRIVATE_GIT_RELAY_LIST)
+                    .author(*public_key),
+            ],
+        )
+        .await
+        .unwrap_or_default();
+        plaintext_private_git_relay_list(
+            events,
+            public_key,
+            &dirs.cache_dir().join(PRIVATE_RELAY_LIST_CACHE_DIR),
+        )
+        .filter(|list| !list.relays.is_empty())
+        .map_or(PrivateGitRelayDiscovery::Absent, |list| {
+            PrivateGitRelayDiscovery::Available(list.relays)
+        })
+    }
+}
+
+fn plaintext_private_git_relay_list(
+    events: Vec<Event>,
+    public_key: &PublicKey,
+    cache_dir: &Path,
+) -> Option<PrivateGitRelayList> {
+    let event = events
+        .iter()
+        .filter(|event| {
+            event.pubkey == *public_key
+                && event.kind == KIND_PRIVATE_GIT_RELAY_LIST
+                && event.tags.is_empty()
+                && event.verify().is_ok()
+        })
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        })?;
+    // Never revive an older list when a newer event has no cached plaintext.
+    let plaintext = read_cached_private_git_relay_list(cache_dir, event).ok()??;
+    PrivateGitRelayList::from_plaintext(event, &plaintext).ok()
+}
+
 /// Select the NIP-01 winner among candidate kind-10318 events, skipping
 /// structurally invalid events but propagating signer/decrypt failures.
 async fn newest_valid_private_git_relay_list(
@@ -1129,6 +1191,49 @@ mod private_git_relay_list_tests {
         let keys = Keys::generate();
         let signer = Arc::new(crate::NgitSigner::Keys(keys.clone()));
         (keys, signer)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plaintext_discovery_never_decrypts_or_revives_a_superseded_list() {
+        let (keys, signer) = test_signer();
+        let plaintext = r#"[["g","wss://private.example"]]"#;
+        let event = private_list_event_with_plaintext(&keys, &signer, plaintext, vec![]).await;
+        let cache = tempfile::tempdir().unwrap();
+        assert!(
+            plaintext_private_git_relay_list(vec![event.clone()], &keys.public_key(), cache.path())
+                .is_none(),
+            "an encrypted event without plaintext must remain a cache miss"
+        );
+        write_cached_private_git_relay_list(cache.path(), &event, plaintext).unwrap();
+        let cached =
+            plaintext_private_git_relay_list(vec![event.clone()], &keys.public_key(), cache.path())
+                .unwrap();
+        assert_eq!(
+            cached.relays,
+            vec![RelayUrl::parse("wss://private.example").unwrap()]
+        );
+        assert!(
+            plaintext_private_git_relay_list(
+                vec![event.clone()],
+                &Keys::generate().public_key(),
+                cache.path()
+            )
+            .is_none(),
+            "another account must not reuse this plaintext"
+        );
+        let newer = keys
+            .sign_event(
+                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, "undecryptable")
+                    .custom_created_at(Timestamp::from(event.created_at.as_secs() + 1))
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap();
+        assert!(
+            plaintext_private_git_relay_list(vec![event, newer], &keys.public_key(), cache.path())
+                .is_none(),
+            "a newer encrypted event must invalidate the older cached locations"
+        );
     }
 
     async fn private_list_event_with_plaintext(

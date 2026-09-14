@@ -65,8 +65,8 @@ pub async fn prepare_selected_account_for_repo_fetch(
     .await)
 }
 
-/// Install a known account and load its private discovery hints only while the
-/// repository remains unresolved.
+/// Install a known account and load its private discovery hints only for a
+/// known private repository whose announcement remains unresolved.
 pub async fn prepare_account_for_repo_fetch<C: Connect + Sync>(
     git_repo: &Repo,
     client: &mut C,
@@ -142,15 +142,22 @@ mod tests {
 
     use super::*;
 
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(false))]
     #[tokio::test]
-    async fn public_repository_installs_signer_without_private_relay_discovery() {
+    async fn public_or_unclassified_repository_skips_private_relay_discovery(
+        #[case] privacy: Option<bool>,
+    ) {
         let temporary = tempfile::tempdir().unwrap();
         let repository = git2::Repository::init(temporary.path()).unwrap();
-        repository
-            .config()
-            .unwrap()
-            .set_bool("nostr.private", false)
-            .unwrap();
+        if let Some(privacy) = privacy {
+            repository
+                .config()
+                .unwrap()
+                .set_bool("nostr.private", privacy)
+                .unwrap();
+        }
         drop(repository);
         let git_repo = Repo::from_path(&temporary.path().to_path_buf()).unwrap();
 
