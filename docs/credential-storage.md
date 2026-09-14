@@ -40,6 +40,13 @@ remain visible. A pre-index OS-keyring entry that is no longer referenced by
 Git config is added to the index the next time it is selected by npub or alias;
 the keyring itself still cannot reveal unknown entry names.
 
+An unresolved inventory candidate does not prevent other usable accounts from
+being listed. Human output warns on stderr with the candidate npub and lookup
+diagnostic; JSON includes these entries in `unavailable_accounts` (each with
+`npub` and `error`) alongside the usable `accounts`. This applies even with
+`--signer`: whoami inventories all accounts. Explicit credential selection for
+signing still fails if that credential is missing, invalid, or unavailable.
+
 Git config remains the portable active-login selector:
 
 | git config key         | value                                                        |

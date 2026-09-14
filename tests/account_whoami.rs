@@ -321,3 +321,109 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn account_whoami_preserves_healthy_accounts_when_inventory_lookup_fails() -> Result<()> {
+    use ngit::login::credential_store::SERVICE;
+    use nostr::prelude::{Keys, ToBech32};
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials_dir = tempfile::tempdir()?;
+    let credentials = NamedTempFile::new_in(credentials_dir.path())?;
+    let healthy = create_stored_account(&repo, &credentials, "Healthy Account").await?;
+    activate_local_alias(&repo, &credentials, &healthy, "healthy").await?;
+    let stale = Keys::generate().public_key().to_bech32()?;
+    let mut registry = credentials.path().as_os_str().to_os_string();
+    registry.push(".accounts");
+    std::fs::write(
+        registry,
+        serde_json::to_vec(&serde_json::json!({
+            "accounts": [&healthy, &stale],
+            "aliases": {"healthy": &healthy},
+        }))?,
+    )?;
+
+    for (unavailable, corrupt) in [(false, false), (true, false), (true, true)] {
+        if corrupt {
+            let mut stored: Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+            stored[format!("{SERVICE}/{stale}")] =
+                Value::String("invalid-test-credential".to_string());
+            std::fs::write(credentials.path(), serde_json::to_vec(&stored)?)?;
+        }
+        for selected in [false, true] {
+            for json in [false, true] {
+                let mut args = vec!["account", "whoami", "--offline"];
+                if selected {
+                    args.extend(["--signer", "healthy"]);
+                }
+                if json {
+                    args.push("--json");
+                }
+                let output = repo
+                    .ngit(args)
+                    .env("NGIT_SECRET_STORAGE", "file")
+                    .env("NGIT_KEYRING_FILE", credentials.path())
+                    .env("NGIT_TEST_OS_STORE_UNAVAILABLE", unavailable.to_string())
+                    .output()
+                    .await?;
+                assert!(
+                    output.status.success(),
+                    "inventory failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if json {
+                    let document: Value = serde_json::from_slice(&output.stdout)?;
+                    assert_eq!(document["accounts"].as_array().map(Vec::len), Some(1));
+                    let account = account_by_npub(&document, &healthy);
+                    assert_eq!(account["active"], true);
+                    assert_eq!(account["signers"][0]["type"], "local-key");
+                    let failures = document["unavailable_accounts"]
+                        .as_array()
+                        .context("missing per-account diagnostics")?;
+                    assert_eq!(failures.len(), 1);
+                    assert_eq!(failures[0]["npub"], stale);
+                    let error = failures[0]["error"].as_str().context("missing error")?;
+                    if corrupt {
+                        assert!(error.contains("file credential"));
+                        assert!(error.contains(&stale));
+                    } else if unavailable {
+                        assert!(error.contains("OS credential store"));
+                        assert!(error.contains(&stale));
+                        assert!(!error.contains("selected signer"));
+                        assert!(!error.contains("ngit's file store"));
+                    } else {
+                        assert!(error.contains("no stored signer credential"));
+                    }
+                } else {
+                    let diagnostics = String::from_utf8(output.stderr)?;
+                    assert!(diagnostics.contains("inventory account"));
+                    assert!(diagnostics.contains(&stale));
+                }
+            }
+        }
+
+        // Explicit selection still fails closed; it must not use the healthy
+        // configured default when the requested account cannot be resolved.
+        let output = repo
+            .ngit(["--signer", &stale, "account", "export-keys", "--json"])
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .env("NGIT_TEST_OS_STORE_UNAVAILABLE", unavailable.to_string())
+            .output()
+            .await?;
+        assert!(!output.status.success());
+        let document: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(document["command_status"], "error");
+    }
+    assert_eq!(
+        repo.config("nostr.signer").await?.as_deref(),
+        Some("healthy")
+    );
+    Ok(())
+}
