@@ -1064,6 +1064,7 @@ impl RepoRef {
                 builder,
                 public_key,
                 crate::event_ordering::latest_event(self.events.values()),
+                crate::event_ordering::OrderingPolicy::PreferSameTimestamp,
             )?,
             signer,
             "repo announcement".to_string(),

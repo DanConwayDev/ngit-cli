@@ -24,70 +24,73 @@ pub fn latest_event<'a>(events: impl IntoIterator<Item = &'a Event>) -> Option<&
     })
 }
 
-/// Finalize an affected event so it sorts after `reference` under NIP-01.
+/// The caller's ordering contract. There is deliberately no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderingPolicy {
+    /// Try a bounded lower-ID search, then advance past the reference.
+    PreferSameTimestamp,
+    /// Advance immediately, including beyond the wall clock, without mining.
+    StrictlyLater,
+    /// Keep the semantic date; fail if a bounded lower-ID search cannot win.
+    PreserveTimestamp(Timestamp),
+}
+
+/// Finalize an event according to an explicit ordering contract.
 ///
-/// The event is deliberately kept unsigned; callers must sign the returned
-/// candidate exactly once.
+/// The returned candidate is unsigned and should be signed exactly once.
+/// Timestamp advancement is checked for overflow and never waits for the clock.
 pub fn finalize_ordered_unsigned(
     builder: EventBuilder,
     public_key: PublicKey,
     reference: Option<&Event>,
+    policy: OrderingPolicy,
 ) -> Result<UnsignedEvent> {
-    finalize_ordered_unsigned_at(
+    finalize_with_policy_at(
         builder,
         public_key,
         reference,
+        policy,
         Timestamp::now(),
         MAX_GRIND_ATTEMPTS,
     )
 }
 
-/// Finalize a replaceable event while keeping an explicit semantic timestamp.
-///
-/// Some addressable events use `created_at` as domain data as well as NIP-01
-/// ordering. NIP-82 releases, for example, require it to remain the release
-/// date when metadata or asset pointers are corrected. If the timestamp ties
-/// the current event this function grinds an ngit-owned nonce for a lower ID;
-/// unlike [`finalize_ordered_unsigned`], it fails rather than advancing the
-/// timestamp when the bounded search cannot produce a winner.
-pub fn finalize_fixed_timestamp_ordered_unsigned(
+fn finalize_with_policy_at(
     builder: EventBuilder,
     public_key: PublicKey,
     reference: Option<&Event>,
-    created_at: Timestamp,
+    policy: OrderingPolicy,
+    now: Timestamp,
+    max_grind_attempts: u128,
 ) -> Result<UnsignedEvent> {
-    finalize_fixed_timestamp_ordered_unsigned_with_limit(
-        builder,
-        public_key,
-        reference,
-        created_at,
-        MAX_GRIND_ATTEMPTS,
-    )
-}
-
-/// Finalize a replaceable event strictly after `reference` by timestamp.
-///
-/// This remains valid NIP-01 ordering for proposal histories whose readers
-/// select the active revision by `created_at` before walking its thread.
-pub fn finalize_strictly_later_unsigned(
-    mut builder: EventBuilder,
-    public_key: PublicKey,
-    reference: Option<&Event>,
-) -> Result<UnsignedEvent> {
-    builder.tags = nostr::prelude::Tags::from_list(
-        builder
-            .tags
-            .into_iter()
-            .filter(|tag| !is_ngit_nonce(tag))
-            .collect(),
-    );
-
-    let Some(created_at) = strictly_later_timestamp(reference, Timestamp::now())? else {
-        return Ok(builder.finalize_unsigned(public_key));
-    };
-    Ok(builder
-        .custom_created_at(created_at)
-        .finalize_unsigned(public_key))
+    match policy {
+        OrderingPolicy::PreferSameTimestamp => {
+            finalize_ordered_unsigned_at(builder, public_key, reference, now, max_grind_attempts)
+        }
+        OrderingPolicy::StrictlyLater => {
+            let mut builder = builder;
+            builder.tags = nostr::prelude::Tags::from_list(
+                builder
+                    .tags
+                    .into_iter()
+                    .filter(|tag| !is_ngit_nonce(tag))
+                    .collect(),
+            );
+            if let Some(created_at) = strictly_later_timestamp(reference, now)? {
+                builder = builder.custom_created_at(created_at);
+            }
+            Ok(builder.finalize_unsigned(public_key))
+        }
+        OrderingPolicy::PreserveTimestamp(created_at) => {
+            finalize_fixed_timestamp_ordered_unsigned_with_limit(
+                builder,
+                public_key,
+                reference,
+                created_at,
+                max_grind_attempts,
+            )
+        }
+    }
 }
 
 /// Return an explicit timestamp only when `now` must be advanced to sort
@@ -280,6 +283,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_policies_distinguish_advancement_from_fixed_date_exhaustion() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"00".repeat(32), 20);
+        for now in [10, 20] {
+            for policy in [
+                OrderingPolicy::PreferSameTimestamp,
+                OrderingPolicy::StrictlyLater,
+                OrderingPolicy::PreserveTimestamp(reference.created_at),
+            ] {
+                let result = finalize_with_policy_at(
+                    candidate_builder(),
+                    keys.public_key(),
+                    Some(&reference),
+                    policy,
+                    Timestamp::from_secs(now),
+                    0,
+                );
+                match policy {
+                    OrderingPolicy::PreserveTimestamp(_) => {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .to_string()
+                                .contains("ordering exhausted")
+                        );
+                    }
+                    _ => {
+                        let event = result.unwrap();
+                        assert_eq!(event.created_at, Timestamp::from_secs(21));
+                        assert!(!event.tags.iter().any(is_ngit_nonce));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advancing_policies_reject_overflow_without_wrapping() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"00".repeat(32), u64::MAX);
+        for policy in [
+            OrderingPolicy::PreferSameTimestamp,
+            OrderingPolicy::StrictlyLater,
+        ] {
+            let error = finalize_with_policy_at(
+                candidate_builder(),
+                keys.public_key(),
+                Some(&reference),
+                policy,
+                Timestamp::from_secs(10),
+                0,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("timestamp overflow"));
+        }
+    }
+
+    #[test]
     fn latest_event_prefers_lower_id_on_timestamp_tie() {
         let keys = Keys::generate();
         let a = keys
@@ -383,10 +444,11 @@ mod tests {
         let keys = Keys::generate();
         let reference = reference_with_id(&"ff".repeat(32), u64::MAX - 1);
 
-        let event = finalize_strictly_later_unsigned(
+        let event = finalize_ordered_unsigned(
             candidate_builder(),
             keys.public_key(),
             Some(&reference),
+            OrderingPolicy::StrictlyLater,
         )
         .unwrap();
 

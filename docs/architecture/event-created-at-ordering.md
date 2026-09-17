@@ -47,7 +47,30 @@ In every case, the latest `created_at` wins. For equal timestamps, the lowest
 event ID wins, matching NIP-01. Only events already present in the local cache
 can be considered, so normal fetch-before-publish flows remain important.
 
-ngit then uses one of two ordering modes.
+Single-event finalization uses `finalize_ordered_unsigned` with a required
+`OrderingPolicy`; there is no implicit default:
+
+| Policy | Callers | Same-second or future predecessor |
+| --- | --- | --- |
+| `PreferSameTimestamp` | State, announcements, statuses, containers, software applications/assets | Bounded lower-ID search, then checked timestamp advancement |
+| `StrictlyLater` | PR upgrades/updates, private Git relay lists | Checked timestamp advancement without mining |
+| `PreserveTimestamp(date)` | Release edits | Bounded lower-ID search at the explicit date; exhaustion is an error |
+
+Patch series use the shared `strictly_later_timestamp` calculation once to keep
+every event in one revision on the same timestamp. It implements the same
+strict advancement rule as `StrictlyLater`.
+
+Release dates are domain metadata as well as event timestamps. An explicit
+older date is rejected; an explicitly newer date needs no mining. Fixed-date
+exhaustion must not silently change the release date.
+
+Nsites currently wait for an observed later wall-clock second. This is separate
+from the immediate timestamp advancement used by `StrictlyLater`.
+
+Readers still use the canonical latest timestamp and lower-ID tie-break.
+Strict revision timestamps also protect interoperability with clients that
+do not resolve timestamp ties correctly.
+
 
 ### NIP-01 replacement ordering
 

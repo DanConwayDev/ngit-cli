@@ -132,8 +132,13 @@ async fn publish(
     ensure_unchanged(existing.as_ref(), rechecked.as_ref())?;
     context.emit_human_warnings_before_signing(json_output);
 
-    let unsigned = finalize_ordered_unsigned(event_builder, public_key, existing.as_ref())
-        .context("failed to order the container repository update after uploading blobs")?;
+    let unsigned = finalize_ordered_unsigned(
+        event_builder,
+        public_key,
+        existing.as_ref(),
+        ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
+    )
+    .context("failed to order the container repository update after uploading blobs")?;
     let event = sign_draft_event(unsigned, &signer, "container repository".to_owned())
         .await
         .context("failed to sign the container repository event; uploaded blobs are reusable")?;

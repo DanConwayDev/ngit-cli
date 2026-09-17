@@ -175,10 +175,11 @@ impl PrivateGitRelayList {
             .await
             .context("failed to encrypt private git relay list")?;
         let event = sign_draft_event(
-            crate::event_ordering::finalize_strictly_later_unsigned(
+            crate::event_ordering::finalize_ordered_unsigned(
                 EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content),
                 public_key,
                 self.source_event.as_ref(),
+                crate::event_ordering::OrderingPolicy::StrictlyLater,
             )?,
             signer,
             "private git relay list".to_string(),

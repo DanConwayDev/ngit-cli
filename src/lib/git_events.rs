@@ -148,6 +148,7 @@ pub async fn sign_ordered_status_event(
             builder,
             signer.get_public_key().await?,
             reference,
+            crate::event_ordering::OrderingPolicy::PreferSameTimestamp,
         )?,
         signer,
         description,
@@ -694,10 +695,11 @@ pub async fn generate_unsigned_pr_or_update_event(
     }
     .tags(all_tags);
     if ordering_reference.is_some() {
-        crate::event_ordering::finalize_strictly_later_unsigned(
+        crate::event_ordering::finalize_ordered_unsigned(
             builder,
             *signing_public_key,
             ordering_reference,
+            crate::event_ordering::OrderingPolicy::StrictlyLater,
         )
     } else {
         Ok(builder.finalize_unsigned(*signing_public_key))
