@@ -12,8 +12,10 @@ use anyhow::{Context, Result, bail};
 use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::prelude::{
-    Keys, Metadata, PublicKey, RelayList, RelayUrl, ToBech32, event::FinalizeEvent,
-    key::AsyncGetPublicKey, nip46::NostrConnectUri,
+    Keys, Metadata, PublicKey, RelayList, RelayUrl, ToBech32,
+    event::{FinalizeEvent, IntoEventBuilder},
+    key::AsyncGetPublicKey,
+    nip46::NostrConnectUri,
 };
 use nostr_connect::client::NostrConnect;
 use qrcode::QrCode;
@@ -1529,12 +1531,17 @@ pub async fn signup_non_interactive(
 
     // Build events, save to cache, and optionally publish to relays
     if let Some(client) = client {
-        let profile = Metadata::new().name(name).finalize(&keys)?;
+        // These are initial account events; ngit does not mine their IDs.
+        let profile = Metadata::new()
+            .name(name)
+            .into_event_builder()
+            .finalize(&keys)?;
         let relay_list = RelayList::new(
             relay_urls
                 .iter()
                 .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),
         )
+        .into_event_builder()
         .finalize(&keys)?;
 
         // Save to global cache so subsequent commands don't need to fetch

@@ -317,11 +317,19 @@ ngit now orders affected events according to their consumers. Repository state,
 repository announcements, and proposal statuses use deterministic NIP-01
 replacement ordering: bounded nonce grinding seeks a lower ID at the reference
 timestamp, then falls back to the next timestamp. GRASP applies the same lower-ID
-tie-break to same-second state replacements. Only proposal histories require
-strictly increasing timestamps because their readers select the active revision
-by timestamp before walking its thread. Every event in one patch revision shares
-a timestamp. See `event-created-at-ordering.md` for the complete production
-policy.
+tie-break to same-second state replacements. Proposal histories, private Git
+relay lists, and changed nsite manifests advance timestamps without waiting or
+mining. Strict revision timestamps also
+protect clients that do not resolve equal timestamps correctly. Every event in
+one patch revision shares a timestamp. See `event-created-at-ordering.md` for
+the complete production policy.
+
+Ordering unit tests supply explicit clocks, predecessor IDs, and search budgets
+to cover mining, fallback, fixed-date failure, future timestamps, and overflow.
+Integration tests exercise the real publisher and assert the winning events;
+they must not wait for a new second before issuing an edit. Semantic release
+dates are a distinct contract: fixed-date exhaustion is an expected error,
+not a reason to advance the date.
 
 Tests must not add wall-clock sleeps to make an update win. **Push to a nostr
 remote via `Repo::nostr_push`, never `repo.git(["push", …])`**; it supplies the
@@ -417,3 +425,25 @@ to production deployment.
 - `test_harness/src/port.rs` — port reservation pattern.
 - ngit-grasp's `tests/common/relay.rs` — port allocation and
   subprocess management pattern adopted here.
+
+### Fabricated event updates
+
+Use `test_harness::finalize_ordered_fixture` with an explicit `OrderingPolicy`
+for fabricated replacements. It compiles the production ordering module rather
+than duplicating timestamp arithmetic. The standard state, GRASP-list, relay-list,
+and announcement helpers use `StrictlyLater`. PR updates and patch revisions
+produced through ngit exercise production ordering directly.
+
+Raw builders with explicit timestamps remain appropriate when constructing
+historical events, malformed candidates, equal-timestamp conflicts, or semantic
+release dates. Those fixtures must document the intended ordering. Do not add
+sleeps or ad-hoc `created_at + 1` calculations to make ordinary updates win.
+
+Release edit success fixtures use an independently arranged high-ID predecessor,
+not a random ID produced by initial CLI publication. When preserving initial
+publication coverage in the same test, the arranged predecessor uses a later
+explicit timestamp so relays accept it before the edit is exercised. Separate
+tests cover fixed-date exhaustion. For reader tie-break tests, build two events
+at the same timestamp and sort their IDs; do not mine against a random fixture.
+An ID-guard nonce is valid even for a strictly later update, so tests must not
+require such updates to be nonce-free.

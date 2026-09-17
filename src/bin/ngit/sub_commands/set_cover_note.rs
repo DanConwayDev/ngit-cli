@@ -161,8 +161,15 @@ async fn publish_set_cover_note_event(
     tags.extend(mention_tags);
     let tags = dedup_tags(tags);
 
-    let cover_note_event = ngit::client::sign_event(
-        EventBuilder::new(KIND_COVER_NOTE, body).tags(tags),
+    let ordering_reference =
+        process_cover_note(&target, &repo_ref, &existing_cover_note_events).map(|(event, _)| event);
+    let cover_note_event = ngit::client::sign_draft_event(
+        ngit::event_ordering::finalize_ordered_unsigned(
+            EventBuilder::new(KIND_COVER_NOTE, body).tags(tags),
+            user_pubkey,
+            ordering_reference.as_ref(),
+            ngit::event_ordering::OrderingPolicy::StrictlyLater,
+        )?,
         &signer,
         format!("set {target_kind} cover note"),
     )

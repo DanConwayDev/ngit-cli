@@ -7,11 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Make rapid updates to replaceable events, such as Git state announcements,
+  more robust by preferring IDs that are easier to replace again. The extra
+  work adapts to recent activity and replacement difficulty and stays bounded.
+- Publish updated nsites without waiting for the clock to advance, consistent
+  with PR and patch revisions. Manifest timestamps advance past the previous
+  version, including when that version is future-dated. Previously, manifests
+  more than five seconds ahead were refused; updates now advance past them
+  and may be rejected by relays that limit future timestamps.
+
 ### Fixed
 
 - Ignore unauthorized status events when ordering issue and PR status changes,
   including merge statuses. An outsider's future-dated event can no longer
   force a legitimate update to adopt a timestamp that relays may reject.
+- Ensure rapid metadata and status updates supersede earlier events, including
+  PR subject and cover-note edits, automatic issue resolution, and statuses
+  that close patches upgraded to PRs. These writers now apply the same
+  ordering and permission checks as their readers.
+- Align the public GRASP-list library writer and reader on event ordering.
+  This writer is not currently exposed through a CLI command.
 - The one-line installer now works with older ngit versions that do not have
   `ngit update`.
 - If you installed ngit with Cargo, `ngit update` and the one-line installer

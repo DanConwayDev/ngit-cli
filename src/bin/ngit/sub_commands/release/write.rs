@@ -16,7 +16,7 @@ use ngit::{
         upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{sign_draft_event, sign_event},
-    event_ordering::{finalize_fixed_timestamp_ordered_unsigned, finalize_ordered_unsigned},
+    event_ordering::finalize_ordered_unsigned,
     git::{Repo, RepoActions},
     release_download::{UrlAssetRequest, download_url_asset},
     release_manifest::{
@@ -1329,8 +1329,13 @@ async fn sign_bootstrap_application(
             json!({ "validation": error.issues }),
         )
     })?;
-    let unsigned = finalize_ordered_unsigned(builder, target.author, None)
-        .context("failed to order initial software application")?;
+    let unsigned = finalize_ordered_unsigned(
+        builder,
+        target.author,
+        None,
+        ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
+    )
+    .context("failed to order initial software application")?;
     let event = sign_draft_event(
         unsigned,
         signer,
@@ -1378,6 +1383,7 @@ async fn sign_application_update(
         builder,
         existing.raw_event.pubkey,
         Some(&existing.raw_event),
+        ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
     )
     .context("failed to order software application platform replacement")?;
     let event = sign_draft_event(
@@ -3419,11 +3425,11 @@ async fn build_release_event(
         )
     })?;
     if let Some(existing) = existing {
-        let unsigned = finalize_fixed_timestamp_ordered_unsigned(
+        let unsigned = finalize_ordered_unsigned(
             builder,
             application.raw_event.pubkey,
             Some(&existing.raw_event),
-            released_at,
+            ngit::event_ordering::OrderingPolicy::PreserveTimestamp(released_at),
         )
         .map_err(|error| {
             coded_error_with_details(
@@ -3437,7 +3443,13 @@ async fn build_release_event(
         })?;
         sign_draft_event(unsigned, signer, "software release replacement".to_owned()).await
     } else {
-        sign_event(builder, signer, "software release".to_owned()).await
+        let unsigned = finalize_ordered_unsigned(
+            builder,
+            application.raw_event.pubkey,
+            None,
+            ngit::event_ordering::OrderingPolicy::PreserveTimestamp(released_at),
+        )?;
+        sign_draft_event(unsigned, signer, "software release".to_owned()).await
     }
 }
 

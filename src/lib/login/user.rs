@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use nostr::prelude::{
     Event, EventBuilder, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, ToBech32, Url,
-    event::Tag,
+    event::{FinalizeUnsignedEvent, Tag},
 };
 use serde::{self, Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -24,7 +24,7 @@ use crate::{client::save_event_in_global_cache, get_dirs};
 use crate::{
     client::{
         Connect, RelayProgressReporter, finish_fetch_progress, get_event_from_global_cache,
-        sign_draft_event, sign_event,
+        sign_draft_event,
     },
     git_events::{KIND_PRIVATE_GIT_RELAY_LIST, KIND_USER_GRASP_LIST},
     output_mode::is_verbose,
@@ -75,6 +75,9 @@ impl UserRelays {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserGraspList {
+    /// Cached predecessor for ordering subsequent publications.
+    #[serde(skip)]
+    pub source_event: Option<Event>,
     pub urls: Vec<Url>,
     pub created_at: Timestamp,
 }
@@ -84,18 +87,27 @@ impl UserGraspList {
         &mut self,
         signer: &Arc<crate::NgitSigner>,
     ) -> Result<nostr::prelude::Event> {
-        let event = sign_event(
-            nostr::prelude::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
-                self.urls
-                    .iter()
-                    .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
-                    .collect::<Vec<_>>(),
-            ),
+        // Public relay lists advance by timestamp without adding mining tags.
+        let now = Timestamp::now();
+        let created_at =
+            crate::event_ordering::strictly_later_timestamp(self.source_event.as_ref(), now)?
+                .unwrap_or(now);
+        let event = sign_draft_event(
+            nostr::prelude::EventBuilder::new(KIND_USER_GRASP_LIST, "")
+                .tags(
+                    self.urls
+                        .iter()
+                        .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
+                        .collect::<Vec<_>>(),
+                )
+                .custom_created_at(created_at)
+                .finalize_unsigned(signer.get_public_key().await?),
             signer,
             "user grasp list".to_string(),
         )
         .await?;
         self.created_at = event.created_at;
+        self.source_event = Some(event.clone());
         Ok(event)
     }
 }
@@ -174,12 +186,16 @@ impl PrivateGitRelayList {
             .nip44_encrypt(&public_key, &plaintext)
             .await
             .context("failed to encrypt private git relay list")?;
+        // Kind 10318 forbids public tags, including ordering nonces. Its
+        // replacements always advance by timestamp, so no ID mining is needed.
+        let now = Timestamp::now();
+        let created_at =
+            crate::event_ordering::strictly_later_timestamp(self.source_event.as_ref(), now)?
+                .unwrap_or(now);
         let event = sign_draft_event(
-            crate::event_ordering::finalize_strictly_later_unsigned(
-                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content),
-                public_key,
-                self.source_event.as_ref(),
-            )?,
+            EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content)
+                .custom_created_at(created_at)
+                .finalize_unsigned(public_key),
             signer,
             "private git relay list".to_string(),
         )
@@ -1147,12 +1163,14 @@ pub fn extract_user_grasp_list(
     public_key: &nostr::prelude::PublicKey,
     events: &[nostr::prelude::Event],
 ) -> UserGraspList {
-    let event = events
-        .iter()
-        .filter(|e| e.kind.eq(&KIND_USER_GRASP_LIST) && e.pubkey.eq(public_key))
-        .max_by_key(|e| e.created_at);
+    let event = crate::event_ordering::latest_event(
+        events
+            .iter()
+            .filter(|e| e.kind.eq(&KIND_USER_GRASP_LIST) && e.pubkey.eq(public_key)),
+    );
 
     UserGraspList {
+        source_event: event.cloned(),
         urls: if let Some(event) = event {
             event
                 .tags
@@ -1191,6 +1209,53 @@ mod private_git_relay_list_tests {
         let keys = Keys::generate();
         let signer = Arc::new(crate::NgitSigner::Keys(keys.clone()));
         (keys, signer)
+    }
+
+    #[tokio::test]
+    async fn public_grasp_list_rapid_edits_advance_past_future_predecessor() {
+        let (keys, signer) = test_signer();
+        let future = Timestamp::from_secs(Timestamp::now().as_secs() + 3600);
+        let predecessor = keys
+            .sign_event(
+                EventBuilder::new(KIND_USER_GRASP_LIST, "")
+                    .custom_created_at(future)
+                    .finalize_unsigned(keys.public_key()),
+            )
+            .unwrap();
+        let mut list = extract_user_grasp_list(&keys.public_key(), &[predecessor]);
+        for offset in 1..=3 {
+            list.urls = vec![Url::parse(&format!("wss://grasp{offset}.example")).unwrap()];
+            let event = list.to_event(&signer).await.unwrap();
+            assert_eq!(event.created_at.as_secs(), future.as_secs() + offset);
+            assert_eq!(list.source_event.as_ref(), Some(&event));
+            assert_eq!(
+                event.tags.as_slice(),
+                &[Tag::parse(["g", list.urls[0].as_str()]).unwrap()]
+            );
+            assert!(event.verify().is_ok());
+        }
+    }
+
+    #[test]
+    fn public_grasp_list_reads_lower_id_on_timestamp_ties() {
+        let (keys, _) = test_signer();
+        let events: Vec<_> = ["wss://one.example", "wss://two.example"]
+            .into_iter()
+            .map(|url| {
+                keys.sign_event(
+                    EventBuilder::new(KIND_USER_GRASP_LIST, "")
+                        .tag(Tag::parse(["g", url]).unwrap())
+                        .custom_created_at(Timestamp::from_secs(10))
+                        .finalize_unsigned(keys.public_key()),
+                )
+                .unwrap()
+            })
+            .collect();
+        let expected = events.iter().min_by_key(|event| event.id).unwrap().clone();
+        for candidates in [events.clone(), events.into_iter().rev().collect()] {
+            let list = extract_user_grasp_list(&keys.public_key(), &candidates);
+            assert_eq!(list.source_event.as_ref(), Some(&expected));
+        }
     }
 
     #[cfg(unix)]
@@ -1380,6 +1445,7 @@ mod private_git_relay_list_tests {
                 created_at: Timestamp::from(0),
             },
             grasp_list: UserGraspList {
+                source_event: None,
                 urls: vec![],
                 created_at: Timestamp::from(0),
             },
@@ -1471,6 +1537,7 @@ mod private_git_relay_list_tests {
                 created_at: Timestamp::from(0),
             },
             grasp_list: UserGraspList {
+                source_event: None,
                 urls: vec![],
                 created_at: Timestamp::from(0),
             },
@@ -1570,6 +1637,7 @@ mod private_git_relay_list_tests {
                 created_at: Timestamp::from(0),
             },
             grasp_list: UserGraspList {
+                source_event: None,
                 urls: vec![],
                 created_at: Timestamp::from(0),
             },
@@ -1859,6 +1927,7 @@ mod private_git_relay_list_tests {
                 created_at: Timestamp::from(0),
             },
             grasp_list: UserGraspList {
+                source_event: None,
                 urls: vec![],
                 created_at: Timestamp::from(0),
             },

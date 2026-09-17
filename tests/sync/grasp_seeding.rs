@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use nostr_sdk::prelude::*;
 use test_harness::{Harness, KIND_REPO_STATE, tag_value};
 
@@ -62,22 +62,13 @@ async fn seeds_state_event_and_git_data_to_new_grasp_server() -> Result<()> {
     );
 
     // Announcement v2: same repo, now also listing the grasp server.
-    // `created_at + 1` keeps the replacement strictly newer than v1
-    // without a wall-clock sleep even inside the same second.
     let v2 = sign_announcement(
         &setup.maintainer_keys,
         identifier,
         &setup.main_oid,
         &[vanilla_url.clone(), grasp_clone_url.clone()],
         &[setup.relay_url.clone(), grasp_relay_url.clone()],
-        Some(Timestamp::from_secs(
-            setup
-                .announcement
-                .created_at
-                .as_secs()
-                .checked_add(1)
-                .context("announcement timestamp overflow")?,
-        )),
+        Some(&setup.announcement),
     )?;
     publish_event_to_all(&v2, &[setup.relay_url.as_str(), grasp_relay_url.as_str()]).await?;
 

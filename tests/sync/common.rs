@@ -20,7 +20,6 @@
 use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nostr::event::FinalizeEvent;
 use nostr_sdk::prelude::*;
 use test_harness::{Harness, KIND_REPO_STATE, Repo, tag_value};
 
@@ -188,7 +187,7 @@ pub fn sign_announcement(
     euc_oid: &str,
     clone_urls: &[String],
     relay_urls: &[String],
-    created_at: Option<Timestamp>,
+    reference: Option<&Event>,
 ) -> Result<Event> {
     let mut clone_tag = vec!["clone".to_string()];
     clone_tag.extend(clone_urls.iter().cloned());
@@ -205,13 +204,12 @@ pub fn sign_announcement(
         Tag::parse(["maintainers".to_string(), keys.public_key().to_string()])
             .context("failed to build maintainers tag")?,
     ];
-    let mut builder = EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(tags);
-    if let Some(ts) = created_at {
-        builder = builder.custom_created_at(ts);
-    }
-    builder
-        .finalize(keys)
-        .context("failed to sign repo announcement")
+    test_harness::finalize_ordered_fixture(
+        EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(tags),
+        keys,
+        reference,
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )
 }
 
 /// Publish `event` to every relay URL in `urls`, bailing if any relay

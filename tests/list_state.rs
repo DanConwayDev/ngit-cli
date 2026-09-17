@@ -402,11 +402,9 @@ async fn grasp_exposes_same_second_lower_id_state_replacement() -> Result<()> {
             .finalize(&published.maintainer_keys)
             .expect("sign state fixture")
     };
-    let higher_id = build(0);
-    let lower_id = (1..100_000)
-        .map(build)
-        .find(|candidate| candidate.id < higher_id.id)
-        .context("bounded nonce search did not find a lower state event ID")?;
+    let mut candidates = [build(0), build(1)];
+    candidates.sort_by_key(|event| event.id);
+    let [lower_id, higher_id] = candidates;
 
     let relay_url = harness.grasp("repo").relay_url();
     let client = Client::default();

@@ -127,7 +127,7 @@ pub fn status_kinds() -> Vec<Kind> {
 }
 
 /// Sign a proposal-status event after ordering it against authorized statuses
-/// in the same NIP-10 proposal thread. Match reader authority: the proposal
+/// referencing the same proposal. Match reader authority: the proposal
 /// author and confirmed repository members may provide predecessors.
 pub async fn sign_ordered_status_event(
     builder: EventBuilder,
@@ -140,7 +140,10 @@ pub async fn sign_ordered_status_event(
     let authorized_members = repo_ref.confirmed_members();
     let reference = crate::event_ordering::latest_event(statuses.iter().filter(|event| {
         status_kinds().contains(&event.kind)
-            && get_event_root(event).is_ok_and(|root| root == proposal.id)
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() >= 2 && parts[0] == "e" && parts[1] == proposal.id.to_hex()
+            })
             && (event.pubkey == proposal.pubkey || authorized_members.contains(&event.pubkey))
     }));
     crate::client::sign_draft_event(
@@ -148,6 +151,7 @@ pub async fn sign_ordered_status_event(
             builder,
             signer.get_public_key().await?,
             reference,
+            crate::event_ordering::OrderingPolicy::PreferSameTimestamp,
         )?,
         signer,
         description,
@@ -694,10 +698,11 @@ pub async fn generate_unsigned_pr_or_update_event(
     }
     .tags(all_tags);
     if ordering_reference.is_some() {
-        crate::event_ordering::finalize_strictly_later_unsigned(
+        crate::event_ordering::finalize_ordered_unsigned(
             builder,
             *signing_public_key,
             ordering_reference,
+            crate::event_ordering::OrderingPolicy::StrictlyLater,
         )
     } else {
         Ok(builder.finalize_unsigned(*signing_public_key))
@@ -754,9 +759,9 @@ pub async fn generate_cover_letter_and_patch_events(
         .context("failed to get root commit of the repository")?;
 
     let mut events = vec![];
-    // Readers identify one revision by its newest timestamp and then walk its
-    // reply chain. Give the whole series one timestamp so signing across a
-    // wall-clock second cannot split the revision, and advance it when needed.
+    // Give the whole series one timestamp so signing across a wall-clock
+    // second cannot split it. Advance revisions for interoperability with
+    // clients that omit the lower-ID tie-break when selecting the latest tip.
     let now = Timestamp::now();
     let created_at =
         crate::event_ordering::strictly_later_timestamp(ordering_reference, now)?.unwrap_or(now);
@@ -1188,6 +1193,25 @@ pub fn process_subject(
     repo_ref: &RepoRef,
     label_events: &[Event],
 ) -> Option<String> {
+    let winner = subject_event(event, repo_ref, label_events)?;
+
+    // Extract the subject value from the winning event.
+    winner.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.len() >= 3 && s[0].eq("l") && s[2].eq("#subject") && !s[1].is_empty() {
+            Some(s[1].clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Select the authorized subject override used by both readers and writers.
+pub fn subject_event<'a>(
+    event: &Event,
+    repo_ref: &RepoRef,
+    label_events: &'a [Event],
+) -> Option<&'a Event> {
     let authorized_members = repo_ref.confirmed_members();
     let is_permitted = |pubkey: &PublicKey| -> bool {
         pubkey.eq(&event.pubkey) || authorized_members.contains(pubkey)
@@ -1196,7 +1220,7 @@ pub fn process_subject(
     let event_id_str = event.id.to_string();
 
     // Find the NIP-01 winner: latest created_at, then lower event ID.
-    let winner = crate::event_ordering::latest_event(label_events.iter().filter(|le| {
+    crate::event_ordering::latest_event(label_events.iter().filter(|le| {
         if !le.kind.eq(&KIND_LABEL) {
             return false;
         }
@@ -1224,17 +1248,7 @@ pub fn process_subject(
             let s = t.as_slice();
             s.len() >= 3 && s[0].eq("l") && s[2].eq("#subject") && !s[1].is_empty()
         })
-    }))?;
-
-    // Extract the subject value from the winning event.
-    winner.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.len() >= 3 && s[0].eq("l") && s[2].eq("#subject") && !s[1].is_empty() {
-            Some(s[1].clone())
-        } else {
-            None
-        }
-    })
+    }))
 }
 
 /// Compute both the effective hashtag labels and the subject/title override for

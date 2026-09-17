@@ -257,11 +257,21 @@ pub fn manifest_event_builder(
 
 /// Return whether an existing event already carries the desired manifest.
 ///
-/// Replacement metadata (`created_at`, ID, and signature) is deliberately
-/// ignored. The builder is deterministic, so equality of kind, tags, and
-/// content means publishing another replaceable event would be a no-op.
+/// Replacement metadata (`created_at`, ID, signature, and our nonce) is
+/// deliberately ignored. The builder is deterministic, so equality of kind,
+/// tags, and content means publishing another replaceable event would be a
+/// no-op.
 pub fn event_matches_manifest(event: &Event, builder: &EventBuilder) -> bool {
-    event.kind == builder.kind && event.tags == builder.tags && event.content == builder.content
+    event.kind == builder.kind
+        && event.content == builder.content
+        && event
+            .tags
+            .iter()
+            .filter(|tag| !crate::event_ordering::is_ngit_nonce(tag))
+            .eq(builder
+                .tags
+                .iter()
+                .filter(|tag| !crate::event_ordering::is_ngit_nonce(tag)))
 }
 
 pub fn validate_named_site_identifier(identifier: &str) -> Result<()> {
@@ -722,11 +732,18 @@ mod tests {
         let event = keys.sign_event(
             builder
                 .clone()
+                .tag(Tag::parse(["nonce", "1", "0", "ngit-created-at-tiebreak"])?)
                 .custom_created_at(Timestamp::from_secs(1))
                 .finalize_unsigned(keys.public_key()),
         )?;
 
         assert!(event_matches_manifest(&event, &builder));
+        assert!(!event_matches_manifest(
+            &event,
+            &builder
+                .clone()
+                .tag(Tag::parse(["nonce", "1", "0", "other-tool"])?)
+        ));
         let mut changed_content = builder.clone();
         changed_content.content = "changed".to_owned();
         assert!(!event_matches_manifest(&event, &changed_content));

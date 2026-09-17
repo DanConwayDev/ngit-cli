@@ -1064,6 +1064,7 @@ impl RepoRef {
                 builder,
                 public_key,
                 crate::event_ordering::latest_event(self.events.values()),
+                crate::event_ordering::OrderingPolicy::PreferSameTimestamp,
             )?,
             signer,
             "repo announcement".to_string(),
@@ -4716,7 +4717,10 @@ mod tests {
                     RepoRef::try_from((create_with_private_tag(values).await, None)).unwrap();
                 assert!(!parsed.private);
                 assert!(
-                    parsed.extra_tags.is_empty(),
+                    parsed
+                        .extra_tags
+                        .iter()
+                        .all(crate::event_ordering::is_ngit_nonce),
                     "malformed known private tag must not leak into extra_tags"
                 );
             }
@@ -8059,7 +8063,15 @@ mod tests {
 
             #[tokio::test]
             async fn no_other_tags() {
-                assert_eq!(create().await.tags.len(), 11)
+                assert_eq!(
+                    create()
+                        .await
+                        .tags
+                        .iter()
+                        .filter(|tag| !crate::event_ordering::is_ngit_nonce(tag))
+                        .count(),
+                    11
+                )
             }
         }
     }
@@ -8106,6 +8118,8 @@ mod tests {
             let leaked: Vec<&str> = parsed
                 .extra_tags
                 .iter()
+                // The finalizer replaces its own nonce instead of round-tripping it.
+                .filter(|tag| !crate::event_ordering::is_ngit_nonce(tag))
                 .filter_map(|t| t.as_slice().first().map(String::as_str))
                 .collect();
             assert!(
@@ -8217,7 +8231,10 @@ mod tests {
             let event = create_with_extra_tags(extras).await;
             let parsed = RepoRef::try_from((event, None)).unwrap();
             assert!(
-                parsed.extra_tags.is_empty(),
+                parsed
+                    .extra_tags
+                    .iter()
+                    .all(crate::event_ordering::is_ngit_nonce),
                 "duplicate `name` tag leaked into extra_tags: {:?}",
                 parsed.extra_tags,
             );

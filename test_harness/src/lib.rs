@@ -105,3 +105,25 @@ pub use scenarios::{
 };
 pub use snapshot::RepoSnapshot;
 pub use vanilla_git_server::VanillaGitServer;
+
+// Compile the dependency-free ordering module from production directly: the
+// harness cannot depend on ngit, which already dev-depends on this crate.
+#[path = "../../src/lib/event_ordering.rs"]
+pub mod event_ordering;
+
+/// Sign a fabricated replacement using the same explicit policy as production.
+/// Historical and conflicting fixtures should use an explicit raw timestamp.
+pub fn finalize_ordered_fixture(
+    builder: ::nostr::prelude::EventBuilder,
+    keys: &::nostr::prelude::Keys,
+    reference: Option<&::nostr::prelude::Event>,
+    policy: event_ordering::OrderingPolicy,
+) -> anyhow::Result<::nostr::prelude::Event> {
+    use ::nostr::event::SignEvent;
+    Ok(keys.sign_event(event_ordering::finalize_ordered_unsigned(
+        builder,
+        keys.public_key(),
+        reference,
+        policy,
+    )?)?)
+}

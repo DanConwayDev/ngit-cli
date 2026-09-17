@@ -788,10 +788,10 @@ impl Harness {
         // Explicit offsets deliberately create an older candidate. Otherwise,
         // make this fabricated replacement strictly newer than the current
         // NIP-01 winner on its target relay without waiting for the wall clock.
-        let mut builder = EventBuilder::new(KIND_REPO_STATE, "").tags(tags);
-        if let Some(offset) = opts.created_at_offset_secs {
+        let builder = EventBuilder::new(KIND_REPO_STATE, "").tags(tags);
+        let event = if let Some(offset) = opts.created_at_offset_secs {
             let ts = Timestamp::now() - offset;
-            builder = builder.custom_created_at(ts);
+            builder.custom_created_at(ts).finalize(&keys)?
         } else {
             let reference = query::fetch_events(
                 &relay_url,
@@ -809,22 +809,13 @@ impl Harness {
                     .cmp(&right.created_at)
                     .then_with(|| right.id.cmp(&left.id))
             });
-            let created_at = reference
-                .map(|event| {
-                    event
-                        .created_at
-                        .as_secs()
-                        .checked_add(1)
-                        .map(Timestamp::from_secs)
-                        .context("state-event timestamp overflow")
-                })
-                .transpose()?
-                .unwrap_or_else(Timestamp::now);
-            builder = builder.custom_created_at(created_at);
-        }
-        let event = builder
-            .finalize(&keys)
-            .context("failed to sign fabricated state event")?;
+            crate::finalize_ordered_fixture(
+                builder,
+                &keys,
+                reference.as_ref(),
+                crate::event_ordering::OrderingPolicy::StrictlyLater,
+            )?
+        };
 
         let client = Client::default();
         client
@@ -888,12 +879,21 @@ impl Harness {
             })
             .collect();
 
-        let event = EventBuilder::new(KIND_USER_GRASP_LIST, "")
-            .tags(tags)
-            .finalize(user_keys)
-            .context("failed to sign user grasp list event")?;
-
         let relay_url = self.relay("default").url().to_string();
+        let previous = query::fetch_events(
+            &relay_url,
+            Filter::new()
+                .author(user_keys.public_key())
+                .kind(KIND_USER_GRASP_LIST),
+        )
+        .await?;
+        let event = crate::finalize_ordered_fixture(
+            EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(tags),
+            user_keys,
+            crate::event_ordering::latest_event(&previous),
+            crate::event_ordering::OrderingPolicy::StrictlyLater,
+        )?;
+
         let client = Client::default();
         client.add_relay(&relay_url).await.with_context(|| {
             format!("failed to add relay {relay_url} for user grasp list publish")

@@ -67,6 +67,7 @@ impl RepoState {
                 EventBuilder::new(STATE_KIND, "").tags(tags),
                 signer.get_public_key().await?,
                 reference,
+                crate::event_ordering::OrderingPolicy::PreferSameTimestamp,
             )?,
             signer,
             "git state".to_string(),

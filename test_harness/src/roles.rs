@@ -204,9 +204,8 @@ pub struct FabricateAnnouncementOpts {
     pub extra_tags: Vec<Tag>,
     /// `["r", <oid>, "euc"]` earliest-unique-commit marker. `None` omits.
     pub euc: Option<String>,
-    /// Explicit `created_at`. `None` uses `Timestamp::now()`. Tests that
-    /// need ngit's subsequent republish to win NIP-01 replacement should
-    /// back-date (the established fixture convention is 30s).
+    /// Explicit historical/conflicting timestamp. `None` uses `StrictlyLater`
+    /// against the latest event for this coordinate on the destination relays.
     pub created_at: Option<Timestamp>,
     /// Relay URLs to publish to. `None` publishes to the `"default"`
     /// vanilla relay only.
@@ -318,12 +317,31 @@ impl Harness {
         }
         tags.extend(opts.extra_tags);
 
-        let created_at = opts.created_at.unwrap_or_else(Timestamp::now);
-        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
-            .tags(tags)
-            .custom_created_at(created_at)
-            .finalize(signer)
-            .context("failed to sign fabricated role-tag announcement")?;
+        let builder = EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(tags);
+        let event = if let Some(created_at) = opts.created_at {
+            // Explicit historical/conflicting fixture: preserve the requested timestamp.
+            builder.custom_created_at(created_at).finalize(signer)?
+        } else {
+            let mut previous = vec![];
+            for relay in &publish_to {
+                previous.extend(
+                    crate::query::fetch_events(
+                        relay,
+                        Filter::new()
+                            .author(signer.public_key())
+                            .kind(Kind::GitRepoAnnouncement)
+                            .identifier(opts.identifier.clone()),
+                    )
+                    .await?,
+                );
+            }
+            crate::finalize_ordered_fixture(
+                builder,
+                signer,
+                crate::event_ordering::latest_event(&previous),
+                crate::event_ordering::OrderingPolicy::StrictlyLater,
+            )?
+        };
 
         publish_event_to_relays(&publish_to, &event)
             .await
@@ -380,20 +398,12 @@ impl Harness {
             ));
         }
 
-        // Strictly newer than `base` even when both land in the same
-        // wall-clock second; never in the past relative to now.
-        let created_at = Timestamp::from_secs(std::cmp::max(
-            Timestamp::now().as_secs(),
-            base.created_at
-                .as_secs()
-                .checked_add(1)
-                .context("announcement timestamp overflow")?,
-        ));
-        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
-            .tags(tags)
-            .custom_created_at(created_at)
-            .finalize(signer)
-            .context("failed to sign role-amended announcement")?;
+        let event = crate::finalize_ordered_fixture(
+            EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(tags),
+            signer,
+            Some(base),
+            crate::event_ordering::OrderingPolicy::StrictlyLater,
+        )?;
 
         publish_event_to_relays(&publish_to, &event)
             .await
@@ -410,9 +420,19 @@ impl Harness {
     /// account (`tests/repo_accept.rs` established the pattern).
     pub async fn publish_user_relay_list(&self, keys: &Keys) -> Result<()> {
         let relay_url = self.relay("default").url().to_string();
-        let relay_list = RelayList::new([(RelayUrl::parse(&relay_url)?, None)])
-            .finalize(keys)
-            .context("failed to sign fabricated relay list event")?;
+        let previous = crate::query::fetch_events(
+            &relay_url,
+            Filter::new()
+                .author(keys.public_key())
+                .kind(Kind::RelayList),
+        )
+        .await?;
+        let relay_list = crate::finalize_ordered_fixture(
+            EventBuilder::new(Kind::RelayList, "").tag(Tag::parse(["r", relay_url.as_str()])?),
+            keys,
+            crate::event_ordering::latest_event(&previous),
+            crate::event_ordering::OrderingPolicy::StrictlyLater,
+        )?;
         publish_event_to_relays(&[relay_url], &relay_list)
             .await
             .context("failed to publish fabricated relay list")

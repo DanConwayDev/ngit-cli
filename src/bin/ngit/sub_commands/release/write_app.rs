@@ -87,6 +87,7 @@ pub(super) async fn app_init(
         builder,
         signer_public_key,
         existing.as_ref().map(|application| &application.raw_event),
+        ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
     )
     .context("failed to order software application replacement")?;
     context.emit_human_warnings_before_signing(args.json);
@@ -216,8 +217,13 @@ pub(super) async fn app_link(
             json!({ "validation": error.issues }),
         )
     })?;
-    let unsigned = finalize_ordered_unsigned(builder, signer_public_key, Some(&existing.raw_event))
-        .context("failed to order software application link replacement")?;
+    let unsigned = finalize_ordered_unsigned(
+        builder,
+        signer_public_key,
+        Some(&existing.raw_event),
+        ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
+    )
+    .context("failed to order software application link replacement")?;
     context.emit_human_warnings_before_signing(args.json);
     let signer = context
         .signer

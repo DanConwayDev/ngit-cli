@@ -210,6 +210,7 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         metadata_events.len(),
         metadata_events,
     );
+    assert!(metadata_events[0].tags.is_empty());
     let metadata = Metadata::from_json(&metadata_events[0].content)
         .context("kind 0 event content is not valid Metadata JSON")?;
     assert_eq!(
@@ -232,6 +233,12 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         relay_list_events.len(),
     );
 
+    assert!(
+        relay_list_events[0]
+            .tags
+            .iter()
+            .all(|tag| tag.as_slice()[0] == "r")
+    );
     let listed_relays: Vec<String> = relay_list_events[0]
         .tags
         .iter()

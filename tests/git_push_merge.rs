@@ -1327,6 +1327,13 @@ async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
         "track offline queue persistence",
     )
     .await?;
+    // A future-dated open status must be superseded immediately by the
+    // automatic resolution, using the same ordering as explicit status edits.
+    let previous = EventBuilder::new(Kind::GitStatusOpen, "reopened")
+        .tag(Tag::event(issue_id))
+        .custom_created_at(Timestamp::from_secs(Timestamp::now().as_secs() + 3600))
+        .finalize(&published.maintainer_keys)?;
+    ngit::client::save_event_in_local_cache(maintainer_repo.dir(), &previous).await?;
     let issue_short = &issue_id.to_hex()[..8];
 
     git_ok(
@@ -1380,6 +1387,10 @@ async fn merge_commit_with_implements_keyword_resolves_issue() -> Result<()> {
     )
     .await?;
 
+    assert_eq!(
+        ngit::event_ordering::latest_event([&previous, &event]),
+        Some(&event)
+    );
     assert_eq!(
         tag_first_value(&event, "alt"),
         Some("issue resolved from commit message"),

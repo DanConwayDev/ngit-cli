@@ -231,3 +231,86 @@ async fn issue_history_distinguishes_maintainer_and_moderator_edits() -> Result<
 
     Ok(())
 }
+
+#[tokio::test]
+async fn rapid_edits_advance_past_authorized_future_events() -> Result<()> {
+    use ngit::{
+        client::{get_events_from_local_cache, save_event_in_local_cache},
+        git_events::{KIND_COVER_NOTE, KIND_LABEL},
+    };
+    use nostr::prelude::{
+        EventBuilder, Filter, FromBech32, Keys, Nip19Event, Tag, Timestamp, event::FinalizeEvent,
+    };
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let created = ngit_json(
+        &publisher,
+        [
+            "issue",
+            "create",
+            "--subject",
+            "original",
+            "--body",
+            "original",
+            "--json",
+        ],
+    )
+    .await?;
+    let id = created["id"].as_str().context("missing issue id")?;
+    let event_id = Nip19Event::from_bech32(id)?.event_id;
+    let future = Timestamp::from_secs(Timestamp::now().as_secs() + 3600);
+    let outsider = Keys::generate();
+    for kind in [KIND_LABEL, KIND_COVER_NOTE] {
+        for (keys, timestamp) in [
+            (&published.maintainer_keys, future),
+            (&outsider, Timestamp::from_secs(future.as_secs() + 3600)),
+        ] {
+            let seed = EventBuilder::new(kind, "seed")
+                .tags([
+                    Tag::event(event_id),
+                    Tag::parse(["L", "#subject"])?,
+                    Tag::parse(["l", "seed", "#subject"])?,
+                ])
+                .custom_created_at(timestamp)
+                .finalize(keys)?;
+            save_event_in_local_cache(publisher.dir(), &seed).await?;
+        }
+    }
+    for offset in 1..=2 {
+        let value = format!("edit {offset}");
+        for (command, flag, kind) in [
+            ("set-subject", "--subject", KIND_LABEL),
+            ("set-cover-note", "--body", KIND_COVER_NOTE),
+        ] {
+            ngit_json(
+                &publisher,
+                ["issue", command, id, flag, &value, "--offline", "--json"],
+            )
+            .await?;
+            let events = get_events_from_local_cache(
+                publisher.dir(),
+                vec![
+                    Filter::new()
+                        .event(event_id)
+                        .kind(kind)
+                        .author(published.maintainer_keys.public_key()),
+                ],
+            )
+            .await?;
+            let latest = ngit::event_ordering::latest_event(&events).context("missing edit")?;
+            assert_eq!(latest.created_at.as_secs(), future.as_secs() + offset);
+        }
+        let viewed = ngit_json(&publisher, ["issue", "view", id, "--offline", "--json"]).await?;
+        assert_eq!(viewed["subject"], value);
+        assert_eq!(viewed["cover_note"]["body"], value);
+    }
+    Ok(())
+}
