@@ -386,7 +386,20 @@ async fn grasp_exposes_same_second_lower_id_state_replacement() -> Result<()> {
     )
     .await?;
     let created_at = Timestamp::from_secs(current.created_at.as_secs() + 1);
-    let state_tags: Vec<Tag> = current.tags.iter().cloned().collect();
+    // The published state may already carry ngit's ordering nonce. Drop it so
+    // each candidate has exactly one nonce, matching what production emits.
+    let state_tags: Vec<Tag> = current
+        .tags
+        .iter()
+        .filter(|tag| {
+            !matches!(
+                tag.as_slice(),
+                [name, _, difficulty, marker]
+                    if name == "nonce" && difficulty == "0" && marker == "ngit-created-at-tiebreak"
+            )
+        })
+        .cloned()
+        .collect();
     let build = |nonce: u64| {
         EventBuilder::new(Kind::Custom(30618), "")
             .tags(state_tags.clone())
