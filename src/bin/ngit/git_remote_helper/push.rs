@@ -7,9 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
-use client::{
-    get_events_from_local_cache, get_issues_from_cache, get_state_from_cache, sign_event,
-};
+use client::{get_events_from_local_cache, get_issues_from_cache, get_state_from_cache};
 use console::Term;
 use git::{RepoActions, sha1_to_oid};
 use git_events::{
@@ -1706,6 +1704,7 @@ async fn get_issue_resolution_status_events(
                         commit_hash,
                         merge_commit,
                         related_event.as_ref(),
+                        &statuses,
                     )
                     .await?;
 
@@ -1757,6 +1756,7 @@ fn create_issue_resolution_content(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_issue_resolution_status_event(
     signer: &Arc<NgitSigner>,
     repo_ref: &RepoRef,
@@ -1765,6 +1765,7 @@ async fn create_issue_resolution_status_event(
     source_commit: Sha1Hash,
     merge_commit: Option<Sha1Hash>,
     related_event: Option<&Event>,
+    statuses: &[Event],
 ) -> Result<Event> {
     let mut public_keys = repo_ref
         .maintainers
@@ -1800,7 +1801,14 @@ async fn create_issue_resolution_status_event(
 
     let content = create_issue_resolution_content(mention, &source_commit, merge_commit);
 
-    sign_event(
+    let statuses: Vec<_> = statuses
+        .iter()
+        .filter(|event| {
+            event.pubkey == issue.pubkey || repo_ref.is_authorized_member(&event.pubkey)
+        })
+        .cloned()
+        .collect();
+    sign_ordered_status_event(
         EventBuilder::new(Kind::GitStatusApplied, content).tags(
             [
                 vec![
@@ -1833,6 +1841,9 @@ async fn create_issue_resolution_status_event(
             .concat(),
         ),
         signer,
+        &statuses,
+        issue,
+        repo_ref,
         "issue resolved from commit".to_string(),
     )
     .await

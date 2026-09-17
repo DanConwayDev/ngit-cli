@@ -17,10 +17,7 @@ use nostr::prelude::{
 
 use crate::{
     cli_interactor::count_lines_per_msg_vec,
-    client::{
-        Connect, get_all_proposal_patch_pr_pr_update_events_from_cache, sign_draft_event,
-        sign_event,
-    },
+    client::{Connect, get_all_proposal_patch_pr_pr_update_events_from_cache, sign_draft_event},
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
@@ -842,6 +839,7 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 Some(vec![
                     pr_event,
                     create_close_status_for_original_patch(
+                        git_repo,
                         signer,
                         repo_ref,
                         root_proposal.unwrap(),
@@ -867,6 +865,7 @@ fn git_server_display_url(url: &str) -> String {
 }
 
 async fn create_close_status_for_original_patch(
+    git_repo: &Repo,
     signer: &Arc<crate::NgitSigner>,
     repo_ref: &RepoRef,
     proposal: &Event,
@@ -878,7 +877,22 @@ async fn create_close_status_for_original_patch(
         .collect::<HashSet<PublicKey>>();
     public_keys.insert(proposal.pubkey);
 
-    sign_event(
+    let statuses = crate::client::get_events_from_local_cache(
+        git_repo.get_path()?,
+        vec![
+            nostr::prelude::Filter::new()
+                .kinds(crate::git_events::status_kinds())
+                .event(proposal.id),
+        ],
+    )
+    .await?;
+    let statuses: Vec<_> = statuses
+        .into_iter()
+        .filter(|event| {
+            event.pubkey == proposal.pubkey || repo_ref.is_authorized_member(&event.pubkey)
+        })
+        .collect();
+    crate::git_events::sign_ordered_status_event(
         EventBuilder::new(nostr::event::Kind::GitStatusClosed, String::new()).tags(
             [
                 vec![
@@ -907,6 +921,9 @@ async fn create_close_status_for_original_patch(
             .concat(),
         ),
         signer,
+        &statuses,
+        proposal,
+        repo_ref,
         "close status for original patch".to_string(),
     )
     .await

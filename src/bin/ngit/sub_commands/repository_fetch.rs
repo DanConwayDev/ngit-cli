@@ -175,6 +175,7 @@ mod tests {
                 created_at: Timestamp::from(0),
             },
             grasp_list: UserGraspList {
+                source_event: None,
                 urls: vec![],
                 created_at: Timestamp::from(0),
             },

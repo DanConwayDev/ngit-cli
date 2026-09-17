@@ -145,8 +145,15 @@ async fn publish_set_subject_event(
     // Notify the target event author.
     tags.push(Tag::public_key(target.pubkey));
 
-    let subject_event = ngit::client::sign_event(
-        EventBuilder::new(KIND_LABEL, "").tags(tags),
+    let ordering_reference =
+        ngit::git_events::subject_event(&target, &repo_ref, &existing_label_events);
+    let subject_event = ngit::client::sign_draft_event(
+        ngit::event_ordering::finalize_ordered_unsigned(
+            EventBuilder::new(KIND_LABEL, "").tags(tags),
+            user_pubkey,
+            ordering_reference,
+            ngit::event_ordering::OrderingPolicy::StrictlyLater,
+        )?,
         &signer,
         format!("set {target_kind} subject"),
     )
