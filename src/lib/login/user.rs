@@ -87,18 +87,21 @@ impl UserGraspList {
         &mut self,
         signer: &Arc<crate::NgitSigner>,
     ) -> Result<nostr::prelude::Event> {
+        // Public relay lists advance by timestamp without adding mining tags.
+        let now = Timestamp::now();
+        let created_at =
+            crate::event_ordering::strictly_later_timestamp(self.source_event.as_ref(), now)?
+                .unwrap_or(now);
         let event = sign_draft_event(
-            crate::event_ordering::finalize_ordered_unsigned(
-                nostr::prelude::EventBuilder::new(KIND_USER_GRASP_LIST, "").tags(
+            nostr::prelude::EventBuilder::new(KIND_USER_GRASP_LIST, "")
+                .tags(
                     self.urls
                         .iter()
                         .map(|url| Tag::parse(["g", url.as_ref()]).unwrap())
                         .collect::<Vec<_>>(),
-                ),
-                signer.get_public_key().await?,
-                self.source_event.as_ref(),
-                crate::event_ordering::OrderingPolicy::StrictlyLater,
-            )?,
+                )
+                .custom_created_at(created_at)
+                .finalize_unsigned(signer.get_public_key().await?),
             signer,
             "user grasp list".to_string(),
         )
@@ -1225,6 +1228,10 @@ mod private_git_relay_list_tests {
             let event = list.to_event(&signer).await.unwrap();
             assert_eq!(event.created_at.as_secs(), future.as_secs() + offset);
             assert_eq!(list.source_event.as_ref(), Some(&event));
+            assert_eq!(
+                event.tags.as_slice(),
+                &[Tag::parse(["g", list.urls[0].as_str()]).unwrap()]
+            );
             assert!(event.verify().is_ok());
         }
     }

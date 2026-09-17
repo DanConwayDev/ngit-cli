@@ -13,7 +13,7 @@ use console::Style;
 use dialoguer::theme::{ColorfulTheme, Theme};
 use nostr::prelude::{
     Keys, Metadata, PublicKey, RelayList, RelayUrl, ToBech32,
-    event::{IntoEventBuilder, SignEvent},
+    event::{FinalizeEvent, IntoEventBuilder},
     key::AsyncGetPublicKey,
     nip46::NostrConnectUri,
 };
@@ -1531,23 +1531,18 @@ pub async fn signup_non_interactive(
 
     // Build events, save to cache, and optionally publish to relays
     if let Some(client) = client {
-        let profile = keys.sign_event(crate::event_ordering::finalize_ordered_unsigned(
-            Metadata::new().name(name).into_event_builder(),
-            keys.public_key(),
-            None,
-            crate::event_ordering::OrderingPolicy::StrictlyLater,
-        )?)?;
-        let relay_list = keys.sign_event(crate::event_ordering::finalize_ordered_unsigned(
-            RelayList::new(
-                relay_urls
-                    .iter()
-                    .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),
-            )
-            .into_event_builder(),
-            keys.public_key(),
-            None,
-            crate::event_ordering::OrderingPolicy::StrictlyLater,
-        )?)?;
+        // These are initial account events; ngit does not mine their IDs.
+        let profile = Metadata::new()
+            .name(name)
+            .into_event_builder()
+            .finalize(&keys)?;
+        let relay_list = RelayList::new(
+            relay_urls
+                .iter()
+                .filter_map(|s| RelayUrl::parse(s).ok().map(|url| (url, None))),
+        )
+        .into_event_builder()
+        .finalize(&keys)?;
 
         // Save to global cache so subsequent commands don't need to fetch
         save_event_in_global_cache(git_repo_path, &profile).await?;

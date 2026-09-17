@@ -57,7 +57,7 @@ a custom timestamp left on a reused builder cannot override it:
 | Policy | Callers | Same-second or future predecessor |
 | --- | --- | --- |
 | `PreferSameTimestamp` | State, announcements, statuses, containers, software applications | Bounded lower-ID search, then checked timestamp advancement |
-| `StrictlyLater` | PR upgrades/updates, subject/cover-note edits, public GRASP lists, changed nsite manifests | Checked timestamp advancement, followed by the ID guard |
+| `StrictlyLater` | PR upgrades/updates, subject/cover-note edits, changed nsite manifests | Checked timestamp advancement, followed by the ID guard |
 | `PreserveTimestamp(date)` | Initial releases and release edits | Bounded lower-ID search at the explicit date; exhaustion is an error |
 
 Patch series use the shared `strictly_later_timestamp` calculation once to keep
@@ -91,7 +91,8 @@ ID found. The hard minimum leading 64-bit prefix remains `2F`, where
 expected-attempt budget. The ID is computed before signing, and only the
 final event is signed. Private Git relay lists (kind 10318) are tagless by
 contract: they use the shared strict timestamp calculation without an ID
-preference or nonce. Their next replacement always advances the timestamp.
+preference or nonce. Public GRASP lists (kind 10317) also use this timestamp-only
+path, retaining only their relay tags. Their next replacement always advances the timestamp.
 
 At an equal timestamp, ngit prefers the highest 5% of winning IDs when that
 is cheap. For leading predecessor prefix `P`, the preferred minimum is
@@ -166,8 +167,8 @@ Subject and cover-note edits use the same authorized winner selection as their
 readers, including edits by other repository members. Unauthorized events do
 not influence the replacement timestamp. Public GRASP lists retain their source
 event and use the lower-ID tie-break when loading it, just like other replaceable
-metadata. Fresh-account profiles and relay lists have no predecessor but use the shared
-finalizer to guard their initial IDs. Automatic issue
+metadata. Fresh-account profiles (kind 0) and relay lists (kind 10002) have no
+predecessor and are finalized without ID guarding or mining tags. Automatic issue
 resolution and patch-to-PR close statuses also use the shared status policy,
 including NIP-34 status references without a NIP-10 root marker.
 
