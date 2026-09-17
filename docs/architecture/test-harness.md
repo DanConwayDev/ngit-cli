@@ -425,3 +425,23 @@ to production deployment.
 - `test_harness/src/port.rs` — port reservation pattern.
 - ngit-grasp's `tests/common/relay.rs` — port allocation and
   subprocess management pattern adopted here.
+
+### Fabricated event updates
+
+Use `test_harness::finalize_ordered_fixture` with an explicit `OrderingPolicy`
+for fabricated replacements. It compiles the production ordering module rather
+than duplicating timestamp arithmetic. The standard state, GRASP-list, relay-list,
+and announcement helpers use `StrictlyLater`. PR updates and patch revisions
+produced through ngit exercise production ordering directly.
+
+Raw builders with explicit timestamps remain appropriate when constructing
+historical events, malformed candidates, equal-timestamp conflicts, or semantic
+release dates. Those fixtures must document the intended ordering. Do not add
+sleeps or ad-hoc `created_at + 1` calculations to make ordinary updates win.
+
+Release edit success fixtures use an independently arranged high-ID predecessor,
+not a random ID produced by initial CLI publication. When preserving initial
+publication coverage in the same test, the arranged predecessor uses a later
+explicit timestamp so relays accept it before the edit is exercised. Separate
+tests cover fixed-date exhaustion. For reader tie-break tests, build two events
+at the same timestamp and sort their IDs; do not mine against a random fixture.

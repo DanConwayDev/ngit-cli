@@ -161,10 +161,12 @@ fn replace_clone(event: &Event, keys: &Keys, clone_url: &str) -> Result<Event> {
         .cloned()
         .collect();
     tags.push(Tag::parse(["clone", clone_url])?);
-    Ok(EventBuilder::new(event.kind, event.content.clone())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
-        .finalize(keys)?)
+    test_harness::finalize_ordered_fixture(
+        EventBuilder::new(event.kind, event.content.clone()).tags(tags),
+        keys,
+        Some(event),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )
 }
 
 fn replace_grasp_hosting(event: &Event, keys: &Keys, grasp_server: &str) -> Result<Event> {
@@ -185,10 +187,12 @@ fn replace_grasp_hosting(event: &Event, keys: &Keys, grasp_server: &str) -> Resu
         .collect();
     tags.push(Tag::parse(["clone", clone_url.as_str()])?);
     tags.push(Tag::parse(["relays", relay_url.as_str()])?);
-    Ok(EventBuilder::new(event.kind, event.content.clone())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
-        .finalize(keys)?)
+    test_harness::finalize_ordered_fixture(
+        EventBuilder::new(event.kind, event.content.clone()).tags(tags),
+        keys,
+        Some(event),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )
 }
 
 fn clear_repo_event_caches(repo: &test_harness::Repo) -> Result<()> {
@@ -326,10 +330,20 @@ async fn targeted_grasp_add_uses_latest_announcement_from_account_write_relay() 
     let added_grasp = harness.grasp("added").url().to_string();
     let account_relay = harness.relay("account").url().to_string();
 
-    let relay_list = EventBuilder::new(Kind::RelayList, "")
-        .tag(Tag::parse(["r", account_relay.as_str(), "write"])?)
-        .custom_created_at(Timestamp::from_secs(original.created_at.as_secs() + 1))
-        .finalize(&published.maintainer_keys)?;
+    let previous_lists = harness
+        .relay("default")
+        .events(Filter::new().author(author).kind(Kind::RelayList))
+        .await?;
+    let relay_list = test_harness::finalize_ordered_fixture(
+        EventBuilder::new(Kind::RelayList, "").tag(Tag::parse([
+            "r",
+            account_relay.as_str(),
+            "write",
+        ])?),
+        &published.maintainer_keys,
+        test_harness::event_ordering::latest_event(&previous_lists),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )?;
     publish_to_relay(harness.relay("default").url(), &[&relay_list]).await?;
 
     // Model a prior replacement which moved hosting away from the original
@@ -1115,10 +1129,12 @@ async fn lead_candidate_prepares_the_full_roster_before_handover() -> Result<()>
         &moderator.to_string(),
         &Timestamp::now().as_secs().to_string(),
     ])?);
-    let roster_with_moderator = EventBuilder::new(Kind::GitRepoAnnouncement, "")
-        .tags(roster_tags)
-        .custom_created_at(Timestamp::from_secs(initial.created_at.as_secs() + 1))
-        .finalize(&published.maintainer_keys)?;
+    let roster_with_moderator = test_harness::finalize_ordered_fixture(
+        EventBuilder::new(Kind::GitRepoAnnouncement, "").tags(roster_tags),
+        &published.maintainer_keys,
+        Some(&initial),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )?;
     publish_to_relay(harness.relay("default").url(), &[&roster_with_moderator]).await?;
     publish_to_relay(
         &harness.grasp("repo").relay_url(),
@@ -1260,10 +1276,12 @@ fn replace_role_tags(event: &Event, keys: &Keys, role_tags: &[Vec<String>]) -> R
     for role in role_tags {
         tags.push(Tag::parse(role.clone())?);
     }
-    Ok(EventBuilder::new(event.kind, event.content.clone())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
-        .finalize(keys)?)
+    test_harness::finalize_ordered_fixture(
+        EventBuilder::new(event.kind, event.content.clone()).tags(tags),
+        keys,
+        Some(event),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )
 }
 
 fn svec(parts: &[&str]) -> Vec<String> {

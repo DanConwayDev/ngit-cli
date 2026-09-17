@@ -546,6 +546,29 @@ mod tests {
     }
 
     #[test]
+    fn fixed_timestamp_rejects_the_low_release_id_observed_in_ci() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(
+            "00015ade2e7a1720a57a98c9522100919ab8c7d3d95764f6fd789f7e1361af32",
+            1_789_380_943,
+        );
+        // This predecessor requires about 48,368 expected attempts, beyond
+        // the 10,000 feasibility ceiling, regardless of the candidate.
+        assert!(!expected_attempts_at_most(
+            &reference.id,
+            MAX_EXPECTED_ATTEMPTS,
+        ));
+        let error = finalize_ordered_unsigned(
+            candidate_builder(),
+            keys.public_key(),
+            Some(&reference),
+            OrderingPolicy::PreserveTimestamp(reference.created_at),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ordering exhausted"));
+    }
+
+    #[test]
     fn fixed_timestamp_replaces_only_the_owned_nonce() {
         let keys = Keys::generate();
         let reference = reference_with_id(&"00".repeat(32), 20);

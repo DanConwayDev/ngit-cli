@@ -52,10 +52,12 @@ fn replace_role_tags(event: &Event, keys: &Keys, role_tags: &[Vec<&str>]) -> Res
     for role in role_tags {
         tags.push(Tag::parse(role.iter().copied())?);
     }
-    Ok(EventBuilder::new(event.kind, event.content.clone())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(event.created_at.as_secs() + 1))
-        .finalize(keys)?)
+    test_harness::finalize_ordered_fixture(
+        EventBuilder::new(event.kind, event.content.clone()).tags(tags),
+        keys,
+        Some(event),
+        test_harness::event_ordering::OrderingPolicy::StrictlyLater,
+    )
 }
 
 async fn publish_to_relay(relay_url: &str, events: &[&Event]) -> Result<()> {

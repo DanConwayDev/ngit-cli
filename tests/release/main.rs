@@ -1447,6 +1447,10 @@ async fn url_asset_add_preserves_the_existing_release() -> Result<()> {
     ensure!(x86.platforms == ["linux-x86_64"]);
     ensure!(initial.assets[0].event_id == x86.raw_event.id);
 
+    let initial = SoftwareRelease::parse(
+        &high_id_edit_predecessor(&harness, &publisher, &published, &initial.raw_event).await?,
+    )?;
+
     let arm_url = format!("{}/ngit-1.2.3-linux-aarch64.tar.gz", server.base_url());
     let added = run_json(
         &publisher,
@@ -1580,6 +1584,10 @@ async fn local_file_asset_add_preserves_the_existing_release() -> Result<()> {
         .await?,
     )
     .map_err(|error| anyhow::anyhow!(error))?;
+
+    let initial = SoftwareRelease::parse(
+        &high_id_edit_predecessor(&harness, &publisher, &published, &initial.raw_event).await?,
+    )?;
 
     fs::write(publisher.dir().join("added-arm.zip"), ADDED_BYTES)
         .context("failed to write local asset-add fixture")?;
@@ -1755,14 +1763,24 @@ async fn release_publish_reuses_an_asset_event_and_is_readable() -> Result<()> {
 }
 
 #[tokio::test]
-async fn release_edit_preserves_legacy_commit_omission_and_allows_an_override() -> Result<()> {
+async fn release_edit_preserves_legacy_commit_omission() -> Result<()> {
+    assert_legacy_release_edit(false).await
+}
+
+#[tokio::test]
+async fn release_edit_allows_a_legacy_commit_override() -> Result<()> {
+    assert_legacy_release_edit(true).await
+}
+
+async fn assert_legacy_release_edit(override_commit: bool) -> Result<()> {
     let (harness, publisher, published) = setup(0).await?;
     create_application(&publisher).await?;
 
     let asset = asset_event(&published, "legacy.tar.gz", "66", "linux-x86_64")?;
     publish_to_default_relay(&harness, &asset).await?;
     wait_for_relay_event(&harness, asset.id).await?;
-    let legacy_release = release_event_builder(ReleaseInput {
+    let released_at = Timestamp::from_secs(1_700_000_000);
+    let builder = release_event_builder(ReleaseInput {
         application: AddressPointer {
             coordinate: Coordinate::new(
                 SOFTWARE_APPLICATION_KIND,
@@ -1780,29 +1798,38 @@ async fn release_edit_preserves_legacy_commit_omission_and_allows_an_override() 
         )],
         commit: None,
         extra_tags: Vec::new(),
-        released_at: Timestamp::now(),
-    })?
-    .finalize(&published.maintainer_keys)?;
+        released_at,
+    })?;
+    // Metadata coverage must not depend on a random predecessor being cheap
+    // to replace. Each scenario gets its own high-ID predecessor: chaining
+    // edits can randomly produce a very low ID and legitimately exhaust the
+    // fixed-date ordering budget on the next edit.
+    let legacy_release = high_id_release_fixture(builder, &published.maintainer_keys)?;
     publish_to_default_relay(&harness, &legacy_release).await?;
     wait_for_relay_event(&harness, legacy_release.id).await?;
 
-    let preserved = run_json(
-        &publisher,
-        &[
-            "release",
-            "publish",
-            RELEASE_VERSION,
-            "--app",
-            APP_ID,
-            "--edit",
-            "--notes",
-            "Edited legacy release",
-            "--json",
-        ],
-    )
-    .await?;
-    ensure!(preserved["result"]["release"]["commit"].is_null());
-    let preserved_event = single_event(
+    let mut args = vec![
+        "release",
+        "publish",
+        RELEASE_VERSION,
+        "--app",
+        APP_ID,
+        "--edit",
+        "--notes",
+        "Edited legacy release",
+        "--json",
+    ];
+    if override_commit {
+        args.extend(["--commit", "main"]);
+    }
+    let edited = run_json(&publisher, &args).await?;
+    let expected_commit = if override_commit {
+        Some(head_commit(&publisher)?)
+    } else {
+        None
+    };
+    ensure!(edited["result"]["release"]["commit"] == serde_json::to_value(&expected_commit)?);
+    let edited_event = single_event(
         &harness,
         Filter::new()
             .kind(SOFTWARE_RELEASE_KIND)
@@ -1811,39 +1838,47 @@ async fn release_edit_preserves_legacy_commit_omission_and_allows_an_override() 
         "legacy release replacement",
     )
     .await?;
-    ensure!(SoftwareRelease::parse(&preserved_event)?.commit.is_none());
-
-    let expected_head = head_commit(&publisher)?;
-    let overridden = run_json(
-        &publisher,
-        &[
-            "release",
-            "publish",
-            RELEASE_VERSION,
-            "--app",
-            APP_ID,
-            "--edit",
-            "--commit",
-            "main",
-            "--json",
-        ],
-    )
-    .await?;
-    ensure!(overridden["result"]["release"]["commit"] == expected_head);
-    let overridden_event = single_event(
-        &harness,
-        Filter::new()
-            .kind(SOFTWARE_RELEASE_KIND)
-            .author(published.maintainer_keys.public_key())
-            .identifier(RELEASE_IDENTIFIER),
-        "release replacement with commit override",
-    )
-    .await?;
-    ensure!(
-        SoftwareRelease::parse(&overridden_event)?.commit.as_deref()
-            == Some(expected_head.as_str())
-    );
+    ensure!(SoftwareRelease::parse(&edited_event)?.commit == expected_commit);
+    ensure!(edited_event.content == "Edited legacy release");
+    ensure!(edited_event.created_at == released_at);
+    ensure!(edited_event.id < legacy_release.id);
     Ok(())
+}
+
+// Retain CLI creation coverage, then arrange the edit independently of the
+// generated ID. A later timestamp is essential: a higher ID at the original
+// timestamp could not supersede the release already stored by the relay.
+async fn high_id_edit_predecessor(
+    harness: &Harness,
+    publisher: &Repo,
+    published: &PublishedRepo,
+    event: &Event,
+) -> Result<Event> {
+    let created_at = ngit::event_ordering::strictly_later_timestamp(Some(event), event.created_at)?
+        .context("expected a later fixture timestamp")?;
+    let fixture = high_id_release_fixture(
+        EventBuilder::new(event.kind, event.content.clone())
+            .tags(event.tags.iter().cloned())
+            .custom_created_at(created_at),
+        &published.maintainer_keys,
+    )?;
+    publish_to_default_relay(harness, &fixture).await?;
+    wait_for_relay_event(harness, fixture.id).await?;
+    ngit::client::save_event_in_local_cache(publisher.dir(), &fixture).await?;
+    Ok(fixture)
+}
+
+fn high_id_release_fixture(builder: EventBuilder, keys: &Keys) -> Result<Event> {
+    for nonce in 0..1024 {
+        let unsigned = builder
+            .clone()
+            .tag(Tag::parse(["test-fixture", &nonce.to_string()])?)
+            .finalize_unsigned(keys.public_key());
+        if unsigned.compute_id().as_bytes()[0] >= 0x80 {
+            return Ok(keys.sign_event(unsigned)?);
+        }
+    }
+    bail!("failed to construct a high-ID release fixture within 1024 attempts")
 }
 
 #[tokio::test]
@@ -1879,6 +1914,8 @@ async fn adding_an_existing_asset_preserves_release_assets_and_order() -> Result
         "initial software release",
     )
     .await?;
+
+    let initial = high_id_edit_predecessor(&harness, &publisher, &published, &initial).await?;
 
     let second = asset_event(
         &published,
