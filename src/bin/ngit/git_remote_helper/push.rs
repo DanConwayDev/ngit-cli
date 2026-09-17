@@ -2412,7 +2412,8 @@ async fn create_merge_status(
         ),
         signer,
         status_events,
-        proposal.id,
+        proposal,
+        repo_ref,
         "PR merge".to_string(),
     )
     .await

@@ -163,7 +163,8 @@ async fn launch_status(
         ),
         &signer,
         &statuses,
-        issue.id,
+        &issue,
+        &repo_ref,
         format!("issue {action}"),
     )
     .await?;

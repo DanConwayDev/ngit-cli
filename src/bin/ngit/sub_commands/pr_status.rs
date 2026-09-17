@@ -171,7 +171,8 @@ async fn launch_status(
         ),
         &signer,
         &statuses,
-        proposal.id,
+        &proposal,
+        &repo_ref,
         format!("PR {action}"),
     )
     .await?;

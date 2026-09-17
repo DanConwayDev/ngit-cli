@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ignore unauthorized status events when ordering issue and PR status changes,
+  including merge statuses. An outsider's future-dated event can no longer
+  force a legitimate update to adopt a timestamp that relays may reject.
 - The one-line installer now works with older ngit versions that do not have
   `ngit update`.
 - If you installed ngit with Cargo, `ngit update` and the one-line installer

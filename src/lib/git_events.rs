@@ -126,18 +126,22 @@ pub fn status_kinds() -> Vec<Kind> {
     ]
 }
 
-/// Sign a proposal-status event after ordering it against every existing status
-/// kind in the same NIP-10 proposal thread.
+/// Sign a proposal-status event after ordering it against authorized statuses
+/// in the same NIP-10 proposal thread. Match reader authority: the proposal
+/// author and confirmed repository members may provide predecessors.
 pub async fn sign_ordered_status_event(
     builder: EventBuilder,
     signer: &Arc<crate::NgitSigner>,
     statuses: &[Event],
-    proposal_id: EventId,
+    proposal: &Event,
+    repo_ref: &RepoRef,
     description: String,
 ) -> Result<Event> {
+    let authorized_members = repo_ref.confirmed_members();
     let reference = crate::event_ordering::latest_event(statuses.iter().filter(|event| {
         status_kinds().contains(&event.kind)
-            && get_event_root(event).is_ok_and(|root| root == proposal_id)
+            && get_event_root(event).is_ok_and(|root| root == proposal.id)
+            && (event.pubkey == proposal.pubkey || authorized_members.contains(&event.pubkey))
     }));
     crate::client::sign_draft_event(
         crate::event_ordering::finalize_ordered_unsigned(
@@ -1694,6 +1698,113 @@ mod tests {
                 .tags([Tag::parse(["e", &target.id.to_string(), "", "root"]).unwrap()])
                 .finalize(keys)
                 .unwrap()
+        }
+
+        fn ordering_repo(acknowledged: bool) -> (RepoRef, Keys, Keys, Keys) {
+            let maintainer = Keys::parse(&"01".repeat(32)).unwrap();
+            let author = Keys::parse(&"02".repeat(32)).unwrap();
+            let moderator = Keys::parse(&"03".repeat(32)).unwrap();
+            let roles = [
+                vec!["M".to_owned(), maintainer.public_key().to_hex()],
+                vec!["o".to_owned(), moderator.public_key().to_hex()],
+            ];
+            let mut repo =
+                RepoRef::try_from((role_announcement(&maintainer, &roles), None)).unwrap();
+            if acknowledged {
+                let event = role_announcement(&moderator, &roles);
+                repo.events.insert(
+                    Nip19Coordinate {
+                        coordinate: Coordinate {
+                            kind: Kind::GitRepoAnnouncement,
+                            public_key: moderator.public_key(),
+                            identifier: "test-repo".to_owned(),
+                        },
+                        relays: vec![],
+                    },
+                    event,
+                );
+            }
+            (repo, maintainer, author, moderator)
+        }
+
+        fn ordering_status(keys: &Keys, proposal: &Event, timestamp: u64) -> Event {
+            EventBuilder::new(Kind::GitStatusClosed, "")
+                .tag(Tag::parse(["e", &proposal.id.to_hex(), "", "root"]).unwrap())
+                .custom_created_at(Timestamp::from_secs(timestamp))
+                .finalize(keys)
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn status_ordering_ignores_unauthorized_future_predecessors() {
+            let (repo, maintainer, author, invitee) = ordering_repo(false);
+            let outsider = Keys::parse(&"04".repeat(32)).unwrap();
+            assert!(!repo.is_authorized_member(&invitee.public_key()));
+            let signer = Arc::new(crate::NgitSigner::Keys(maintainer));
+            for kind in [Kind::GitIssue, KIND_PULL_REQUEST, Kind::GitPatch] {
+                let proposal = EventBuilder::new(kind, "proposal")
+                    .custom_created_at(Timestamp::from_secs(1))
+                    .finalize(&author)
+                    .unwrap();
+                for keys in [&outsider, &invitee] {
+                    let hostile = ordering_status(keys, &proposal, u64::MAX);
+                    assert_eq!(
+                        get_status(&proposal, &repo, std::slice::from_ref(&hostile), &[]),
+                        Kind::GitStatusOpen
+                    );
+                    let event = sign_ordered_status_event(
+                        EventBuilder::new(Kind::GitStatusClosed, ""),
+                        &signer,
+                        &[hostile],
+                        &proposal,
+                        &repo,
+                        "test status".to_owned(),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(event.created_at < Timestamp::from_secs(u64::MAX));
+                    event.verify().unwrap();
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn status_ordering_retains_author_and_confirmed_member_predecessors() {
+            let (repo, maintainer, author, moderator) = ordering_repo(true);
+            assert!(repo.is_authorized_member(&maintainer.public_key()));
+            assert!(repo.is_authorized_member(&moderator.public_key()));
+            let proposal = EventBuilder::new(KIND_PULL_REQUEST, "proposal")
+                .custom_created_at(Timestamp::from_secs(1))
+                .finalize(&author)
+                .unwrap();
+            let outsider = Keys::parse(&"04".repeat(32)).unwrap();
+            let hostile = ordering_status(&outsider, &proposal, u64::MAX);
+            let signer = Arc::new(crate::NgitSigner::Keys(maintainer.clone()));
+            for keys in [&author, &maintainer, &moderator] {
+                let predecessor = ordering_status(keys, &proposal, 4_000_000_000);
+                assert_eq!(
+                    get_status(&proposal, &repo, std::slice::from_ref(&predecessor), &[]),
+                    Kind::GitStatusClosed
+                );
+                let event = sign_ordered_status_event(
+                    EventBuilder::new(Kind::GitStatusOpen, ""),
+                    &signer,
+                    &[hostile.clone(), predecessor.clone()],
+                    &proposal,
+                    &repo,
+                    "test status".to_owned(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    crate::event_ordering::latest_event([&predecessor, &event])
+                        .unwrap()
+                        .id,
+                    event.id
+                );
+                assert!(event.created_at < hostile.created_at);
+                event.verify().unwrap();
+            }
         }
 
         #[test]
