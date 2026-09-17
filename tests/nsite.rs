@@ -318,7 +318,14 @@ async fn fallback_maps_the_named_page_to_404_in_the_manifest() -> Result<()> {
         vec!["source", "https://example.invalid/fallback-site"],
     ];
     ensure!(
-        tag_slices(&event) == expected,
+        tag_slices(&event)
+            .into_iter()
+            .filter(|tag| !matches!(
+                tag.as_slice(),
+                ["nonce", _, "0", "ngit-created-at-tiebreak"]
+            ))
+            .collect::<Vec<_>>()
+            == expected,
         "unexpected manifest tags: {:?}",
         tag_slices(&event)
     );
@@ -525,12 +532,9 @@ async fn changed_manifests_advance_past_a_future_predecessor() -> Result<()> {
         let edited = single_manifest(&harness, published.maintainer_keys.public_key()).await?;
         ensure!(edited.created_at > previous.created_at);
         ensure!(path_tags(&edited) == vec![("/index.html".to_string(), hex_hash(content))]);
-        ensure!(
-            !edited
-                .tags
-                .iter()
-                .any(|tag| tag.as_slice().first().is_some_and(|name| name == "nonce"))
-        );
+        // Strict advancement may still add a nonce to avoid a difficult ID.
+        let prefix = u64::from_be_bytes(edited.id.as_bytes()[..8].try_into()?);
+        ensure!(prefix > u64::MAX / 10_000);
         previous = edited;
     }
     blossom.finish().await?;

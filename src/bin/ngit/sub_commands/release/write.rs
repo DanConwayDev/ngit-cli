@@ -3443,7 +3443,13 @@ async fn build_release_event(
         })?;
         sign_draft_event(unsigned, signer, "software release replacement".to_owned()).await
     } else {
-        sign_event(builder, signer, "software release".to_owned()).await
+        let unsigned = finalize_ordered_unsigned(
+            builder,
+            application.raw_event.pubkey,
+            None,
+            ngit::event_ordering::OrderingPolicy::PreserveTimestamp(released_at),
+        )?;
+        sign_draft_event(unsigned, signer, "software release".to_owned()).await
     }
 }
 

@@ -50,22 +50,23 @@ In every case, the latest `created_at` wins. For equal timestamps, the lowest
 event ID wins, matching NIP-01. Only events already present in the local cache
 can be considered, so normal fetch-before-publish flows remain important.
 
-Single-event finalization uses `finalize_ordered_unsigned` with a required
+Tag-bearing single-event finalization uses `finalize_ordered_unsigned` with a required
 `OrderingPolicy`; there is no implicit default. The policy owns the timestamp;
 a custom timestamp left on a reused builder cannot override it:
 
 | Policy | Callers | Same-second or future predecessor |
 | --- | --- | --- |
 | `PreferSameTimestamp` | State, announcements, statuses, containers, software applications | Bounded lower-ID search, then checked timestamp advancement |
-| `StrictlyLater` | PR upgrades/updates, subject/cover-note edits, public GRASP and private Git relay lists, changed nsite manifests | Checked timestamp advancement without mining |
-| `PreserveTimestamp(date)` | Release edits | Bounded lower-ID search at the explicit date; exhaustion is an error |
+| `StrictlyLater` | PR upgrades/updates, subject/cover-note edits, public GRASP lists, changed nsite manifests | Checked timestamp advancement, followed by the ID guard |
+| `PreserveTimestamp(date)` | Initial releases and release edits | Bounded lower-ID search at the explicit date; exhaustion is an error |
 
 Patch series use the shared `strictly_later_timestamp` calculation once to keep
 every event in one revision on the same timestamp. It implements the same
-strict advancement rule as `StrictlyLater`.
+strict advancement rule as `StrictlyLater`. Tagless private Git relay lists
+also use this calculation directly, preserving their empty public tag list.
 
 Release dates are domain metadata as well as event timestamps. An explicit
-older date is rejected; an explicitly newer date needs no mining. Fixed-date
+older date is rejected; an explicitly newer date only needs the ID guard. Fixed-date
 exhaustion must not silently change the release date.
 
 Timestamp advancement never waits for the wall clock. Rapid updates and
@@ -76,6 +77,42 @@ Readers must still use the canonical latest timestamp and lower-ID tie-break.
 Strict revision timestamps also protect interoperability with clients that
 do not resolve timestamp ties correctly.
 
+
+### Avoiding difficult predecessor IDs
+
+Fresh-timestamp events avoid the lowest 5% of IDs when there is no predecessor
+or it is more than five seconds old (about 1.05 hashes on average). If the
+predecessor is within five seconds, including exactly five seconds or a
+future-dated predecessor, they avoid the lowest 50% (about two hashes).
+Recency uses the observed clock, not an advanced or semantic release timestamp.
+If the bounded search misses that preference, it keeps the highest acceptable
+ID found. The hard minimum leading 64-bit prefix remains `2F`, where
+`F = ceil(2^64 / 10_000)`, leaving room for a replacement within the
+expected-attempt budget. The ID is computed before signing, and only the
+final event is signed. Private Git relay lists (kind 10318) are tagless by
+contract: they use the shared strict timestamp calculation without an ID
+preference or nonce. Their next replacement always advances the timestamp.
+
+At an equal timestamp, ngit prefers the highest 5% of winning IDs when that
+is cheap. For leading predecessor prefix `P`, the preferred minimum is
+`P - max(P / 20, F)`. The acceptable range widens as inherited difficulty
+grows, keeping the expected search cost within 10,000 attempts. At the
+feasibility limit, any winner qualifies.
+
+This is a preference: if the bounded search finds only harder winners, it
+returns the highest-ID winner found. Future replacement difficulty never
+disqualifies an otherwise valid winner. Feasibility independently bounds the
+raw cost of finding any lower ID at 10,000 expected attempts. An inherited
+predecessor below the fresh-event floor can therefore still be replaced.
+If no winner is found or the predecessor is already too expensive, the selected
+policy advances the timestamp or returns a fixed-date error. Arbitrarily many
+edits at one semantic date are not guaranteed.
+
+All searches are bounded at 100,000 nonce attempts. A fresh-timestamp safety
+search that exhausts its limit returns an error instead of publishing an unsafe
+ID. Strict timestamp ordering may therefore add a nonce, but never mines to
+beat the previous ID. Patch series keep their single strict timestamp; their
+non-replaceable per-commit events do not need this guard.
 
 ### NIP-01 replacement ordering
 
@@ -129,7 +166,8 @@ Subject and cover-note edits use the same authorized winner selection as their
 readers, including edits by other repository members. Unauthorized events do
 not influence the replacement timestamp. Public GRASP lists retain their source
 event and use the lower-ID tie-break when loading it, just like other replaceable
-metadata. Fresh-account profiles and relay lists have no predecessor. Automatic issue
+metadata. Fresh-account profiles and relay lists have no predecessor but use the shared
+finalizer to guard their initial IDs. Automatic issue
 resolution and patch-to-PR close statuses also use the shared status policy,
 including NIP-34 status references without a NIP-10 root marker.
 

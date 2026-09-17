@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use nostr::prelude::{
     Event, EventBuilder, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp, ToBech32, Url,
-    event::Tag,
+    event::{FinalizeUnsignedEvent, Tag},
 };
 use serde::{self, Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -183,13 +183,16 @@ impl PrivateGitRelayList {
             .nip44_encrypt(&public_key, &plaintext)
             .await
             .context("failed to encrypt private git relay list")?;
+        // Kind 10318 forbids public tags, including ordering nonces. Its
+        // replacements always advance by timestamp, so no ID mining is needed.
+        let now = Timestamp::now();
+        let created_at =
+            crate::event_ordering::strictly_later_timestamp(self.source_event.as_ref(), now)?
+                .unwrap_or(now);
         let event = sign_draft_event(
-            crate::event_ordering::finalize_ordered_unsigned(
-                EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content),
-                public_key,
-                self.source_event.as_ref(),
-                crate::event_ordering::OrderingPolicy::StrictlyLater,
-            )?,
+            EventBuilder::new(KIND_PRIVATE_GIT_RELAY_LIST, content)
+                .custom_created_at(created_at)
+                .finalize_unsigned(public_key),
             signer,
             "private git relay list".to_string(),
         )

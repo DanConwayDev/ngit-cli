@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Make rapid updates to replaceable events, such as Git state announcements,
+  more robust by preferring IDs that are easier to replace again. The extra
+  work adapts to recent activity and replacement difficulty and stays bounded.
 - Publish updated nsites without waiting for the clock to advance, consistent
   with PR and patch revisions. Manifest timestamps advance past the previous
   version, including when that version is future-dated.

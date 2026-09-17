@@ -445,3 +445,5 @@ publication coverage in the same test, the arranged predecessor uses a later
 explicit timestamp so relays accept it before the edit is exercised. Separate
 tests cover fixed-date exhaustion. For reader tie-break tests, build two events
 at the same timestamp and sort their IDs; do not mine against a random fixture.
+An ID-guard nonce is valid even for a strictly later update, so tests must not
+require such updates to be nonce-free.
