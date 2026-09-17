@@ -12,17 +12,14 @@ use ngit::{
         upload_resilient_snapshot_batch_to_servers_with_progress,
     },
     client::{send_public_events, sign_draft_event},
-    event_ordering::{latest_event, wait_for_strictly_later_timestamp},
+    event_ordering::{OrderingPolicy, finalize_ordered_unsigned, latest_event},
     nsite::{
         NSITE_NAMED_KIND, NSITE_ROOT_KIND, NsiteManifestInput, apply_nsite_fallback,
         event_matches_manifest, load_nsite_project_config, manifest_event_builder,
         snapshot_nsite_directory, unique_blob_snapshots, validate_named_site_identifier,
     },
 };
-use nostr::prelude::{
-    Event, Filter, PublicKey, ToBech32 as _, Url, event::FinalizeUnsignedEvent as _,
-    nip19::Nip19Event,
-};
+use nostr::prelude::{Event, Filter, PublicKey, ToBech32 as _, Url, nip19::Nip19Event};
 use serde_json::{Value, json};
 
 use super::publication::{
@@ -219,10 +216,12 @@ async fn publish(
             }),
         )
     } else {
-        let created_at = wait_for_strictly_later_timestamp(current.as_ref()).await?;
-        let unsigned = builder
-            .custom_created_at(created_at)
-            .finalize_unsigned(author);
+        let unsigned = finalize_ordered_unsigned(
+            builder,
+            author,
+            current.as_ref(),
+            OrderingPolicy::StrictlyLater,
+        )?;
         let event = sign_draft_event(unsigned, &signer, "NIP-5A nsite manifest".to_owned()).await?;
         let publication = publish_manifest(&context, &event, json_output).await?;
         (event, publication)
@@ -593,7 +592,10 @@ fn append_blossom_replication_warning(
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
-    use nostr::prelude::{EventBuilder, Keys, RelayUrl, event::SignEvent as _};
+    use nostr::prelude::{
+        EventBuilder, Keys, RelayUrl,
+        event::{FinalizeUnsignedEvent as _, SignEvent as _},
+    };
 
     use super::*;
     use crate::cli::{Cli, Commands};

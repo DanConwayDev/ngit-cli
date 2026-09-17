@@ -52,8 +52,8 @@ Single-event finalization uses `finalize_ordered_unsigned` with a required
 
 | Policy | Callers | Same-second or future predecessor |
 | --- | --- | --- |
-| `PreferSameTimestamp` | State, announcements, statuses, containers, software applications/assets | Bounded lower-ID search, then checked timestamp advancement |
-| `StrictlyLater` | PR upgrades/updates, private Git relay lists | Checked timestamp advancement without mining |
+| `PreferSameTimestamp` | State, announcements, statuses, containers, software applications | Bounded lower-ID search, then checked timestamp advancement |
+| `StrictlyLater` | PR upgrades/updates, private Git relay lists, changed nsite manifests | Checked timestamp advancement without mining |
 | `PreserveTimestamp(date)` | Release edits | Bounded lower-ID search at the explicit date; exhaustion is an error |
 
 Patch series use the shared `strictly_later_timestamp` calculation once to keep
@@ -64,10 +64,11 @@ Release dates are domain metadata as well as event timestamps. An explicit
 older date is rejected; an explicitly newer date needs no mining. Fixed-date
 exhaustion must not silently change the release date.
 
-Nsites currently wait for an observed later wall-clock second. This is separate
-from the immediate timestamp advancement used by `StrictlyLater`.
+Timestamp advancement never waits for the wall clock. Rapid updates and
+future-dated predecessors may produce future timestamps; checked overflow is an
+error. Unchanged nsites reuse the existing event without ordering or signing.
 
-Readers still use the canonical latest timestamp and lower-ID tie-break.
+Readers must still use the canonical latest timestamp and lower-ID tie-break.
 Strict revision timestamps also protect interoperability with clients that
 do not resolve timestamp ties correctly.
 

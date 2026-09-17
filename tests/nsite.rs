@@ -463,6 +463,80 @@ async fn an_accepted_upload_is_verified_before_it_counts_as_stored() -> Result<(
     Ok(())
 }
 
+/// Changed deployments advance past even a future-dated manifest instead of
+/// waiting for the wall clock or mining an event-ID tie-break.
+#[tokio::test]
+async fn changed_manifests_advance_past_a_future_predecessor() -> Result<()> {
+    use std::time::Duration;
+
+    use nostr_sdk::prelude::{Client, EventBuilder, Timestamp, event::FinalizeEvent};
+
+    let (harness, publisher, published) = setup().await?;
+    let site = publisher.dir().join("dist");
+    write_site(&site, &[("index.html", INDEX_HTML)])?;
+    let blossom = BlossomServer::start().await?;
+    let relay = harness.relay("default").url().to_string();
+    let args = [
+        "nsite",
+        "publish",
+        "dist",
+        "--blossom-server",
+        blossom.base_url(),
+        "--relay",
+        &relay,
+        "--json",
+    ];
+    run_json(&publisher, &args).await?;
+    let first = single_manifest(&harness, published.maintainer_keys.public_key()).await?;
+    let future = EventBuilder::new(first.kind, first.content)
+        .tags(first.tags)
+        .custom_created_at(Timestamp::from_secs(Timestamp::now().as_secs() + 60))
+        .finalize(&published.maintainer_keys)?;
+    let client = Client::default();
+    client.add_relay(&relay).await?;
+    client.connect().await;
+    let sent = client.send_event(&future).await?;
+    client.disconnect().await;
+    ensure!(
+        !sent.success.is_empty(),
+        "future manifest fixture was not accepted"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if single_manifest(&harness, published.maintainer_keys.public_key())
+                .await?
+                .id
+                == future.id
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("future manifest did not become queryable")??;
+
+    let mut previous = future;
+    for content in [b"first edit".as_slice(), b"second edit".as_slice()] {
+        write_site(&site, &[("index.html", content)])?;
+        tokio::time::timeout(Duration::from_secs(20), run_json(&publisher, &args))
+            .await
+            .context("nsite edit waited for the future predecessor")??;
+        let edited = single_manifest(&harness, published.maintainer_keys.public_key()).await?;
+        ensure!(edited.created_at > previous.created_at);
+        ensure!(path_tags(&edited) == vec![("/index.html".to_string(), hex_hash(content))]);
+        ensure!(
+            !edited
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().is_some_and(|name| name == "nonce"))
+        );
+        previous = edited;
+    }
+    blossom.finish().await?;
+    Ok(())
+}
+
 async fn setup() -> Result<(Harness, Repo, PublishedRepo)> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),

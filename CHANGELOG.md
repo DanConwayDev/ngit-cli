@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Publish updated nsites without waiting for the clock to advance, consistent
+  with PR and patch revisions. Manifest timestamps advance past the previous
+  version, including when that version is future-dated.
+
 ### Fixed
 
 - Ignore unauthorized status events when ordering issue and PR status changes,

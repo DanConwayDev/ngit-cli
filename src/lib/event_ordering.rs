@@ -1,7 +1,5 @@
 //! Shared NIP-01 ordering policy for events that replace an earlier event.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use anyhow::{Result, bail};
 use nostr::prelude::{
     Event, EventBuilder, EventId, PublicKey, Tag, Timestamp,
@@ -11,7 +9,6 @@ use nostr::prelude::{
 const MAX_EXPECTED_ATTEMPTS: u64 = 10_000;
 const MAX_GRIND_ATTEMPTS: u128 = 100_000;
 const NONCE_MARKER: &str = "ngit-created-at-tiebreak";
-const MAX_CLOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// Select the NIP-01 winner: newest timestamp, then lowest event ID.
 pub fn latest_event<'a>(events: impl IntoIterator<Item = &'a Event>) -> Option<&'a Event> {
@@ -63,6 +60,9 @@ fn finalize_with_policy_at(
     now: Timestamp,
     max_grind_attempts: u128,
 ) -> Result<UnsignedEvent> {
+    // Ordering owns the timestamp. A stale custom timestamp on a reused builder
+    // must not bypass the policy when the clock already exceeds the reference.
+    let builder = builder.custom_created_at(now);
     match policy {
         OrderingPolicy::PreferSameTimestamp => {
             finalize_ordered_unsigned_at(builder, public_key, reference, now, max_grind_attempts)
@@ -113,47 +113,6 @@ pub fn strictly_later_timestamp(
         .map(Timestamp::from_secs)
         .map(Some)
         .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))
-}
-
-/// Wait for the wall clock to sort strictly after `reference` by timestamp.
-///
-/// This is appropriate when the event's timestamp has no independent domain
-/// meaning and spacing relay writes is preferable to grinding an ID tie-break.
-/// The returned timestamp is observed after the wait, never synthesized in the
-/// future. A substantially future-dated reference fails instead of stalling a
-/// non-interactive command indefinitely.
-pub async fn wait_for_strictly_later_timestamp(reference: Option<&Event>) -> Result<Timestamp> {
-    let Some(reference) = reference else {
-        return Ok(Timestamp::now());
-    };
-
-    loop {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| anyhow::anyhow!("system clock predates the Unix epoch: {error}"))?;
-        let Some(wait) = replacement_wait_duration(reference.created_at, now)? else {
-            return Ok(Timestamp::from_secs(now.as_secs()));
-        };
-        if wait > MAX_CLOCK_WAIT {
-            bail!(
-                "current event timestamp is too far in the future to replace safely ({} second wait required)",
-                wait.as_secs_f64()
-            );
-        }
-        tokio::time::sleep(wait).await;
-    }
-}
-
-fn replacement_wait_duration(reference: Timestamp, now: Duration) -> Result<Option<Duration>> {
-    if now.as_secs() > reference.as_secs() {
-        return Ok(None);
-    }
-    let target = reference
-        .as_secs()
-        .checked_add(1)
-        .map(Duration::from_secs)
-        .ok_or_else(|| anyhow::anyhow!("event timestamp overflow while ordering update"))?;
-    Ok(Some(target.saturating_sub(now)))
 }
 
 /// The implementation accepts the current time and attempt limit separately so
@@ -281,6 +240,29 @@ mod tests {
     use nostr::prelude::{Keys, Kind, event::SignEvent};
 
     use super::*;
+
+    #[test]
+    fn policy_overrides_stale_builder_timestamp_with_the_observed_clock() {
+        let keys = Keys::generate();
+        let reference = reference_with_id(&"00".repeat(32), 5);
+        for policy in [
+            OrderingPolicy::StrictlyLater,
+            OrderingPolicy::PreferSameTimestamp,
+        ] {
+            for reference in [None, Some(&reference)] {
+                let unsigned = finalize_with_policy_at(
+                    candidate_builder().custom_created_at(Timestamp::from_secs(1)),
+                    keys.public_key(),
+                    reference,
+                    policy,
+                    Timestamp::from_secs(10),
+                    0,
+                )
+                .unwrap();
+                assert_eq!(unsigned.created_at, Timestamp::from_secs(10));
+            }
+        }
+    }
 
     #[test]
     fn explicit_policies_distinguish_advancement_from_fixed_date_exhaustion() {
@@ -468,31 +450,6 @@ mod tests {
             strictly_later_timestamp(Some(&reference), Timestamp::from_secs(11)).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn replacement_wait_uses_the_next_wall_clock_second() {
-        let reference = Timestamp::from_secs(10);
-
-        assert_eq!(
-            replacement_wait_duration(reference, Duration::new(10, 250_000_000)).unwrap(),
-            Some(Duration::from_millis(750))
-        );
-        assert_eq!(
-            replacement_wait_duration(reference, Duration::from_secs(11)).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn replacement_wait_rejects_timestamp_overflow() {
-        let error = replacement_wait_duration(
-            Timestamp::from_secs(u64::MAX),
-            Duration::from_secs(u64::MAX),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("timestamp overflow"));
     }
 
     #[test]
