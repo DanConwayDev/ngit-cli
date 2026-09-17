@@ -4529,6 +4529,53 @@ fn event_rejection_is_duplicate(error: &NostrSdkError) -> bool {
 }
 
 #[allow(clippy::module_name_repetitions)]
+/// Per-relay outcome of one publication attempt.
+///
+/// The relay URL is reported without a trailing slash, matching the keys
+/// returned by [`send_events`]. `error` carries the relay's rejection or
+/// transport error so callers can report it even when the interactive
+/// progress display is hidden.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayPublishOutcome {
+    pub relay: String,
+    pub error: Option<String>,
+}
+
+impl RelayPublishOutcome {
+    #[must_use]
+    pub fn accepted(relay: impl Into<String>) -> Self {
+        Self {
+            relay: relay.into(),
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub fn rejected(relay: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            relay: relay.into(),
+            error: Some(error.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn accepted_by_relay(&self) -> bool {
+        self.error.is_none()
+    }
+
+    fn into_result(self) -> (String, bool) {
+        let accepted = self.accepted_by_relay();
+        (self.relay, accepted)
+    }
+}
+
+fn outcomes_to_results(outcomes: Vec<RelayPublishOutcome>) -> Vec<(String, bool)> {
+    outcomes
+        .into_iter()
+        .map(RelayPublishOutcome::into_result)
+        .collect()
+}
+
 pub async fn send_events(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
@@ -4539,18 +4586,20 @@ pub async fn send_events(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
-    send_events_with_cache_path(
-        client,
-        git_repo_path,
-        git_repo_path,
-        true,
-        events,
-        my_write_relays,
-        repo_read_relays,
-        animate,
-        silent,
-    )
-    .await
+    Ok(outcomes_to_results(
+        send_events_with_cache_path(
+            client,
+            git_repo_path,
+            git_repo_path,
+            true,
+            events,
+            my_write_relays,
+            repo_read_relays,
+            animate,
+            silent,
+        )
+        .await?,
+    ))
 }
 
 /// Publish events without writing them into the repository's local event
@@ -4570,6 +4619,34 @@ pub async fn send_events_without_caching(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
+    Ok(outcomes_to_results(
+        publish_events_without_caching(
+            client,
+            git_repo_path,
+            events,
+            my_write_relays,
+            repo_read_relays,
+            animate,
+            silent,
+        )
+        .await?,
+    ))
+}
+
+/// [`send_events_without_caching`] returning each relay's
+/// [`RelayPublishOutcome`], including the rejection reason, instead of a
+/// bare acceptance flag.
+#[allow(clippy::module_name_repetitions)]
+pub async fn publish_events_without_caching(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<nostr::prelude::Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<RelayPublishOutcome>> {
     send_events_with_cache_path(
         client,
         None,
@@ -4600,18 +4677,20 @@ pub async fn send_public_events(
     animate: bool,
     silent: bool,
 ) -> Result<Vec<(String, bool)>> {
-    send_events_with_cache_path(
-        client,
-        git_repo_path,
-        None,
-        false,
-        events,
-        my_write_relays,
-        additional_relays,
-        animate,
-        silent,
-    )
-    .await
+    Ok(outcomes_to_results(
+        send_events_with_cache_path(
+            client,
+            git_repo_path,
+            None,
+            false,
+            events,
+            my_write_relays,
+            additional_relays,
+            animate,
+            silent,
+        )
+        .await?,
+    ))
 }
 
 /// Shared implementation of [`send_events`] /
@@ -4632,7 +4711,7 @@ async fn send_events_with_cache_path(
     repo_read_relays: Vec<RelayUrl>,
     animate: bool,
     silent: bool,
-) -> Result<Vec<(String, bool)>> {
+) -> Result<Vec<RelayPublishOutcome>> {
     let locally_private = repository_scoped
         && config_repo_path.is_some_and(|path| {
             git2::Repository::open(path)
@@ -4768,7 +4847,7 @@ async fn send_events_with_cache_path(
     })?;
 
     #[allow(clippy::borrow_deref_ref)]
-    let relay_results: Vec<(String, bool)> = join_all(relays.iter().map(|&relay| {
+    let relay_results: Vec<RelayPublishOutcome> = join_all(relays.iter().map(|&relay| {
         let progress = progress.clone();
         let my_write_relays = my_write_relays.clone();
         let repo_read_relays = repo_read_relays.clone();
@@ -4816,42 +4895,50 @@ async fn send_events_with_cache_path(
                 pb.enable_steady_tick(Duration::from_millis(300));
             }
             pb.inc(0); // need to make pb display intially
-            let mut failed = false;
+            let mut error = None;
             for event in &events {
                 match client.send_event_to(cache_path, relay, event.clone()).await {
                     Ok(_) => pb.inc(1),
                     Err(e) => {
                         pb.set_style(pb_after_style_failed.clone());
-                        let msg = console::style(format!(
-                            "error: {}",
-                            e.to_string()
-                                .replace("relay pool error:", "")
-                                .replace("event not published: ", "")
-                        ))
-                        .for_stderr()
-                        .red()
-                        .to_string();
+                        let reason = e
+                            .to_string()
+                            .replace("relay pool error:", "")
+                            .replace("event not published: ", "")
+                            .trim()
+                            .to_string();
+                        let msg = console::style(format!("error: {reason}"))
+                            .for_stderr()
+                            .red()
+                            .to_string();
                         progress.finish_bar(&pb, msg);
-                        failed = true;
+                        error = Some(reason);
                         break;
                     }
                 };
             }
-            if !failed {
+            if error.is_none() {
                 pb.set_style(pb_after_style_succeeded.clone());
                 progress.finish_bar(&pb, String::new());
             }
-            (relay_clean.to_string(), !failed)
+            RelayPublishOutcome {
+                relay: relay_clean.to_string(),
+                error,
+            }
         }
     }))
     .await;
 
-    let succeeded_count = relay_results.iter().filter(|(_, ok)| *ok).count();
+    let succeeded_count = relay_results
+        .iter()
+        .filter(|outcome| outcome.accepted_by_relay())
+        .count();
     let total_count = relay_results.len();
     let failed_relays: Vec<&str> = relay_results
         .iter()
-        .filter(|(_, ok)| !*ok)
-        .map(|(url, _)| {
+        .filter(|outcome| !outcome.accepted_by_relay())
+        .map(|outcome| {
+            let url = outcome.relay.as_str();
             url.strip_prefix("wss://")
                 .or_else(|| url.strip_prefix("ws://"))
                 .unwrap_or(url)

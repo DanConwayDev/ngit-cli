@@ -37,7 +37,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use console::Term;
 use ngit::{
-    client::{Client, save_event_in_local_cache, send_events, send_events_without_caching},
+    client::{
+        Client, RelayPublishOutcome, publish_events_without_caching, save_event_in_local_cache,
+        send_events,
+    },
     git::{Repo, RepoActions, nostr_url::NostrUrlDecoded},
     push::push_to_remote,
     repo_ref::{
@@ -72,7 +75,7 @@ pub trait StateTransactionOps {
         events: Vec<Event>,
         my_write_relays: Vec<String>,
         repo_relays: Vec<RelayUrl>,
-    ) -> Result<Vec<(String, bool)>>;
+    ) -> Result<Vec<RelayPublishOutcome>>;
 
     /// Push `refspecs` to `git_server_url`, returning per-ref rejection
     /// reasons (`None` meaning the ref update was accepted).
@@ -124,8 +127,8 @@ impl StateTransactionOps for LiveOps<'_> {
         events: Vec<Event>,
         my_write_relays: Vec<String>,
         repo_relays: Vec<RelayUrl>,
-    ) -> Result<Vec<(String, bool)>> {
-        send_events_without_caching(
+    ) -> Result<Vec<RelayPublishOutcome>> {
+        publish_events_without_caching(
             self.client,
             Some(self.git_repo.get_path()?),
             events,
@@ -262,7 +265,7 @@ impl StateTransactionFailure {
 #[derive(Default)]
 struct InitialStatePublish {
     grasp_relays: Vec<RelayUrl>,
-    results: Vec<(String, bool)>,
+    results: Vec<RelayPublishOutcome>,
 }
 
 /// How the transaction relates to the state event it publishes.
@@ -299,7 +302,7 @@ pub struct StateTransaction<'a> {
     mode: StateMode,
     force_policy: ServerForcePolicy,
     initial_state_publish: InitialStatePublish,
-    remaining_relay_results: Vec<(String, bool)>,
+    remaining_relay_results: Vec<RelayPublishOutcome>,
     refspecs_dropped_by_policy: HashMap<String, Vec<String>>,
     server_push_outcomes: HashMap<String, ServerPushOutcome>,
 }
@@ -421,7 +424,7 @@ impl<'a> StateTransaction<'a> {
         results.extend(
             relays_holding
                 .into_iter()
-                .map(|relay| (relay.to_string(), true)),
+                .map(|relay| RelayPublishOutcome::accepted(relay.to_string())),
         );
 
         self.initial_state_publish = InitialStatePublish {
@@ -613,7 +616,7 @@ fn eligible_git_servers(
     remote_refspecs: HashMap<String, Vec<String>>,
     git_state_refspecs: &[String],
     has_state_event: bool,
-    initial_state_relay_results: &[(String, bool)],
+    initial_state_relay_results: &[RelayPublishOutcome],
     force_policy: &ServerForcePolicy,
 ) -> (Vec<(String, Vec<String>)>, DroppedRefspecs) {
     let mut eligible = vec![];
@@ -653,15 +656,25 @@ fn eligible_git_servers(
             // outright — counts as rejection, because pushing anyway
             // would create git data whose state the relay will never
             // announce.
-            let relay_accepted =
-                format_grasp_server_url_as_relay_url(&git_server_url).is_ok_and(|relay_url| {
-                    initial_state_relay_results
-                        .iter()
-                        .any(|(url, succeeded)| *succeeded && relay_urls_match(url, &relay_url))
-                });
-            if !relay_accepted {
+            let relay_outcomes: Vec<&RelayPublishOutcome> =
+                format_grasp_server_url_as_relay_url(&git_server_url).map_or_else(
+                    |_| vec![],
+                    |relay_url| {
+                        initial_state_relay_results
+                            .iter()
+                            .filter(|outcome| relay_urls_match(&outcome.relay, &relay_url))
+                            .collect()
+                    },
+                );
+            if !relay_outcomes
+                .iter()
+                .any(|outcome| outcome.accepted_by_relay())
+            {
                 let short_name = get_short_git_server_name(&git_server_url);
-                eprintln!("WARNING: skipping {short_name} - state event failed to reach its relay");
+                let reason = staging_failure_reason(&relay_outcomes);
+                eprintln!(
+                    "WARNING: skipping {short_name} - state event failed to reach its relay: {reason}"
+                );
                 continue;
             }
         }
@@ -672,13 +685,26 @@ fn eligible_git_servers(
 
 fn state_relay_accepted<'a>(
     has_state_event: bool,
-    initial_results: impl Iterator<Item = &'a (String, bool)>,
-    remaining_results: impl Iterator<Item = &'a (String, bool)>,
+    initial_results: impl Iterator<Item = &'a RelayPublishOutcome>,
+    remaining_results: impl Iterator<Item = &'a RelayPublishOutcome>,
 ) -> bool {
     !has_state_event
         || initial_results
             .chain(remaining_results)
-            .any(|(_, succeeded)| *succeeded)
+            .any(RelayPublishOutcome::accepted_by_relay)
+}
+
+/// Explain why a GRASP relay did not accept the staged state event. The
+/// interactive progress display already shows relay errors, but it is hidden
+/// in quiet, silent and test runs, so the warning must carry the reason.
+fn staging_failure_reason(outcomes: &[&RelayPublishOutcome]) -> String {
+    outcomes
+        .iter()
+        .find_map(|outcome| outcome.error.as_deref().filter(|error| !error.is_empty()))
+        .map_or_else(
+            || "no publish result for its relay".to_string(),
+            ToString::to_string,
+        )
 }
 
 /// Publish `events` to the repository relays and the user's write relays,
@@ -943,14 +969,24 @@ mod tests {
             events: Vec<Event>,
             my_write_relays: Vec<String>,
             repo_relays: Vec<RelayUrl>,
-        ) -> Result<Vec<(String, bool)>> {
+        ) -> Result<Vec<RelayPublishOutcome>> {
             let repo_relays: Vec<String> = repo_relays.iter().map(ToString::to_string).collect();
             self.calls.push(FakeCall::PublishState {
                 event_ids: events.iter().map(|event| event.id).collect(),
                 my_write_relays: my_write_relays.clone(),
                 repo_relays: repo_relays.clone(),
             });
-            self.relay_results(&my_write_relays, &repo_relays)
+            Ok(self
+                .relay_results(&my_write_relays, &repo_relays)?
+                .into_iter()
+                .map(|(relay, accepted)| {
+                    if accepted {
+                        RelayPublishOutcome::accepted(relay)
+                    } else {
+                        RelayPublishOutcome::rejected(relay, "rejected by fake relay")
+                    }
+                })
+                .collect())
         }
 
         fn push_to_git_server(
@@ -1314,6 +1350,41 @@ mod tests {
         }
 
         #[test]
+        fn staging_failure_reason_prefers_the_relay_error() {
+            let rejected = RelayPublishOutcome::rejected(
+                "wss://grasp.example",
+                "restricted: author not authorized for this repository",
+            );
+            let blank = RelayPublishOutcome::rejected("wss://grasp.example", "");
+            assert_eq!(
+                super::super::staging_failure_reason(&[&blank, &rejected]),
+                "restricted: author not authorized for this repository"
+            );
+            assert_eq!(
+                super::super::staging_failure_reason(&[]),
+                "no publish result for its relay"
+            );
+        }
+
+        #[test]
+        fn grasp_server_ineligible_when_paired_relay_rejected_the_state() {
+            let grasp_url = grasp_clone_url("grasp.example");
+
+            let (servers, _) = super::super::eligible_git_servers(
+                HashMap::from([(grasp_url, vec![refspec()])]),
+                &[refspec()],
+                true,
+                &[RelayPublishOutcome::rejected(
+                    "wss://grasp.example",
+                    "blocked: replaced by a newer event",
+                )],
+                &ServerForcePolicy::ForceRealignAll,
+            );
+
+            assert!(servers.is_empty());
+        }
+
+        #[test]
         fn grasp_server_ineligible_when_paired_relay_result_is_missing() {
             let grasp_url = grasp_clone_url("grasp.example");
 
@@ -1323,7 +1394,7 @@ mod tests {
                 true,
                 // staging produced results, but none for this server's
                 // paired relay
-                &[("wss://other.example".to_string(), true)],
+                &[RelayPublishOutcome::accepted("wss://other.example")],
                 &ServerForcePolicy::ForceRealignAll,
             );
 

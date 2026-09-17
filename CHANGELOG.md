@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Include the relay's rejection reason when a GRASP server is skipped because
+  its relay did not accept the state event. Quiet and non-interactive runs
+  previously reported only that the event failed to reach the relay.
 - Ignore unauthorized status events when ordering issue and PR status changes,
   including merge statuses. An outsider's future-dated event can no longer
   force a legitimate update to adopt a timestamp that relays may reject.
