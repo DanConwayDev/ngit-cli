@@ -84,6 +84,12 @@ pub(super) async fn run_push(
         .cloned()
         .collect::<Vec<String>>();
 
+    // Classify using the original names, then resolve every source before any
+    // network work. State generation and every server must use the same objects
+    // even if another process moves a local branch or tag during the push.
+    proposal_refspecs = pin_push_sources(&git_repo.git_repo, &proposal_refspecs)?;
+    git_state_refspecs = pin_push_sources(&git_repo.git_repo, &git_state_refspecs)?;
+
     let term = console::Term::stderr();
 
     let (list_outputs, advertised_refs) = if let Some(outputs) = list_outputs {
@@ -1295,6 +1301,31 @@ pub(crate) fn create_rejected_refspecs_and_remotes_refspecs(
         );
     }
     Ok((rejected_refspecs, remotes_refspecs_without_rejected))
+}
+
+/// Snapshot source objects without peeling annotated tags. Deletions and force
+/// markers retain their meaning. Call before planning or publishing a push.
+///
+/// Git can pass a source name instead of its previously resolved object ID, so
+/// this cannot recover Git's earlier snapshot if that name already changed
+/// before the helper received the batch. It prevents subsequent ref movement
+/// from changing this invocation's state, proposals, or per-server transfers.
+pub(crate) fn pin_push_sources(git_repo: &Repository, refspecs: &[String]) -> Result<Vec<String>> {
+    refspecs
+        .iter()
+        .map(|refspec| {
+            let (from, to) = refspec_to_from_to(refspec)?;
+            if from.is_empty() {
+                return Ok(refspec.clone());
+            }
+            let oid = git_repo
+                .revparse_single(from)
+                .with_context(|| format!("cannot resolve push source {from}"))?
+                .id();
+            let force = if refspec.starts_with('+') { "+" } else { "" };
+            Ok(format!("{force}{oid}:{to}"))
+        })
+        .collect()
 }
 
 fn ensure_force_push_refspec(refspec: &str) -> String {
@@ -2783,6 +2814,106 @@ mod tests {
             };
 
             Ok((dir, Repo { git_repo }, commit_oid))
+        }
+
+        #[test]
+        fn pinned_sources_survive_ref_changes_between_state_and_server_pushes() -> Result<()> {
+            let (_dir, git_repo, original) = repo_with_initial_commit()?;
+            let repo = &git_repo.git_repo;
+            let branch = "refs/heads/moving";
+            let tag = "refs/tags/moving";
+            let proposal = "refs/heads/pr/moving";
+            repo.reference(branch, original, true, "test setup")?;
+            let signature = git2::Signature::now("Test User", "test@example.com")?;
+            let object = repo.find_object(original, None)?;
+            let original_tag = repo.tag("moving", &object, &signature, "original tag", false)?;
+            let refspecs = pin_push_sources(
+                repo,
+                &[
+                    format!("+{branch}:{branch}"),
+                    format!("+{tag}:{tag}"),
+                    format!("{branch}:{proposal}"),
+                    ":refs/heads/deleted".to_string(),
+                    format!("{original}:refs/tags/lightweight"),
+                ],
+            )?;
+            let parent = repo.find_commit(original)?;
+            let changed = repo.commit(
+                None,
+                &signature,
+                &signature,
+                "later commit",
+                &parent.tree()?,
+                &[&parent],
+            )?;
+            repo.reference(branch, changed, true, "concurrent branch update")?;
+            repo.reference(tag, changed, true, "concurrent tag replacement")?;
+
+            let existing =
+                HashMap::from([("refs/heads/deleted".to_string(), original.to_string())]);
+            let state = generate_updated_state(&git_repo, &existing, &refspecs)?;
+            assert_eq!(state.get(branch), Some(&original.to_string()));
+            assert_eq!(state.get(proposal), Some(&original.to_string()));
+            assert_eq!(state.get(tag), Some(&original_tag.to_string()));
+            assert_eq!(
+                state.get(&format!("{tag}^{{}}")),
+                Some(&original.to_string())
+            );
+            assert_eq!(
+                state.get("refs/tags/lightweight"),
+                Some(&original.to_string())
+            );
+            assert!(!state.contains_key("refs/heads/deleted"));
+            assert!(refspecs[0].starts_with('+'));
+
+            // Real local Git transports consume the same planner output as the
+            // network transports. Move/delete the sources between transfers;
+            // neither server may observe those changes.
+            for _ in 0..2 {
+                let server_dir = tempfile::tempdir()?;
+                let server = Repository::init_bare(server_dir.path())?;
+                let url = server_dir
+                    .path()
+                    .to_str()
+                    .context("non-UTF8 test path")?
+                    .to_string();
+                let listings = HashMap::from([(url.clone(), (HashMap::new(), false))]);
+                let (rejected, plans) = create_rejected_refspecs_and_remotes_refspecs(
+                    &Term::buffered_stderr(),
+                    &git_repo,
+                    &refspecs,
+                    &HashMap::new(),
+                    &listings,
+                )?;
+                assert!(rejected.is_empty());
+                repo.remote_anonymous(&url)?.push(&plans[&url], None)?;
+                assert_eq!(server.refname_to_id(branch)?, original);
+                assert_eq!(server.refname_to_id(proposal)?, original);
+                assert_eq!(server.refname_to_id(tag)?, original_tag);
+                assert_eq!(server.find_reference(tag)?.peel_to_commit()?.id(), original);
+                assert_eq!(server.refname_to_id("refs/tags/lightweight")?, original);
+                assert!(server.find_reference("refs/heads/deleted").is_err());
+                for name in [branch, tag] {
+                    if let Ok(mut reference) = repo.find_reference(name) {
+                        reference.delete()?;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn pinning_rejects_missing_sources_but_preserves_deletions() -> Result<()> {
+            let (_dir, git_repo, _) = repo_with_initial_commit()?;
+            let deletion = vec![":refs/heads/missing".to_string()];
+            assert_eq!(pin_push_sources(&git_repo.git_repo, &deletion)?, deletion);
+            let error = pin_push_sources(
+                &git_repo.git_repo,
+                &["refs/heads/missing:refs/heads/target".to_string()],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("cannot resolve push source"));
+            Ok(())
         }
 
         #[test]

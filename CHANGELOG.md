@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Freeze push source objects before planning and publication so concurrent local
+  branch or tag changes cannot make repository state and Git server pushes
+  refer to different objects within the same ngit push.
 - Recover corrupt or incompatible repository and global event caches, including
   queries failing with `Not found`. Keep damaged files for diagnosis, coordinate
   recovery across ngit processes, and restart online fetch planning after a

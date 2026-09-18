@@ -51,7 +51,7 @@ use crate::{
     },
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     git_remote_helper::push::{
-        create_rejected_refspecs_and_remotes_refspecs, generate_updated_state,
+        create_rejected_refspecs_and_remotes_refspecs, generate_updated_state, pin_push_sources,
     },
     login,
     login::user::{PrivateGitRelayDiscovery, publish_private_git_relay_list},
@@ -2418,7 +2418,8 @@ async fn push_initial_branch(
 ) -> Result<()> {
     let term = Term::stderr();
     let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
-    let refspecs = vec![refspec.clone()];
+    let refspecs = pin_push_sources(&git_repo.git_repo, &[refspec])?;
+    let refspec = &refspecs[0];
     let private_signer = repo_ref.private.then_some(signer);
 
     // Git-server reality must come from a same-invocation listing; local
@@ -2453,7 +2454,7 @@ async fn push_initial_branch(
         &existing_state,
         &list_outputs,
     )?;
-    if rejected_refspecs.contains_key(&refspec) {
+    if rejected_refspecs.contains_key(refspec) {
         bail!("refs/heads/{branch_name} is out of sync with an existing git server");
     }
 
