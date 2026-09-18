@@ -74,6 +74,10 @@ current process. Repository event caches remain in the Git common directory;
 commands that use them require that directory (normally `.git`) to be writable.
 Outgoing events enter these caches only after a relay accepts them (or confirms
 it already has them). Undelivered edits do not change cached state.
+If an event cache is corrupt or incompatible, ngit warns and switches to a
+fresh database. Online fetches rebuild the cached history; offline commands
+cannot restore missing events. The damaged files are preserved for diagnosis.
+See [event cache recovery](docs/architecture/event-cache.md) for details.
 
 Secrets are kept in the OS credential store where possible; see
 [docs/credential-storage.md](docs/credential-storage.md) for the storage

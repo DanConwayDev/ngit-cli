@@ -77,6 +77,8 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# Corrupt real cache fixtures through the same LMDB backend, without byte hacks.
+heed = { version = "0.20.5", default-features = false }
 tokio-tungstenite = "0.28"
 assert_cmd = "2.2.2"
 mockall = "0.15.0"

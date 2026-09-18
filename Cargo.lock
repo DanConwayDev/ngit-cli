@@ -2221,6 +2221,7 @@ dependencies = [
  "flate2",
  "futures",
  "git2",
+ "heed",
  "indicatif",
  "keyring",
  "libc",

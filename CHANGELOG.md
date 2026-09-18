@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover corrupt or incompatible repository and global event caches, including
+  queries failing with `Not found`. Keep damaged files for diagnosis, coordinate
+  recovery across ngit processes, and restart online fetch planning after a
+  reset. Permission, disk-space and other operational errors do not trigger
+  cache replacement.
 - Return a nonzero exit status and JSON error when no relay accepts a command's
   publication, including account creation and issue or PR edits. Errors include
   the failed relay URLs and reasons; publication still succeeds when at least

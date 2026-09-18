@@ -41,7 +41,6 @@ use nostr::prelude::{
     nip19::Nip19Coordinate,
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
-use nostr_lmdb::NostrLmdb;
 use nostr_memory::MemoryDatabase;
 use nostr_sdk::{
     client::ClientBuilder,
@@ -52,6 +51,7 @@ use nostr_sdk::{
 use serde_json::Value;
 
 use crate::{
+    cache::Database as CacheDatabase,
     get_dirs,
     git::{Repo, RepoActions, get_git_config_item},
     git_events::{
@@ -856,6 +856,19 @@ impl Connect for Client {
             .filter_map(|r| RelayUrl::parse(r).ok())
             .collect::<HashSet<RelayUrl>>();
 
+        let cache_paths = [
+            git_repo_path.map(local_cache_path).transpose()?,
+            global_cache_path(git_repo_path).ok(),
+        ];
+        let cache_generations = || {
+            cache_paths.each_ref().map(|path| {
+                path.as_ref()
+                    .map_or(0, |path| crate::cache::generation(path))
+            })
+        };
+        let mut observed_generations = cache_generations();
+        let mut cache_restarts = 0;
+
         let mut request = create_relays_request(
             git_repo_path,
             selected_maintainer_coordinate,
@@ -872,9 +885,10 @@ impl Connect for Client {
 
         let repository_success_count = Arc::new(AtomicU64::new(0));
         let announcement_resolved = Arc::new(AtomicBool::new(false));
-        let announcement_resolution_coordinate = (!request.announcement_profile_authors.is_empty())
-            .then(|| selected_maintainer_coordinate.cloned())
-            .flatten();
+        let mut announcement_resolution_coordinate =
+            (!request.announcement_profile_authors.is_empty())
+                .then(|| selected_maintainer_coordinate.cloned())
+                .flatten();
 
         let mut processed_relay_scopes = HashSet::new();
         let mut repository_relay_attempts = 0;
@@ -882,6 +896,40 @@ impl Connect for Client {
         let mut relay_reports: Vec<Result<FetchReport>> = vec![];
 
         loop {
+            let current_generations = cache_generations();
+            if current_generations != observed_generations {
+                if cache_restarts == 2 {
+                    bail!(
+                        "event caches changed repeatedly during fetch; retry after other cache recovery finishes"
+                    );
+                }
+                cache_restarts += 1;
+                observed_generations = current_generations;
+                // A replacement can invalidate cached IDs, timestamps and
+                // discovery roots collected earlier in this fetch. Restart
+                // planning instead of treating the replacement as complete.
+                request = create_relays_request(
+                    git_repo_path,
+                    selected_maintainer_coordinate,
+                    user_profiles,
+                    private_relay_list_authors,
+                    relay_default_set.clone(),
+                    announcement_indexer_relays.clone(),
+                    repository_relays_only,
+                )
+                .await?;
+                processed_relay_scopes.clear();
+                relay_reports.clear();
+                repository_relay_attempts = 0;
+                repository_success_count.store(0, Ordering::Relaxed);
+                announcement_resolved.store(false, Ordering::Relaxed);
+                announcement_resolution_coordinate =
+                    (!request.announcement_profile_authors.is_empty())
+                        .then(|| selected_maintainer_coordinate.cloned())
+                        .flatten();
+                continue;
+            }
+
             match request.repo_auth_mode {
                 RelayAuthMode::Never => {}
                 RelayAuthMode::IfSignerAttached => self
@@ -1976,13 +2024,17 @@ fn pb_after_style(succeed: bool) -> indicatif::ProgressStyle {
     .unwrap()
 }
 
-async fn get_local_cache_database(git_repo_path: &Path) -> Result<NostrLmdb> {
+fn local_cache_path(git_repo_path: &Path) -> Result<PathBuf> {
     let git_dir = git2::Repository::discover(git_repo_path)
         .context("failed to discover git repository")?
         .commondir()
         .to_path_buf();
-    let path = git_dir.join("nostr-cache.lmdb");
-    NostrLmdb::open(&path).await.with_context(|| {
+    Ok(git_dir.join("nostr-cache.lmdb"))
+}
+
+async fn get_local_cache_database(git_repo_path: &Path) -> Result<CacheDatabase> {
+    let path = local_cache_path(git_repo_path)?;
+    CacheDatabase::open(&path).await.with_context(|| {
         format!(
             "failed to open or create repository nostr cache database at {}; ngit requires the \
              Git common directory to be writable for repository state",
@@ -1998,7 +2050,7 @@ fn get_global_cache_dir() -> Result<PathBuf> {
     Ok(get_dirs()?.cache_dir().to_path_buf())
 }
 
-async fn open_global_cache_database(git_repo_path: Option<&Path>) -> Result<NostrLmdb> {
+fn global_cache_path(git_repo_path: Option<&Path>) -> Result<PathBuf> {
     let path = if std::env::var("NGITTEST").is_ok() {
         if let Some(git_repo_path) = git_repo_path {
             let git_dir = git2::Repository::discover(git_repo_path)
@@ -2020,7 +2072,12 @@ async fn open_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nost
         cache_dir.join("nostr-cache.lmdb")
     };
 
-    NostrLmdb::open(&path).await.with_context(|| {
+    Ok(path)
+}
+
+async fn open_global_cache_database(git_repo_path: Option<&Path>) -> Result<CacheDatabase> {
+    let path = global_cache_path(git_repo_path)?;
+    CacheDatabase::open(&path).await.with_context(|| {
         format!(
             "failed to open or create global nostr cache database at {}",
             path.display()
@@ -2028,10 +2085,12 @@ async fn open_global_cache_database(git_repo_path: Option<&Path>) -> Result<Nost
     })
 }
 
-async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Arc<dyn NostrDatabase>> {
+async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<CacheDatabase> {
     match open_global_cache_database(git_repo_path).await {
-        Ok(database) => Ok(Arc::new(database)),
-        Err(error) if std::env::var("NGITTEST").is_err() => Ok(use_in_memory_global_cache(error)),
+        Ok(database) => Ok(database),
+        Err(error) if std::env::var("NGITTEST").is_err() => {
+            Ok(CacheDatabase::Memory(use_in_memory_global_cache(error)))
+        }
         Err(error) => Err(error),
     }
 }
