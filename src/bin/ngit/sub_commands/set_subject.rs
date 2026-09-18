@@ -7,10 +7,7 @@ use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{
-        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        save_event_in_local_cache,
-    },
+    client::{Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache},
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_for_publishing,
@@ -159,9 +156,6 @@ async fn publish_set_subject_event(
     )
     .await?;
     let subject_event_id = subject_event.id;
-
-    // Save to local cache immediately so subsequent reads reflect the new subject.
-    save_event_in_local_cache(git_repo_path, &subject_event).await?;
 
     let mut client = client;
     client.set_signer(signer).await;

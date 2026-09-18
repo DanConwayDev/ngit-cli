@@ -680,7 +680,14 @@ impl Connect for Client {
         if let Some(git_repo_path) = git_repo_path {
             save_event_in_local_cache(git_repo_path, &event).await?;
         }
-        if [Kind::GitRepoAnnouncement, KIND_USER_GRASP_LIST].contains(&event.kind) {
+        if [
+            Kind::GitRepoAnnouncement,
+            KIND_USER_GRASP_LIST,
+            Kind::Metadata,
+            Kind::RelayList,
+        ]
+        .contains(&event.kind)
+        {
             save_event_in_global_cache(git_repo_path, &event).await?;
         }
         Ok(event.id)

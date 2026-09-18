@@ -314,3 +314,97 @@ async fn rapid_edits_advance_past_authorized_future_events() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn undelivered_issue_edits_do_not_enter_the_cache() -> Result<()> {
+    use ngit::client::{get_events_from_local_cache, save_event_in_local_cache};
+    use nostr_sdk::prelude::*;
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (publisher, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let created = ngit_json(
+        &publisher,
+        [
+            "issue",
+            "create",
+            "--subject",
+            "original",
+            "--body",
+            "original body",
+            "--json",
+        ],
+    )
+    .await?;
+    let id = created["id"].as_str().context("missing issue id")?;
+
+    // Keep the failure endpoint reserved, and route every edit exclusively to it.
+    let unavailable = test_harness::port::UnavailableTcpEndpoint::start().await?;
+    let relay_url = format!("ws://{}", unavailable.addr());
+    let announcement = get_events_from_local_cache(
+        publisher.dir(),
+        vec![
+            Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(published.maintainer_keys.public_key()),
+        ],
+    )
+    .await?
+    .into_iter()
+    .max_by_key(|event| event.created_at)
+    .context("missing announcement")?;
+    let tags = announcement
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice()[0] != "relays")
+        .cloned()
+        .chain([Tag::parse(["relays", relay_url.as_str()])?]);
+    let announcement = EventBuilder::new(announcement.kind, &announcement.content)
+        .tags(tags)
+        .custom_created_at(Timestamp::from(announcement.created_at.as_secs() + 1))
+        .finalize(&published.maintainer_keys)?;
+    save_event_in_local_cache(publisher.dir(), &announcement).await?;
+    publisher
+        .git_ok(
+            ["config", "nostr.repo-relay-only", "true"],
+            "restrict publication",
+        )
+        .await?;
+
+    let filter = Filter::new().kinds([
+        ngit::git_events::KIND_LABEL,
+        ngit::git_events::KIND_COVER_NOTE,
+    ]);
+    let before = get_events_from_local_cache(publisher.dir(), vec![filter.clone()]).await?;
+    for (command, flag, value) in [
+        ("set-subject", "--subject", "undelivered subject"),
+        ("set-cover-note", "--body", "undelivered body"),
+        ("label", "--label", "undelivered-label"),
+    ] {
+        // Publication status reporting is separate from the cache contract:
+        // inspect the cache regardless of the command's exit status.
+        let _output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            publisher
+                .ngit(["issue", command, id, flag, value, "--offline", "--json"])
+                .output(),
+        )
+        .await??;
+        let after = get_events_from_local_cache(publisher.dir(), vec![filter.clone()]).await?;
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "{command} cached an undelivered edit"
+        );
+    }
+    let viewed = ngit_json(&publisher, ["issue", "view", id, "--offline", "--json"]).await?;
+    assert_eq!(viewed["subject"], "original");
+    assert_eq!(viewed["description"], "original body");
+    Ok(())
+}

@@ -8,10 +8,7 @@ use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{
-        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        save_event_in_local_cache,
-    },
+    client::{Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache},
     git::{Repo, RepoActions},
     login,
     repo_ref::get_repo_coordinates_for_publishing,
@@ -175,10 +172,6 @@ async fn publish_set_cover_note_event(
     )
     .await?;
     let cover_note_event_id = cover_note_event.id;
-
-    // Save to local cache immediately so subsequent reads reflect the new cover
-    // note.
-    save_event_in_local_cache(git_repo_path, &cover_note_event).await?;
 
     let mut client = client;
     client.set_signer(signer).await;

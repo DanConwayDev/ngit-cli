@@ -9,7 +9,7 @@ use crate::{
     cli::SignerParams,
     client::{
         Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        save_event_in_local_cache, warn_if_invited_as_maintainer,
+        warn_if_invited_as_maintainer,
     },
     git::{Repo, RepoActions},
     login,
@@ -172,9 +172,6 @@ async fn publish_label_event(
     )
     .await?;
     let label_event_id = label_event.id;
-
-    // Save to local cache immediately so subsequent reads reflect the new labels.
-    save_event_in_local_cache(git_repo_path, &label_event).await?;
 
     let mut client = client;
     client.set_signer(signer).await;

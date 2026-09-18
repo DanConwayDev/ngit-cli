@@ -38,7 +38,7 @@ use crate::{
         PromptInputParms, PromptPasswordParms, multi_select_with_custom_value,
         show_multi_input_prompt_success,
     },
-    client::{Connect, save_event_in_global_cache, send_events},
+    client::{Connect, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
 };
 
@@ -1529,8 +1529,8 @@ pub async fn signup_non_interactive(
         None
     };
 
-    // Build events, save to cache, and optionally publish to relays
-    if let Some(client) = client {
+    // Build account events only when publication was requested.
+    if let Some(client) = client.filter(|_| publish) {
         // These are initial account events; ngit does not mine their IDs.
         let profile = Metadata::new()
             .name(name)
@@ -1544,26 +1544,20 @@ pub async fn signup_non_interactive(
         .into_event_builder()
         .finalize(&keys)?;
 
-        // Save to global cache so subsequent commands don't need to fetch
-        save_event_in_global_cache(git_repo_path, &profile).await?;
-        save_event_in_global_cache(git_repo_path, &relay_list).await?;
-
-        if publish {
-            // Account creation publishes before the complete login object is
-            // returned. Attach these newly created keys explicitly so the
-            // selected outbox can request NIP-42 authentication.
-            client.nip42_set_auth_signer(Arc::new(crate::NgitSigner::Keys(keys.clone())));
-            let _ = send_events(
-                client,
-                git_repo_path,
-                vec![profile, relay_list],
-                relay_urls,
-                vec![],
-                true,
-                false,
-            )
-            .await?;
-        }
+        // Account creation publishes before the complete login object is
+        // returned. Attach these newly created keys explicitly so the
+        // selected outbox can request NIP-42 authentication.
+        client.nip42_set_auth_signer(Arc::new(crate::NgitSigner::Keys(keys.clone())));
+        let _ = send_events(
+            client,
+            git_repo_path,
+            vec![profile, relay_list],
+            relay_urls,
+            vec![],
+            true,
+            false,
+        )
+        .await?;
     }
 
     Ok((

@@ -219,6 +219,18 @@ async fn account_create_relay_arg_publishes_metadata_and_relay_list() -> Result<
         "metadata.name does not match --name argument",
     );
 
+    // Accepted account events must also be available to global profile lookup.
+    use nostr_database::NostrDatabase;
+    let db = nostr_lmdb::NostrLmdb::open(repo.dir().join(".git/test-global-cache.lmdb")).await?;
+    let cached = db
+        .query(
+            Filter::new()
+                .author(pubkey)
+                .kinds([Kind::Metadata, Kind::RelayList]),
+        )
+        .await?;
+    assert_eq!(cached.len(), 2);
+
     // --- assertion 4: kind 10002 relay-list reached the specified relay ----
 
     let relay_list_events = harness
@@ -1485,15 +1497,18 @@ async fn local_logins_for_same_key_share_one_entry() -> Result<()> {
 }
 
 /// `account create --local --name <name>` stores the fresh secret in the
-/// file store and saves the account's kind-0 profile into the repo-scoped
+/// file store and publishes the profile before caching it in the repo-scoped
 /// global cache; the follow-up logout retains both. Returns the npub.
 async fn create_named_account_then_logout(
     repo: &Repo,
     credentials: &NamedTempFile,
     name: &str,
+    relay_url: &str,
 ) -> Result<String> {
     let output = repo
-        .ngit(["account", "create", "--local", "--name", name])
+        .ngit([
+            "account", "create", "--local", "--name", name, "--relay", relay_url,
+        ])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
         .output()
@@ -1527,11 +1542,18 @@ async fn profile_name_selects_the_sole_credentialed_account_for_one_command() ->
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("target")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
-    create_named_account_then_logout(&repo, &credentials, "Lighthouse Alice").await?;
+    create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "Lighthouse Alice",
+        harness.relay("target").url(),
+    )
+    .await?;
 
     // case-insensitive match against the cached kind-0 profile
     let output = repo
@@ -1557,12 +1579,18 @@ async fn login_with_profile_name_persists_the_npub_not_the_name() -> Result<()> 
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("target")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
-    let npub =
-        create_named_account_then_logout(&repo, &credentials, "Casper The Friendly Ghost").await?;
+    let npub = create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "Casper The Friendly Ghost",
+        harness.relay("target").url(),
+    )
+    .await?;
 
     let output = repo
         .ngit([
@@ -1604,14 +1632,20 @@ async fn same_named_cached_profile_without_credentials_is_ignored() -> Result<()
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("target")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
 
     // squat the name: the profile stays cached but its credentials are gone
-    let squatter_npub =
-        create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
+    let squatter_npub = create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "Shared Name",
+        harness.relay("target").url(),
+    )
+    .await?;
     let output = repo
         .ngit(["account", "forget-keys", &squatter_npub])
         .env("NGIT_SECRET_STORAGE", "file")
@@ -1623,7 +1657,13 @@ async fn same_named_cached_profile_without_credentials_is_ignored() -> Result<()
         "forget-keys failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let real_npub = create_named_account_then_logout(&repo, &credentials, "shared name").await?;
+    let real_npub = create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "shared name",
+        harness.relay("target").url(),
+    )
+    .await?;
 
     let output = repo
         .ngit([
@@ -1657,12 +1697,25 @@ async fn two_credentialed_same_named_accounts_fail_closed() -> Result<()> {
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("target")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
-    let first = create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
-    let second = create_named_account_then_logout(&repo, &credentials, "Shared Name").await?;
+    let first = create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "Shared Name",
+        harness.relay("target").url(),
+    )
+    .await?;
+    let second = create_named_account_then_logout(
+        &repo,
+        &credentials,
+        "Shared Name",
+        harness.relay("target").url(),
+    )
+    .await?;
 
     let output = repo
         .ngit([
@@ -1750,6 +1803,52 @@ async fn unknown_profile_name_yields_guidance_and_preserves_the_login() -> Resul
             Some(npub.as_str()),
             "failed selection must preserve the current login"
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_creation_without_relay_acceptance_does_not_cache_events() -> Result<()> {
+    use nostr_database::NostrDatabase;
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let unavailable = test_harness::port::UnavailableTcpEndpoint::start().await?;
+    let relay_url = format!("ws://{}", unavailable.addr());
+    for offline in [false, true] {
+        let repo = harness.fresh_repo()?;
+        let mut command = repo.ngit([
+            "account",
+            "create",
+            "--local",
+            "--name",
+            "Unpublished",
+            "--relay",
+            &relay_url,
+        ]);
+        if offline {
+            command.arg("--offline");
+        }
+        let _output =
+            tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await??;
+        let npub = repo
+            .config("nostr.npub")
+            .await?
+            .context("account was not created")?;
+        let filter = Filter::new()
+            .author(PublicKey::parse(&npub)?)
+            .kinds([Kind::Metadata, Kind::RelayList]);
+        for filename in ["nostr-cache.lmdb", "test-global-cache.lmdb"] {
+            let db = nostr_lmdb::NostrLmdb::open(repo.dir().join(".git").join(filename)).await?;
+            assert!(
+                db.query(filter.clone()).await?.is_empty(),
+                "unpublished events entered {filename}"
+            );
+        }
     }
     Ok(())
 }

@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cache outgoing issue and PR subject, cover-note, and label edits only after
+  a relay accepts them, so undelivered edits no longer change local views.
+  New-account profiles and relay lists likewise enter the cache only after
+  relay acceptance.
 - Include the relay's rejection reason when a GRASP server is skipped because
   its relay did not accept the state event. Quiet and non-interactive runs
   previously reported only that the event failed to reach the relay.

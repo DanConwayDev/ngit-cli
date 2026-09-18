@@ -123,6 +123,7 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("default")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
@@ -331,6 +332,7 @@ async fn account_whoami_preserves_healthy_accounts_when_inventory_lookup_fails()
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("default")
     .build()
     .await?;
     let repo = harness.fresh_repo()?;
