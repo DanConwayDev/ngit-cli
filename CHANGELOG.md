@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-09-18
+
+Fix flaky tests and improve updates, cache recovery, push consistency, relay publishing, and Android TLS compatibility.
+
 ### Changed
 
 - Make rapid updates to replaceable events, such as Git state announcements,
@@ -23,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Freeze push source objects before planning and publication so concurrent local
   branch or tag changes cannot make repository state and Git server pushes
   refer to different objects within the same ngit push.
+- Prevent HTTPS requests, including Nostr web address resolution, from panicking
+  in standalone Android and Termux builds. Use bundled CA roots on Android
+  while retaining certificate and hostname verification.
 - Recover corrupt or incompatible repository and global event caches, including
   queries failing with `Not found`. Keep damaged files for diagnosis, coordinate
   recovery across ngit processes, and restart online fetch planning after a
