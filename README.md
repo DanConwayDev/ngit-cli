@@ -45,6 +45,12 @@ changes the relay TLS root stores, not the Rustls cryptographic provider; Ring
 remains the sole provider. Other HTTPS transports use their own platform
 verification behavior.
 
+On Android (including Termux), ngit's HTTP client uses bundled Mozilla CA
+roots instead of Android's platform verifier, which requires a JVM and app
+context unavailable to standalone executables. This covers address resolution,
+downloads, and Blossom requests; `native-tls-roots` does not change these HTTP
+roots. Certificate and hostname verification remain enabled.
+
 ## configuration
 
 Run `ngit --customize` to list supported git config keys and their environment-variable overrides. Useful examples:
