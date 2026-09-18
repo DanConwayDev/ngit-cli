@@ -22,7 +22,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
-        ngitGraspRevision = "bce30ef039ecbc8c2371008e1bd00eedd79bbccf";
+        ngitGraspRevision = "5ef7480a0137e64eb3a4d0cf1bd0ca02a6f6c8e5";
         # The pinned repository contains Gitlinks without .gitmodules entries.
         # Nix 2.34 and 2.35 disagree about whether their empty directories are
         # retained in a flake Git input, producing different NAR hashes for the
@@ -30,12 +30,12 @@
         ngitGraspSource = pkgs.fetchgit {
           url = "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
           rev = ngitGraspRevision;
-          hash = "sha256-oWXeMPoT1QmP2u5NB8pZWdTy8GMoDvqSrgS/vmOsicc=";
+          hash = "sha256-iBtw3rKKdmm93fjFJXgibRSSwK/NFf9rDrD421JjMqY=";
           fetchSubmodules = false;
         };
         ngit-grasp-pkg = pkgs.rustPlatform.buildRustPackage {
           pname = "ngit-grasp";
-          version = "3.0.0";
+          version = "3.0.3";
           src = ngitGraspSource;
           NGIT_BUILD_REVISION = ngitGraspRevision;
           cargoLock.lockFile = "${ngitGraspSource}/Cargo.lock";
