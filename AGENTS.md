@@ -97,6 +97,11 @@ cargo test -- --nocapture
 cargo test --test ngit_init
 ```
 
+### Manual Android checks
+
+For HTTP/TLS, Reqwest/Rustls, Android dependency, or Android test-tooling changes,
+follow [the manual Android testing guide](docs/architecture/android-testing.md).
+
 ### Important Testing Notes
 
 1. **URL Comparison**: When comparing git server URLs, be aware of normalization:

@@ -108,6 +108,8 @@ path = "src/lib/mod.rs"
 
 [features]
 default = []
+# Opt-in manual Android probe; does not enable any production behavior.
+android-smoke = []
 native-tls-roots = [
     "nostr-connect/rustls-tls-native-roots",
     "nostr-sdk/rustls-tls-native-roots",
@@ -144,6 +146,11 @@ path = "tests/git_push_pr/main.rs"
 [[test]]
 name = "release"
 path = "tests/release/main.rs"
+
+[[example]]
+name = "android_tls"
+path = "tools/android/tls_probe.rs"
+required-features = ["android-smoke"]
 
 [profile.release]
 lto = true
