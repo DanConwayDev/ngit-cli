@@ -288,7 +288,14 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
     let file = NamedTempFile::new()?;
 
     let output = repo
-        .ngit(["account", "create", "--local", "--name", "keyring alice"])
+        .ngit([
+            "account",
+            "create",
+            "--local",
+            "--name",
+            "keyring alice",
+            "--offline",
+        ])
         .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -1829,12 +1836,25 @@ async fn account_creation_without_relay_acceptance_does_not_cache_events() -> Re
             "Unpublished",
             "--relay",
             &relay_url,
+            "--json",
         ]);
         if offline {
             command.arg("--offline");
         }
-        let _output =
+        let output =
             tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await??;
+        assert_eq!(output.status.success(), offline);
+        let document: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            document["command_status"],
+            if offline { "ok" } else { "error" }
+        );
+        if !offline {
+            let error = document["error"]
+                .as_str()
+                .context("missing publication error")?;
+            assert!(error.contains(&relay_url), "missing failed relay: {error}");
+        }
         let npub = repo
             .config("nostr.npub")
             .await?

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use ngit::{
-    client::{send_events, sign_draft_event},
+    client::{send_events_with_results, sign_draft_event},
     event_ordering::{finalize_ordered_unsigned, latest_event},
     software_release::{
         ApplicationInput, SOFTWARE_APPLICATION_KIND, SoftwareApplication, application_event_builder,
@@ -632,7 +632,7 @@ async fn publish_application(
     json_output: bool,
 ) -> Result<Vec<(String, bool)>> {
     let (write_relays, repo_relays) = context.publication_relays();
-    let results = send_events(
+    let results = send_events_with_results(
         &context.client,
         Some(context.git_repo_path()?),
         vec![event],

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Context, Result, anyhow};
 use ngit::{
-    client::send_events,
+    client::send_events_with_results,
     event_ordering::latest_event,
     software_release::{
         SOFTWARE_APPLICATION_KIND, SOFTWARE_ASSET_KIND, SOFTWARE_RELEASE_KIND, SoftwareApplication,
@@ -318,7 +318,7 @@ impl ReleaseContext {
         json_output: bool,
     ) -> Result<PublicationBatchResult> {
         let (user_write, repo_relays) = self.publication_relays();
-        let results = send_events(
+        let results = send_events_with_results(
             &self.client,
             Some(self.git_repo_path()?),
             events.clone(),

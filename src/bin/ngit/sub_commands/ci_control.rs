@@ -23,7 +23,9 @@ use ngit::{
         KIND_CI_MANUAL_TRIGGER, KIND_CI_SERVICE_REQUEST, KIND_CI_SERVICE_STOP,
         validate_manual_trigger, validate_service_control,
     },
-    client::{Params, get_repo_ref_from_cache, get_state_from_cache, send_events, sign_event},
+    client::{
+        Params, get_repo_ref_from_cache, get_state_from_cache, send_events_with_results, sign_event,
+    },
     login::user::get_user_details,
     repo_ref::RepoRef,
 };
@@ -439,7 +441,7 @@ impl Prepared {
         }
 
         self.client.set_signer(self.signer.clone()).await;
-        let outcomes = send_events(
+        let outcomes = send_events_with_results(
             &self.client,
             Some(self.git_repo.get_path()?),
             events,

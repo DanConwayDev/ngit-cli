@@ -4583,7 +4583,65 @@ fn outcomes_to_results(outcomes: Vec<RelayPublishOutcome>) -> Vec<(String, bool)
         .collect()
 }
 
+fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()> {
+    if outcomes.iter().any(RelayPublishOutcome::accepted_by_relay) {
+        return Ok(());
+    }
+    if outcomes.is_empty() {
+        bail!("failed to publish events: no publication relays configured");
+    }
+    let failures = outcomes
+        .iter()
+        .map(|outcome| {
+            format!(
+                "{}: {}",
+                outcome.relay,
+                outcome.error.as_deref().unwrap_or("unknown error")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!("failed to publish events to any relay: {failures}")
+}
+
+/// Publish events, requiring at least one relay to accept the entire batch.
+/// An empty batch is a no-op. Partial relay failure remains successful when
+/// another relay accepts every event. Errors include the relay failure reasons.
 pub async fn send_events(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<nostr::prelude::Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
+    if events.is_empty() {
+        return Ok(vec![]);
+    }
+    let outcomes = send_events_with_cache_path(
+        client,
+        git_repo_path,
+        git_repo_path,
+        true,
+        events,
+        my_write_relays,
+        repo_read_relays,
+        animate,
+        silent,
+    )
+    .await?;
+    require_publication_acceptance(&outcomes)?;
+    Ok(outcomes_to_results(outcomes))
+}
+
+/// Publish events and return per-relay results even when every relay fails.
+/// Callers must check acceptance before reporting success. Use this for
+/// transaction decisions or domain-specific error and recovery reports;
+/// ordinary commands should use [`send_events`].
+#[allow(clippy::module_name_repetitions)]
+pub async fn send_events_with_results(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &Client,
     git_repo_path: Option<&Path>,
@@ -4611,10 +4669,11 @@ pub async fn send_events(
 
 /// Publish events without writing them into the repository's local event
 /// cache on success. `git_repo_path` still drives repository
-/// configuration lookups (`nostr.repo-relay-only`); only the cache side
-/// effect of [`send_events`] is suppressed. Use this when an event must
+/// configuration lookups (`nostr.repo-relay-only`). Use this when an event must
 /// not become locally authoritative until the caller explicitly commits
-/// it — e.g. an unverified repository-state candidate.
+/// it — e.g. an unverified repository-state candidate. Like
+/// [`send_events_with_results`], this returns outcomes even on total relay
+/// failure so the transaction can combine them with earlier publication.
 #[allow(clippy::module_name_repetitions)]
 pub async fn send_events_without_caching(
     #[cfg(test)] client: &crate::client::MockConnect,

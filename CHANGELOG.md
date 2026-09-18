@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Return a nonzero exit status and JSON error when no relay accepts a command's
+  publication, including account creation and issue or PR edits. Errors include
+  the failed relay URLs and reasons; publication still succeeds when at least
+  one relay accepts the complete batch.
 - Cache outgoing issue and PR subject, cover-note, and label edits only after
   a relay accepts them, so undelivered edits no longer change local views.
   New-account profiles and relay lists likewise enter the cache only after

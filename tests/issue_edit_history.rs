@@ -387,15 +387,23 @@ async fn undelivered_issue_edits_do_not_enter_the_cache() -> Result<()> {
         ("set-cover-note", "--body", "undelivered body"),
         ("label", "--label", "undelivered-label"),
     ] {
-        // Publication status reporting is separate from the cache contract:
-        // inspect the cache regardless of the command's exit status.
-        let _output = tokio::time::timeout(
+        let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             publisher
                 .ngit(["issue", command, id, flag, value, "--offline", "--json"])
                 .output(),
         )
         .await??;
+        assert!(
+            !output.status.success(),
+            "{command} reported success without delivery"
+        );
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(document["command_status"], "error");
+        let error = document["error"]
+            .as_str()
+            .context("missing publication error")?;
+        assert!(error.contains(&relay_url), "missing failed relay: {error}");
         let after = get_events_from_local_cache(publisher.dir(), vec![filter.clone()]).await?;
         assert_eq!(
             after.len(),

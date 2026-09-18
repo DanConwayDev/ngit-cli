@@ -11,7 +11,7 @@ use ngit::{
         blossom_server_list_from_events, canonicalize_blossom_server_root, snapshot_local_file,
         upload_resilient_snapshot_batch_to_servers_with_progress,
     },
-    client::{Connect, send_events, sign_draft_event},
+    client::{Connect, send_events_with_results, sign_draft_event},
     container_manifest::{load_container_manifest, resolve_container_manifest_path},
     event_ordering::{finalize_ordered_unsigned, latest_event},
     git::{Repo, RepoActions},
@@ -142,7 +142,7 @@ async fn publish(
     let event = sign_draft_event(unsigned, &signer, "container repository".to_owned())
         .await
         .context("failed to sign the container repository event; uploaded blobs are reusable")?;
-    let relay_results = send_events(
+    let relay_results = send_events_with_results(
         &context.client,
         Some(context.git_repo_path()?),
         vec![event.clone()],
