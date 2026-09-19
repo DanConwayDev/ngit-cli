@@ -1329,7 +1329,9 @@ async fn self_defer_continue_repair_republishes_the_active_lead_role() -> Result
     publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
     publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
 
-    edit_ok(&publisher, &["--repair-self-defer", "M=continue"]).await?;
+    edit_ok(&publisher, &["--repair-self-defer", "M=continue"])
+        .await
+        .with_context(|| harness.grasp("repo").log_tail())?;
 
     let repaired = latest_announcement(&harness, alice, &published.identifier).await?;
     assert_eq!(
@@ -1374,7 +1376,9 @@ async fn self_defer_continue_repair_republishes_the_active_co_maintainer_role() 
     publish_to_relay(harness.relay("default").url(), &[&malformed]).await?;
     publish_to_relay(&harness.grasp("repo").relay_url(), &[&malformed]).await?;
 
-    edit_ok(&publisher, &["--repair-self-defer", "m=continue"]).await?;
+    edit_ok(&publisher, &["--repair-self-defer", "m=continue"])
+        .await
+        .with_context(|| harness.grasp("repo").log_tail())?;
 
     let repaired = latest_announcement(&harness, alice, &published.identifier).await?;
     assert_eq!(
