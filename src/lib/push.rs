@@ -949,12 +949,13 @@ mod tests {
             io::{Read, Write},
             net::{TcpListener, TcpStream},
             path::Path,
-            process::{Command, Stdio},
+            process::{Child, Command, Stdio},
             sync::{
-                Arc,
-                atomic::{AtomicUsize, Ordering},
+                Arc, Mutex,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
             },
             thread,
+            time::{Duration, Instant},
         };
 
         use anyhow::{Context, Result, ensure};
@@ -968,6 +969,171 @@ mod tests {
             },
             push::push_to_remote,
         };
+
+        const CHILD_TEST: &str = "NGIT_FALLBACK_FIXTURE_CHILD";
+        const TEST_NAME: &str = "push::tests::system_git_fallback::falls_back_to_system_git_when_libgit2_hits_an_internal_assertion";
+
+        // Isolate the synchronous libgit2 call too: an async timeout cannot
+        // cancel it. The child owns a separate process group on Unix, so the
+        // deadline also terminates receive-pack and fallback Git processes.
+        fn isolated_test(name: &str, deadline: Duration) -> Result<()> {
+            let log = tempfile::tempfile()?;
+            let mut command = Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", name, "--nocapture"])
+                .env(CHILD_TEST, name)
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(log.try_clone()?))
+                .stderr(Stdio::from(log.try_clone()?));
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = ReapChild(command.spawn()?);
+            #[cfg(unix)]
+            let mut group = ProcessGroupGuard(Some(child.0.id()));
+            let end = Instant::now() + deadline;
+            let status = loop {
+                if let Some(status) = child.0.try_wait()? {
+                    #[cfg(unix)]
+                    {
+                        group.0 = None;
+                    }
+                    break Some(status);
+                }
+                if Instant::now() >= end {
+                    #[cfg(unix)]
+                    // SAFETY: the unreaped child leads the group we created.
+                    unsafe {
+                        libc::kill(-(child.0.id() as libc::pid_t), libc::SIGKILL);
+                    }
+                    let _ = child.0.kill();
+                    let _ = child.0.wait();
+                    #[cfg(unix)]
+                    {
+                        group.0 = None;
+                    }
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            };
+            use std::io::{Seek, SeekFrom};
+            let mut log = log;
+            log.seek(SeekFrom::Start(
+                log.metadata()?.len().saturating_sub(64 * 1024),
+            ))?;
+            let mut output = Vec::new();
+            log.take(64 * 1024).read_to_end(&mut output)?;
+            ensure!(
+                status.is_some_and(|status| status.success()),
+                "isolated test {name} failed (status: {status:?}, deadline: {deadline:?}):\n{}",
+                String::from_utf8_lossy(&output)
+            );
+            Ok(())
+        }
+
+        // Also cover errors while polling: kill descendants before reaping
+        // the group leader, whose PID must not yet be reusable.
+        #[cfg(unix)]
+        struct ProcessGroupGuard(Option<u32>);
+        #[cfg(unix)]
+        impl Drop for ProcessGroupGuard {
+            fn drop(&mut self) {
+                if let Some(id) = self.0 {
+                    // SAFETY: this is our still-unreaped child's own group.
+                    unsafe {
+                        libc::kill(-(id as libc::pid_t), libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        struct ReapChild(Child);
+        impl Drop for ReapChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        struct Proxy {
+            address: std::net::SocketAddr,
+            stopped: Arc<AtomicBool>,
+            connections: Arc<AtomicUsize>,
+            sockets: Arc<Mutex<Vec<TcpStream>>>,
+            task: Option<thread::JoinHandle<()>>,
+        }
+
+        impl Proxy {
+            fn start(repo: &Path) -> Result<Self> {
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                let address = listener.local_addr()?;
+                let stopped = Arc::new(AtomicBool::new(false));
+                let connections = Arc::new(AtomicUsize::new(0));
+                let sockets = Arc::new(Mutex::new(Vec::new()));
+                let task = thread::spawn({
+                    let stopped = stopped.clone();
+                    let connections = connections.clone();
+                    let sockets = sockets.clone();
+                    let repo = repo.to_path_buf();
+                    move || {
+                        let mut workers = Vec::new();
+                        for stream in listener.incoming() {
+                            if stopped.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            let Ok(stream) = stream else {
+                                break;
+                            };
+                            connections.fetch_add(1, Ordering::SeqCst);
+                            match stream.try_clone() {
+                                Ok(socket) => sockets.lock().unwrap().push(socket),
+                                Err(error) => {
+                                    eprintln!("retain proxy socket: {error}");
+                                    break;
+                                }
+                            }
+                            let repo = repo.clone();
+                            // The failed libgit2 session must not prevent the
+                            // fallback client from receiving its advertisement.
+                            workers.push(thread::spawn(move || {
+                                if let Err(error) = serve_connection(stream, &repo) {
+                                    eprintln!("fallback proxy connection: {error:#}");
+                                }
+                            }));
+                        }
+                        for socket in sockets.lock().unwrap().iter() {
+                            let _ = socket.shutdown(std::net::Shutdown::Both);
+                        }
+                        for worker in workers {
+                            let _ = worker.join();
+                        }
+                    }
+                });
+                Ok(Self {
+                    address,
+                    stopped,
+                    connections,
+                    sockets,
+                    task: Some(task),
+                })
+            }
+        }
+
+        impl Drop for Proxy {
+            fn drop(&mut self) {
+                self.stopped.store(true, Ordering::SeqCst);
+                for socket in self.sockets.lock().unwrap().iter() {
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                }
+                // Wake accept without releasing/rebinding the fixture's port.
+                let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+                if let Some(task) = self.task.take() {
+                    let _ = task.join();
+                }
+            }
+        }
 
         fn run<'a>(cwd: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String> {
             let output = Command::new("git").current_dir(cwd).args(args).output()?;
@@ -1057,20 +1223,24 @@ mod tests {
         /// Serve one `git://` connection by proxying to `git receive-pack`
         /// on `repo`, rewriting the advertisement to the tangled.org shape.
         fn serve_connection(mut stream: TcpStream, repo: &Path) -> Result<()> {
+            stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(10)))?;
             // Discard the git-daemon request line; the repository is fixed.
             read_pkt(&mut stream)?.context("expected a git protocol request pkt")?;
 
-            let mut child = Command::new("git")
-                .arg("receive-pack")
-                .arg(repo)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                // The libgit2 connection aborts mid-session by design, which
-                // makes receive-pack print "the remote end hung up".
-                .stderr(Stdio::null())
-                .spawn()?;
-            let mut child_in = child.stdin.take().context("no receive-pack stdin")?;
-            let mut child_out = child.stdout.take().context("no receive-pack stdout")?;
+            let mut child = ReapChild(
+                Command::new("git")
+                    .arg("receive-pack")
+                    .arg(repo)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    // The libgit2 connection aborts mid-session by design, which
+                    // makes receive-pack print "the remote end hung up".
+                    .stderr(Stdio::null())
+                    .spawn()?,
+            );
+            let mut child_in = child.0.stdin.take().context("no receive-pack stdin")?;
+            let mut child_out = child.0.stdout.take().context("no receive-pack stdout")?;
 
             let mut first = true;
             while let Some(payload) = read_pkt(&mut child_out)? {
@@ -1091,14 +1261,56 @@ mod tests {
                 relay(&mut stream_reader, &mut child_in);
             });
             relay(&mut child_out, &mut stream);
-            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
             let _ = to_child.join();
-            let _ = child.wait();
+            let _ = child.0.wait();
+            Ok(())
+        }
+
+        #[test]
+        fn stalled_connection_does_not_block_next_client() -> Result<()> {
+            const NAME: &str =
+                "push::tests::system_git_fallback::stalled_connection_does_not_block_next_client";
+            if std::env::var(CHILD_TEST).as_deref() != Ok(NAME) {
+                return isolated_test(NAME, Duration::from_secs(30));
+            }
+            let repo = tempfile::tempdir()?;
+            run(repo.path(), ["init", "-q", "--bare"])?;
+            let proxy = Proxy::start(repo.path())?;
+            let mut stalled = TcpStream::connect(proxy.address)?;
+            stalled.set_read_timeout(Some(Duration::from_secs(5)))?;
+            write_pkt(&mut stalled, b"git-receive-pack /remote\0host=localhost\0")?;
+            // Observe an accepted, active session before opening the next one.
+            while read_pkt(&mut stalled)?.is_some() {}
+            let mut next = TcpStream::connect(proxy.address)?;
+            next.set_read_timeout(Some(Duration::from_secs(5)))?;
+            write_pkt(&mut next, b"git-receive-pack /remote\0host=localhost\0")?;
+            ensure!(read_pkt(&mut next)?.is_some(), "missing advertisement");
+            // Both sessions remain open while Drop stops and joins the proxy.
+            drop(proxy);
+            Ok(())
+        }
+
+        #[test]
+        fn isolated_deadline_terminates_stalled_test() -> Result<()> {
+            const NAME: &str =
+                "push::tests::system_git_fallback::isolated_deadline_terminates_stalled_test";
+            if std::env::var(CHILD_TEST).as_deref() == Ok(NAME) {
+                loop {
+                    thread::park();
+                }
+            }
+            let error = isolated_test(NAME, Duration::from_secs(1))
+                .expect_err("a stalled test must hit its deadline");
+            ensure!(error.to_string().contains("status: None"), "{error:#}");
             Ok(())
         }
 
         #[test]
         fn falls_back_to_system_git_when_libgit2_hits_an_internal_assertion() -> Result<()> {
+            if std::env::var(CHILD_TEST).as_deref() != Ok(TEST_NAME) {
+                return isolated_test(TEST_NAME, Duration::from_secs(60));
+            }
             let temp = tempfile::tempdir()?;
             let source_path = temp.path().join("source");
             let remote_path = temp.path().join("remote.git");
@@ -1122,22 +1334,8 @@ mod tests {
                 ["init", "-q", "--bare", remote_path.to_str().unwrap()],
             )?;
 
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let port = listener.local_addr()?.port();
-            let connections = Arc::new(AtomicUsize::new(0));
-            // Detached server thread: it blocks on accept and dies with the
-            // test process.
-            thread::spawn({
-                let connections = Arc::clone(&connections);
-                let remote_path = remote_path.clone();
-                move || {
-                    for stream in listener.incoming() {
-                        let Ok(stream) = stream else { break };
-                        connections.fetch_add(1, Ordering::SeqCst);
-                        let _ = serve_connection(stream, &remote_path);
-                    }
-                }
-            });
+            let proxy = Proxy::start(&remote_path)?;
+            let port = proxy.address.port();
 
             let updates = push_to_remote(
                 &Repo::from_path(&source_path)?,
@@ -1155,7 +1353,7 @@ mod tests {
             // the push must have completed over a second, system-git
             // connection. A single connection means libgit2 no longer
             // asserts and this fallback deserves a rethink.
-            assert_eq!(connections.load(Ordering::SeqCst), 2);
+            assert_eq!(proxy.connections.load(Ordering::SeqCst), 2);
             let pushed = run(
                 temp.path(),
                 [
