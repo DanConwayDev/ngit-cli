@@ -14,6 +14,8 @@ use test_harness::{
 #[case(true, true, false)]
 #[case(false, false, true)]
 #[case(true, false, true)]
+#[case(false, true, true)]
+#[case(true, true, true)]
 #[tokio::test(flavor = "multi_thread")]
 async fn proposal_uses_upstream_not_fork(
     #[case] push_by_oid: bool,

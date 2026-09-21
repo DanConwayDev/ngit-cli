@@ -174,7 +174,6 @@ pub(super) async fn run_push(
             &proposal_refspecs,
             client, // &mut Client
             existing_state,
-            remote_name,
             &term,
             title_description.as_ref(),
             &git_server_push_options,
@@ -421,7 +420,6 @@ async fn create_events_and_proposals(
     proposal_refspecs: &Vec<String>,
     client: &mut Client,
     existing_state: HashMap<String, String>,
-    remote_name: Option<&str>,
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
@@ -588,7 +586,6 @@ async fn create_events_and_proposals(
     });
     let proposal_default = ProposalDefaultBranch {
         name: proposal_default_name.as_deref(),
-        remote: remote_name,
         allow_local: authorized_maintainer,
         tip: proposal_default_name
             .as_ref()
@@ -647,41 +644,31 @@ async fn create_events_and_proposals(
     })
 }
 
-/// Scope automatic proposal bases to the destination and its tracking branch.
+/// Scope automatic proposal bases to the destination and maintainer history.
 /// Legacy destinations without HEAD can still advertise main or master.
 struct ProposalDefaultBranch<'a> {
     name: Option<&'a str>,
-    remote: Option<&'a str>,
     allow_local: bool,
     tip: Option<Sha1Hash>,
 }
 
 impl ProposalDefaultBranch<'_> {
-    fn tips(&self, repo: &Repo) -> Result<Vec<Sha1Hash>> {
+    fn tips(&self, repo: &Repo, proposal_tip: &Sha1Hash) -> Result<Vec<Sha1Hash>> {
         match self.tip {
             Some(tip) => {
                 let mut tips = vec![tip];
-                if let (Some(branch), Some(remote)) = (self.name, self.remote) {
-                    // A local default tracking a fork is not evidence that the
-                    // destination accepted those commits. A confirmed maintainer's
-                    // branch tracking this destination can contain advances learned
-                    // through another server, preserving the stale-destination protection.
-                    let tracks_destination = self.allow_local
-                        && repo
-                            .get_git_config_item(&format!("branch.{branch}.remote"), None)?
-                            .as_deref()
-                            == Some(remote)
-                        && repo
-                            .get_git_config_item(&format!("branch.{branch}.merge"), None)?
-                            .as_deref()
-                            == Some(format!("refs/heads/{branch}").as_str());
-                    if tracks_destination {
-                        if let Ok(local) =
-                            repo.get_commit_or_tip_of_reference(&format!("refs/heads/{branch}"))
+                if let Some(branch) = self.name.filter(|_| self.allow_local) {
+                    // Maintainers may learn accepted history through another
+                    // publishing remote. But when the proposal equals local
+                    // default, all its unpublished commits are the proposal.
+                    if let Ok(local) =
+                        repo.get_commit_or_tip_of_reference(&format!("refs/heads/{branch}"))
+                    {
+                        if local != *proposal_tip
+                            && local != tip
+                            && repo.ancestor_of(&local, &tip)?
                         {
-                            if local != tip && repo.ancestor_of(&local, &tip)? {
-                                tips.push(local);
-                            }
+                            tips.push(local);
                         }
                     }
                 }
@@ -695,7 +682,7 @@ impl ProposalDefaultBranch<'_> {
         match self.tip {
             Some(_) => {
                 let mut best = None;
-                for target in self.tips(repo)? {
+                for target in self.tips(repo, tip)? {
                     let base = repo.get_merge_base(tip, &target).context(
                         "cannot determine proposal base against destination state; fetch the destination and retry",
                     )?;
@@ -792,7 +779,7 @@ async fn process_proposal_refspecs(
                     false,
                 )?]
             } else {
-                default_branch.tips(git_repo)?
+                default_branch.tips(git_repo, &tip_of_pushed_branch)?
             };
             let inference = if explicit_base.is_none() {
                 infer_proposal_base(
@@ -984,7 +971,7 @@ async fn process_proposal_refspecs(
                     .omits_unpublished_local_commits(git_repo, &tip_of_pushed_branch)?
             {
                 bail!(
-                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or ngit send <range> to include selected commits",
+                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or use -o base=<remote>/<branch> (ngit send --base <remote>/<branch>) to choose a different base",
                     default_branch.name.unwrap_or("default branch")
                 );
             }
@@ -996,7 +983,7 @@ async fn process_proposal_refspecs(
                     true,
                 )?]
             } else {
-                default_branch.tips(git_repo)?
+                default_branch.tips(git_repo, &tip_of_pushed_branch)?
             };
             let inferred_base = if explicit_base.is_none() {
                 match infer_proposal_base(
@@ -2837,7 +2824,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn local_default_must_track_destination_and_extend_its_history() -> Result<()> {
+        fn maintainer_default_can_extend_destination_but_not_swallow_proposal() -> Result<()> {
             let dir = tempfile::tempdir()?;
             let git = Repository::init(dir.path())?;
             let tree_id = git.treebuilder(None)?.write()?;
@@ -2862,18 +2849,17 @@ mod tests {
             let repo = Repo::from_path(&dir.path().to_path_buf())?;
             let baseline = ProposalDefaultBranch {
                 name: Some("trunk"),
-                remote: Some("upstream"),
                 allow_local: true,
                 tip: Some(git::oid_to_sha1(&destination)),
             };
             for (remote, merge, local, expected) in [
                 ("upstream", "trunk", advanced, advanced),
-                ("origin", "trunk", advanced, destination),
+                ("origin", "trunk", advanced, advanced),
                 ("origin", "trunk", proposal, destination),
-                ("upstream", "other", advanced, destination),
+                ("upstream", "other", advanced, advanced),
                 ("upstream", "trunk", initial, destination),
                 ("upstream", "trunk", divergent, destination),
-                ("", "trunk", advanced, destination),
+                ("", "trunk", advanced, advanced),
             ] {
                 git.reference("refs/heads/trunk", local, true, "test local default")?;
                 if remote.is_empty() {

@@ -71,7 +71,8 @@ pub struct SubCommandArgs {
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
     /// commit, branch, root PR, or PR update to use as the base for this
-    /// publication
+    /// publication; e.g. --base github/main when that upstream is ahead of
+    /// Nostr
     #[clap(long)]
     pub(crate) base: Option<String>,
 }

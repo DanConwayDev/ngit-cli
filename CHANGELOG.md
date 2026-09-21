@@ -30,13 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Allow proposal pushes to a Nostr upstream when the contributor's local default
-  branch tracks a separate fork that already contains the change. Automatic
-  proposal bases use the destination's default-branch state, while still
-  considering a confirmed maintainer's local default that tracks and extends
-  that destination. New proposals require `git push --force` to omit unpublished
-  local-default commits they contain; `ngit send` still includes explicitly
-  selected commits drafted on the default branch.
+- Fix PR pushes from forks. Changes already on your fork or local default
+  branch are still proposed if the Nostr destination has not accepted them.
+  A PR that points to the same commit as local `main` or `master` works too.
+- Support maintainers who build PRs on a newer local default branch. For a new
+  PR, require `git push --force` before excluding local commits that have not
+  been published to Nostr. Local changes outside the PR need no confirmation.
+- Keep `ngit send` working for drafts made directly on `main` or `master`.
+  Explain how `--base <commit-or-ref>` lets contributors and maintainers choose
+  which earlier commits to exclude. Remote names such as `origin` or `github`
+  do not establish ownership or accepted history.
 
 ## [3.0.2] - 2026-09-18
 

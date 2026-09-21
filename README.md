@@ -9,6 +9,10 @@ nostr plugin for git
 
 browse [gitworkshop.dev/repos](https://gitworkshop.dev/repos) to find nostr repositories.
 
+If another upstream remote is ahead of Nostr, use `ngit send --base <remote>/<branch>`
+to propose only your changes. See [choosing a proposal base](docs/explanations/proposal-bases.md)
+for fork, multiple-remote, and draft-on-master workflows.
+
 ## install
 
 install options:

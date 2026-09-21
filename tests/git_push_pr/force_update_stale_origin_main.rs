@@ -1,10 +1,10 @@
 //! A confirmed maintainer's local default branch can include upstream changes
 //! learned from another Git server before the Nostr destination catches up.
-//! When it tracks that destination, use the advanced local branch as the PR
-//! base for both initial publication and a force-pushed rewrite. A new PR
+//! Even when it tracks the other remote, use the advanced local branch as the
+//! PR base for both initial publication and a force-pushed rewrite. A new PR
 //! requires --force before excluding those unpublished local-default commits.
-//! The complementary fork_origin cases ensure contributors and local branches
-//! tracking a separate fork cannot advance the automatic proposal base.
+//! The complementary fork_origin cases ensure contributors and proposals equal
+//! to local default do not lose their proposed changes.
 
 use std::sync::Arc;
 
@@ -175,6 +175,13 @@ async fn capture_snapshot() -> Result<Snapshot> {
         )
         .await?;
 
+    contributor
+        .git_ok(
+            ["branch", "--set-upstream-to=gitlab/main", "main"],
+            "track maintainer's other publishing remote",
+        )
+        .await?;
+
     let local_main_oid = contributor.rev_parse("main").await?;
     if local_main_oid != advanced_main_oid {
         bail!(
@@ -339,8 +346,9 @@ async fn one_pr_one_update(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     Ok(())
 }
 
-/// A confirmed maintainer's advanced local main tracks the destination,
-/// so it remains the fork point when that destination has not caught up.
+/// A confirmed maintainer's advanced local main remains the fork point even
+/// when it tracks another publishing remote and the destination has not caught
+/// up.
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_base_is_advanced_main_not_stale_origin(
