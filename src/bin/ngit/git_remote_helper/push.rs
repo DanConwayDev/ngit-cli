@@ -859,7 +859,7 @@ async fn process_proposal_refspecs(
                     };
                     if ahead.is_empty() {
                         bail!(
-                            "cannot push '{from}' as proposal as branch isn't ahead of {default_label}"
+                            "cannot update proposal from '{from}': no commits after {default_label}.\nChoose a base before the commits you want to propose, then repeat this force push with -o base=<commit-or-ref>. Alternatively, run ngit send --in-reply-to <PR-ID> --base <commit-or-ref> from the proposal branch to update the same PR."
                         );
                     }
                     for patch in generate_patches_or_pr_event_or_pr_updates(
@@ -1037,7 +1037,9 @@ async fn process_proposal_refspecs(
                 default_branch.commits_ahead(git_repo, &tip_of_pushed_branch)?
             };
             if ahead.is_empty() {
-                bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
+                bail!(
+                    "cannot create proposal from '{from}': no commits after {default_label}.\nTo choose a different base, run ngit send --base <commit-or-ref> from the proposal branch, or repeat this push with -o base=<commit-or-ref>. The base should be the commit before the changes you want to propose."
+                );
             }
             for event in generate_patches_or_pr_event_or_pr_updates(
                 client,
