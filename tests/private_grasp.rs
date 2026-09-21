@@ -314,7 +314,16 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
         nostr_lmdb::NostrLmdb::open(template.path().join("test-global-cache.lmdb")).await?;
     database.save_event(&cached_event).await?;
     drop(database);
-    let cache_dir = plaintext_cache.path().join("ngit/private-git-relay-lists");
+    // ProjectDirs ignores XDG_CACHE_HOME on macOS. Keep the existing
+    // sandbox HOME (and its signer configuration), but seed the directory
+    // the child actually reads rather than an unused XDG cache.
+    let cache_dir = if cfg!(target_os = "macos") {
+        harness
+            .home()
+            .join("Library/Caches/ngit/private-git-relay-lists")
+    } else {
+        plaintext_cache.path().join("ngit/private-git-relay-lists")
+    };
     std::fs::create_dir_all(&cache_dir)?;
     std::fs::write(
         cache_dir.join(format!(

@@ -222,6 +222,13 @@ impl GraspServer {
             .context("failed to allocate tempdir for ngit-grasp git data")
             .map_err(StartFailure::Other)?;
         let git_data_path = git_data_dir.path().to_path_buf();
+        let log = std::fs::File::create(git_data_path.join("fixture.log"))
+            .context("create Grasp fixture log")
+            .map_err(StartFailure::Other)?;
+        let stderr = log
+            .try_clone()
+            .context("clone Grasp fixture log handle")
+            .map_err(StartFailure::Other)?;
 
         // Build the Command *before* releasing the reservation so that
         // none of the env-setting allocations happen while the listener
@@ -242,11 +249,10 @@ impl GraspServer {
             .env("NGIT_SYNC_STARTUP_DELAY_SECS", "0")
             .env("NGIT_SYNC_STARTUP_JITTER_MS", "0")
             .env("NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", "1")
-            // Detach from the test's stdio. Tests assert on the harness's
-            // event store / git state, not on ngit-grasp logs — and noisy
-            // INFO output makes `cargo test --nocapture` unreadable.
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // Keep successful tests quiet, but retain diagnostics for callers
+            // reporting a failure before the fixture's temporary data is gone.
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr));
 
         // Opt the subprocess into GRASP-06 `/prs/` endpoint support when
         // requested. The env var is consumed by ngit-grasp's config layer
@@ -424,6 +430,28 @@ impl GraspServer {
     /// `nostr/policy/announcement.rs::ensure_bare_repository`).
     pub fn git_data_path(&self) -> &Path {
         &self.git_data_path
+    }
+
+    /// Last 64 KiB of subprocess output, for failure context rather than
+    /// assertions.
+    pub fn log_tail(&self) -> String {
+        use std::io::{Read, Seek, SeekFrom};
+        let tail = (|| -> std::io::Result<Vec<u8>> {
+            let mut file = std::fs::File::open(self.git_data_path.join("fixture.log"))?;
+            let start = file.metadata()?.len().saturating_sub(64 * 1024);
+            file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })();
+        match tail {
+            Ok(bytes) => format!(
+                "Grasp fixture {} log tail:\n{}",
+                self.role,
+                String::from_utf8_lossy(&bytes)
+            ),
+            Err(error) => format!("Could not read Grasp fixture {} log: {error}", self.role),
+        }
     }
 
     /// Query ngit-grasp's nostr surface over a real websocket REQ. Identical

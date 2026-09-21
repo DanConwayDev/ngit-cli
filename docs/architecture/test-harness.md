@@ -447,3 +447,12 @@ tests cover fixed-date exhaustion. For reader tie-break tests, build two events
 at the same timestamp and sort their IDs; do not mine against a random fixture.
 An ID-guard nonce is valid even for a strictly later update, so tests must not
 require such updates to be nonce-free.
+
+### Grasp failure diagnostics
+
+Grasp subprocess output is captured in the fixture's temporary `fixture.log`.
+Successful tests stay quiet. When a command returns an error, attach
+`GraspServer::log_tail()` as error context before dropping the harness; it
+returns at most the final 64 KiB of subprocess output plus a label. This also
+works for tests returning `Result::Err`, where panic-only cleanup logging
+would miss the failure. Logs are diagnostic evidence, not test assertions.
