@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Clarify the agent skill's shared repository-data refresh behavior across git
+  and ngit commands, and when to reuse cached data with `--offline` to avoid
+  redundant relay fetching.
+
 ## [3.0.2] - 2026-09-18
 
 Fix flaky tests and improve updates, cache recovery, push consistency, relay publishing, and Android TLS compatibility.
