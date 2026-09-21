@@ -1,56 +1,10 @@
-//! End-to-end coverage of a force-push PR update where the **nostr remote's**
-//! view of the default branch (`origin/main`) is **stale** because `main`
-//! advanced via a *different* remote (modelling a `gitlab`/`github` remote that
-//! the contributor pulled into local `main`).
-//!
-//! ## The bug this guards against
-//!
-//! The merge-base (fork point) on a force-pushed PR update used to be computed
-//! as `get_merge_base(tip, get_main_or_master_branch())`, and
-//! `get_main_or_master_branch()` resolves to `origin/main` first, falling back
-//! to local `main` only when `origin/main` is absent. In a multi-remote
-//! workflow the canonical default branch lives on a non-nostr remote (here
-//! `gitlab`); the contributor pulls it into local `main` but the nostr remote
-//! (`origin`) lags. The stale `origin/main` then dragged the fork point
-//! backwards: a force-pushed PR reset to a single commit off the *advanced*
-//! main produced a `merge-base` tag pointing at the *old* main, not the new
-//! one.
-//!
-//! The fix computes the fork point against the **most advanced** default branch
-//! visible — local `main` and every remote's default branch — so an advance on
-//! any remote (or locally) is respected.
-//!
-//! ## Arrangement
-//!
-//! 1. Harness: one relay (`"default"`) + one GRASP server (`"repo"`) + one
-//!    vanilla git server (`"gitlab"`) standing in for a non-nostr remote.
-//! 2. Maintainer publishes the repo (kind 30617).  `published.initial_oid` is
-//!    the fork point baseline.
-//! 3. Maintainer seeds the `gitlab` vanilla server with the same `main` and
-//!    then advances it one commit (`gitlab-main.md`), so `gitlab/main` is one
-//!    commit ahead of `published.initial_oid`.
-//! 4. Fresh contributor clones the nostr repo, adds the `gitlab` remote, and
-//!    `git fetch gitlab` + fast-forwards **local** `main` to `gitlab/main`.
-//!    Crucially the contributor never pushes `main` to the nostr `origin`, so
-//!    `origin/main` stays at `published.initial_oid` (stale).
-//! 5. Contributor checks out `pr/feature` off the *advanced* local `main`,
-//!    commits `t1.md` + `t2.md`, and `git push -u origin pr/feature` — the
-//!    original PR.
-//! 6. Contributor force-resets `pr/feature` to a single new commit (`t3.md`)
-//!    off the advanced local `main` tip (the simplified change), and `git push
-//!    -f origin pr/feature` — the act under test.
-//! 7. [`capture_snapshot`] reads events + refs; harness drops.
-//!
-//! ## Coverage
-//!
-//! 1. **one_pr_one_update** — the force push produced exactly one
-//!    KIND_PULL_REQUEST_UPDATE and did not emit a new KIND_PULL_REQUEST.
-//! 2. **merge_base_is_advanced_main_not_stale_origin** — the update event's
-//!    `merge-base` tag equals the *advanced* local `main` tip (=
-//!    `gitlab/main`), **not** the stale `origin/main` (=
-//!    `published.initial_oid`). This is the direct regression guard.
-//! 3. **update_c_tag_is_new_tip** — the update event's `c` tag equals the
-//!    single-commit tip OID after the reset.
+//! A confirmed maintainer's local default branch can include upstream changes
+//! learned from another Git server before the Nostr destination catches up.
+//! Even when it tracks the other remote, use the advanced local branch as the
+//! PR base for both initial publication and a force-pushed rewrite. A new PR
+//! requires --force before excluding those unpublished local-default commits.
+//! The complementary fork_origin cases ensure contributors and proposals equal
+//! to local default do not lose their proposed changes.
 
 use std::sync::Arc;
 
@@ -173,14 +127,10 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .await?;
     let advanced_main_oid = publisher.rev_parse("HEAD").await?;
 
-    // --- 4. Clone as a fresh contributor -------------------------------------
+    // --- 4. Clone as the confirmed maintainer
+    // -------------------------------------
     let contributor = harness
-        .clone_published_repo(
-            &published,
-            CloneLogin::AsContributor {
-                display_name: "stale-origin contributor".into(),
-            },
-        )
+        .clone_published_repo(&published, CloneLogin::AsMaintainer)
         .await?;
 
     let contributor_nsec = contributor
@@ -222,6 +172,13 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .git_ok(
             ["reset", "--hard", "gitlab/main"],
             "git reset --hard gitlab/main",
+        )
+        .await?;
+
+    contributor
+        .git_ok(
+            ["branch", "--set-upstream-to=gitlab/main", "main"],
+            "track maintainer's other publishing remote",
         )
         .await?;
 
@@ -270,7 +227,21 @@ async fn capture_snapshot() -> Result<Snapshot> {
         )
         .await?;
     contributor
-        .nostr_push(["-u", "origin", &format!("pr/{BRANCH}")])
+        .nostr_push_expecting_failure(["-u", "origin", &format!("pr/{BRANCH}")])
+        .await?;
+    assert!(
+        harness
+            .grasp("repo")
+            .events(
+                Filter::new()
+                    .author(contributor_pubkey)
+                    .kind(KIND_PULL_REQUEST)
+            )
+            .await?
+            .is_empty()
+    );
+    contributor
+        .nostr_push(["-f", "-u", "origin", &format!("pr/{BRANCH}")])
         .await
         .context("first nostr_push -u origin pr/feature failed")?;
 
@@ -375,17 +346,9 @@ async fn one_pr_one_update(#[future] snapshot: Arc<Snapshot>) -> Result<()> {
     Ok(())
 }
 
-/// Assertion 2 (the regression guard): the update event's `merge-base` tag
-/// equals the **advanced** local `main` tip, not the stale `origin/main`.
-///
-/// With the pre-fix logic the merge-base resolved against `origin/main` (the
-/// nostr remote-tracking ref), which lagged at `published.initial_oid` because
-/// `main` advanced via the `gitlab` remote only. That produced a merge-base of
-/// `stale_origin_main_oid`. The fix compares against the most advanced default
-/// branch (local `main` / any remote), yielding `advanced_main_oid`.
-///
-/// The precondition (`advanced != stale`, enforced in `capture_snapshot`)
-/// makes this assertion non-trivial.
+/// A confirmed maintainer's advanced local main remains the fork point even
+/// when it tracks another publishing remote and the destination has not caught
+/// up.
 #[rstest]
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_base_is_advanced_main_not_stale_origin(
