@@ -984,7 +984,7 @@ async fn process_proposal_refspecs(
                     .omits_unpublished_local_commits(git_repo, &tip_of_pushed_branch)?
             {
                 bail!(
-                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or use -o base=<remote>/<branch> (ngit send --base <remote>/<branch>) to choose a different base",
+                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or use -o base=<commit-or-ref> (ngit send --base <commit-or-ref>) to choose a different base",
                     default_branch.name.unwrap_or("default branch")
                 );
             }
