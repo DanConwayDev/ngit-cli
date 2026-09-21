@@ -1723,6 +1723,25 @@ pub(super) fn validate_git_server_url(url: &str) -> Result<String> {
     }
 }
 
+// Resolve the forthcoming state against the signed announcement being
+// published, not the old event retained while preparing its replacement.
+// In particular a self-defer repair must restore the signer's coordinate
+// before selecting and ordering against its cached state. This is only an
+// in-memory candidate; publication and state-transaction gates still apply.
+fn use_candidate_announcement(repo_ref: &mut RepoRef, event: &Event) {
+    repo_ref.events.insert(
+        Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: event.kind,
+                public_key: event.pubkey,
+                identifier: repo_ref.identifier.clone(),
+            },
+            relays: vec![],
+        },
+        event.clone(),
+    );
+}
+
 /// How `ngit init` establishes the repository state after publishing
 /// the announcement.
 enum StateAction {
@@ -1803,7 +1822,7 @@ async fn publish_and_finalize(
             warn_style.apply_to("         pass --clean to drop them on republish"),
         );
     }
-    let repo_ref = RepoRef {
+    let mut repo_ref = RepoRef {
         identifier: fields.identifier.clone(),
         name: fields.name,
         description: fields.description,
@@ -1887,6 +1906,7 @@ async fn publish_and_finalize(
 
     // Step 2: Create event
     let repo_event = repo_ref.to_event(&signer).await?;
+    use_candidate_announcement(&mut repo_ref, &repo_event);
 
     // Step 3: Build nostr URL
     let nostr_url_decoded = repo_ref.to_nostr_git_url(&Some(git_repo));
@@ -3754,5 +3774,85 @@ mod git_server_url_validation_tests {
         ] {
             assert!(validate_git_server_url(url).is_err(), "{url}");
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_announcement_tests {
+    use nostr::prelude::{EventBuilder, Keys, Tag, Timestamp, event::FinalizeEvent};
+
+    use super::*;
+
+    #[test]
+    fn ended_role_does_not_retain_the_old_authority() -> Result<()> {
+        let keys = Keys::generate();
+        let author = keys.public_key().to_hex();
+        let active = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags([
+                Tag::identifier("repair"),
+                Tag::parse(["M", &author, "100"])?,
+            ])
+            .finalize(&keys)?;
+        let ended = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags([
+                Tag::identifier("repair"),
+                Tag::parse(["M", &author, "100", "200"])?,
+            ])
+            .finalize(&keys)?;
+        let mut candidate = RepoRef::try_from((active, None))?;
+        assert!(candidate.is_authorized_maintainer(&keys.public_key()));
+        use_candidate_announcement(&mut candidate, &ended);
+        assert!(!candidate.is_authorized_maintainer(&keys.public_key()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repaired_roles_keep_the_cached_state_visible() -> Result<()> {
+        for role in ["M", "m"] {
+            let keys = Keys::generate();
+            let author = keys.public_key().to_hex();
+            let malformed = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags([
+                    Tag::identifier("repair"),
+                    Tag::parse([role, &author, "100", "defer"])?,
+                ])
+                .finalize(&keys)?;
+            let repaired = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+                .tags([
+                    Tag::identifier("repair"),
+                    Tag::parse([role, &author, "100"])?,
+                ])
+                .finalize(&keys)?;
+            // The publisher has prepared repaired fields but still carries
+            // the original announcement map until the candidate is signed.
+            let mut candidate = RepoRef::try_from((repaired.clone(), None))?;
+            candidate.events = RepoRef::try_from((malformed, None))?.events;
+            let directory = tempfile::tempdir()?;
+            git2::Repository::init(directory.path())?;
+            let state = EventBuilder::new(Kind::Custom(30618), "")
+                .tags([
+                    Tag::identifier("repair"),
+                    Tag::parse([
+                        "refs/heads/main",
+                        "0123456789012345678901234567890123456789",
+                    ])?,
+                ])
+                .custom_created_at(Timestamp::from(2_000_000_000))
+                .finalize(&keys)?;
+            ngit::client::save_event_in_local_cache(directory.path(), &state).await?;
+            assert!(
+                get_state_from_cache(Some(directory.path()), &candidate)
+                    .await
+                    .is_err()
+            );
+            use_candidate_announcement(&mut candidate, &repaired);
+            assert_eq!(candidate.confirmed_maintainers(), vec![keys.public_key()]);
+            let cached = get_state_from_cache(Some(directory.path()), &candidate).await?;
+            assert_eq!(
+                cached.event.id, state.id,
+                "{role} repair lost its predecessor"
+            );
+        }
+        Ok(())
     }
 }
