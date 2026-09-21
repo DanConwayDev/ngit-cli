@@ -17,6 +17,9 @@
 //!   non-zero, no proposal events reach the relay, no
 //!   `refs/remotes/origin/pr/feature` tracking ref is recorded, and the `main`
 //!   tracking ref and relay state event still describe the last accepted push.
+//! - [`fork_origin`] — a fork default already contains the proposal while the
+//!   Nostr destination is behind. New proposals and both update paths use the
+//!   destination baseline, for branch and raw-commit refspecs.
 //! - [`new_pr`] — contributor pushes a `pr/feature` branch against a
 //!   single-grasp repo for the first time. Asserts that the push fires the
 //!   9e06e7b "GRASP server → default to PR kind" code path: one
@@ -68,6 +71,7 @@
 mod all_git_servers_down;
 mod ff_update;
 mod force_update_stale_origin_main;
+mod fork_origin;
 mod new_pr;
 mod new_pr_custom_subject_desc;
 mod patch_kind_when_no_grasp;

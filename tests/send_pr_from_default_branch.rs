@@ -61,7 +61,7 @@ async fn snapshot() -> Arc<Snapshot> {
     SNAPSHOT
         .get_or_init(|| async {
             Arc::new(
-                capture_snapshot()
+                capture_snapshot(false, false)
                     .await
                     .expect("send_pr_from_default_branch fixture: capture_snapshot failed"),
             )
@@ -70,7 +70,7 @@ async fn snapshot() -> Arc<Snapshot> {
         .clone()
 }
 
-async fn capture_snapshot() -> Result<Snapshot> {
+async fn capture_snapshot(maintainer: bool, defaults: bool) -> Result<Snapshot> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
@@ -91,8 +91,12 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let contributor = harness
         .clone_published_repo(
             &published,
-            CloneLogin::AsContributor {
-                display_name: "send-from-main contributor".into(),
+            if maintainer {
+                CloneLogin::AsMaintainer
+            } else {
+                CloneLogin::AsContributor {
+                    display_name: "send-from-main contributor".into(),
+                }
             },
         )
         .await?;
@@ -133,7 +137,7 @@ async fn capture_snapshot() -> Result<Snapshot> {
     let out = contributor
         .ngit([
             "send",
-            "HEAD~1",
+            if defaults { "--defaults" } else { "HEAD~1" },
             "--force-pr",
             "--title",
             "on-main proposal",
@@ -216,6 +220,26 @@ async fn c_tag_is_proposal_tip(#[future] snapshot: Arc<Snapshot>) -> Result<()> 
         "c tag should equal the on-main proposal commit OID; got {:?}, want {:?}",
         tag_value(&s.pr_event, "c"),
         s.proposal_tip_oid,
+    );
+    Ok(())
+}
+
+/// Maintainers may draft directly on the default branch without silently
+/// treating their selected commits as already merged, or requiring --force.
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn maintainer_can_send_from_default_branch(#[case] defaults: bool) -> Result<()> {
+    let snapshot = capture_snapshot(true, defaults).await?;
+    assert_eq!(snapshot.pr_count, 1);
+    assert_eq!(
+        tag_value(&snapshot.pr_event, "merge-base").as_deref(),
+        Some(snapshot.expected_merge_base_oid.as_str())
+    );
+    assert_eq!(
+        tag_value(&snapshot.pr_event, "c").as_deref(),
+        Some(snapshot.proposal_tip_oid.as_str())
     );
     Ok(())
 }

@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and ngit commands, and when to reuse cached data with `--offline` to avoid
   redundant relay fetching.
 
+### Fixed
+
+- Allow proposal pushes to a Nostr upstream when the contributor's local default
+  branch tracks a separate fork that already contains the change. Automatic
+  proposal bases use the destination's default-branch state, while still
+  considering a confirmed maintainer's local default that tracks and extends
+  that destination. New proposals require `git push --force` to omit unpublished
+  local-default commits they contain; `ngit send` still includes explicitly
+  selected commits drafted on the default branch.
+
 ## [3.0.2] - 2026-09-18
 
 Fix flaky tests and improve updates, cache recovery, push consistency, relay publishing, and Android TLS compatibility.

@@ -174,6 +174,7 @@ pub(super) async fn run_push(
             &proposal_refspecs,
             client, // &mut Client
             existing_state,
+            remote_name,
             &term,
             title_description.as_ref(),
             &git_server_push_options,
@@ -420,6 +421,7 @@ async fn create_events_and_proposals(
     proposal_refspecs: &Vec<String>,
     client: &mut Client,
     existing_state: HashMap<String, String>,
+    remote_name: Option<&str>,
     term: &Term,
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
@@ -578,6 +580,24 @@ async fn create_events_and_proposals(
         }
     }
 
+    let proposal_default_name = declared_default_branch.clone().or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .find(|name| existing_state.contains_key(&format!("refs/heads/{name}")))
+            .map(str::to_string)
+    });
+    let proposal_default = ProposalDefaultBranch {
+        name: proposal_default_name.as_deref(),
+        remote: remote_name,
+        allow_local: authorized_maintainer,
+        tip: proposal_default_name
+            .as_ref()
+            .and_then(|name| existing_state.get(&format!("refs/heads/{name}")))
+            .map(|oid| Sha1Hash::from_str(oid))
+            .transpose()
+            .context("invalid default branch commit in repository state")?,
+    };
+
     let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
         client,
         git_repo,
@@ -589,7 +609,7 @@ async fn create_events_and_proposals(
         title_description,
         git_server_push_options,
         git_server,
-        declared_default_branch.as_deref(),
+        &proposal_default,
         proposal_options,
     )
     .await?;
@@ -627,6 +647,91 @@ async fn create_events_and_proposals(
     })
 }
 
+/// Scope automatic proposal bases to the destination and its tracking branch.
+/// Legacy destinations without HEAD can still advertise main or master.
+struct ProposalDefaultBranch<'a> {
+    name: Option<&'a str>,
+    remote: Option<&'a str>,
+    allow_local: bool,
+    tip: Option<Sha1Hash>,
+}
+
+impl ProposalDefaultBranch<'_> {
+    fn tips(&self, repo: &Repo) -> Result<Vec<Sha1Hash>> {
+        match self.tip {
+            Some(tip) => {
+                let mut tips = vec![tip];
+                if let (Some(branch), Some(remote)) = (self.name, self.remote) {
+                    // A local default tracking a fork is not evidence that the
+                    // destination accepted those commits. A confirmed maintainer's
+                    // branch tracking this destination can contain advances learned
+                    // through another server, preserving the stale-destination protection.
+                    let tracks_destination = self.allow_local
+                        && repo
+                            .get_git_config_item(&format!("branch.{branch}.remote"), None)?
+                            .as_deref()
+                            == Some(remote)
+                        && repo
+                            .get_git_config_item(&format!("branch.{branch}.merge"), None)?
+                            .as_deref()
+                            == Some(format!("refs/heads/{branch}").as_str());
+                    if tracks_destination {
+                        if let Ok(local) =
+                            repo.get_commit_or_tip_of_reference(&format!("refs/heads/{branch}"))
+                        {
+                            if local != tip && repo.ancestor_of(&local, &tip)? {
+                                tips.push(local);
+                            }
+                        }
+                    }
+                }
+                Ok(tips)
+            }
+            None => Ok(vec![]),
+        }
+    }
+
+    fn merge_base(&self, repo: &Repo, tip: &Sha1Hash) -> Result<Option<Sha1Hash>> {
+        match self.tip {
+            Some(_) => {
+                let mut best = None;
+                for target in self.tips(repo)? {
+                    let base = repo.get_merge_base(tip, &target).context(
+                        "cannot determine proposal base against destination state; fetch the destination and retry",
+                    )?;
+                    if best.is_none_or(|current| repo.ancestor_of(&base, &current).unwrap_or(false))
+                    {
+                        best = Some(base);
+                    }
+                }
+                Ok(best)
+            }
+            None => bail!(
+                "cannot determine destination default branch; fetch the destination or specify -o base=<commit>"
+            ),
+        }
+    }
+
+    fn omits_unpublished_local_commits(&self, repo: &Repo, tip: &Sha1Hash) -> Result<bool> {
+        let Some(destination) = self.tip else {
+            return Ok(false);
+        };
+        let destination_base = repo.get_merge_base(tip, &destination)?;
+        Ok(self
+            .merge_base(repo, tip)?
+            .is_some_and(|base| base != destination_base))
+    }
+
+    fn commits_ahead(&self, repo: &Repo, tip: &Sha1Hash) -> Result<(Vec<Sha1Hash>, String)> {
+        let base = self
+            .merge_base(repo, tip)?
+            .context("missing proposal base")?;
+        let (mut ahead, _) = repo.get_commits_ahead_behind(&base, tip)?;
+        ahead.reverse();
+        Ok((ahead, self.name.unwrap_or("the default branch").to_string()))
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn process_proposal_refspecs(
@@ -640,7 +745,7 @@ async fn process_proposal_refspecs(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
-    default_branch: Option<&str>,
+    default_branch: &ProposalDefaultBranch<'_>,
     proposal_options: &super::ProposalOptions,
 ) -> Result<(Vec<Event>, Vec<String>)> {
     let mut events = vec![];
@@ -683,11 +788,11 @@ async fn process_proposal_refspecs(
                 vec![resolve_target_branch_tip(
                     git_repo,
                     branch,
-                    default_branch,
+                    default_branch.name,
                     false,
                 )?]
             } else {
-                git_repo.get_default_branch_tips(default_branch)?
+                default_branch.tips(git_repo)?
             };
             let inference = if explicit_base.is_none() {
                 infer_proposal_base(
@@ -750,8 +855,7 @@ async fn process_proposal_refspecs(
                             format!("target branch '{branch}'"),
                         )
                     } else {
-                        git_repo
-                            .get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?
+                        default_branch.commits_ahead(git_repo, &tip_of_pushed_branch)?
                     };
                     if ahead.is_empty() {
                         bail!(
@@ -871,16 +975,28 @@ async fn process_proposal_refspecs(
                 rejected_proposal_refspecs.push(refspec.clone());
             }
         } else {
-            // TODO new proposal / couldn't find exisiting proposal
+            // Confirm omitting unpublished local-default history on a new PR.
+            // Explicit bases already express the caller's choice of boundary.
+            if explicit_base.is_none()
+                && proposal_options.target_branch.is_none()
+                && !refspec.starts_with('+')
+                && default_branch
+                    .omits_unpublished_local_commits(git_repo, &tip_of_pushed_branch)?
+            {
+                bail!(
+                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or ngit send <range> to include selected commits",
+                    default_branch.name.unwrap_or("default branch")
+                );
+            }
             let target_tips = if let Some(branch) = &proposal_options.target_branch {
                 vec![resolve_target_branch_tip(
                     git_repo,
                     branch,
-                    default_branch,
+                    default_branch.name,
                     true,
                 )?]
             } else {
-                git_repo.get_default_branch_tips(default_branch)?
+                default_branch.tips(git_repo)?
             };
             let inferred_base = if explicit_base.is_none() {
                 match infer_proposal_base(
@@ -918,7 +1034,7 @@ async fn process_proposal_refspecs(
                     format!("target branch '{branch}'"),
                 )
             } else {
-                git_repo.get_commits_ahead_of_default(&tip_of_pushed_branch, default_branch)?
+                default_branch.commits_ahead(git_repo, &tip_of_pushed_branch)?
             };
             if ahead.is_empty() {
                 bail!("cannot push '{from}' as proposal as branch isn't ahead of {default_label}");
@@ -963,7 +1079,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     title_description: Option<&(String, String)>,
     git_server_push_options: &[String],
     git_server: Option<&str>,
-    default_branch: Option<&str>,
+    default_branch: &ProposalDefaultBranch<'_>,
     proposal_metadata: &ngit::push::ProposalMetadata,
     ordering_reference: Option<&Event>,
 ) -> Result<Vec<Event>> {
@@ -983,25 +1099,8 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         let first_commit = ahead.first().context("no commits")?;
         let push_options_refs: Vec<&str> =
             git_server_push_options.iter().map(String::as_str).collect();
-        // Compute the merge-base (fork point) from the actual git topology: the
-        // point where this branch diverges from the default branch. Crucially
-        // we compare against the *most advanced* default branch visible — the
-        // local default branch and every remote's default branch — not just
-        // `origin` (the nostr remote), whose view of the default branch can be
-        // stale in a multi-remote workflow (e.g. the canonical default branch
-        // lives on a gitlab/github remote and the nostr remote lags). Using the
-        // stale origin tip produced a fork point that didn't reflect that the
-        // default branch had advanced.
-        //
-        // This is correct for all push types:
-        //   - new PR: merge-base(tip, default) == first commit's parent
-        //   - FF push on existing PR: merge-base(tip, default) == original fork point
-        //     (not the previous PR tip, which parent(ahead.first()) would give for the
-        //     truncated FF `ahead` set — the 840c581 bug)
-        //   - force push after rebase: merge-base(tip, default) == new fork point (not
-        //     the stale value from the original PR event tag)
-        // Using the git DAG directly means no stored event values can ever
-        // propagate a stale or incorrect fork point.
+        // Use the same destination baseline for validation and event metadata.
+        // A contributor's local default branch may already contain this PR.
         let merge_base: Option<Sha1Hash> = if let Some(base) = &proposal_metadata.explicit_base {
             Some(*base)
         } else if let Some(branch) = &proposal_metadata.target_branch {
@@ -1013,10 +1112,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
                     })?,
             )
         } else {
-            git_repo
-                .get_most_advanced_merge_base_with_default(tip, default_branch)
-                .ok()
-                .flatten()
+            default_branch.merge_base(git_repo, tip)?
         };
         select_servers_push_refs_and_generate_pr_or_pr_update_event(
             client,
@@ -2736,6 +2832,95 @@ mod tests {
     use nostr::nips::nip19::Nip19Event;
 
     use super::*;
+
+    mod proposal_default {
+        use super::*;
+
+        #[test]
+        fn local_default_must_track_destination_and_extend_its_history() -> Result<()> {
+            let dir = tempfile::tempdir()?;
+            let git = Repository::init(dir.path())?;
+            let tree_id = git.treebuilder(None)?.write()?;
+            let tree = git.find_tree(tree_id)?;
+            let sig = git2::Signature::now("test", "test@example.com")?;
+            let commit = |message, parent: Option<git2::Oid>| -> Result<git2::Oid> {
+                let parents = parent.map(|oid| git.find_commit(oid)).transpose()?;
+                Ok(git.commit(
+                    None,
+                    &sig,
+                    &sig,
+                    message,
+                    &tree,
+                    &parents.iter().collect::<Vec<_>>(),
+                )?)
+            };
+            let initial = commit("initial", None)?;
+            let destination = commit("destination", Some(initial))?;
+            let advanced = commit("local advance", Some(destination))?;
+            let proposal = commit("proposal", Some(advanced))?;
+            let divergent = commit("divergent local", Some(initial))?;
+            let repo = Repo::from_path(&dir.path().to_path_buf())?;
+            let baseline = ProposalDefaultBranch {
+                name: Some("trunk"),
+                remote: Some("upstream"),
+                allow_local: true,
+                tip: Some(git::oid_to_sha1(&destination)),
+            };
+            for (remote, merge, local, expected) in [
+                ("upstream", "trunk", advanced, advanced),
+                ("origin", "trunk", advanced, destination),
+                ("origin", "trunk", proposal, destination),
+                ("upstream", "other", advanced, destination),
+                ("upstream", "trunk", initial, destination),
+                ("upstream", "trunk", divergent, destination),
+                ("", "trunk", advanced, destination),
+            ] {
+                git.reference("refs/heads/trunk", local, true, "test local default")?;
+                if remote.is_empty() {
+                    git.config()?.remove("branch.trunk.remote")?;
+                } else {
+                    git.config()?.set_str("branch.trunk.remote", remote)?;
+                }
+                git.config()?
+                    .set_str("branch.trunk.merge", &format!("refs/heads/{merge}"))?;
+                let proposal = git::oid_to_sha1(&proposal);
+                let expected = git::oid_to_sha1(&expected);
+                assert_eq!(baseline.merge_base(&repo, &proposal)?, Some(expected));
+                assert_eq!(
+                    baseline.omits_unpublished_local_commits(&repo, &proposal)?,
+                    expected == git::oid_to_sha1(&advanced),
+                );
+                let (ahead, label) = baseline.commits_ahead(&repo, &proposal)?;
+                assert_eq!(label, "trunk");
+                let contributor_baseline = ProposalDefaultBranch {
+                    allow_local: false,
+                    ..baseline
+                };
+                assert_eq!(
+                    contributor_baseline.merge_base(&repo, &proposal)?,
+                    Some(git::oid_to_sha1(&destination))
+                );
+                assert!(!contributor_baseline.omits_unpublished_local_commits(&repo, &proposal)?);
+                assert_eq!(ahead.last(), Some(&proposal));
+                assert_eq!(
+                    ahead.len(),
+                    if expected == git::oid_to_sha1(&advanced) {
+                        1
+                    } else {
+                        2
+                    }
+                );
+            }
+            git.reference("refs/heads/trunk", advanced, true, "local ahead")?;
+            git.config()?.set_str("branch.trunk.remote", "upstream")?;
+            let independent_proposal = commit("independent proposal", Some(destination))?;
+            assert!(!baseline.omits_unpublished_local_commits(
+                &repo,
+                &git::oid_to_sha1(&independent_proposal),
+            )?);
+            Ok(())
+        }
+    }
 
     mod force_with_lease {
         use super::*;
