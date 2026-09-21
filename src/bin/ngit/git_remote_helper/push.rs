@@ -697,7 +697,7 @@ impl ProposalDefaultBranch<'_> {
                 let mut best = None;
                 for target in self.tips(repo, tip)? {
                     let base = repo.get_merge_base(tip, &target).context(
-                        "cannot determine proposal base against destination state; fetch the destination and retry",
+                        "cannot determine proposal base against destination state; fetch the destination and retry, or choose the commit before your proposed changes with -o base=<commit-or-ref>",
                     )?;
                     if best.is_none_or(|current| repo.ancestor_of(&base, &current).unwrap_or(false))
                     {
@@ -707,7 +707,7 @@ impl ProposalDefaultBranch<'_> {
                 Ok(best)
             }
             None => bail!(
-                "cannot determine destination default branch; fetch the destination or specify -o base=<commit>"
+                "cannot determine destination default branch; fetch the destination or choose the commit before your proposed changes with -o base=<commit-or-ref>"
             ),
         }
     }

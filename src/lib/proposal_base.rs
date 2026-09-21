@@ -242,7 +242,7 @@ fn select_proposal_base(
             [lineage] => {
                 if !commit_is_available(git_repo, &lineage.latest) {
                     bail!(
-                        "the latest tip of inferred parent PR #{} is not available locally; fetch it or specify --base",
+                        "the latest tip of inferred parent PR #{} is not available locally; fetch it or specify -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)",
                         &lineage.root_id.to_hex()[..8]
                     );
                 }
@@ -253,14 +253,14 @@ fn select_proposal_base(
                     return Ok(inferred_base(&lineage.root_id, lineage.latest));
                 }
                 bail!(
-                    "inferred parent PR #{} has advanced to {}, but the proposal tip is not descended from it; rebase onto the latest parent or specify --base",
+                    "inferred parent PR #{} has advanced to {}, but the proposal tip is not descended from it; rebase onto the latest parent or specify -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)",
                     &lineage.root_id.to_hex()[..8],
                     lineage.latest
                 );
             }
             _ => {
                 bail!(
-                    "the previous proposal base belongs to multiple open PR lineages; specify --base"
+                    "the previous proposal base belongs to multiple open PR lineages; specify -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)"
                 );
             }
         }
@@ -294,7 +294,9 @@ fn select_proposal_base(
     match maximal.as_slice() {
         [] => Ok(ProposalBaseInference::NotFound),
         [lineage] => Ok(inferred_base(&lineage.root_id, lineage.latest)),
-        _ => bail!("multiple unrelated open PR tips are possible proposal bases; specify --base"),
+        _ => bail!(
+            "multiple unrelated open PR tips are possible proposal bases; specify -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)"
+        ),
     }
 }
 
@@ -454,10 +456,16 @@ pub fn commits_after_base(
 ) -> Result<Vec<Sha1Hash>> {
     let (mut ahead, behind) = git_repo.get_commits_ahead_behind(&base.commit, tip)?;
     if !behind.is_empty() {
-        bail!("proposal tip is not descended from {}", base.description);
+        bail!(
+            "proposal tip is not descended from {}; choose an ancestor before your proposed changes with -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)",
+            base.description
+        );
     }
     if ahead.is_empty() {
-        bail!("proposal has no commits after {}", base.description);
+        bail!(
+            "proposal has no commits after {}; choose the commit before your proposed changes with -o base=<commit-or-ref> (ngit send --base <commit-or-ref>)",
+            base.description
+        );
     }
     ahead.reverse();
     Ok(ahead)

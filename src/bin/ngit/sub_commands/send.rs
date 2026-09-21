@@ -71,8 +71,8 @@ pub struct SubCommandArgs {
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
     /// commit, branch, root PR, or PR update to use as the base for this
-    /// publication; e.g. --base github/main when that upstream is ahead of
-    /// Nostr
+    /// publication. History through this base is excluded from the proposed
+    /// changes. Use a commit ID or a verified ref, e.g. --base github/master
     #[clap(long)]
     pub(crate) base: Option<String>,
 }
@@ -399,7 +399,7 @@ pub async fn launch(
                 };
                 if proposed_commits.len() > 10 && !cli_args.force {
                     bail!(
-                        "too many commits ({}). use --force to proceed or specify a range",
+                        "too many commits ({}). choose where your proposed changes start with --base <commit-or-ref> (PRs only), specify a range, or use --force to send all selected commits",
                         proposed_commits.len()
                     );
                 }
@@ -415,13 +415,15 @@ pub async fn launch(
     // Check for too many commits with explicit range
     if commits.len() > 10 && !cli_args.force && !cli_args.interactive {
         bail!(
-            "too many commits ({}). use --force to proceed or specify a smaller range",
+            "too many commits ({}). choose where your proposed changes start with --base <commit-or-ref> (PRs only), specify a smaller range, or use --force to send all selected commits",
             commits.len()
         );
     }
 
     if commits.is_empty() {
-        bail!("no commits selected");
+        bail!(
+            "no commits selected; select a commit range, or send as a PR with --base <commit-or-ref> set to the commit before your proposed changes (omit --force-patch and --no-cover-letter)"
+        );
     }
     println!("creating proposal from {} commits:", commits.len());
 
@@ -444,6 +446,7 @@ pub async fn launch(
         &behind,
         &proposal_base_name,
         &proposal_base_tip,
+        !args.force_patch && !args.no_cover_letter,
     )?;
 
     let commits_too_big = git_repo.are_commits_too_big_for_patches(&commits);
@@ -709,7 +712,13 @@ fn check_commits_are_suitable_for_proposal(
     behind: &[Sha1Hash],
     main_branch_name: &str,
     main_tip: &Sha1Hash,
+    supports_explicit_base: bool,
 ) -> Result<()> {
+    let base_guidance = if supports_explicit_base {
+        "retry with --base <commit-or-ref> set to the commit before your proposed changes"
+    } else {
+        "select a different commit range or use --force to keep the selected commits"
+    };
     // check proposal ahead of origin/main
     if first_commit_ahead.len().gt(&1) {
         if cli.interactive {
@@ -720,11 +729,11 @@ fn check_commits_are_suitable_for_proposal(
                     )
                     .with_default(false)
             ).context("failed to get confirmation response from interactor confirm")? {
-                bail!("aborting ...");
+                bail!("aborting; {base_guidance}");
             }
         } else if !cli.force {
             bail!(
-                "proposal builds on a commit {} ahead of '{}'. use --force to proceed",
+                "proposal builds on a commit {} ahead of '{}'. {base_guidance}",
                 first_commit_ahead.len() - 1,
                 main_branch_name
             );
@@ -741,12 +750,10 @@ fn check_commits_are_suitable_for_proposal(
                     )
                     .with_default(false)
             ).context("failed to get confirmation response from interactor confirm")? {
-                bail!("aborting ...");
+                bail!("aborting; {base_guidance}");
             }
         } else if !cli.force {
-            bail!(
-                "proposal contains commit(s) already in '{main_branch_name}'. use --force to proceed"
-            );
+            bail!("proposal contains commit(s) already in '{main_branch_name}'. {base_guidance}");
         }
     }
     // check proposal isn't behind origin/main
@@ -759,11 +766,11 @@ fn check_commits_are_suitable_for_proposal(
                     )
                     .with_default(false)
             ).context("failed to get confirmation response from interactor confirm")? {
-                bail!("aborting so commits can be rebased");
+                bail!("aborting so commits can be rebased; alternatively, {base_guidance}");
             }
         } else if !cli.force {
             bail!(
-                "proposal is {} behind '{}'. rebase first or use --force to proceed",
+                "proposal is {} behind '{}'. rebase first, or {base_guidance}",
                 behind.len(),
                 main_branch_name
             );

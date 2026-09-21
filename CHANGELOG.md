@@ -30,15 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fix PR pushes from forks. Changes already on your fork or local default
-  branch are still proposed if the Nostr destination has not accepted them.
+- Fix PR pushes when changes are already on your local default branch or
+  another remote but have not been accepted by the Nostr destination.
   A PR that points to the same commit as local `main` or `master` works too.
 - Support maintainers who build PRs on a newer local default branch. For a new
   PR sharing local commits that have not been published to Nostr, explain how
   `-o base=<commit-or-ref>` chooses where the proposed changes start. Earlier
   commits remain in Git history. Local changes outside the PR need no confirmation.
 - Keep `ngit send` working for drafts made directly on `main` or `master`.
-  Explain how `--base <commit-or-ref>` lets contributors and maintainers choose
+  Rejection messages explain how `--base <commit-or-ref>` lets you choose
   which earlier commits to exclude. Remote names such as `origin` or `github`
   do not establish ownership or accepted history.
 
