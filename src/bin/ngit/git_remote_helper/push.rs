@@ -984,7 +984,7 @@ async fn process_proposal_refspecs(
                     .omits_unpublished_local_commits(git_repo, &tip_of_pushed_branch)?
             {
                 bail!(
-                    "proposal contains unpublished commits from local '{}'; use git push --force to omit them and use that local branch as the base, or use -o base=<commit-or-ref> (ngit send --base <commit-or-ref>) to choose a different base",
+                    "local '{0}' contains commits shared with this proposal that are not published to the destination; choose which changes to propose with -o base=<commit-or-ref> (ngit send --base <commit-or-ref>). Use -o base=refs/heads/{0} to start the proposal after your local default branch. Earlier commits remain in Git history but are outside the proposed changes",
                     default_branch.name.unwrap_or("default branch")
                 );
             }

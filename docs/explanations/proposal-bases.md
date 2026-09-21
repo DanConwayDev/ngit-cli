@@ -58,10 +58,15 @@ extends the destination's default, regardless of its tracking remote.
 - If the PR tip equals local default, all commits ahead of the destination are
   proposed. There is no additional `--force` requirement.
 - If using local default would exclude unpublished commits shared with a new
-  PR, ngit asks for `git push --force` to confirm using that local base. Those
-  commits remain in Git history but are excluded from the proposed change.
-- Local advances absent from the PR's history do not require that confirmation.
-- Use `-o base=<commit-or-ref>` to select a different boundary explicitly.
+  PR, ngit asks you to choose the base explicitly with
+  `-o base=<commit-or-ref>` (or `ngit send --base <commit-or-ref>`).
+  For example, `-o base=refs/heads/main` starts the proposal after local `main`.
+  Earlier commits remain in the pushed Git history but are outside the proposed
+  changes.
+- Local advances absent from the PR's history do not require an explicit base.
+
+Existing `git push --force` support still confirms using the automatically
+selected local base. Prefer an explicit base to make the boundary clear.
 
 Contributors' local defaults do not advance the automatic base. Use the explicit
 base options above when you intend to exclude additional history.
