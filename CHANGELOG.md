@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-09-21
+
+Fix proposal base selection for PR pushes and draft patches, refresh dependencies,
+and clarify agent guidance for repository data refreshes.
+
 ### Changed
 
 - Refresh Rust dependencies and the lockfile, including Nostr SDK 0.45.4,
