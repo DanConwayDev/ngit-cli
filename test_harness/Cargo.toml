@@ -16,14 +16,14 @@ http-body-util = "0.1"
 hyper = { version = "1.11", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 # Kept in step with the root crate — see the note in ../Cargo.toml.
-nostr = "0.45.3"
+nostr = "0.45.5"
 # `nostr-relay-builder` was merged into `nostr-sdk` behind the `local-relay`
 # feature; `LocalRelay` now lives at `nostr_sdk::local_relay`.
-nostr-sdk = { version = "0.45.2", features = ["local-relay"] }
+nostr-sdk = { version = "0.45.4", features = ["local-relay"] }
 serde_json = "1.0.151"
 tempfile = "3.27"
 tokio = { version = "1.53.1", features = ["full"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.30"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -33,5 +33,5 @@ libc = "0.2"
 # uses, so the fixture's socket-level behaviour is asserted as reqwest sees it.
 # Match ngit's TLS feature even when these tests run without the root package.
 # Workspace feature unification otherwise enables it only in workspace runs.
-reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "json", "rustls-no-provider"] }
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "http2", "json", "rustls-no-provider"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }

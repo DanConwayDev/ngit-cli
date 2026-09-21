@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh Rust dependencies and the lockfile, including Nostr SDK 0.45.4,
+  Reqwest 0.13.5, Rustls 0.23.45, apk-info 1.0.13, mailparse 0.17.0,
+  keyring 4.2.0, and the test harness dependencies. Relevant upstream fixes:
+  - Rustls rejects TLS 1.3 handshake messages received at the wrong encryption
+    level ([GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/releases/tag/v%2F0.23.45)).
+  - Reqwest selects the correct credentials when multiple proxies match a URL
+    and recognizes timeouts wrapped in response-body decoding errors
+    ([release notes](https://github.com/seanmonstar/reqwest/releases/tag/v0.13.5)).
+  - APK analysis can continue when the resource table is corrupt, resolves
+    sparse resource entries correctly, and reads ZIP entries lazily to reduce
+    memory use with large archives
+    ([release notes](https://github.com/delvinru/apk-info/blob/master/CHANGELOG.md#1013---2026-09-10)).
+  - The Nostr SDK's local relay, used by the test harness, closes subscriptions
+    when their live-event buffer overflows so clients can detect missing events
+    ([crate changelog](https://docs.rs/crate/nostr-sdk/0.45.4/source/CHANGELOG.md)).
 - Clarify the agent skill's shared repository-data refresh behavior across git
   and ngit commands, and when to reuse cached data with `--offline` to avoid
   redundant relay fetching.

@@ -13,7 +13,7 @@ categories = ["command-line-utilities","development-tools"]
 
 [dependencies]
 anyhow = "1.0.104"
-apk-info = "1.0.12"
+apk-info = "1.0.13"
 async-trait = "0.1.92"
 auth-git2 = "0.6.0"
 # `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its
@@ -25,8 +25,8 @@ base64 = "0.23.1"
 bech32 = "0.12.0"
 chacha20poly1305 = "0.11.0"
 chrono = "0.4"
-clap = { version = "4.6.6", features = ["derive", "env"] }
-console = "0.16.4"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+console = "0.16.6"
 crossterm = "0.29.0"
 dialoguer = "0.12.0"
 directories = "6.0.0"
@@ -37,26 +37,26 @@ indicatif = "0.18.6"
 # `keyring` 4's default `v1` feature provides persistent native stores on
 # macOS, Windows, and Unix (Secret Service). Keep defaults enabled: disabling
 # them makes `keyring` reject the build instead of selecting a real store.
-keyring = "4.1.6"
-mailparse = "0.16.1"
+keyring = "4.2.0"
+mailparse = "0.17.0"
 mime_guess = "2.0"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.
-nostr = { version = "0.45.4", features = ["nip44", "nip49"] }
-nostr-connect = "0.45.1"
-nostr-database = "0.45.1"
-nostr-lmdb = "0.45.2"
-nostr-memory = "0.45.1"
-nostr-sdk = "0.45.2"
+nostr = { version = "0.45.5", features = ["nip44", "nip49"] }
+nostr-connect = "0.45.2"
+nostr-database = "0.45.2"
+nostr-lmdb = "0.45.3"
+nostr-memory = "0.45.2"
+nostr-sdk = "0.45.4"
 passwords = "3.1.18"
 qrcode = { version = "0.14.1", default-features = false }
 # Keep Reqwest provider-neutral so rustls compiles with Ring alone, while
 # retaining Reqwest's other default features. `rustls-no-provider` requires
 # the application to install a process-wide provider before building a client;
 # ngit does that explicitly through `tls::install_default_crypto_provider`.
-reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "json", "rustls-no-provider", "stream", "system-proxy"] }
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "http2", "json", "rustls-no-provider", "stream", "system-proxy"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 scrypt = "0.12.0"
 semver = "1.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -81,14 +81,15 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # Corrupt real cache fixtures through the same LMDB backend, without byte hacks.
+# Stay on nostr-lmdb's 0.20 series so both share the open-environment registry.
 heed = { version = "0.20.5", default-features = false }
 webpki-root-certs = "1.0.9"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.30"
 assert_cmd = "2.2.2"
 mockall = "0.15.0"
 once_cell = "1.21.4"
-rstest = "0.26"
+rstest = "0.27"
 serial_test = "4.0.1"
 test_harness = { path = "test_harness" }
 # `test-util` is not part of tokio's `full` feature. It provides the paused
