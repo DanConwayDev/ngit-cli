@@ -17,6 +17,8 @@
 //!   non-zero, no proposal events reach the relay, no
 //!   `refs/remotes/origin/pr/feature` tracking ref is recorded, and the `main`
 //!   tracking ref and relay state event still describe the last accepted push.
+//! - [`combined_default_push`] — a maintainer publishes the default branch and
+//!   a new PR together, without force, in either refspec order.
 //! - [`fork_origin`] — a fork default already contains the proposal while the
 //!   Nostr destination is behind. New proposals and both update paths use the
 //!   destination baseline, for branch and raw-commit refspecs.
@@ -69,6 +71,7 @@
 //! pinpoint-named in `cargo test` output.
 
 mod all_git_servers_down;
+mod combined_default_push;
 mod ff_update;
 mod force_update_stale_origin_main;
 mod fork_origin;

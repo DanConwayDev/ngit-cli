@@ -489,9 +489,16 @@ async fn create_events_and_proposals(
     // A rejected pusher's branch refspecs produce no state candidate, no
     // merge/issue status events and no maintainers.yaml update; only their
     // proposal refspecs are processed below.
-    if authorized_maintainer && !git_server_refspecs.is_empty() {
-        let new_state = generate_updated_state(git_repo, &existing_state, git_server_refspecs)?;
-
+    let planned_state = if authorized_maintainer && !git_server_refspecs.is_empty() {
+        Some(generate_updated_state(
+            git_repo,
+            &existing_state,
+            git_server_refspecs,
+        )?)
+    } else {
+        None
+    };
+    if let Some(new_state) = &planned_state {
         let store_state =
             if let Ok(Some(nostate)) = git_repo.get_git_config_item("nostr.nostate", None) {
                 !nostate.eq("true")
@@ -522,7 +529,7 @@ async fn create_events_and_proposals(
             state = Some(
                 RepoState::build(
                     repo_ref.identifier.clone(),
-                    new_state,
+                    new_state.clone(),
                     &signer,
                     old_state_event.as_ref(),
                 )
@@ -578,18 +585,24 @@ async fn create_events_and_proposals(
         }
     }
 
-    let proposal_default_name = declared_default_branch.clone().or_else(|| {
-        ["main", "master"]
-            .into_iter()
-            .find(|name| existing_state.contains_key(&format!("refs/heads/{name}")))
-            .map(str::to_string)
-    });
+    // A default-branch update in this batch is an explicit publication choice,
+    // so proposals can use its planned tip without the unpublished-local guard.
+    // This is only a planning baseline: StateTransaction still controls which
+    // events are published and when successful refs are reported and cached.
+    let proposal_state = planned_state.as_ref().unwrap_or(&existing_state);
+    let proposal_default_name =
+        repo_state::default_branch_from_state(proposal_state).or_else(|| {
+            ["main", "master"]
+                .into_iter()
+                .find(|name| proposal_state.contains_key(&format!("refs/heads/{name}")))
+                .map(str::to_string)
+        });
     let proposal_default = ProposalDefaultBranch {
         name: proposal_default_name.as_deref(),
         allow_local: authorized_maintainer,
         tip: proposal_default_name
             .as_ref()
-            .and_then(|name| existing_state.get(&format!("refs/heads/{name}")))
+            .and_then(|name| proposal_state.get(&format!("refs/heads/{name}")))
             .map(|oid| Sha1Hash::from_str(oid))
             .transpose()
             .context("invalid default branch commit in repository state")?,
