@@ -30,7 +30,10 @@ use crate::{
     },
     cli::{LogTailMode, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
-    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
+    client::{
+        Client, Connect, get_active_label_events, get_events_from_local_cache,
+        warn_if_invited_as_maintainer,
+    },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
         commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
@@ -124,8 +127,9 @@ pub async fn launch(
         statuses
     };
 
-    // Fetch NIP-32 kind-1985 label events for all proposals.
-    let label_events: Vec<nostr::prelude::Event> = get_events_from_local_cache(
+    // Fetch NIP-32 kind-1985 label events for all proposals, minus any
+    // carrying a valid NIP-09 deletion.
+    let label_events: Vec<nostr::prelude::Event> = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()

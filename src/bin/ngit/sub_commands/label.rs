@@ -8,7 +8,7 @@ use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
+    client::{Client, Connect, get_active_label_events, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions},
     login,
     repo_ref::get_resolved_repo_coordinate_for_publishing,
@@ -23,7 +23,7 @@ use crate::{
 /// `labels` must be non-empty. The caller is responsible for ensuring
 /// `target` is a valid issue or PR event that belongs to the current repo.
 #[allow(clippy::too_many_lines)]
-async fn publish_label_event(
+pub(crate) async fn publish_label_event(
     id: &str,
     labels: &[String],
     offline: bool,
@@ -86,7 +86,8 @@ async fn publish_label_event(
     }
 
     // Fetch existing label events so we can warn about duplicates.
-    let existing_label_events = get_events_from_local_cache(
+    // Deleted label events do not count: re-adding a removed label is new.
+    let existing_label_events = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
@@ -214,17 +215,43 @@ async fn publish_label_event(
 pub async fn launch_issue_label(
     id: &str,
     labels: &[String],
+    remove_labels: &[String],
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    publish_label_event(id, labels, offline, "issue", auth).await
+    launch_label(id, labels, remove_labels, offline, "issue", auth).await
 }
 
 pub async fn launch_pr_label(
     id: &str,
     labels: &[String],
+    remove_labels: &[String],
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    publish_label_event(id, labels, offline, "PR", auth).await
+    launch_label(id, labels, remove_labels, offline, "PR", auth).await
+}
+
+/// Shared entry point behind `issue label` / `pr label`: apply removals
+/// first so re-adding a just-removed label in the same invocation leaves
+/// it present. At least one of the two lists must be non-empty.
+async fn launch_label(
+    id: &str,
+    labels: &[String],
+    remove_labels: &[String],
+    offline: bool,
+    target_kind: &str, // "issue" or "PR" — used in error messages
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    if labels.is_empty() && remove_labels.is_empty() {
+        bail!("nothing to change: pass --label and/or --remove-label");
+    }
+    if !remove_labels.is_empty() {
+        super::unlabel::publish_unlabel_event(id, remove_labels, offline, target_kind, auth)
+            .await?;
+    }
+    if !labels.is_empty() {
+        publish_label_event(id, labels, offline, target_kind, auth).await?;
+    }
+    Ok(())
 }

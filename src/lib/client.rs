@@ -1542,6 +1542,8 @@ impl Connect for Client {
         // Only request non-proposal event deletions on the first loop iteration;
         // cleared after first use so subsequent iterations don't re-request them.
         let mut fresh_non_proposal_event_ids = request.non_proposal_event_ids.clone();
+        // Same one-shot rule for label-event deletions.
+        let mut fresh_label_event_ids = request.label_event_ids.clone();
 
         // discovery expansion state: see expand_role_discovery
         let mut maintainer_listed: HashSet<PublicKey> = request.maintainer_listed_authors.clone();
@@ -1576,6 +1578,7 @@ impl Connect for Client {
                     &fresh_coordinates,
                     &fresh_proposal_roots,
                     &fresh_issue_roots,
+                    &fresh_label_event_ids,
                     &fresh_non_proposal_event_ids,
                     &fresh_profiles,
                 ),
@@ -1600,6 +1603,7 @@ impl Connect for Client {
                 }
             }
             fresh_non_proposal_event_ids = HashSet::new();
+            fresh_label_event_ids = HashSet::new();
 
             if let Some(pb) = &pb {
                 pb.set_prefix(
@@ -2909,6 +2913,29 @@ pub async fn get_events_from_local_cache(
     Ok(events.into_iter().collect())
 }
 
+/// Fetch cached kind-1985 label events minus any carrying a valid NIP-09
+/// deletion. Both event kinds come from the local cache, so this works
+/// offline; deletions converge from relays through the fetch filters.
+/// Callers pass the same filter they would use for the label events alone.
+pub async fn get_active_label_events(
+    git_repo_path: &Path,
+    filters: Vec<nostr::prelude::Filter>,
+) -> Result<Vec<nostr::prelude::Event>> {
+    let label_events = get_events_from_local_cache(git_repo_path, filters).await?;
+    if label_events.is_empty() {
+        return Ok(label_events);
+    }
+    let deletions = get_events_from_local_cache(
+        git_repo_path,
+        vec![nostr::prelude::Filter::default().kind(Kind::EventDeletion)],
+    )
+    .await?;
+    Ok(crate::git_events::apply_label_deletions(
+        label_events,
+        &deletions,
+    ))
+}
+
 pub async fn get_event_from_global_cache(
     git_repo_path: Option<&Path>,
     filters: Vec<nostr::prelude::Filter>,
@@ -3730,6 +3757,30 @@ async fn create_relays_request(
         }
     }
 
+    // Known kind-1985 label events, so the fetch can also request the kind-5
+    // deletion events that target them (NIP-09). Labels observed for the
+    // first time this sync pick up their deletions on the next one — the
+    // same eventual consistency the proposal filters already accept.
+    let mut label_event_ids: HashSet<EventId> = HashSet::new();
+    if let Some(git_repo_path) = git_repo_path {
+        let labelled_roots: HashSet<EventId> =
+            issue_ids.iter().chain(proposals.iter()).copied().collect();
+        if !labelled_roots.is_empty() {
+            for event in &get_events_from_local_cache(
+                git_repo_path,
+                vec![
+                    nostr::prelude::Filter::default()
+                        .events(labelled_roots)
+                        .kind(KIND_LABEL),
+                ],
+            )
+            .await?
+            {
+                label_event_ids.insert(event.id);
+            }
+        }
+    }
+
     let profiles_to_fetch_from_user_relays = {
         let mut user_profiles = user_profiles.clone();
         user_profiles.extend(private_relay_list_authors.iter().copied());
@@ -3788,6 +3839,8 @@ async fn create_relays_request(
             &repo_coordinates_without_relays,
             &proposals,
             &issue_ids,
+            &HashSet::new(), /* label_event_ids not yet computed; label deletions join the
+                              * per-relay fetch below */
             &HashSet::new(), /* non_proposal_event_ids not yet computed; deletion events are not
                               * cached locally */
             &missing_contributor_profiles
@@ -3972,6 +4025,7 @@ async fn create_relays_request(
         },
         proposals,
         issue_ids,
+        label_event_ids,
         contributors,
         missing_contributor_profiles,
         existing_events,
@@ -4083,6 +4137,30 @@ async fn process_fetched_events(
                 }
             } else if event.kind.eq(&Kind::EventDeletion) {
                 report.deletions += 1;
+                // Evict validly-deleted label events from the local cache so
+                // label removals converge instead of lingering as stale rows.
+                // NIP-09 rule: the deleter must be the label event's author.
+                if let Some(git_repo_path) = git_repo_path {
+                    for tag in event.tags.iter() {
+                        let s = tag.as_slice();
+                        if s.len() < 2 || !s[0].eq("e") {
+                            continue;
+                        }
+                        let Ok(target_id) = EventId::parse(&s[1]) else {
+                            continue;
+                        };
+                        let targets = get_events_from_local_cache(
+                            git_repo_path,
+                            vec![nostr::prelude::Filter::default().id(target_id)],
+                        )
+                        .await?;
+                        for target in targets {
+                            if target.kind.eq(&KIND_LABEL) && target.pubkey == event.pubkey {
+                                delete_event_from_local_cache(git_repo_path, target.id).await?;
+                            }
+                        }
+                    }
+                }
             } else if event_is_patch_set_root(event) || event.kind.eq(&KIND_PULL_REQUEST) {
                 fresh_proposal_roots.insert(event.id);
                 report.proposals.insert(event.id);
@@ -4450,6 +4528,7 @@ pub fn get_fetch_filters(
     repo_coordinates: &HashSet<Nip19Coordinate>,
     proposal_ids: &HashSet<EventId>,
     issue_ids: &HashSet<EventId>,
+    label_event_ids: &HashSet<EventId>,
     non_proposal_event_ids: &HashSet<EventId>,
     required_profiles: &HashSet<PublicKey>,
 ) -> Vec<nostr::prelude::Filter> {
@@ -4553,6 +4632,18 @@ pub fn get_fetch_filters(
                         .kind(KIND_LABEL),
                 ]
             }
+        },
+        // Fetch NIP-09 kind-5 deletions targeting the known label events,
+        // so label removals converge. Label events observed for the first
+        // time this sync are covered from the next sync on.
+        if label_event_ids.is_empty() {
+            vec![]
+        } else {
+            vec![
+                nostr::prelude::Filter::default()
+                    .kind(Kind::EventDeletion)
+                    .events(label_event_ids.clone()),
+            ]
         },
         // Fetch kind-1624 cover note events for issues and proposals.
         // Cover notes reference the target via a lowercase `e` tag.
@@ -5050,6 +5141,10 @@ pub struct FetchRequest {
     /// Event IDs of non-proposal events (state events, repo announcements) for
     /// which we should also request kind-5 deletion events by `#e` tag.
     non_proposal_event_ids: HashSet<EventId>,
+    /// Event IDs of known kind-1985 label events, used to fetch the kind-5
+    /// deletion events that target them (NIP-09). Labels stay additive
+    /// unless a valid deletion is observed.
+    label_event_ids: HashSet<EventId>,
     contributors: HashSet<PublicKey>,
     missing_contributor_profiles: HashSet<PublicKey>,
     existing_events: HashSet<EventId>,

@@ -20,7 +20,11 @@ pub fn complete(
                 Some((subject, "new subject", "--subject"))
             }
             IssueCommands::SetCoverNote { body, .. } => Some((body, "cover note", "--body")),
-            IssueCommands::Label { labels, .. } => {
+            IssueCommands::Label {
+                labels,
+                remove_labels,
+                ..
+            } if remove_labels.is_empty() => {
                 return complete_labels(labels, cli.interactive, input);
             }
             _ => None,
@@ -29,7 +33,11 @@ pub fn complete(
             PrCommands::Comment { body, .. } => Some((body, "comment body", "--body")),
             PrCommands::SetSubject { subject, .. } => Some((subject, "new subject", "--subject")),
             PrCommands::SetCoverNote { body, .. } => Some((body, "cover note", "--body")),
-            PrCommands::Label { labels, .. } => {
+            PrCommands::Label {
+                labels,
+                remove_labels,
+                ..
+            } if remove_labels.is_empty() => {
                 return complete_labels(labels, cli.interactive, input);
             }
             _ => None,

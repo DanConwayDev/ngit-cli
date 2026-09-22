@@ -1396,6 +1396,9 @@ pub enum PrCommands {
         /// Label to apply (repeatable; required unless --interactive)
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
+        /// Label to remove (repeatable: --remove-label bug)
+        #[arg(long = "remove-label", value_name = "LABEL")]
+        remove_labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1881,6 +1884,9 @@ pub enum IssueCommands {
         /// Label to apply (repeatable; required unless --interactive)
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
+        /// Label to remove (repeatable: --remove-label bug)
+        #[arg(long = "remove-label", value_name = "LABEL")]
+        remove_labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

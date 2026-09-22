@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use ngit::{
-    client::{Params, get_events_from_local_cache, get_issues_from_cache},
+    client::{Params, get_active_label_events, get_events_from_local_cache, get_issues_from_cache},
     git_events::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, get_labels_and_subject, get_status,
         process_cover_note, status_kinds, tag_value,
@@ -195,8 +195,9 @@ pub async fn launch(
         statuses
     };
 
-    // Fetch NIP-32 kind-1985 label events for all issues.
-    let label_events: Vec<nostr::prelude::Event> = get_events_from_local_cache(
+    // Fetch NIP-32 kind-1985 label events for all issues, minus any
+    // carrying a valid NIP-09 deletion.
+    let label_events: Vec<nostr::prelude::Event> = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()

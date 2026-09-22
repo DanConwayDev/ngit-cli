@@ -31,6 +31,7 @@ pub mod set_cover_note;
 pub mod set_subject;
 pub mod skill;
 pub mod sync;
+pub mod unlabel;
 pub mod whoami;
 
 pub mod ci_watch;

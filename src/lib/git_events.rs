@@ -1278,6 +1278,35 @@ pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> 
     process_labels(event, repo_ref, label_events)
 }
 
+/// Drop label events that carry a valid NIP-09 deletion.
+///
+/// A kind-5 deletion removes a kind-1985 label event only when the deleter
+/// is the label event's own author and the deletion references the label
+/// event's ID in an `e` tag. Anything else — a deletion by a third party,
+/// one referencing another event, or a non-deletion kind — is ignored, so
+/// labels stay additive unless explicitly and validly deleted. Deletion is
+/// whole-event granularity: every label carried by a deleted event goes
+/// with it; callers that remove a single value republish the survivors.
+#[must_use]
+pub fn apply_label_deletions(label_events: Vec<Event>, deletion_events: &[Event]) -> Vec<Event> {
+    if deletion_events.is_empty() {
+        return label_events;
+    }
+    label_events
+        .into_iter()
+        .filter(|label| {
+            !deletion_events.iter().any(|deletion| {
+                deletion.kind.as_u16() == 5
+                    && deletion.pubkey == label.pubkey
+                    && deletion.tags.iter().any(|t| {
+                        let s = t.as_slice();
+                        s.len() >= 2 && s[0].eq("e") && s[1].eq(&label.id.to_string())
+                    })
+            })
+        })
+        .collect()
+}
+
 /// The effective cover note for `event`, selected from a pre-fetched set of
 /// kind-1624 events.
 ///
@@ -1874,6 +1903,97 @@ mod tests {
                 .finalize(&moderator_keys)
                 .unwrap();
             assert!(process_labels(&proposal, &repo_ref, &[label_event]).is_empty());
+        }
+    }
+
+    mod apply_label_deletions {
+        use super::*;
+
+        fn make_label_event(
+            keys: &nostr::prelude::Keys,
+            target: EventId,
+            value: &str,
+        ) -> Result<nostr::prelude::Event> {
+            Ok(nostr::event::EventBuilder::new(KIND_LABEL, "")
+                .tags([
+                    Tag::parse(["L", "#t"]).expect("valid namespace tag"),
+                    Tag::parse(["l", value, "#t"]).expect("valid label tag"),
+                    Tag::parse(["e", &target.to_hex()]).expect("valid target tag"),
+                ])
+                .finalize(keys)?)
+        }
+
+        fn make_deletion_event(
+            keys: &nostr::prelude::Keys,
+            target: EventId,
+        ) -> Result<nostr::prelude::Event> {
+            Ok(nostr::event::EventBuilder::new(Kind::EventDeletion, "")
+                .tags([Tag::parse(["e", &target.to_hex()]).expect("valid target tag")])
+                .finalize(keys)?)
+        }
+
+        #[test]
+        fn matching_author_deletion_removes_the_label_event() -> Result<()> {
+            let keys = nostr::prelude::Keys::generate();
+            let target = nostr::prelude::EventId::from_byte_array([0u8; 32]);
+            let label = make_label_event(&keys, target, "bug")?;
+            let label_id = label.id;
+            let deletion = make_deletion_event(&keys, label_id)?;
+            let survivors = apply_label_deletions(vec![label], &[deletion]);
+            assert!(survivors.is_empty());
+            Ok(())
+        }
+
+        #[test]
+        fn deletion_by_another_author_is_ignored() -> Result<()> {
+            let keys = nostr::prelude::Keys::generate();
+            let other = nostr::prelude::Keys::generate();
+            let target = nostr::prelude::EventId::from_byte_array([0u8; 32]);
+            let label = make_label_event(&keys, target, "bug")?;
+            let deletion = make_deletion_event(&other, label.id)?;
+            let survivors = apply_label_deletions(vec![label], &[deletion]);
+            assert_eq!(survivors.len(), 1);
+            Ok(())
+        }
+
+        #[test]
+        fn deletion_targeting_another_event_is_ignored() -> Result<()> {
+            let keys = nostr::prelude::Keys::generate();
+            let target = nostr::prelude::EventId::from_byte_array([0u8; 32]);
+            let label = make_label_event(&keys, target, "bug")?;
+            let deletion = make_deletion_event(&keys, target)?;
+            let survivors = apply_label_deletions(vec![label], &[deletion]);
+            assert_eq!(survivors.len(), 1);
+            Ok(())
+        }
+
+        #[test]
+        fn non_deletion_events_never_remove_labels() -> Result<()> {
+            let keys = nostr::prelude::Keys::generate();
+            let target = nostr::prelude::EventId::from_byte_array([0u8; 32]);
+            let label = make_label_event(&keys, target, "bug")?;
+            let not_a_deletion = make_label_event(&keys, label.id, "unrelated")?;
+            let survivors = apply_label_deletions(vec![label], &[not_a_deletion]);
+            assert_eq!(survivors.len(), 1);
+            Ok(())
+        }
+
+        #[test]
+        fn unrelated_label_events_survive() -> Result<()> {
+            let keys = nostr::prelude::Keys::generate();
+            let target = nostr::prelude::EventId::from_byte_array([0u8; 32]);
+            let doomed = make_label_event(&keys, target, "bug")?;
+            let kept = make_label_event(&keys, target, "help-wanted")?;
+            let deletion = make_deletion_event(&keys, doomed.id)?;
+            let survivors = apply_label_deletions(vec![doomed, kept], &[deletion]);
+            assert_eq!(survivors.len(), 1);
+            assert!(
+                survivors[0]
+                    .tags
+                    .iter()
+                    .any(|t| t.as_slice() == ["l", "help-wanted", "#t"])
+            );
+            Ok(())
         }
     }
 

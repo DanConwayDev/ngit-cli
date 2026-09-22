@@ -30,7 +30,10 @@ use crate::{
         CiReport, ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage,
     },
     cli::{CiTrustFloor, LogTailMode, SignerParams},
-    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
+    client::{
+        Client, Connect, get_active_label_events, get_events_from_local_cache,
+        warn_if_invited_as_maintainer,
+    },
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
@@ -410,7 +413,7 @@ pub async fn launch(
 
     // Resolve the effective (latest edited) title via the #subject label
     // override, falling back to the root proposal's title.
-    let label_events = get_events_from_local_cache(
+    let label_events = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
