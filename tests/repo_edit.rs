@@ -430,6 +430,10 @@ async fn edit_refuses_when_an_account_write_relay_cannot_be_read() -> Result<()>
         stderr.contains("account write relay"),
         "the refusal should identify the incomplete announcement refresh: {stderr}",
     );
+    assert!(
+        stderr.contains("connection timeout"),
+        "the refusal should retain the underlying relay connection error: {stderr}",
+    );
 
     let after = harness
         .grasp("repo")

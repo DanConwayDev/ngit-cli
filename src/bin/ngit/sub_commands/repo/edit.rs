@@ -782,7 +782,7 @@ async fn refresh_own_announcement_from_account_relays(
             result
                 .as_ref()
                 .err()
-                .map(|error| format!("{relay}: {error}"))
+                .map(|error| format!("{relay}: {error:#}"))
         })
         .collect::<Vec<_>>();
     if failures.is_empty() {
