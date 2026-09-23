@@ -258,14 +258,16 @@ async fn capture_snapshot() -> Result<Snapshot> {
         .take_vanilla_git_server("git")
         .context("vanilla git server was never registered or already taken")?;
     let dead_addr = git_server.url().trim_start_matches("http://").to_string();
-    drop(git_server);
+    tokio::time::timeout(std::time::Duration::from_secs(5), git_server.stop())
+        .await
+        .context("timed out waiting for the git server to stop")?;
 
     // Sanity: the server must actually be unreachable, otherwise the push
     // could succeed and the test would assert nothing about the failure path.
     let probe = tokio::net::TcpStream::connect(&dead_addr).await;
     assert!(
         probe.is_err(),
-        "git server should be unreachable after drop, but TCP connect to \
+        "git server should be unreachable after stop, but TCP connect to \
          {dead_addr} succeeded — cannot test all-servers-down path",
     );
 
