@@ -720,7 +720,7 @@ pub fn warning_message(status: &GuidanceStatus) -> Option<String> {
             "tip: install ngit's repository skill so coding agents use ngit instead of GitHub; run `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)".into(),
         ),
         WarningKind::Update => Some(format!(
-            "tip: newer ngit repository skill guidance is available ({} -> {}); run `ngit skill upgrade` (or `ngit skill opt-out --local` to stop reminders here)",
+            "tip: run `ngit skill upgrade` (repository skill {} -> {})",
             status.installed_version.as_deref().unwrap_or("unknown"),
             status.bundled_version
         )),
@@ -849,9 +849,7 @@ mod tests {
         };
         assert_eq!(
             warning_message(&status).as_deref(),
-            Some(
-                "tip: newer ngit repository skill guidance is available (1.0 -> 1.1); run `ngit skill upgrade` (or `ngit skill opt-out --local` to stop reminders here)"
-            )
+            Some("tip: run `ngit skill upgrade` (repository skill 1.0 -> 1.1)")
         );
     }
     #[test]
