@@ -94,10 +94,38 @@ function Test-Receipt([string]$Directory) {
     } catch { return $false }
 }
 
+# Drain both pipes concurrently and bound execution and inherited output handles.
+function Invoke-VersionProbe([string]$Executable, [string]$Arguments) {
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Executable
+    $start.Arguments = $Arguments
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(5000)) {
+            Fail-Install "version check timed out: $Executable"
+        }
+        if (-not $stdout.Wait(1000) -or -not $stderr.Wait(1000)) {
+            Fail-Install "version check output timed out: $Executable"
+        }
+        if ($process.ExitCode -ne 0) { Fail-Install "version check failed: $Executable" }
+        return $stdout.Result.TrimEnd([char[]]"`r`n")
+    } finally {
+        try {
+            if (-not $process.HasExited) {
+                $process.Kill()
+                if (-not $process.WaitForExit(1000)) { Write-Warning "Could not stop version probe: $Executable" }
+            }
+        } finally { $process.Dispose() }
+    }
+}
+
 function Get-BinaryVersion([string]$Executable) {
-    $reported = & $Executable --version
-    if ($LASTEXITCODE -ne 0) { Fail-Install "version check failed: $Executable" }
-    return $reported
+    return Invoke-VersionProbe $Executable "--version"
 }
 
 function Assert-Version([string]$Executable) {
@@ -135,12 +163,64 @@ function Assert-Destination([string]$Directory) {
     }
 }
 
+function Get-GitExecPath([string]$Executable) {
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Executable
+    $start.Arguments = "--exec-path"
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(5000)) {
+            $process.Kill()
+            Fail-Install "Git exec-path lookup timed out"
+        }
+        if (-not $stdout.Wait(1000)) { Fail-Install "Git exec-path output timed out" }
+        $execPath = $stdout.Result.Trim()
+        $exitCode = $process.ExitCode
+    } finally { $process.Dispose() }
+    if ($exitCode -ne 0 -or -not $execPath) { Fail-Install "Cannot determine Git exec-path; fix Git before installing ngit" }
+    return $execPath
+}
+
+function Get-GitHelper {
+    foreach ($entry in ($env:PATH -split [regex]::Escape([string][IO.Path]::PathSeparator))) {
+        if (-not $entry -or -not [IO.Path]::IsPathRooted($entry)) { Fail-Install "PATH contains relative or empty entries; use absolute PATH entries before installing ngit" }
+    }
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($git) {
+        $execPath = Get-GitExecPath $git.Source
+        # Git for Windows reports native forward-slash paths here.
+        foreach ($name in @("git-remote-nostr.exe", "git-remote-nostr")) {
+            $candidate = Join-Path $execPath $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Get-CanonicalPath $candidate)
+            }
+        }
+    } else {
+        Write-Warning "Git is not installed; helper selection cannot be verified until Git is installed."
+    }
+    $helper = Get-Command git-remote-nostr.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($helper) {
+        return (Get-CanonicalPath $helper.Source)
+    }
+    return ""
+}
+
 function Show-PathGuidance([string]$Directory) {
+    try { $gitHelper = Get-GitHelper }
+    catch { Write-Warning "Installation completed, but Git helper selection could not be verified: $_"; return }
     foreach ($binary in $binaryNames) {
         $active = Get-Command $binary -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         $expected = Join-Path $Directory $binary
-        if (-not $active -or (Get-CanonicalPath $active.Source) -ine $expected) {
-            $location = if ($active) { $active.Source } else { "not found" }
+        if (Test-Path -LiteralPath $expected) { $expected = Get-CanonicalPath $expected }
+        $location = if ($binary -eq "git-remote-nostr.exe") { $gitHelper } elseif ($active) { Get-CanonicalPath $active.Source } else { "" }
+        if ($location -ine $expected) {
+            if (-not $location) { $location = "not found" }
+            if ($binary -eq "git-remote-nostr.exe") { Write-Warning "A helper in Git exec-path takes precedence over PATH; update or uninstall that copy through its owning package manager." }
             Write-Warning "$binary on PATH: $location; installed copy: $expected. Put $Directory first on PATH and restart your terminal. An earlier system PATH entry may also need to be removed."
         }
     }
@@ -214,6 +294,18 @@ function Invoke-NgitInstall {
             (Test-Path -LiteralPath (Join-Path $root ".crates2.json")) -or $root -eq $cargoHome)) { $cargoRoot = $root }
         Assert-Version $existingPath
     }
+    if ($Method -eq "auto" -and $Repair -and $existingDirectory -and -not (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))) {
+        Fail-Install "-Repair requires an existing standalone receipt; use the package manager that owns this installation"
+    }
+    $gitHelper = ""
+    try { $gitHelper = Get-GitHelper }
+    catch { Write-Warning "Cannot verify Git helper selection; continuing installation: $_" }
+    $expectedHelper = if ($existingDirectory) { Join-Path $existingDirectory "git-remote-nostr.exe" } else { "" }
+    if ($expectedHelper -and (Test-Path -LiteralPath $expectedHelper)) { $expectedHelper = Get-CanonicalPath $expectedHelper }
+    if ($gitHelper -and $gitHelper -ine $expectedHelper) {
+        Write-Warning "Git selects $gitHelper; active ngit directory: $existingDirectory. Update or uninstall the conflicting copy through its owner. Git exec-path takes precedence over PATH."
+        if ($Method -ne "standalone") { Fail-Install "Conflicting installation; no files changed. Use -Method standalone only for a deliberate migration, then resolve the conflict before using Git." }
+    }
     if ($Method -eq "auto" -and $cargoRoot -and -not (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))) {
         $Method = "cargo"
     }
@@ -230,7 +322,7 @@ function Invoke-NgitInstall {
         if (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename)) {
             Fail-Install "invalid standalone receipt; rerun with -Repair to repair it"
         }
-        Fail-Install "Existing installation: $existingPath. For Cargo, rerun with -Method cargo. To install a separate standalone copy, use -Method standalone."
+        Fail-Install "Existing installation: $existingPath. Update it through the package manager that installed it. To install a separate standalone copy, use -Method standalone."
     }
     if (-not $InstallDirectory) {
         if ($existingDirectory -and ((Test-Receipt $existingDirectory) -or ($Repair -and (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))))) {

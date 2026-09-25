@@ -137,7 +137,7 @@ mod shell {
             // Expose only known tools: never discover or execute the host's ngit/Cargo.
             for tool in [
                 "bash", "cat", "gzip", "awk", "basename", "dirname", "readlink", "cp", "chmod",
-                "mv", "find", "tar", "mkdir", "rm", "rmdir", "mktemp", "touch",
+                "mv", "find", "tar", "mkdir", "rm", "rmdir", "mktemp", "touch", "sleep",
             ] {
                 let output = Command::new("bash")
                     .args(["-c", "command -v \"$1\"", "tools", tool])
@@ -214,6 +214,10 @@ mod shell {
         }
 
         fn run(&self, args: &[&str]) -> std::process::Output {
+            self.run_with_path_suffix(args, "")
+        }
+
+        fn run_with_path_suffix(&self, args: &[&str], suffix: &str) -> std::process::Output {
             let mut command = Command::new("bash");
             command
                 .arg(&self.script)
@@ -223,15 +227,16 @@ mod shell {
                 .env(
                     "PATH",
                     format!(
-                        "{}:{}:{}",
+                        "{}:{}:{}{}",
                         self.active.display(),
                         self.destination.display(),
-                        self.tools.display()
+                        self.tools.display(),
+                        suffix
                     ),
                 )
                 .env("TEST_ARCHIVE", &self.archive);
             assert_cmd::Command::from_std(command)
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
                 .output()
                 .unwrap()
         }
@@ -479,6 +484,102 @@ mod shell {
         assert!(!fixture.run(&[]).status.success());
         let output = fixture.run(&["--repair"]);
         assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn git_exec_path_conflict_blocks_default_update_without_touching_either_copy() {
+        let fixture = Installer::new(true);
+        fixture.old_standalone("1.6.0");
+        let git_exec = fixture.home.join("git exec");
+        fs::create_dir_all(&git_exec).unwrap();
+        executable(&git_exec.join("git-remote-nostr"), "echo v2.6.1");
+        executable(
+            &fixture.tools.join("git"),
+            "printf '%s\\n' \"$HOME/git exec\"",
+        );
+        let before = fs::read(fixture.destination.join("ngit")).unwrap();
+        let output = fixture.run(&[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(fixture.destination.join("ngit")).unwrap(), before);
+        assert!(
+            fs::read_to_string(git_exec.join("git-remote-nostr"))
+                .unwrap()
+                .contains("2.6.1")
+        );
+        let output = fixture.run(&["--method", "standalone"]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            fs::read_to_string(fixture.destination.join("ngit"))
+                .unwrap()
+                .contains("3.0.1")
+        );
+        assert!(
+            fs::read_to_string(git_exec.join("git-remote-nostr"))
+                .unwrap()
+                .contains("2.6.1")
+        );
+    }
+
+    #[test]
+    fn downgrade_probe_timeout_preserves_the_existing_pair() {
+        let fixture = Installer::new(true);
+        fixture.old_standalone("1.6.0");
+        // The timeout itself is under test, including a binary ignoring TERM.
+        executable(
+            &fixture.destination.join("ngit"),
+            "trap '' TERM; exec sleep 60",
+        );
+        let before = fs::read(fixture.destination.join("ngit")).unwrap();
+        let output = fixture.run(&[]);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(fixture.destination.join("ngit")).unwrap(), before);
+        assert!(
+            fs::read_to_string(fixture.destination.join(".ngit-install-receipt.json"))
+                .unwrap()
+                .contains("1.6.0")
+        );
+        assert!(!fixture.destination.join(".ngit-install-lock").exists());
+    }
+
+    #[test]
+    fn git_lookup_timeout_does_not_block_the_update() {
+        let fixture = Installer::new(true);
+        fixture.old_standalone("1.6.0");
+        // Passage of time is the behavior under test: even a wrapper ignoring
+        // TERM must be stopped by the lookup deadline without blocking replacement.
+        executable(&fixture.tools.join("git"), "trap '' TERM; exec sleep 60");
+        let output = fixture.run(&[]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(fixture.destination.join("git-remote-nostr").exists());
+        assert!(
+            fs::read_to_string(fixture.destination.join(".ngit-install-receipt.json"))
+                .unwrap()
+                .contains("3.0.1")
+        );
+    }
+
+    #[test]
+    fn unverifiable_path_does_not_block_fresh_or_owned_installs() {
+        for suffix in [":", ":."] {
+            for existing in [false, true] {
+                let fixture = Installer::new(true);
+                if existing {
+                    fixture.old_standalone("1.6.0");
+                }
+                let output = fixture.run_with_path_suffix(&[], suffix);
+                assert!(output.status.success(), "{output:?}");
+                assert!(fixture.destination.join("git-remote-nostr").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn orphan_helper_does_not_trigger_a_second_installation() {
+        let fixture = Installer::new(true);
+        executable(&fixture.tools.join("git"), "echo \"$HOME/git-core\"");
+        executable(&fixture.active.join("git-remote-nostr"), "echo v2.6.1");
+        assert!(!fixture.run(&[]).status.success());
+        assert!(!fixture.destination.join("ngit").exists());
     }
 
     #[test]

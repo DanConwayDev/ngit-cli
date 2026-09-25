@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Explain when Git uses a different ngit helper, including an older copy in
+  Git's own executable directory, even when `ngit update` says ngit is current.
+  Update or remove conflicting copies through their original installation
+  method. If Git lookup is unavailable, ordinary installs and updates continue
+  with a warning. Unresponsive version checks time out instead of hanging the
+  installer.
+
 ## [3.0.3] - 2026-09-21
 
 Fix proposal base selection for PR pushes and draft patches, refresh dependencies,

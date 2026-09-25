@@ -1,4 +1,4 @@
-# Isolated PowerShell installer tests; no downloads, PATH/profile writes, or real executables.
+# Isolated PowerShell installer tests; no downloads or PATH/profile writes.
 param([string]$TemplatePath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -17,6 +17,22 @@ function Assert-Fails([scriptblock]$Action) {
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) "ngit-installer-test-$([Guid]::NewGuid())"
 try {
+    # Exercise the real process runner before the file-backed installation tests.
+    New-Item -ItemType Directory -Path $temporary -Force | Out-Null
+    $pwsh = (Get-Process -Id $PID).Path
+    $pidFile = Join-Path $temporary 'probe.pid'
+    $escapedPidFile = $pidFile.Replace("'", "''")
+    $hang = "[IO.File]::WriteAllText('$escapedPidFile', [string]`$PID); (New-Object Threading.ManualResetEvent(`$false)).WaitOne()"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hang))
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    Assert-Fails { Invoke-VersionProbe $pwsh "-NoProfile -EncodedCommand $encoded" }
+    Assert-True ($timer.Elapsed.TotalSeconds -lt 10) 'version probe exceeded its deadline'
+    Assert-True (Test-Path -LiteralPath $pidFile) 'probe did not start'
+    $childId = [int](Get-Content -LiteralPath $pidFile)
+    Assert-True (-not (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'timed-out probe still running'
+    Assert-Fails { Invoke-VersionProbe $pwsh '-NoProfile -Command "exit 17"' }
+    Assert-True ((Invoke-VersionProbe $pwsh '--version') -like 'PowerShell *') 'successful probe lost output'
+
     $destination = Join-Path $temporary 'destination with spaces'
     $release = Join-Path $temporary 'release'
     New-Item -ItemType Directory -Path $destination, $release -Force | Out-Null
@@ -41,6 +57,13 @@ try {
     function cargo { $script:cargoArgs = @($args); $script:LASTEXITCODE = 0 }
     Invoke-NgitInstall
     Assert-True (($cargoArgs -join '|') -eq "install|ngit|--locked|--version|3.0.1|--root|$cargoRootFixture") 'automatic Cargo root or version was lost'
+    # Unverifiable lookup must not block an otherwise owned Cargo update.
+    $savedPath = $env:PATH
+    try {
+        $env:PATH += [IO.Path]::PathSeparator
+        Invoke-NgitInstall
+        Assert-True (($cargoArgs -join '|') -eq "install|ngit|--locked|--version|3.0.1|--root|$cargoRootFixture") 'unverifiable PATH blocked Cargo'
+    } finally { $env:PATH = $savedPath }
     $Method = 'cargo'
     Invoke-NgitInstall
     Assert-True (($cargoArgs -join '|') -eq "install|ngit|--locked|--version|3.0.1|--root|$cargoRootFixture") 'Cargo root or version was lost'
@@ -51,6 +74,27 @@ try {
     Assert-True ((Get-BinaryVersion (Join-Path $cargoBin 'ngit.exe')) -eq 'ngit 1.6.0') 'failed Cargo update changed the installation'
     Remove-Item Function:Get-Command, Function:cargo
     $Method = 'auto'
+
+    # Git's exec-path wins over an otherwise complete Cargo installation.
+    $execDirectory = Join-Path $temporary 'git exec'
+    New-Item -ItemType Directory -Path $execDirectory | Out-Null
+    $oldHelper = Join-Path $execDirectory 'git-remote-nostr.exe'
+    [IO.File]::WriteAllText($oldHelper, 'v2.6.1')
+    $originalExecProbe = ${function:Get-GitExecPath}
+    function Get-GitExecPath { param($Executable); return $execDirectory }
+    function Get-Command {
+        param($Name, $CommandType, $ErrorAction)
+        if ($Name -eq 'git') { return [pscustomobject]@{ Source = 'fake-git' } }
+        if ($Name -eq 'ngit') { return [pscustomobject]@{ Source = (Join-Path $cargoBin 'ngit.exe') } }
+        return $null
+    }
+    function cargo { throw 'conflicting installation must not invoke Cargo' }
+    Assert-True ((Get-GitHelper) -eq (Get-CanonicalPath $oldHelper)) 'Git exec-path helper was missed'
+    Assert-Fails { Invoke-NgitInstall }
+    Assert-True ((Get-BinaryVersion $oldHelper) -eq 'v2.6.1') 'conflicting helper was modified'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $cargoBin $receiptFilename))) 'conflict adopted Cargo'
+    Remove-Item Function:Get-Command, Function:cargo
+    Set-Item Function:Get-GitExecPath $originalExecProbe
 
     # Fresh install and missing-helper repair.
     Install-Binaries $destination $sources

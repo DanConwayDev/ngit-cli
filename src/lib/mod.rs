@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod git;
 pub mod git_events;
 pub mod git_http_auth;
+pub mod install_lookup;
 pub mod list;
 pub mod login;
 pub mod mbox_parser;

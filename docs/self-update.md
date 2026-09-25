@@ -59,7 +59,9 @@ event, verifies its SHA-256 and size, extracts both `ngit` and
 before replacing either binary.
 
 An update can restore a missing helper when a newer release is available.
-For same-version repairs, rerun the pinned installer. The native updater shares
+For same-version standalone repairs, rerun the pinned installer. Cargo repairs
+may require `cargo install ngit --locked --force --version VERSION --root ROOT`.
+The native updater shares
 `.ngit-install-lock` with the installer; inspect leftovers after an interrupted
 run before retrying. If rollback fails, the error identifies the remaining
 `ngit-backup` files instead of claiming the originals were restored.
@@ -199,3 +201,29 @@ nix shell nixpkgs#powershell --command cargo test --test installer_templates
 The PowerShell tests use version fixtures, so they run on Unix as well as
 Windows without executing platform-specific release binaries. Actual Windows
 file-lock and terminal behaviour still require Windows verification.
+
+## Conflicting installations
+
+The installer and `ngit update` check both the active `ngit` and the helper Git
+would select in the current environment. Git searches its own executable
+directory before PATH, so an old helper there can remain active even after a
+successful update elsewhere. Diagnostics run even when ngit is already current. If lookup cannot be verified
+(for example, Git is unavailable or PATH contains relative or empty entries),
+ordinary installs and owned updates continue with a warning. A detected conflict
+still stops an ordinary update. Use the installation method
+that owns the conflicting copy to update or uninstall it; changing PATH alone
+cannot override a helper in Git's exec-path. No other installations are deleted
+automatically. An intentional migration uses `--method standalone`
+(PowerShell: `-Method standalone`); follow the resulting warnings before using
+Git. `--repair` requires a standalone installer receipt.
+
+A missing or mismatched helper in an owned standalone installation can be
+repaired by rerunning the one-line installer. To enable verification, make
+relative or empty PATH entries absolute: Git may change directories before
+invoking its helper. Post-install lookup failures produce a warning rather
+than undoing a successful installation.
+
+The checks describe the current process environment: an IDE, shell alias,
+wrapper, or later PATH change can select a different Git installation. Git
+wrappers that add PATH entries internally, including Git for Windows wrappers,
+can also select a helper this check cannot predict.

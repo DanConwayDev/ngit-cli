@@ -183,6 +183,64 @@ valid_receipt() {
     ' "$1/$RECEIPT_FILENAME"
 }
 
+# Bound Git lookup even when git on PATH is a broken wrapper.
+probe_output() {
+    local output child watchdog status
+    output=$(mktemp) || return 1
+    "$@" >"$output" &
+    child=$!
+    (sleep 5; kill -KILL "$child" 2>/dev/null) >/dev/null 2>&1 &
+    watchdog=$!
+    status=0
+    wait "$child" || status=$?
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    if [ "$status" -eq 0 ]; then cat "$output"; fi
+    rm -f "$output"
+    return "$status"
+}
+
+# Query Git's helper search path, not just the interactive shell's PATH.
+inspect_git_helper() {
+    # Git may change to the repository root before launching its helper.
+    # Relative PATH entries cannot be verified against a future Git invocation.
+    local entry remaining
+    remaining=$PATH
+    while :; do
+        entry=${remaining%%:*}
+        case "$entry" in /*) ;; *) warn 'Cannot verify Git helper: PATH contains relative or empty entries'; return 1 ;; esac
+        case "$remaining" in *:*) remaining=${remaining#*:} ;; *) break ;; esac
+    done
+    ngit_helper=''
+    ngit_git_path=$PATH
+    if command_exists git; then
+        ngit_exec_path=$(probe_output git --exec-path) || { warn 'Cannot verify Git helper: Git exec-path lookup failed'; return 1; }
+        [ -n "$ngit_exec_path" ] || { warn 'Cannot verify Git helper: Git returned an empty exec-path'; return 1; }
+        case "$ngit_exec_path" in /*) ;; *) ngit_exec_path="$(pwd -P)/$ngit_exec_path" ;; esac
+        ngit_git_path="$ngit_exec_path:$PATH"
+    else
+        warn 'Git is not installed; helper selection cannot be verified until Git is installed.'
+        return 1
+    fi
+    ngit_helper=$(PATH="$ngit_git_path" command -v git-remote-nostr || true)
+    if [ -n "$ngit_helper" ]; then
+        ngit_helper=$(canonical_path "$ngit_helper") || { warn 'Cannot resolve Git helper'; return 1; }
+    fi
+}
+
+check_existing_pair() {
+    inspect_git_helper || return 0
+    [ -n "$ngit_helper" ] || return 0
+    if [ -z "$ngit_existing_dir" ] || {
+        [ "$ngit_helper" != "$ngit_existing_dir/git-remote-nostr" ] &&
+        [ ! "$ngit_helper" -ef "$ngit_existing_dir/git-remote-nostr" ];
+    }; then
+        warn "Git selects $ngit_helper; active ngit: ${ngit_existing:-not found}"
+        warn 'Update or uninstall the conflicting copy through its owner (Cargo, Nix, or your package manager). Git exec-path takes precedence over PATH.'
+        [ "$INSTALL_METHOD" = standalone ] || fail 'conflicting installation; no files changed. To deliberately install a separate copy, use --method standalone and resolve the conflict before using Git.'
+    fi
+}
+
 inspect_existing_install() {
     ngit_existing=''
     ngit_existing_dir=''
@@ -232,7 +290,7 @@ check_destination() {
 check_downgrade() {
     [ "$ALLOW_DOWNGRADE" -eq 1 ] && return 0
     [ -e "$1" ] || [ -L "$1" ] || return 0
-    ngit_reported=$("$1" --version 2>/dev/null) || fail 'cannot read the installed version; use --allow-downgrade to authorize replacement'
+    ngit_reported=$(probe_output "$1" --version 2>/dev/null) || fail 'cannot read the installed version; use --allow-downgrade to authorize replacement'
     # The download is stable. A prerelease of the same core version is older.
     if ! printf '%s\n' "$ngit_reported" | awk -v target="$VERSION" '
         /^ngit [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$/ {
@@ -251,14 +309,24 @@ check_downgrade() {
 
 report_path() {
     hash -r
+    # A failed diagnostic after replacement must not turn a successful update
+    # into an apparent installation failure.
+    if ! ngit_helper=$(inspect_git_helper && printf '%s' "$ngit_helper"); then
+        warn 'Installation completed, but Git helper selection could not be verified.'
+        return 0
+    fi
     for ngit_binary in $BINARIES; do
         ngit_active=$(command -v "$ngit_binary" || true)
+        if [ "$ngit_binary" = git-remote-nostr ]; then ngit_active=$ngit_helper; fi
         ngit_resolved=''
         if [ -n "$ngit_active" ]; then
             ngit_resolved=$(canonical_path "$ngit_active" || true)
         fi
-        if [ "$ngit_resolved" != "$ngit_dir/$ngit_binary" ]; then
-            warn "$ngit_binary on PATH: ${ngit_active:-not found}; installed copy: $ngit_dir/$ngit_binary"
+        if [ "$ngit_resolved" != "$ngit_dir/$ngit_binary" ] && [ ! "$ngit_resolved" -ef "$ngit_dir/$ngit_binary" ]; then
+            warn "$ngit_binary selected: ${ngit_active:-not found}; installed copy: $ngit_dir/$ngit_binary"
+            if [ "$ngit_binary" = git-remote-nostr ]; then
+                warn 'If this helper is in Git exec-path, changing PATH is insufficient: update or uninstall that copy through its owner.'
+            fi
             # Keep $PATH literal for the command the user will run.
             # shellcheck disable=SC2016
             printf 'Run in your shell: export PATH=%q:"$PATH"; hash -r\n' "$ngit_dir" >&2
@@ -338,6 +406,11 @@ main() {
     parse_arguments "$@"
     printf '%s\n' "$VERSION" | awk '/^[0-9]+\.[0-9]+\.[0-9]+$/ { valid=1 } END { exit !valid }' || fail 'installer template was not rendered with a stable release'
     inspect_existing_install
+    check_existing_pair
+    if [ "$INSTALL_METHOD" = auto ] && [ "$REPAIR" -eq 1 ] && [ -n "$ngit_existing_dir" ] &&
+        [ ! -f "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
+        fail '--repair requires an existing standalone receipt; update this installation through its original package manager'
+    fi
     if [ "$INSTALL_METHOD" = auto ] && [ -n "$ngit_cargo_root" ] &&
         [ ! -e "$ngit_existing_dir/$RECEIPT_FILENAME" ] && [ ! -L "$ngit_existing_dir/$RECEIPT_FILENAME" ]; then
         INSTALL_METHOD=cargo
@@ -367,6 +440,7 @@ main() {
         if [ -n "$ngit_cargo_root" ]; then
             warn 'To keep using Cargo: rerun this installer with --method cargo'
         fi
+        warn 'Update the existing installation through its original package manager (for example, nix profile upgrade for a Nix profile). Unknown installations are not adopted automatically.'
         fail 'To install a standalone copy with ngit update support: rerun with --method standalone (optionally --install-dir DIR). Package-managed files will not be overwritten.'
     fi
     if [ -n "$ngit_existing" ]; then

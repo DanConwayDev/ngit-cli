@@ -1,11 +1,13 @@
 use std::env;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde_json::json;
 
 use crate::{cli::UpdateArgs, output};
 
 pub async fn launch(args: &UpdateArgs) -> Result<()> {
+    let current_exe = env::current_exe()?;
+    let lookup = inspect_installation(&current_exe).await;
     let git_repo = ngit::git::Repo::discover().ok();
     let git_repo_path = git_repo
         .as_ref()
@@ -18,7 +20,7 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
             newer_candidate,
         } => {
             set_current_output(&current, newer_candidate.as_deref());
-            println!("ngit v{current} is current");
+            println!("ngit executable v{current} is current");
             print_newer_candidate_notice(Some(&current), newer_candidate.as_deref());
         }
         ngit::self_update::UpdateDiscovery::Pending {
@@ -54,12 +56,13 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
             update,
             newer_candidate,
         } => {
-            let current_exe = env::current_exe()?;
             match ngit::self_update::classify_installation(&current_exe, &update.version)? {
                 ngit::self_update::Installation::External(external)
                     if external.manager == "cargo" =>
                 {
+                    require_consistent_installation(&lookup)?;
                     update_with_cargo(&update, &external, newer_candidate.as_deref()).await?;
+                    report_installation(&current_exe, &update.version).await;
                 }
                 ngit::self_update::Installation::External(external) => {
                     set_ready_output(
@@ -71,6 +74,7 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
                     println!("{}", external.guidance);
                 }
                 ngit::self_update::Installation::Standalone(installation) => {
+                    require_consistent_installation(&lookup)?;
                     let installed =
                         ngit::self_update::install_update(&installation, &update).await?;
                     output::set_value(json!({
@@ -87,6 +91,7 @@ pub async fn launch(args: &UpdateArgs) -> Result<()> {
                             "asset_event_id": update.asset.raw_event.id.to_hex(),
                         }
                     }));
+                    report_installation(&current_exe, &update.version).await;
                     println!(
                         "updated ngit from v{} to v{}",
                         update.current, update.version
@@ -189,5 +194,56 @@ fn set_ready_output(
 fn print_newer_candidate_notice(selected: Option<&str>, newer: Option<&str>) {
     if let (Some(selected), Some(newer)) = (selected, newer) {
         eprintln!("note: ngit v{newer} is newer than the selected v{selected}");
+    }
+}
+
+async fn report_installation(executable: &std::path::Path, version: &str) {
+    // On Unix current_exe may point at the old inode after replacement; use
+    // the original install location captured before the update instead.
+    match ngit::install_lookup::inspect(executable).await {
+        Ok(mut lookup) => {
+            lookup.check_version(version).await;
+            for warning in lookup.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        Err(error) => eprintln!("warning: cannot verify the active installation: {error}"),
+    }
+}
+
+async fn inspect_installation(
+    executable: &std::path::Path,
+) -> Result<ngit::install_lookup::Lookup> {
+    let mut lookup = ngit::install_lookup::inspect(executable).await;
+    if let Ok(lookup) = &mut lookup {
+        lookup.check_version(env!("CARGO_PKG_VERSION")).await;
+    }
+    match &lookup {
+        Ok(lookup) => {
+            for warning in &lookup.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        Err(error) => eprintln!("warning: cannot verify the active installation: {error}"),
+    }
+    lookup
+}
+
+fn require_consistent_installation(lookup: &Result<ngit::install_lookup::Lookup>) -> Result<()> {
+    if lookup.as_ref().is_ok_and(|lookup| lookup.conflict) {
+        bail!(
+            "Resolve the installation lookup warnings before updating; no files were changed. Use the owning package manager, or explicitly migrate with the one-line installer's --method standalone option."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unverified_lookup_does_not_block_owned_updates() {
+        assert!(require_consistent_installation(&Err(anyhow::anyhow!("Git unavailable"))).is_ok());
     }
 }
