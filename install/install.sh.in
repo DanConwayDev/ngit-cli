@@ -223,23 +223,85 @@ inspect_git_helper() {
         return 1
     fi
     ngit_helper=$(PATH="$ngit_git_path" command -v git-remote-nostr || true)
+    ngit_helper_path=$ngit_helper
     if [ -n "$ngit_helper" ]; then
         ngit_helper=$(canonical_path "$ngit_helper") || { warn 'Cannot resolve Git helper'; return 1; }
     fi
 }
 
 check_existing_pair() {
+    ngit_obsolete=
     inspect_git_helper || return 0
     [ -n "$ngit_helper" ] || return 0
     if [ -z "$ngit_existing_dir" ] || {
         [ "$ngit_helper" != "$ngit_existing_dir/git-remote-nostr" ] &&
         [ ! "$ngit_helper" -ef "$ngit_existing_dir/git-remote-nostr" ];
     }; then
+        ngit_other=$(dirname "$ngit_helper")
+        if [ -n "$ngit_existing_dir" ] && standalone_pair "$ngit_existing_dir" &&
+            [ ! -L "$ngit_helper_path" ] && standalone_pair "$ngit_other" &&
+            { [ -z "$INSTALL_DIR" ] || [ "$INSTALL_DIR" = "$ngit_existing_dir" ]; }; then
+            check_downgrade "$ngit_other/ngit"
+            ngit_obsolete=$ngit_other
+            info "Will consolidate standalone $ngit_other into $ngit_existing_dir after verifying the update"
+            return 0
+        fi
         warn "Git selects $ngit_helper; active ngit: ${ngit_existing:-not found}"
         warn 'Update or uninstall the conflicting copy through its owner (Cargo, Nix, or your package manager). Git exec-path takes precedence over PATH.'
         [ "$INSTALL_METHOD" = standalone ] || fail 'conflicting installation; no files changed. To deliberately install a separate copy, use --method standalone and resolve the conflict before using Git.'
     fi
 }
+
+# Only complete regular-file pairs with matching receipts can be retired.
+standalone_pair() {
+    local directory=$1 name old_version
+    case "$directory/" in /nix/store/*) return 1 ;; esac
+    [ ! -e "$(dirname "$directory")/.crates.toml" ] && [ ! -e "$(dirname "$directory")/.crates2.json" ] || return 1
+    valid_receipt "$directory" || return 1
+    for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+        [ -f "$directory/$name" ] && [ ! -L "$directory/$name" ] || return 1
+    done
+    old_version=$(awk -F '"' '{ for(i=1;i<=NF;i++) if($i=="version") {print $(i+2); exit} }' "$directory/$RECEIPT_FILENAME")
+    [ "$(probe_output "$directory/ngit" --version)" = "ngit $old_version" ] &&
+        [ "$(probe_output "$directory/git-remote-nostr" --version)" = "v$old_version" ]
+}
+
+consolidate_standalone() (
+    [ -n "${ngit_obsolete:-}" ] || exit 0
+    [ "$ngit_dir" = "$ngit_existing_dir" ] || fail 'consolidation must retain the active standalone directory; omit --install-dir'
+    standalone_pair "$ngit_dir" || fail 'retained standalone pair failed verification; old installation preserved'
+    [ "$(probe_output "$ngit_dir/ngit" --version)" = "ngit $VERSION" ] || fail 'retained version differs from requested release'
+    mkdir "$ngit_obsolete/.ngit-install-lock" 2>/dev/null || fail "Cannot consolidate $ngit_obsolete: check permissions or an active installer; old files preserved"
+    local backup='' committed=0 recovery_failed=0 name selected active
+    # Invoked by the EXIT trap.
+    # shellcheck disable=SC2329
+    restore_retired() {
+        if [ -n "$backup" ] && [ "$committed" -eq 0 ]; then
+            for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+                if [ -e "$backup/$name" ]; then
+                    mv "$backup/$name" "$ngit_obsolete/$name" || { recovery_failed=1; warn "Restore $backup/$name manually"; }
+                fi
+            done
+        fi
+        if [ -n "$backup" ]; then rmdir "$backup" 2>/dev/null || warn "Recovery files remain in $backup"; fi
+        if [ "$recovery_failed" -eq 0 ]; then rmdir "$ngit_obsolete/.ngit-install-lock" 2>/dev/null || true; fi
+    }
+    trap restore_retired EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    standalone_pair "$ngit_obsolete" || fail 'obsolete receipt or binaries changed; old files preserved'
+    check_downgrade "$ngit_obsolete/ngit"
+    backup=$(mktemp -d "$ngit_obsolete/.ngit-retired.XXXXXX") || fail 'cannot stage obsolete installation'
+    for name in ngit git-remote-nostr "$RECEIPT_FILENAME"; do
+        mv "$ngit_obsolete/$name" "$backup/$name" || fail 'cannot retire old installation; restoring its files'
+    done
+    selected=$(inspect_git_helper && printf '%s' "$ngit_helper") || fail 'cannot verify Git selection; restoring old installation'
+    active=$(canonical_path "$(command -v ngit)") || fail 'cannot verify active ngit; restoring old installation'
+    [ "$selected" -ef "$ngit_dir/git-remote-nostr" ] && [ "$active" -ef "$ngit_dir/ngit" ] || fail 'another installation still takes precedence; restoring old installation'
+    committed=1
+    rm "$backup/ngit" "$backup/git-remote-nostr" "$backup/$RECEIPT_FILENAME" || fail "Consolidated successfully; remove remaining retired files in $backup manually"
+    info "Removed obsolete standalone files from $ngit_obsolete; Git selects $ngit_dir"
+)
 
 inspect_existing_install() {
     ngit_existing=''
@@ -486,6 +548,7 @@ EOF
     info "Installing ngit and git-remote-nostr to $ngit_dir"
     install_binaries
     info "Installed ngit v$VERSION to $ngit_dir"
+    consolidate_standalone
     report_path
 }
 

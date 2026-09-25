@@ -521,6 +521,35 @@ mod shell {
     }
 
     #[test]
+    fn receipted_conflicting_pair_is_consolidated_without_removing_other_files() {
+        for another_conflict in [false, true] {
+            let fixture = Installer::new(true);
+            fixture.old_standalone("1.6.0");
+            executable(&fixture.destination.join("git-remote-nostr"), "echo v1.6.0");
+            let old = fixture.home.join("obsolete");
+            fs::create_dir(&old).unwrap();
+            receipt(&old);
+            executable(&old.join("ngit"), "echo 'ngit 1.6.0'");
+            executable(&old.join("git-remote-nostr"), "echo v1.6.0");
+            fs::write(old.join("unrelated"), "keep").unwrap();
+            executable(
+                &fixture.tools.join("git"),
+                "printf '%s\\n' \"$HOME/obsolete\"",
+            );
+            if another_conflict {
+                executable(&fixture.active.join("git-remote-nostr"), "echo v1.0.0");
+            }
+            let output = fixture.run(&[]);
+            assert_eq!(output.status.success(), !another_conflict, "{output:?}");
+            for name in ["ngit", "git-remote-nostr", ".ngit-install-receipt.json"] {
+                assert_eq!(old.join(name).exists(), another_conflict);
+                assert!(fixture.destination.join(name).exists());
+            }
+            assert!(old.join("unrelated").exists());
+        }
+    }
+
+    #[test]
     fn downgrade_probe_timeout_preserves_the_existing_pair() {
         let fixture = Installer::new(true);
         fixture.old_standalone("1.6.0");

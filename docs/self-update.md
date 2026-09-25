@@ -209,21 +209,55 @@ would select in the current environment. Git searches its own executable
 directory before PATH, so an old helper there can remain active even after a
 successful update elsewhere. Diagnostics run even when ngit is already current. If lookup cannot be verified
 (for example, Git is unavailable or PATH contains relative or empty entries),
-ordinary installs and owned updates continue with a warning. A detected conflict
-still stops an ordinary update. Use the installation method
-that owns the conflicting copy to update or uninstall it; changing PATH alone
-cannot override a helper in Git's exec-path. No other installations are deleted
-automatically. An intentional migration uses `--method standalone`
-(PowerShell: `-Method standalone`); follow the resulting warnings before using
-Git. `--repair` requires a standalone installer receipt.
+ordinary installs and owned updates continue with a warning. Automatic cleanup
+requires successful lookup. A detected conflict still stops an ordinary update
+unless it qualifies for consolidation or an explicit installer migration.
+When ngit is already current, a conflict that cannot be consolidated produces
+advice without failing the version check.
+
+Most old conflicts, including a lone helper copied into Git's executable
+directory or a copy installed before receipts existed, require manual cleanup
+through the method that installed them. Automatic consolidation mainly helps
+when Git's exec-path points at another complete standalone installation.
+
+When both installations have valid standalone receipts and complete matching
+binaries, the installer and updater retain the active ngit installation and
+consolidate the other copy automatically. They verify the retained pair, lock
+both directories, move only the old binaries and receipt aside, and check Git's
+selection before deleting those files. Unrelated files and directories remain.
+If another conflict is exposed, the old files are restored. If restoration
+fails, recovery files and the obsolete directory's lock are retained for manual
+repair. Permission or lock failures stop consolidation with a nonzero exit
+status; an already completed update to the retained installation is not rolled
+back. In JSON mode, a cleanup failure reports `command_status: "error"`,
+preserves the installed version details, and includes a failed `consolidation`
+result. `ngit update --check` never
+consolidates; a normal update can consolidate even when ngit is current.
+
+Executable symlinks, incomplete or inconsistent receipts, and unknown ownership
+require manual resolution. A newer conflicting installation is protected against
+implicit downgrade. For Cargo, Nix, or an unreceipted copy, use
+the installation method that owns the conflicting copy to update or uninstall it;
+changing PATH alone cannot override a helper in Git's exec-path. Package-managed
+and unreceipted installations are not deleted automatically. An intentional migration uses
+`--method standalone` (PowerShell: `-Method standalone`); follow the resulting
+warnings before using Git. `--repair` requires a standalone installer receipt.
 
 A missing or mismatched helper in an owned standalone installation can be
-repaired by rerunning the one-line installer. To enable verification, make
-relative or empty PATH entries absolute: Git may change directories before
-invoking its helper. Post-install lookup failures produce a warning rather
-than undoing a successful installation.
+repaired by rerunning the one-line installer. The checks describe the current
+process environment: an IDE, shell alias, wrapper, or later PATH change can
+select a different Git installation. To enable verification and automatic
+cleanup, make relative or empty PATH entries absolute: Git may change
+directories before invoking its helper.
+Post-install lookup failures produce a warning rather than undoing a successful
+installation.
 
-The checks describe the current process environment: an IDE, shell alias,
-wrapper, or later PATH change can select a different Git installation. Git
-wrappers that add PATH entries internally, including Git for Windows wrappers,
-can also select a helper this check cannot predict.
+Git wrappers that add PATH entries internally, including Git for Windows
+wrappers, can also select a helper this check cannot predict.
+
+Forced termination can leave `.ngit-install-lock` directories and a
+`.ngit-retired-*` recovery directory in the obsolete installation. Before
+retrying, ensure no installer is running, restore any retired binaries and
+receipt to their original directory, and remove the stale locks in both
+installation directories. Ordinary reported failures attempt this recovery
+automatically; native Ctrl-C termination does not guarantee cleanup.

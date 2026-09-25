@@ -103,6 +103,58 @@ try {
     Install-Binaries $destination $sources
     Assert-True (Test-Path -LiteralPath (Join-Path $destination 'git-remote-nostr.exe')) 'helper was not repaired'
 
+    # Consolidation retires exactly the obsolete pair and receipt, and restores
+    # them if another helper still shadows the retained installation.
+    $originalHelperLookup = ${function:Get-GitHelper}
+    $obsoleteFixture = Join-Path $temporary 'obsolete standalone'
+    New-Item -ItemType Directory -Path $obsoleteFixture | Out-Null
+    [IO.File]::WriteAllText((Join-Path $obsoleteFixture 'unrelated'), 'keep')
+    function Get-Command {
+        param($Name, $CommandType, $ErrorAction)
+        if ($Name -eq 'ngit') { return [pscustomobject]@{ Source = (Join-Path $destination 'ngit.exe') } }
+        return $null
+    }
+    foreach ($anotherConflict in @($false, $true)) {
+        foreach ($binary in $binaryNames) { Copy-Item -LiteralPath $sources[$binary] -Destination (Join-Path $obsoleteFixture $binary) }
+        Write-Receipt $obsoleteFixture
+        function Get-GitHelper {
+            if (Test-Path -LiteralPath (Join-Path $obsoleteFixture 'git-remote-nostr.exe')) { return (Join-Path $obsoleteFixture 'git-remote-nostr.exe') }
+            if ($anotherConflict) { return (Join-Path $temporary 'third/git-remote-nostr.exe') }
+            return (Join-Path $destination 'git-remote-nostr.exe')
+        }
+        if ($anotherConflict) { Assert-Fails { Consolidate-Standalone $destination $obsoleteFixture } }
+        else { Consolidate-Standalone $destination $obsoleteFixture }
+        foreach ($name in (@($binaryNames) + $receiptFilename)) {
+            Assert-True ((Test-Path -LiteralPath (Join-Path $obsoleteFixture $name)) -eq $anotherConflict) "obsolete $name was not retired/restored"
+            Assert-True (Test-Path -LiteralPath (Join-Path $destination $name)) "retained $name changed"
+        }
+        Assert-True (Test-Path -LiteralPath (Join-Path $obsoleteFixture 'unrelated')) 'unrelated file removed'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $obsoleteFixture '.ngit-install-lock'))) 'consolidation lock left behind'
+    }
+    # A hung revalidation while both locks are held must release them and
+    # preserve both installations. The fourth probe is the first under lock.
+    $fileVersionProbe = ${function:Get-BinaryVersion}
+    $script:versionProbeCount = 0
+    function Get-BinaryVersion([string]$Executable) {
+        $script:versionProbeCount++
+        if ($script:versionProbeCount -eq 4) {
+            return Invoke-VersionProbe $pwsh "-NoProfile -EncodedCommand $encoded"
+        }
+        return Get-Content -LiteralPath $Executable -Raw
+    }
+    try {
+        Assert-Fails { Consolidate-Standalone $destination $obsoleteFixture }
+        Assert-True ($script:versionProbeCount -eq 4) 'timeout did not exercise locked revalidation'
+        foreach ($dir in @($destination, $obsoleteFixture)) {
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $dir '.ngit-install-lock'))) 'timeout left an installation lock'
+            foreach ($name in (@($binaryNames) + $receiptFilename)) {
+                Assert-True (Test-Path -LiteralPath (Join-Path $dir $name)) "timeout removed $name"
+            }
+        }
+    } finally { Set-Item Function:Get-BinaryVersion $fileVersionProbe }
+    Remove-Item Function:Get-Command
+    Set-Item Function:Get-GitHelper $originalHelperLookup
+
     # Unreceipted files and downgrades remain untouched.
     Remove-Item -LiteralPath (Join-Path $destination $receiptFilename) -Force
     Assert-Fails { Install-Binaries $destination $sources }

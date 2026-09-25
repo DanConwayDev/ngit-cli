@@ -187,6 +187,7 @@ function Get-GitExecPath([string]$Executable) {
 }
 
 function Get-GitHelper {
+    $script:helperIsLink = $false
     foreach ($entry in ($env:PATH -split [regex]::Escape([string][IO.Path]::PathSeparator))) {
         if (-not $entry -or -not [IO.Path]::IsPathRooted($entry)) { Fail-Install "PATH contains relative or empty entries; use absolute PATH entries before installing ngit" }
     }
@@ -197,6 +198,7 @@ function Get-GitHelper {
         foreach ($name in @("git-remote-nostr.exe", "git-remote-nostr")) {
             $candidate = Join-Path $execPath $name
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $script:helperIsLink = [bool]((Get-Item -LiteralPath $candidate -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)
                 return (Get-CanonicalPath $candidate)
             }
         }
@@ -205,9 +207,76 @@ function Get-GitHelper {
     }
     $helper = Get-Command git-remote-nostr.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($helper) {
+        $script:helperIsLink = [bool]((Get-Item -LiteralPath $helper.Source -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)
         return (Get-CanonicalPath $helper.Source)
     }
     return ""
+}
+
+function Test-StandalonePair([string]$Directory) {
+    $root = Split-Path -Parent $Directory
+    if ((Test-Path -LiteralPath (Join-Path $root '.crates.toml')) -or (Test-Path -LiteralPath (Join-Path $root '.crates2.json'))) { return $false }
+    if (-not (Test-Receipt $Directory)) { return $false }
+    foreach ($name in (@($binaryNames) + $receiptFilename)) {
+        $item = Get-Item -LiteralPath (Join-Path $Directory $name) -Force -ErrorAction SilentlyContinue
+        if (-not $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    }
+    $receipt = Get-Content -LiteralPath (Join-Path $Directory $receiptFilename) -Raw | ConvertFrom-Json
+    return ((Get-BinaryVersion (Join-Path $Directory "ngit.exe")) -eq "ngit $($receipt.version)" -and
+        (Get-BinaryVersion (Join-Path $Directory "git-remote-nostr.exe")) -eq "v$($receipt.version)")
+}
+
+function Consolidate-Standalone([string]$Directory, [string]$Obsolete) {
+    if (-not $Obsolete) { return }
+    if (-not (Test-StandalonePair $Directory) -or (Get-BinaryVersion (Join-Path $Directory "ngit.exe")) -ne "ngit $version") {
+        Fail-Install "Retained installation failed verification; old files preserved"
+    }
+    $locks = @()
+    $moved = @()
+    $backup = Join-Path $Obsolete ".ngit-retired-$([Guid]::NewGuid())"
+    $committed = $false
+    $recoveryFailed = $false
+    try {
+        foreach ($dir in @($Directory, $Obsolete)) {
+            $lock = Join-Path $dir '.ngit-install-lock'
+            New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null
+            $locks += $lock
+        }
+        if (-not (Test-StandalonePair $Directory) -or (Get-BinaryVersion (Join-Path $Directory 'ngit.exe')) -ne "ngit $version") { Fail-Install "Retained installation changed; old files preserved" }
+        if (-not (Test-StandalonePair $Obsolete)) { Fail-Install "Obsolete standalone changed; old files preserved" }
+        Assert-Version (Join-Path $Obsolete 'ngit.exe')
+        New-Item -ItemType Directory -Path $backup | Out-Null
+        foreach ($name in (@($binaryNames) + $receiptFilename)) {
+            Move-Item -LiteralPath (Join-Path $Obsolete $name) -Destination (Join-Path $backup $name) -Force -ErrorAction Stop
+            $moved += $name
+        }
+        $selected = Get-GitHelper
+        $active = Get-Command ngit -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $active -or (Get-CanonicalPath $active.Source) -ine (Join-Path $Directory 'ngit.exe') -or $selected -ine (Join-Path $Directory 'git-remote-nostr.exe')) {
+            Fail-Install "Another conflict remains; restoring obsolete standalone files"
+        }
+        $committed = $true
+        foreach ($name in $moved) { Remove-Item -LiteralPath (Join-Path $backup $name) -Force -ErrorAction Stop }
+        [IO.Directory]::Delete($backup, $false)
+        Write-Info "Removed obsolete standalone files from $Obsolete; Git selects $Directory"
+    } catch {
+        $originalError = $_
+        if (-not $committed) {
+            foreach ($name in $moved) {
+                try { Move-Item -LiteralPath (Join-Path $backup $name) -Destination (Join-Path $Obsolete $name) -Force -ErrorAction Stop }
+                catch { $recoveryFailed = $true; Write-Warning "Restore remaining files from $backup manually: $_" }
+            }
+        }
+        Fail-Install "Cannot complete consolidation: $originalError. Check permissions or active installers. Recovery files, if any, remain at $backup."
+    } finally {
+        if (Test-Path -LiteralPath $backup) {
+            try { [IO.Directory]::Delete($backup, $false) } catch { }
+        }
+        foreach ($lock in $locks) {
+            if ($recoveryFailed -and $lock -eq (Join-Path $Obsolete '.ngit-install-lock')) { continue }
+            try { [IO.Directory]::Delete($lock, $false) } catch { }
+        }
+    }
 }
 
 function Show-PathGuidance([string]$Directory) {
@@ -297,14 +366,22 @@ function Invoke-NgitInstall {
     if ($Method -eq "auto" -and $Repair -and $existingDirectory -and -not (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))) {
         Fail-Install "-Repair requires an existing standalone receipt; use the package manager that owns this installation"
     }
+    $obsoleteStandalone = ""
     $gitHelper = ""
     try { $gitHelper = Get-GitHelper }
-    catch { Write-Warning "Cannot verify Git helper selection; continuing installation: $_" }
+    catch { Write-Warning "Cannot verify Git helper selection; continuing without automatic consolidation: $_" }
     $expectedHelper = if ($existingDirectory) { Join-Path $existingDirectory "git-remote-nostr.exe" } else { "" }
     if ($expectedHelper -and (Test-Path -LiteralPath $expectedHelper)) { $expectedHelper = Get-CanonicalPath $expectedHelper }
     if ($gitHelper -and $gitHelper -ine $expectedHelper) {
+        $other = Split-Path -Parent $gitHelper
+        if ($existingDirectory -and (Test-StandalonePair $existingDirectory) -and -not $script:helperIsLink -and (Test-StandalonePair $other) -and (-not $InstallDirectory -or $InstallDirectory -eq $existingDirectory)) {
+            Assert-Version (Join-Path $other 'ngit.exe')
+            $obsoleteStandalone = $other
+            Write-Info "Will consolidate standalone $other into $existingDirectory after verifying the update"
+        } else {
         Write-Warning "Git selects $gitHelper; active ngit directory: $existingDirectory. Update or uninstall the conflicting copy through its owner. Git exec-path takes precedence over PATH."
         if ($Method -ne "standalone") { Fail-Install "Conflicting installation; no files changed. Use -Method standalone only for a deliberate migration, then resolve the conflict before using Git." }
+        }
     }
     if ($Method -eq "auto" -and $cargoRoot -and -not (Test-Path -LiteralPath (Join-Path $existingDirectory $receiptFilename))) {
         $Method = "cargo"
@@ -388,6 +465,7 @@ function Invoke-NgitInstall {
 
         Install-Binaries $InstallDirectory $sources
         Add-UserPath $installDirectory
+        Consolidate-Standalone $InstallDirectory $obsoleteStandalone
         Show-PathGuidance $installDirectory
         Write-Info "Installed ngit v$version to $installDirectory"
     }

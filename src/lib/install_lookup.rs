@@ -134,12 +134,231 @@ async fn inspect_with_path(current: &Path, path: &OsStr) -> Result<Lookup> {
     match &result.helper {
         Some(active) if !same_file(active, &expected) => {
             result.conflict = true;
-            result.warnings.push(format!("Git selects {} instead of {}. Update or uninstall the conflicting copy through its owner (Cargo, Nix, or your package manager). A helper in Git's exec-path takes precedence even after changing PATH. No conflicting files were removed.", active.display(), expected.display()));
+            result.warnings.push(format!("Git selects {} instead of {}. Verified standalone copies can be consolidated; Cargo, Nix and unreceipted copies require their original installation method. A helper in Git's exec-path takes precedence even after changing PATH.", active.display(), expected.display()));
         },
         None => result.warnings.push(format!("Git cannot find git-remote-nostr; expected {}. Rerun the one-line installer for a standalone repair. For Cargo, reinstall with cargo install ngit --locked --force using the original --root and desired --version; otherwise use the owning package manager.", expected.display())),
         _ => {},
     }
     Ok(result)
+}
+
+const RECEIPT: &str = ".ngit-install-receipt.json";
+
+fn standalone_version(directory: &Path) -> Result<String> {
+    if directory.parent().is_some_and(|root| {
+        [".crates.toml", ".crates2.json"]
+            .iter()
+            .any(|name| root.join(name).exists())
+    }) {
+        bail!(
+            "Cargo metadata exists beside {}; resolve ownership through Cargo before consolidating",
+            directory.display()
+        );
+    }
+    if directory.starts_with("/nix/store") {
+        bail!("Nix installations cannot be consolidated");
+    }
+    for name in [
+        format!("ngit{}", env::consts::EXE_SUFFIX),
+        format!("git-remote-nostr{}", env::consts::EXE_SUFFIX),
+        RECEIPT.to_owned(),
+    ] {
+        let path = directory.join(name);
+        if !path
+            .symlink_metadata()
+            .with_context(|| format!("Cannot inspect standalone file {}", path.display()))?
+            .file_type()
+            .is_file()
+        {
+            bail!("{} is not a regular standalone file", path.display());
+        }
+    }
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join(RECEIPT))?)?;
+    if receipt["schema"] != 1 || receipt["method"] != "standalone" {
+        bail!("invalid standalone receipt in {}", directory.display());
+    }
+    let version = receipt["version"]
+        .as_str()
+        .context("receipt has no version")?;
+    semver::Version::parse(version)?;
+    Ok(version.to_owned())
+}
+
+async fn verify_pair(directory: &Path, version: &str) -> Result<()> {
+    for (name, expected) in [
+        ("ngit", format!("ngit {version}")),
+        ("git-remote-nostr", format!("v{version}")),
+    ] {
+        let path = directory.join(format!("{name}{}", env::consts::EXE_SUFFIX));
+        if probe(&path, &["--version"], None).await?.trim() != expected {
+            bail!(
+                "{} does not match its standalone receipt; repair it before consolidating",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Return an obsolete standalone directory only when both complete pairs are
+/// receipted and the active ngit is the one the caller intends to retain.
+pub async fn consolidation_candidate(current: &Path, target: &str) -> Result<Option<PathBuf>> {
+    let current = current
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve ngit at {}", current.display()))?;
+    let inspected = inspect(&current).await?;
+    if !inspected.conflict {
+        return Ok(None);
+    }
+    let path = env::var_os("PATH").context("PATH is unset")?;
+    if !lookup("ngit", &path).is_some_and(|active| same_file(&active, &current)) {
+        bail!("Select the ngit installation you want to retain on PATH before consolidating");
+    }
+    let retained = current
+        .parent()
+        .context("ngit has no installation directory")?;
+    let retained_version = standalone_version(retained)?;
+    verify_pair(retained, &retained_version).await?;
+    let helper = inspected.helper.context("Git helper is missing")?;
+    // Do not follow a final executable symlink to delete its target elsewhere.
+    if !helper
+        .symlink_metadata()
+        .with_context(|| format!("Cannot inspect Git helper {}", helper.display()))?
+        .file_type()
+        .is_file()
+    {
+        bail!(
+            "Resolve the conflicting helper symlink through its installation method (for example Nix): {}",
+            helper.display()
+        );
+    }
+    let obsolete = helper
+        .parent()
+        .context("helper has no directory")?
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve directory containing {}", helper.display()))?;
+    if obsolete == retained {
+        bail!("Cannot consolidate within the retained directory");
+    }
+    let old_version = standalone_version(&obsolete)?;
+    if semver::Version::parse(&old_version)? > semver::Version::parse(target)? {
+        bail!(
+            "Conflicting standalone {} is newer ({old_version}); select that installation or resolve it manually",
+            obsolete.display()
+        );
+    }
+    verify_pair(&obsolete, &old_version).await?;
+    Ok(Some(obsolete))
+}
+
+/// Quarantine only the two binaries and receipt, prove lookup is fixed, then
+/// delete the quarantine. Any failure before deletion restores the old pair.
+pub async fn consolidate(current: &Path, version: &str) -> Result<()> {
+    let Some(obsolete) = consolidation_candidate(current, version).await? else {
+        return Ok(());
+    };
+    let retained = current
+        .canonicalize()?
+        .parent()
+        .context("ngit has no directory")?
+        .to_path_buf();
+    verify_pair(&retained, version).await?;
+    let mut locks = Vec::new();
+    for directory in [&retained, &obsolete] {
+        let lock = directory.join(".ngit-install-lock");
+        if let Err(error) = std::fs::create_dir(&lock) {
+            for lock in &locks {
+                let _ = std::fs::remove_dir(lock);
+            }
+            bail!(
+                "Cannot lock {} for consolidation: {error}. No conflicting files were removed; check permissions or an active installer",
+                directory.display()
+            );
+        }
+        locks.push(lock);
+    }
+    let mut preserve_lock = false;
+    let result = consolidate_locked(current, version, &obsolete, &mut preserve_lock).await;
+    for lock in locks {
+        if preserve_lock && lock == obsolete.join(".ngit-install-lock") {
+            continue;
+        }
+        let _ = std::fs::remove_dir(lock);
+    }
+    result
+}
+
+async fn consolidate_locked(
+    current: &Path,
+    version: &str,
+    obsolete: &Path,
+    preserve_lock: &mut bool,
+) -> Result<()> {
+    // Revalidate after acquiring both locks.
+    if consolidation_candidate(current, version).await?.as_deref() != Some(obsolete) {
+        bail!("Installation selection changed; retry consolidation");
+    }
+    verify_pair(
+        current
+            .canonicalize()?
+            .parent()
+            .context("ngit has no directory")?,
+        version,
+    )
+    .await?;
+    let backup = tempfile::Builder::new()
+        .prefix(".ngit-retired-")
+        .tempdir_in(obsolete)?;
+    let mut moved = Vec::new();
+    let result: Result<()> = async {
+        for name in [
+            format!("ngit{}", env::consts::EXE_SUFFIX),
+            format!("git-remote-nostr{}", env::consts::EXE_SUFFIX),
+            RECEIPT.to_owned(),
+        ] {
+            let from = obsolete.join(&name);
+            let to = backup.path().join(name);
+            std::fs::rename(&from, &to).with_context(|| {
+                format!(
+                    "Cannot retire {}; check directory permissions",
+                    from.display()
+                )
+            })?;
+            moved.push((from, to));
+        }
+        let mut selected = inspect(current).await?;
+        selected.check_version(version).await;
+        if !selected.warnings.is_empty() {
+            bail!("Another conflict remains: {}", selected.warnings.join("; "));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        for (from, to) in moved.iter().rev() {
+            if let Err(restore) = std::fs::rename(to, from) {
+                *preserve_lock = true;
+                let recovery = backup.keep();
+                bail!(
+                    "{error}; restoration failed: {restore}. Recover remaining files from {}",
+                    recovery.display()
+                );
+            }
+        }
+        return Err(error.context("Conflicting standalone installation was preserved"));
+    }
+    backup.close().with_context(|| {
+        format!(
+            "Consolidation succeeded but retired files in {} need manual cleanup",
+            obsolete.display()
+        )
+    })?;
+    eprintln!(
+        "Removed obsolete standalone ngit files from {}; Git now selects the retained pair",
+        obsolete.display()
+    );
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -255,5 +474,101 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn consolidation_subprocess() {
+        let Some(current) = env::var_os("NGIT_TEST_CONSOLIDATE") else {
+            return;
+        };
+        let result = consolidate(Path::new(&current), "3.0.3").await;
+        if env::var_os("NGIT_TEST_EXPECT_FAILURE").is_some() {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn consolidation_removes_only_verified_files_and_rolls_back_conflicts() {
+        for scenario in [
+            "success",
+            "invalid receipt",
+            "another helper",
+            "locked",
+            "broken retained",
+            "Cargo metadata",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let retained = temp.path().join("retained");
+            let obsolete = temp.path().join("obsolete");
+            let third = temp.path().join("third");
+            for dir in [&retained, &obsolete, &third] {
+                fs::create_dir(dir).unwrap();
+            }
+            for (dir, version) in [(&retained, "3.0.3"), (&obsolete, "2.6.1")] {
+                fs::write(
+                    dir.join(RECEIPT),
+                    format!(r#"{{"schema":1,"method":"standalone","version":"{version}"}}"#),
+                )
+                .unwrap();
+                for (name, prefix) in [("ngit", "ngit "), ("git-remote-nostr", "v")] {
+                    let path = dir.join(name);
+                    fs::write(&path, format!("#!/bin/sh\necho '{prefix}{version}'\n")).unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+            fs::write(obsolete.join("unrelated"), "keep").unwrap();
+            match scenario {
+                "Cargo metadata" => fs::write(temp.path().join(".crates2.json"), "{}").unwrap(),
+                "invalid receipt" => fs::write(obsolete.join(RECEIPT), "invalid").unwrap(),
+                "another helper" => {
+                    fs::copy(
+                        obsolete.join("git-remote-nostr"),
+                        third.join("git-remote-nostr"),
+                    )
+                    .unwrap();
+                }
+                "locked" => fs::create_dir(obsolete.join(".ngit-install-lock")).unwrap(),
+                "broken retained" => fs::write(
+                    retained.join("git-remote-nostr"),
+                    "#!/bin/sh\necho v1.0.0\n",
+                )
+                .unwrap(),
+                _ => {}
+            }
+            let path = env::join_paths(
+                [third, retained.clone()]
+                    .into_iter()
+                    .chain(env::split_paths(&env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let mut child = std::process::Command::new(env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "install_lookup::tests::consolidation_subprocess",
+                    "--nocapture",
+                ])
+                .env("NGIT_TEST_CONSOLIDATE", retained.join("ngit"))
+                .env("PATH", path)
+                .env("GIT_EXEC_PATH", &obsolete);
+            if scenario != "success" {
+                child.env("NGIT_TEST_EXPECT_FAILURE", "1");
+            }
+            let output = assert_cmd::Command::from_std(child)
+                .timeout(Duration::from_secs(30))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{scenario}: {output:?}");
+            for name in ["ngit", "git-remote-nostr", RECEIPT] {
+                assert_eq!(
+                    obsolete.join(name).exists(),
+                    scenario != "success",
+                    "{scenario}: {name}"
+                );
+                assert!(retained.join(name).exists());
+            }
+            assert!(obsolete.join("unrelated").exists());
+        }
     }
 }
