@@ -356,10 +356,13 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
     }
     let file = options
         .open(path)
-        .with_context(|| format!("failed to open {label} file"))?;
-    let meta = file
-        .metadata()
-        .with_context(|| format!("failed to inspect open {label} file"))?;
+        .with_context(|| format!("couldn't open the file supplied with `--{label}-file`: {}. Check the path and read permissions.", path.display()))?;
+    let meta = file.metadata().with_context(|| {
+        format!(
+            "couldn't inspect the file supplied with `--{label}-file`: {}",
+            path.display()
+        )
+    })?;
     if !meta.is_file() {
         bail!("{label} file path must resolve to a regular file");
     }
@@ -367,7 +370,10 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
     {
         use std::os::unix::fs::PermissionsExt;
         if !matches!(meta.permissions().mode() & 0o777, 0o400 | 0o600) {
-            bail!("{label} file permissions must be 0400 or 0600");
+            bail!(
+                "the file supplied with `--{label}-file` ({}) must be readable only by its owner (permissions 0400 or 0600). Restrict access to this file before trying again.",
+                path.display()
+            );
         }
     }
     if !(1..=4096).contains(&meta.len()) {
@@ -378,7 +384,7 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
     let mut raw = Vec::with_capacity(capacity);
     file.take(4097)
         .read_to_end(&mut raw)
-        .with_context(|| format!("failed to read {label} file"))?;
+        .with_context(|| format!("couldn't read the file supplied with `--{label}-file`: {}. Check the filesystem error below.", path.display()))?;
     if raw.len() > 4096 {
         bail!("{label} file must contain 1 to 4096 bytes");
     }

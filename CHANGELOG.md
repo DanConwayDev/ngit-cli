@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Include paths and access guidance when Git repositories or signing-key
+  files cannot be opened, while preserving the underlying filesystem error.
+
 - Retain Git server and connection-method failures when fetching commits.
   Explain relay timeouts, incomplete searches and publication failures in
   plain language, including the possibility of partially accepted updates.
