@@ -2872,6 +2872,56 @@ pub struct ResolvedRepoCoordinate {
     pub remote: Option<ResolvedNostrRemote>,
 }
 
+impl ResolvedRepoCoordinate {
+    /// Identify the selected input and how to inspect it without exposing
+    /// protocol internals.
+    pub fn lookup_diagnostic_source(&self, repo: &Repo) -> Result<(String, String, String)> {
+        let address = || {
+            self.coordinate
+                .to_bech32()
+                .context("failed to encode repository address")
+        };
+        match &self.source {
+            RepoCoordinateSource::NostrRepoConfig => Ok((
+                "Git setting `nostr.repo`".to_string(),
+                repo.get_git_config_item("nostr.repo", Some(false))?
+                    .context("nostr.repo is no longer configured")?,
+                "Check its value and location with `git config --show-origin --get nostr.repo`."
+                    .to_string(),
+            )),
+            RepoCoordinateSource::RepoArgNaddr | RepoCoordinateSource::RepoArgNostrUrl => Ok((
+                "`--repo`".to_string(),
+                std::env::var(NGIT_REPO_ENV)
+                    .ok()
+                    .map(Ok)
+                    .unwrap_or_else(address)?,
+                "Check the value supplied to `--repo`.".to_string(),
+            )),
+            RepoCoordinateSource::MaintainersYaml => Ok((
+                "`maintainers.yaml`".to_string(),
+                address()?,
+                "Check the identifier, first maintainer and relays in `maintainers.yaml`."
+                    .to_string(),
+            )),
+            _ => {
+                if let Some(remote) = &self.remote {
+                    Ok((
+                        format!("Git remote {:?}", remote.name),
+                        remote.decoded_url.original_string.clone(),
+                        "Check the remote URL with `git remote -v`.".to_string(),
+                    ))
+                } else {
+                    Ok((
+                        self.source.label(),
+                        address()?,
+                        "Check the repository address.".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedNostrRemote {
     pub name: String,

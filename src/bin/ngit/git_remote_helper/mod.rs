@@ -451,6 +451,11 @@ pub async fn run(args: &[String]) -> Result<()> {
                 &decoded_nostr_url.coordinate.relays,
                 &nip11_private_relays,
             );
+            let earlier_relays = fetch_result
+                .as_ref()
+                .ok()
+                .map(|report| report.announcement_searches.clone())
+                .unwrap_or_default();
             fetch_result = fetching_with_report_for_helper(
                 git_repo_path,
                 &client,
@@ -459,11 +464,40 @@ pub async fn run(args: &[String]) -> Result<()> {
                 true,
             )
             .await;
+            if let Ok(report) = &mut fetch_result {
+                report.announcement_searches.merge(earlier_relays);
+            }
         }
     }
     let fetch_report = fetch_result?;
 
-    let mut repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &discovery_coordinate).await?;
+    let mut repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &discovery_coordinate)
+        .await
+        .map_err(|error| {
+            if let Some(missing) = error.downcast_ref::<client::MissingRepoAnnouncement>() {
+                // Git also uses the URL itself as the remote name for direct URL operations.
+                let name = remote_name
+                    .as_deref()
+                    .filter(|name| *name != decoded_nostr_url.original_string);
+                let source = name.map_or_else(
+                    || "the supplied URL".to_string(),
+                    |name| format!("Git remote {name:?}"),
+                );
+                let guidance = if name.is_some() {
+                    "Check the remote URL with `git remote -v`."
+                } else {
+                    "Check the repository URL supplied to Git."
+                };
+                missing.diagnostic(
+                    &source,
+                    &decoded_nostr_url.original_string,
+                    guidance,
+                    &fetch_report,
+                )
+            } else {
+                error
+            }
+        })?;
     // this is the repository the helper operates on, so its privacy
     // classification may be recorded in the local git config
     save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
@@ -679,7 +713,8 @@ async fn fetching_with_report_for_helper(
         || private_discovery_unavailable
         || private_probe
         || repository_is_known_private;
-    let report = loop {
+    let mut announcement_searches = client::AnnouncementSearches::default();
+    let mut report = loop {
         let mut private_coordinate = selected_maintainer_coordinate.clone();
         private_coordinate.relays = private_discovery.relays().to_vec();
         let fetch_coordinate = if repository_relays_only && private_probe {
@@ -696,6 +731,7 @@ async fn fetching_with_report_for_helper(
                 repository_relays_only,
             )
             .await?;
+        announcement_searches.merge(progress_reporter.announcement_searches.clone());
         finish_fetch_progress(&relay_reports, progress_reporter)?;
         let outcome = consolidate_fetch_outcome(relay_reports);
         if repository_relays_only && private_probe {
@@ -728,6 +764,7 @@ async fn fetching_with_report_for_helper(
         }
         break outcome.report;
     };
+    report.announcement_searches.merge(announcement_searches);
     if report.to_string().is_empty() {
         if verbose {
             term.write_line("nostr: no updates")?;

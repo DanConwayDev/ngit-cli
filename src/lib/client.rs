@@ -38,7 +38,7 @@ use nostr::prelude::{
     message::MachineReadablePrefix,
     nip01::Coordinate,
     nip05::{Nip05Address, Nip05Profile},
-    nip19::Nip19Coordinate,
+    nip19::{Nip19Coordinate, ToBech32},
 };
 use nostr_database::{NostrDatabase, SaveEventStatus};
 use nostr_memory::MemoryDatabase;
@@ -212,6 +212,8 @@ pub struct RelayProgressReporter {
     reveal_state: Option<Arc<BarRevealState>>,
     timer_handle: Option<tokio::task::JoinHandle<()>>,
     fetch_relay_health: FetchRelayHealth,
+    /// Completed and failed searches for the selected repository.
+    pub announcement_searches: AnnouncementSearches,
     finished: bool,
 }
 
@@ -330,6 +332,7 @@ impl RelayProgressReporter {
             reveal_state,
             timer_handle,
             fetch_relay_health: FetchRelayHealth::default(),
+            announcement_searches: AnnouncementSearches::default(),
             finished: false,
         }
     }
@@ -920,6 +923,7 @@ impl Connect for Client {
                 .await?;
                 processed_relay_scopes.clear();
                 relay_reports.clear();
+                progress_reporter.announcement_searches = AnnouncementSearches::default();
                 repository_relay_attempts = 0;
                 repository_success_count.store(0, Ordering::Relaxed);
                 announcement_resolved.store(false, Ordering::Relaxed);
@@ -976,7 +980,16 @@ impl Connect for Client {
 
             let futures: Vec<_> = relay_requests
                 .into_iter()
-                .map(|request| {
+                .map(|mut request| {
+                    request.announcement_search = selected_maintainer_coordinate
+                        .filter(|selected| request.repo_coordinates_without_relays.iter()
+                            .any(|(coordinate, _)| coordinate.coordinate == selected.coordinate))
+                        .map(|selected| AnnouncementSearch {
+                            coordinate: selected.coordinate.clone(),
+                            result: Arc::new(Mutex::new(None)),
+                        });
+                    let search = request.announcement_search.clone();
+                    let searched_relay = request.selected_relay.clone();
                     let peers = round_progress.clone();
                     let scope = request.scope;
                     let repository_success_count_clone =
@@ -991,7 +1004,7 @@ impl Connect for Client {
                         .selected_relay
                         .as_ref()
                         .is_some_and(|relay| request.author_announcement_relays.contains(relay));
-                    async move {
+                    let fetch = async move {
                         let relay_column_width = request.relay_column_width;
 
                         let relay_url = request
@@ -1145,15 +1158,32 @@ impl Connect for Client {
                                 Ok(res)
                             }
                         }
+                    };
+                    async move {
+                        let result = fetch.await;
+                        let search_result = search.zip(searched_relay).map(|(search, relay)| {
+                            let outcome = search.result.lock().unwrap().clone().unwrap_or_else(|| {
+                                AnnouncementSearchResult::Failed(result.as_ref().err()
+                                    .map(announcement_search_failure)
+                                    .unwrap_or_else(|| "search did not finish".to_string()))
+                            });
+                            (relay, outcome)
+                        });
+                        (search_result, result)
                     }
                 })
                 .collect();
 
-            for report in stream::iter(futures)
+            for (search_result, report) in stream::iter(futures)
                 .buffer_unordered(15)
-                .collect::<Vec<Result<FetchReport>>>()
+                .collect::<Vec<_>>()
                 .await
             {
+                if let Some((relay, result)) = search_result {
+                    progress_reporter
+                        .announcement_searches
+                        .record(relay, result);
+                }
                 relay_reports.push(report);
             }
             processed_relay_scopes.extend(processed_this_round);
@@ -1336,6 +1366,11 @@ impl Connect for Client {
                 .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
             let events: Vec<nostr::prelude::Event> =
                 get_events_of(&relay, filters.clone(), pb).await?;
+            // Preserve the completed selected-repository query even if a later
+            // discovery round or cache write fails. get_events_of requires EOSE.
+            if let Some(search) = &request.announcement_search {
+                search.observe(&events);
+            }
             // TODO: try reconcile
 
             // Track the best state event seen from this relay so callers can
@@ -2266,6 +2301,56 @@ fn latest_announcement_per_author(
     events
 }
 
+/// A missing announcement, distinct from cache failures and invalid repository
+/// data.
+#[derive(Debug)]
+pub struct MissingRepoAnnouncement(pub Nip19Coordinate);
+
+impl Display for MissingRepoAnnouncement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "couldn't find repository {:?} owned by {}",
+            self.0.identifier,
+            self.0
+                .public_key
+                .to_bech32()
+                .unwrap_or_else(|_| self.0.public_key.to_string())
+        )
+    }
+}
+
+impl std::error::Error for MissingRepoAnnouncement {}
+
+impl MissingRepoAnnouncement {
+    /// Replace internal lookup details with the input the user can correct.
+    pub fn diagnostic(
+        &self,
+        source: &str,
+        value: &str,
+        guidance: &str,
+        report: &FetchReport,
+    ) -> anyhow::Error {
+        let searches = &report.announcement_searches;
+        let action = if searches.has_response() {
+            "find"
+        } else {
+            "check"
+        };
+        let mut message = format!(
+            "couldn't {action} the repository specified by {source}:\n  {value}\n\n{}\n\n{guidance}",
+            searches.description()
+        );
+        if searches.has_failures() {
+            message.push_str("\nSome Nostr relays couldn't be checked, so retrying may help.");
+        }
+        if crate::output_mode::is_verbose() {
+            message.push_str(&format!("\nRepository coordinate: {}", self.0.coordinate));
+        }
+        anyhow!(message)
+    }
+}
+
 // use annoucement from selected maintainer but recursively add maintainers, git
 // servers and relays
 pub async fn get_repo_ref_from_cache(
@@ -2385,7 +2470,7 @@ async fn get_repo_ref_from_cache_with_selected_recovery(
         repo_events
             .iter()
             .find(|e| e.pubkey == repo_coordinate.public_key)
-            .context("no repo announcement event found at specified Nip19Coordinates. if you are the repository maintainer consider running `ngit init` to create one")?
+            .ok_or_else(|| MissingRepoAnnouncement(repo_coordinate.clone()))?
             .clone(),
         Some(repo_coordinate.public_key),
     ))?;
@@ -3081,6 +3166,7 @@ async fn create_relays_request(
 
     Ok(FetchRequest {
         selected_relay: None,
+        announcement_search: None,
         repo_relays,
         announcement_indexer_relays,
         author_announcement_relays,
@@ -3446,6 +3532,9 @@ fn request_includes_ngit_repo(request: &FetchRequest) -> bool {
 pub fn consolidate_fetch_reports(reports: Vec<Result<FetchReport>>) -> FetchReport {
     let mut report = FetchReport::default();
     for relay_report in reports.into_iter().flatten() {
+        report
+            .announcement_searches
+            .merge(relay_report.announcement_searches);
         for c in relay_report.repo_coordinates_without_relays {
             if !report
                 .repo_coordinates_without_relays
@@ -3853,8 +3942,149 @@ pub fn get_filter_contributor_profiles(contributors: HashSet<PublicKey>) -> nost
         .authors(contributors)
 }
 
+/// Outcomes of searches for the selected repository, including failed requests.
+#[derive(Clone, Default)]
+pub struct AnnouncementSearches {
+    results: HashMap<RelayUrl, AnnouncementSearchResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnnouncementSearchResult {
+    NoMatch,
+    Returned,
+    Failed(String),
+}
+
+impl AnnouncementSearchResult {
+    fn priority(&self) -> u8 {
+        match self {
+            Self::Failed(_) => 0,
+            Self::NoMatch => 1,
+            Self::Returned => 2,
+        }
+    }
+}
+
+impl AnnouncementSearches {
+    fn record(&mut self, relay: RelayUrl, result: AnnouncementSearchResult) {
+        // A later failure cannot undo a completed search. If any completed
+        // query returned the event, never claim the relay returned no match.
+        if self
+            .results
+            .get(&relay)
+            .is_none_or(|previous| result.priority() >= previous.priority())
+        {
+            self.results.insert(relay, result);
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for (relay, result) in other.results {
+            self.record(relay, result);
+        }
+    }
+
+    fn has_response(&self) -> bool {
+        self.results
+            .values()
+            .any(|result| !matches!(result, AnnouncementSearchResult::Failed(_)))
+    }
+
+    fn has_failures(&self) -> bool {
+        self.results
+            .values()
+            .any(|result| matches!(result, AnnouncementSearchResult::Failed(_)))
+    }
+
+    fn description(&self) -> String {
+        let mut missing = vec![];
+        let mut returned = vec![];
+        let mut failed = vec![];
+        let mut ordered: Vec<_> = self.results.iter().collect();
+        ordered.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        for (relay, result) in ordered {
+            match result {
+                AnnouncementSearchResult::NoMatch => missing.push(relay.to_string()),
+                AnnouncementSearchResult::Returned => returned.push(relay.to_string()),
+                AnnouncementSearchResult::Failed(reason) => {
+                    failed.push(format!("{relay} — {reason}"))
+                }
+            }
+        }
+        let mut groups = vec![];
+        for (label, relays) in [
+            (
+                "Nostr relays that responded but didn't return this repository",
+                missing,
+            ),
+            (
+                "Nostr relays that returned repository data that couldn't be used",
+                returned,
+            ),
+            ("Nostr relays that couldn't be checked", failed),
+        ] {
+            if !relays.is_empty() {
+                groups.push(format!(
+                    "{label} ({}):\n  {}",
+                    relays.len(),
+                    relays.join("\n  ")
+                ));
+            }
+        }
+        if groups.is_empty() {
+            "No Nostr relays were searched.".to_string()
+        } else {
+            groups.join("\n\n")
+        }
+    }
+}
+
+// Shared with the outer deadline so a completed announcement query survives
+// cancellation of subsequent discovery work on the same relay.
+#[derive(Clone)]
+struct AnnouncementSearch {
+    coordinate: Coordinate,
+    result: Arc<Mutex<Option<AnnouncementSearchResult>>>,
+}
+
+impl AnnouncementSearch {
+    fn observe(&self, events: &[Event]) {
+        let mut result = self.result.lock().unwrap();
+        if result.is_none() {
+            *result = Some(
+                if events.iter().any(|event| {
+                    event.kind == self.coordinate.kind
+                        && event.pubkey == self.coordinate.public_key
+                        && event.tags.identifier().as_deref()
+                            == Some(self.coordinate.identifier.as_str())
+                }) {
+                    AnnouncementSearchResult::Returned
+                } else {
+                    AnnouncementSearchResult::NoMatch
+                },
+            );
+        }
+    }
+}
+
+fn announcement_search_failure(error: &anyhow::Error) -> String {
+    let detail = format!("{error:#}");
+    let lower = detail.to_lowercase();
+    if lower.contains("connection refused") {
+        "connection refused".to_string()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timed out waiting for a response".to_string()
+    } else if lower.contains("disconnected before eose") {
+        "connection closed before the search finished".to_string()
+    } else {
+        detail.replace("EOSE", "the end of the search results")
+    }
+}
+
 #[derive(Default)]
 pub struct FetchReport {
+    /// Completed and failed searches for the selected repository.
+    pub announcement_searches: AnnouncementSearches,
     repo_coordinates_without_relays: HashSet<Nip19Coordinate>,
     updated_repo_announcements: Vec<(Nip19Coordinate, Timestamp)>,
     updated_state: Option<(Timestamp, EventId)>,
@@ -4029,6 +4259,7 @@ pub struct FetchRequest {
     repository_relays_only: bool,
     lock_repository_relays: bool,
     selected_relay: Option<RelayUrl>,
+    announcement_search: Option<AnnouncementSearch>,
     scope: RelayFetchScope,
     repo_auth_mode: RelayAuthMode,
     relay_column_width: usize,
@@ -4237,6 +4468,7 @@ pub async fn fetching_with_private_discovery(
         bail!("private Git relay discovery is unavailable: {error}");
     }
 
+    let mut earlier_searches = AnnouncementSearches::default();
     if private_discovery.requires_repository_only_probe() {
         let mut private_coordinate = coordinate.clone();
         private_coordinate.relays = private_discovery.relays().to_vec();
@@ -4262,7 +4494,9 @@ pub async fn fetching_with_private_discovery(
                 }
                 return Ok(private_outcome.report);
             }
-            PrivateRelayProbeDecision::RetryPublicDiscovery => {}
+            PrivateRelayProbeDecision::RetryPublicDiscovery => {
+                earlier_searches.merge(private_outcome.report.announcement_searches);
+            }
             PrivateRelayProbeDecision::FailClosed => {
                 bail!(
                     "private repository relay probe failed; refusing to query public discovery relays"
@@ -4271,7 +4505,8 @@ pub async fn fetching_with_private_discovery(
         }
     }
 
-    let report = fetching_with_report(git_repo_path, client, coordinate).await?;
+    let mut report = fetching_with_report(git_repo_path, client, coordinate).await?;
+    report.announcement_searches.merge(earlier_searches);
     if let Ok(repo_ref) = get_repo_ref_from_cache(Some(git_repo_path), coordinate).await {
         save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);
     }
@@ -4335,8 +4570,13 @@ async fn fetching_with_report_policy_outcome(
             repository_relays_only,
         )
         .await?;
+    let announcement_searches = progress_reporter.announcement_searches.clone();
     finish_fetch_progress(&relay_reports, progress_reporter)?;
-    let outcome = consolidate_fetch_outcome(relay_reports);
+    let mut outcome = consolidate_fetch_outcome(relay_reports);
+    outcome
+        .report
+        .announcement_searches
+        .merge(announcement_searches);
     // Route the summary to stderr so stdout stays clean for JSON-emitting
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
@@ -5452,6 +5692,7 @@ mod tests {
                 repository_relay_attempts: 1,
                 repository_relay_successes: 1,
             },
+            announcement_searches: AnnouncementSearches::default(),
             finished: false,
         };
 
@@ -7234,6 +7475,145 @@ mod fetch_completion_tests {
             } else {
                 assert!(result.is_err(), "partial history accepted: {result:?}");
             }
+        }
+    }
+}
+#[cfg(test)]
+mod announcement_search_diagnostic_tests {
+    use nostr::prelude::{FinalizeEvent, Keys};
+
+    use super::*;
+
+    fn missing() -> MissingRepoAnnouncement {
+        MissingRepoAnnouncement(Nip19Coordinate {
+            coordinate: Coordinate {
+                kind: Kind::GitRepoAnnouncement,
+                public_key: Keys::generate().public_key(),
+                identifier: "repo".to_string(),
+            },
+            relays: vec![],
+        })
+    }
+
+    fn message(searches: AnnouncementSearches) -> String {
+        missing()
+            .diagnostic(
+                "Git remote \"origin\"",
+                "nostr://example/repo",
+                "Check the repository URL with `git remote -v`.",
+                &FetchReport {
+                    announcement_searches: searches,
+                    ..Default::default()
+                },
+            )
+            .to_string()
+    }
+
+    #[test]
+    fn incomplete_searches_do_not_claim_repository_absence() {
+        let mut searches = AnnouncementSearches::default();
+        let empty = message(searches.clone());
+        assert!(empty.contains("couldn't check"));
+        assert!(empty.contains("No Nostr relays were searched"));
+        searches.record(
+            RelayUrl::parse("wss://a.example").unwrap(),
+            AnnouncementSearchResult::Failed("connection refused".to_string()),
+        );
+        let failed = message(searches);
+        assert!(failed.contains("couldn't check"));
+        assert!(failed.contains("Nostr relays that couldn't be checked (1):"));
+        assert!(failed.contains("wss://a.example — connection refused"));
+        assert!(!failed.contains("didn't return this repository"));
+        assert!(failed.contains("retrying may help"));
+    }
+
+    #[test]
+    fn completed_searches_survive_failed_retries_in_either_merge_order() {
+        for reverse in [false, true] {
+            let relay = RelayUrl::parse("wss://a.example").unwrap();
+            let mut completed = AnnouncementSearches::default();
+            completed.record(relay.clone(), AnnouncementSearchResult::NoMatch);
+            let mut failed = AnnouncementSearches::default();
+            failed.record(relay, AnnouncementSearchResult::Failed("timeout".into()));
+            let merged = if reverse {
+                failed.merge(completed);
+                failed
+            } else {
+                completed.merge(failed);
+                completed
+            };
+            let message = message(merged);
+            assert!(message.contains("couldn't find"));
+            assert!(
+                message
+                    .contains("Nostr relays that responded but didn't return this repository (1):")
+            );
+            assert!(!message.contains("couldn't be checked"));
+            assert!(!message.contains("retrying may help"));
+        }
+    }
+
+    #[test]
+    fn completed_queries_track_matching_events_and_ignore_later_queries() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags([nostr::prelude::Tag::identifier("repo")])
+            .finalize(&keys)
+            .unwrap();
+        let search = AnnouncementSearch {
+            coordinate: Coordinate {
+                kind: event.kind,
+                public_key: event.pubkey,
+                identifier: "repo".into(),
+            },
+            result: Arc::new(Mutex::new(None)),
+        };
+        search.observe(std::slice::from_ref(&event));
+        search.observe(&[]);
+        assert_eq!(
+            *search.result.lock().unwrap(),
+            Some(AnnouncementSearchResult::Returned)
+        );
+        let mut searches = AnnouncementSearches::default();
+        searches.record(
+            RelayUrl::parse("wss://a.example").unwrap(),
+            AnnouncementSearchResult::Returned,
+        );
+        let message = message(searches);
+        assert!(message.contains("returned repository data that couldn't be used"));
+        assert!(!message.contains("didn't return this repository"));
+
+        let unrelated = AnnouncementSearch {
+            coordinate: Coordinate {
+                identifier: "different".into(),
+                ..search.coordinate
+            },
+            result: Arc::new(Mutex::new(None)),
+        };
+        unrelated.observe(&[event]);
+        assert_eq!(
+            *unrelated.result.lock().unwrap(),
+            Some(AnnouncementSearchResult::NoMatch)
+        );
+    }
+
+    #[test]
+    fn failed_search_reasons_use_plain_language() {
+        for (error, expected) in [
+            (
+                "relay disconnected before EOSE",
+                "connection closed before the search finished",
+            ),
+            (
+                "timed out before complete EOSE",
+                "timed out waiting for a response",
+            ),
+            (
+                "connection timeout: Connection refused",
+                "connection refused",
+            ),
+        ] {
+            assert_eq!(announcement_search_failure(&anyhow!(error)), expected);
         }
     }
 }

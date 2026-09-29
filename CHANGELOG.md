@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make repository lookup errors identify the Git remote, URL, `nostr.repo`
+  setting or `--repo` value to check. Group Nostr relays by whether they
+  responded without the repository, returned unusable data, or could not be
+  checked, with reasons for failed searches. When no search completes, report
+  that the repository could not be checked rather than implying it is missing.
 - Explain when Git uses a different ngit helper, including an older copy in
   Git's own executable directory, even when `ngit update` says ngit is current.
   A conflicting copy still needs cleanup through its original installation

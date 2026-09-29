@@ -10,6 +10,7 @@ use ngit::{
         existing::load_existing_login,
         user::{PrivateGitRelayDiscovery, UserRef, discover_private_git_relay_list},
     },
+    repo_ref::resolve_repo_coordinate,
     signer::NgitSigner,
 };
 use nostr::nips::nip19::Nip19Coordinate;
@@ -129,7 +130,23 @@ pub async fn fetching_with_account(
 ) -> anyhow::Result<FetchReport> {
     let private_discovery =
         prepare_selected_account_for_repo_fetch(git_repo, client, coordinate, auth).await?;
-    fetching_with_private_discovery(git_repo_path, client, coordinate, &private_discovery).await
+    let report =
+        fetching_with_private_discovery(git_repo_path, client, coordinate, &private_discovery)
+            .await?;
+    if let Err(error) = get_repo_ref_from_cache(Some(git_repo_path), coordinate).await {
+        if let Some(missing) = error.downcast_ref::<ngit::client::MissingRepoAnnouncement>() {
+            // Resolve only on a miss, and verify the input still names the repository
+            // that was fetched before using it in the diagnostic.
+            if let Ok(selected) = resolve_repo_coordinate(git_repo).await {
+                if selected.coordinate.coordinate == coordinate.coordinate {
+                    let (source, value, guidance) = selected.lookup_diagnostic_source(git_repo)?;
+                    return Err(missing.diagnostic(&source, &value, &guidance, &report));
+                }
+            }
+        }
+        return Err(error);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
