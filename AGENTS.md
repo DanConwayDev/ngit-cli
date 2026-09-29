@@ -166,6 +166,10 @@ cargo build --release
 
 ### Error Handling
 
+Follow [the error reporting guide](docs/architecture/error-reporting.md) when
+adding user-facing failures. Reuse the shared diagnostics for repository and
+item lookups; retain source information, search outcomes and actionable advice.
+
 ```rust
 use anyhow::{Context, Result};
 
