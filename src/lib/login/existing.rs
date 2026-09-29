@@ -37,7 +37,7 @@ pub(super) struct SignerInfoNotFound;
 impl std::fmt::Display for SignerInfoNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "failed to get or find signer info in cli arguments, local git config, global git config or system git config",
+            "couldn't find a signing account for this command. Run `ngit account login` to connect an account, or use `--signer` to select an account you already configured.",
         )
     }
 }
@@ -475,7 +475,7 @@ fn signer_info_npub(signer_info: &SignerInfo) -> Result<String> {
                 bail!("configured encrypted signer has no npub");
             }
             Keys::parse(nsec)
-                .context("configured signer has an invalid nsec")?
+                .context(super::INVALID_SIGNING_KEY)?
                 .public_key()
         }
         SignerInfo::Bunker { npub, .. } => PublicKey::parse(
@@ -932,10 +932,10 @@ pub fn command_signer_public_key(
                 let password = signer_password
                     .as_ref()
                     .or(password.as_ref())
-                    .context("command signer ncryptsec requires a password")?;
-                decrypt_key(nsec, password).context("failed to decrypt command signer ncryptsec")?
+                    .context(super::SIGNING_KEY_PASSWORD_REQUIRED)?;
+                decrypt_key(nsec, password).context(super::SIGNING_KEY_UNLOCK_FAILED)?
             } else {
-                Keys::parse(nsec).context("command signer has an invalid nsec")?
+                Keys::parse(nsec).context(super::INVALID_SIGNING_KEY)?
             };
             let public_key = keys.public_key();
             if *verify_npub {
@@ -945,7 +945,7 @@ pub fn command_signer_public_key(
                 )
                 .context("selected command signer has an invalid npub")?;
                 if public_key != expected {
-                    bail!("selected command signer belongs to a different npub");
+                    bail!(super::SIGNING_ACCOUNT_MISMATCH);
                 }
             }
             Ok(Some(public_key))
@@ -1127,19 +1127,16 @@ async fn get_signer(
                     password.clone()
                 } else {
                     if !prompt_for_ncryptsec_password {
-                        bail!(
-                            "failed to login without prompts a nsec is encrypted with a password"
-                        );
+                        bail!(super::SIGNING_KEY_PASSWORD_REQUIRED);
                     }
                     Interactor::default()
                         .password(PromptPasswordParms::default().with_prompt("password"))
                         .context("failed to get password input from interactor.password")?
                 };
                 decrypt_key(nsec, password.clone().as_str())
-                    .context("failed to decrypt key with provided password")
-                    .context("failed to decrypt ncryptsec supplied as nsec with password")?
+                    .context(super::SIGNING_KEY_UNLOCK_FAILED)?
             } else {
-                nostr::prelude::Keys::from_str(nsec).context("invalid nsec parameter")?
+                nostr::prelude::Keys::from_str(nsec).context(super::INVALID_SIGNING_KEY)?
             };
             let public_key = keys.public_key();
             if *verify_npub {
@@ -1148,7 +1145,7 @@ async fn get_signer(
                     .context("selected nsec has no expected npub")?;
                 let expected = PublicKey::parse(expected).context("invalid configured npub")?;
                 if public_key != expected {
-                    bail!("selected nsec belongs to a different npub");
+                    bail!(super::SIGNING_ACCOUNT_MISMATCH);
                 }
             }
             Ok((Arc::new(crate::NgitSigner::Keys(keys)), public_key))
@@ -1290,6 +1287,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypted_key_without_password_fails_without_prompting_or_echoing_key() -> Result<()> {
+        let key = "ncryptsec1-private-test-input";
+        let info = SignerInfo::Nsec {
+            nsec: key.into(),
+            password: None,
+            npub: None,
+            verify_npub: false,
+        };
+        let error = get_signer(&info, false).await.unwrap_err();
+        assert!(error.to_string().contains("password-protected"));
+        assert!(error.to_string().contains("--password"));
+        assert!(!format!("{error:#}").contains(key));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn configured_nsec_npub_is_verified_on_construction() -> Result<()> {
         let info = SignerInfo::Nsec {
             nsec: Keys::generate().secret_key().to_bech32()?,
@@ -1298,7 +1311,7 @@ mod tests {
             verify_npub: true,
         };
         let error = get_signer(&info, false).await.unwrap_err();
-        assert!(error.to_string().contains("different npub"));
+        assert!(error.to_string().contains("different account"));
         Ok(())
     }
 

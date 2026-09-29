@@ -23,6 +23,12 @@ pub mod user;
 use user::UserRef;
 pub mod fresh;
 
+/// Shared guidance for signing-key failures across account selection and login.
+pub const INVALID_SIGNING_KEY: &str = "couldn't read the signing key. Supply a valid Nostr secret key with `--nsec-file`, or run `ngit account login` to configure your account.";
+pub const SIGNING_KEY_PASSWORD_REQUIRED: &str = "this account's signing key is password-protected. Run `ngit -i account login` to unlock it interactively, or provide `--password` for this command.";
+pub const SIGNING_KEY_UNLOCK_FAILED: &str = "couldn't unlock the signing key. Check the password and that you supplied the correct encrypted key.";
+pub const SIGNING_ACCOUNT_MISMATCH: &str = "the signing key belongs to a different account than the one selected. Check your configured accounts with `ngit account list`, then select the intended account with `--signer`.";
+
 pub async fn login_or_signup(
     git_repo: &Option<&Repo>,
     signer_info: &Option<SignerInfo>,

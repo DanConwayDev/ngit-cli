@@ -26,14 +26,18 @@ fn validate_remote_signed_event(
     event: Event,
 ) -> Result<Event> {
     if event.pubkey != expected_public_key {
-        bail!("remote signer signed with a different npub than requested");
+        bail!(
+            "the remote signer signed as a different account than requested. The signature was rejected. Check which account your signing app has authorized for ngit."
+        );
     }
     if event.id != expected_event_id {
-        bail!("remote signer signed a different event than requested");
+        bail!(
+            "the remote signer changed the data it was asked to sign. The signature was rejected. Check your signing app before trying again."
+        );
     }
-    event
-        .verify()
-        .context("remote signer returned an invalid event signature")?;
+    event.verify().context(
+        "the remote signer returned an invalid signature. Check your signing app and try again.",
+    )?;
     Ok(event)
 }
 
@@ -238,7 +242,7 @@ mod tests {
 
         let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
             .expect_err("a different signer must be rejected");
-        assert!(error.to_string().contains("different npub"));
+        assert!(error.to_string().contains("different account"));
     }
 
     #[test]
@@ -251,7 +255,7 @@ mod tests {
 
         let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
             .expect_err("different event contents must be rejected");
-        assert!(error.to_string().contains("different event"));
+        assert!(error.to_string().contains("changed the data"));
     }
 
     #[test]
@@ -269,6 +273,6 @@ mod tests {
 
         let error = validate_remote_signed_event(unsigned.pubkey, unsigned.compute_id(), returned)
             .expect_err("an invalid signature must be rejected");
-        assert!(error.to_string().contains("invalid event signature"));
+        assert!(error.to_string().contains("invalid signature"));
     }
 }

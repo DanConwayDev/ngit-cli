@@ -244,32 +244,30 @@ fn validate_signer_before_switch(
                 .context("invalid signer npub")?;
             if nsec.starts_with("ncryptsec1") {
                 let encrypted = nostr::nips::nip49::EncryptedSecretKey::from_bech32(nsec)
-                    .context("invalid ncryptsec parameter")?;
+                    .context(ngit::login::INVALID_SIGNING_KEY)?;
                 if let Some(password) = password {
                     let public_key = Keys::new(
                         encrypted
                             .decrypt(password)
-                            .context("failed to decrypt ncryptsec with provided password")?,
+                            .context(ngit::login::SIGNING_KEY_UNLOCK_FAILED)?,
                     )
                     .public_key();
                     if *verify_npub && expected.is_some_and(|expected| expected != public_key) {
-                        anyhow::bail!("selected nsec belongs to a different npub");
+                        anyhow::bail!(ngit::login::SIGNING_ACCOUNT_MISMATCH);
                     }
                     return Ok(Some(public_key.to_bech32()?));
                 } else if Interactor::is_non_interactive() {
-                    anyhow::bail!(
-                        "an encrypted nsec requires --password for non-interactive login"
-                    );
+                    anyhow::bail!(ngit::login::SIGNING_KEY_PASSWORD_REQUIRED);
                 }
                 return Ok(expected
                     .map(|public_key| public_key.to_bech32())
                     .transpose()?);
             }
             let public_key = Keys::parse(nsec)
-                .context("invalid nsec parameter")?
+                .context(ngit::login::INVALID_SIGNING_KEY)?
                 .public_key();
             if *verify_npub && expected.is_some_and(|expected| expected != public_key) {
-                anyhow::bail!("selected nsec belongs to a different npub");
+                anyhow::bail!(ngit::login::SIGNING_ACCOUNT_MISMATCH);
             }
             Ok(Some(public_key.to_bech32()?))
         }

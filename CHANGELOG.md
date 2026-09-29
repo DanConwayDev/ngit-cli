@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Use consistent account and signing-key guidance for missing passwords,
+  invalid keys and account mismatches. Explain rejected remote signatures
+  without requiring knowledge of Nostr key or event terminology.
+
 - Give issue, PR and comment lookup failures consistent guidance for finding
   the ID, checking the selected repository and refreshing offline data.
 
