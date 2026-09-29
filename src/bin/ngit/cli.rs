@@ -108,7 +108,7 @@ pub struct Cli {
     /// Use default values without prompting (non-interactive mode)
     #[arg(short = 'd', long, global = true, conflicts_with = "interactive")]
     pub defaults: bool,
-    /// Enable interactive prompts (default behavior)
+    /// Enable prompts where supported (non-interactive by default)
     #[arg(short = 'i', long, global = true)]
     pub interactive: bool,
     /// Force operations, bypass safety guards

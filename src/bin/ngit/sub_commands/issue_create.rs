@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use ngit::{
+    cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{Params, send_events, sign_event},
     content_tags::{dedup_tags, tags_from_content},
     repo_lookup::RepositoryLookup,
@@ -15,10 +16,70 @@ use crate::{
     sub_commands::repository_fetch::fetching_with_account,
 };
 
+struct IssueDraft {
+    subject: String,
+    body: String,
+    labels: Vec<String>,
+}
+
+fn compose_issue(
+    subject: Option<String>,
+    body: Option<String>,
+    labels: Vec<String>,
+    interactive: bool,
+    mut input: impl FnMut(PromptInputParms) -> Result<String>,
+) -> Result<IssueDraft> {
+    let subject = match subject {
+        Some(subject) => subject,
+        None if interactive => input(
+            PromptInputParms::default()
+                .with_prompt("issue subject")
+                .with_flag_name("--subject"),
+        )?,
+        None => bail!("provide `--subject` to create an issue, or use `--interactive` to enter it"),
+    };
+    if subject.trim().is_empty() {
+        bail!(
+            "the issue subject cannot be empty; provide `--subject` or enter a subject at the prompt"
+        );
+    }
+    let body = match body {
+        Some(body) => body,
+        None if interactive => input(
+            PromptInputParms::default()
+                .with_prompt("issue body (Nostr links create mentions)")
+                .with_flag_name("--body")
+                .optional(),
+        )?,
+        None => String::new(),
+    };
+    let labels = if interactive && labels.is_empty() {
+        input(
+            PromptInputParms::default()
+                .with_prompt("labels (comma-separated, optional)")
+                .with_flag_name("--label")
+                .optional(),
+        )?
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+        .collect()
+    } else {
+        labels
+    };
+    Ok(IssueDraft {
+        subject,
+        body,
+        labels,
+    })
+}
+
 pub async fn launch(
     title: Option<String>,
     body: Option<String>,
     labels: Vec<String>,
+    interactive: bool,
     signer: SignerParams<'_>,
 ) -> Result<()> {
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -42,14 +103,12 @@ pub async fn launch(
     let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
-    // Resolve title — required
-    let title = match title {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => bail!("--title is required to create an issue"),
-    };
-
-    // Body defaults to empty string if not provided
-    let body = body.unwrap_or_default();
+    let interactor = Interactor::default();
+    let IssueDraft {
+        subject: title,
+        body,
+        labels,
+    } = compose_issue(title, body, labels, interactive, |p| interactor.input(p))?;
 
     // Login
     let (event_signer, user_ref, _) = login::login_or_signup(
@@ -154,4 +213,87 @@ pub async fn launch(
         ))
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_creation_collects_missing_fields() -> Result<()> {
+        let mut answers = [
+            "a subject",
+            "body with nostr:note1example",
+            "bug, help wanted, ",
+        ]
+        .into_iter();
+        let mut fields = Vec::new();
+        let draft = compose_issue(None, None, vec![], true, |params| {
+            fields.push(params.flag_name.unwrap());
+            Ok(answers.next().unwrap().into())
+        })?;
+        assert_eq!(fields, ["--subject", "--body", "--label"]);
+        assert_eq!(draft.subject, "a subject");
+        assert_eq!(draft.body, "body with nostr:note1example");
+        assert_eq!(draft.labels, ["bug", "help wanted"]);
+        Ok(())
+    }
+
+    #[test]
+    fn supplied_values_are_preserved_and_subject_alone_still_prompts() -> Result<()> {
+        for interactive in [false, true] {
+            let draft = compose_issue(
+                Some("subject".into()),
+                Some(String::new()),
+                vec!["bug".into()],
+                interactive,
+                |_| panic!("explicit values must not prompt"),
+            )?;
+            assert_eq!(draft.subject, "subject");
+            assert!(draft.body.is_empty());
+            assert_eq!(draft.labels, ["bug"]);
+        }
+        let mut fields = Vec::new();
+        let draft = compose_issue(Some("subject".into()), None, vec![], true, |params| {
+            fields.push(params.flag_name.unwrap());
+            Ok("entered".into())
+        })?;
+        assert_eq!(fields, ["--body", "--label"]);
+        assert_eq!(draft.body, "entered");
+        Ok(())
+    }
+
+    #[test]
+    fn noninteractive_creation_never_prompts() -> Result<()> {
+        for subject in [None, Some("  ".into())] {
+            let error = compose_issue(subject, None, vec![], false, |_| panic!("must not prompt"))
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("--subject"));
+        }
+        let draft = compose_issue(Some("subject".into()), None, vec![], false, |_| {
+            panic!("must not prompt")
+        })?;
+        assert!(draft.body.is_empty());
+        assert!(draft.labels.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_and_blank_subject_do_not_produce_a_draft() {
+        let mut calls = 0;
+        let result = compose_issue(Some("subject".into()), None, vec![], true, |_| {
+            calls += 1;
+            bail!("cancelled")
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        let mut calls = 0;
+        let result = compose_issue(None, None, vec![], true, |_| {
+            calls += 1;
+            Ok("  ".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
 }

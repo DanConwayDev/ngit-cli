@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make `ngit issue create --interactive` prompt for missing subject, body and
+  labels instead of rejecting the subject or publishing an empty body without
+  asking. Preserve explicit values and use `--subject` in missing-input errors.
+  Correct the global help text: interactive prompts are opt-in where supported.
+
 - Shorten error messages to focused recovery steps while retaining source
   details, grouped relay results and underlying causes. Repository-selection
   guidance now includes both `nostr.repo` and Git remotes.

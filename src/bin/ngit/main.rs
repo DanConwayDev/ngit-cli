@@ -388,6 +388,7 @@ async fn main() {
                         subject.clone(),
                         body.clone(),
                         labels.clone(),
+                        cli.interactive,
                         signer_params,
                     )
                     .await

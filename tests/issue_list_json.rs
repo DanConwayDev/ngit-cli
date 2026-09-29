@@ -31,6 +31,23 @@ async fn issue_json_stdout_is_valid_when_relay_updates_are_reported() -> Result<
 
     let (publisher, _published) = harness.publish_repo(PublishRepoOpts::default()).await?;
 
+    // Missing or blank subjects must fail without publishing an issue. The
+    // final one-issue assertion below also guards against accidental writes.
+    for args in [
+        vec!["issue", "create", "--json"],
+        vec!["issue", "create", "--subject", "  ", "--json"],
+    ] {
+        let rejected = publisher.ngit(args).output().await?;
+        assert!(!rejected.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&rejected.stdout)?;
+        assert_eq!(error["command_status"], "error");
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("--subject"))
+        );
+    }
+
     // Land a real issue on the relay and in the publisher's local cache.
     // `ngit issue create` publishes via `send_events`, whose per-relay
     // `send_event_to` saves the event to the local cache. The next online
