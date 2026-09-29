@@ -7,9 +7,10 @@ use ngit::{
         wait_for_grasp_servers,
     },
     cli_interactor::{cli_error, cli_error_with_category},
-    client::{Params, get_repo_ref_from_cache, send_events},
+    client::{Params, send_events},
     git::nostr_url::NostrUrlDecoded,
     login::user::{UserRef, publish_private_git_relay_list},
+    repo_lookup::RepositoryLookup,
     repo_ref::{RepoRef, apply_grasp_infrastructure, latest_event_repo_ref},
     signer::NgitSigner,
 };
@@ -281,6 +282,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         ));
     };
     print_selected_repo(&resolved_repo_coordinate);
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo_coordinate)?;
     let mut repo_coordinate = resolved_repo_coordinate.coordinate;
 
     // Fetch latest data from relays
@@ -292,7 +294,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         &user_ref,
     )
     .await;
-    ngit::client::fetching_with_private_discovery(
+    let report = ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,
         &mut repo_coordinate,
@@ -300,18 +302,8 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     )
     .await?;
 
-    let Some(repo_ref) =
-        (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
-    else {
-        return Err(cli_error(
-            "no announcement found on relays for this repository",
-            &[],
-            &[
-                "if you created this repository, use `ngit repo init` to publish an announcement",
-                "if this is a relay or network issue, try again later",
-            ],
-        ));
-    };
+    lookup.record(&report);
+    let repo_ref = lookup.load(git_repo_path).await?;
 
     // Validate state
     let selected = repo_ref.selected_maintainer;

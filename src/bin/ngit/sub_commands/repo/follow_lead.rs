@@ -4,11 +4,12 @@ use anyhow::{Context, Result};
 use ngit::{
     cli_interactor::cli_error,
     client::{
-        Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
+        Params, get_event_from_global_cache, get_events_from_local_cache,
         get_repo_ref_from_cache_for_lead_recovery, get_state_from_cache, send_events,
     },
     event_ordering::latest_event,
     git::nostr_url::NostrUrlDecoded,
+    repo_lookup::RepositoryLookup,
     repo_ref::{LeadSource, RepoRef, ResolvedRepoCoordinate},
 };
 use nostr::prelude::{Event, Filter, Kind, PublicKey, ToBech32};
@@ -182,6 +183,7 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         .await?
         .context("no nostr repository found")?;
     print_selected_repo(&resolved);
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved)?;
     let mut selected_coordinate = resolved.coordinate.clone();
     let private_discovery = prepare_account_for_repo_fetch(
         &git_repo,
@@ -191,16 +193,18 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         &user_ref,
     )
     .await;
-    ngit::client::fetching_with_private_discovery(
+    let report = ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,
         &mut selected_coordinate,
         &private_discovery,
     )
     .await?;
+    lookup.record(&report);
     let selected_ref =
         get_repo_ref_from_cache_for_lead_recovery(Some(git_repo_path), &selected_coordinate)
-            .await?;
+            .await
+            .map_err(|error| lookup.explain(error))?;
     let resolution = selected_ref.lead_resolution();
     if !matches!(
         resolution.source,
@@ -230,7 +234,12 @@ pub async fn launch(_args: &SubCommandArgs, signer_params: SignerParams<'_>) -> 
         .context("the resolved lead announcement is missing")?;
     let mut lead_coordinate = canonical_lead.coordinate_with_hint();
     lead_coordinate.relays = canonical_lead.relays.clone();
-    let lead_ref = get_repo_ref_from_cache(Some(git_repo_path), &lead_coordinate).await?;
+    let lead_ref = RepositoryLookup::related(
+        lead_coordinate.clone(),
+        "the repository's lead announcement",
+    )?
+    .load(git_repo_path)
+    .await?;
     let lead_resolution = lead_ref.lead_resolution();
     let target_resolves_lead = lead_resolution.lead == Some(lead)
         && match resolution.source {

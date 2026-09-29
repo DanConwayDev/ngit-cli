@@ -80,17 +80,22 @@ pub fn finish_and_exit(code: i32) -> ! {
     std::process::exit(code)
 }
 
+/// A shared error shape for failed commands and partial informational results.
+pub fn error_document(error: &anyhow::Error) -> serde_json::Value {
+    let mut value = serde_json::json!({"command_status": "error", "error": format!("{error:#}")});
+    if let Some(lookup) = error.downcast_ref::<ngit::repo_lookup::RepositoryLookupError>() {
+        value["category"] = lookup.category.into();
+        value["details"] = lookup.details.clone();
+    }
+    value
+}
+
 pub fn finish_error(error: &anyhow::Error) {
     let mut value = JSON_OUTPUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "command_status": "error",
-                "error": format!("{error:#}"),
-            })
-        });
+        .unwrap_or_else(|| error_document(error));
     if let Some(category) = error
         .downcast_ref::<ngit::cli_interactor::CliError>()
         .and_then(ngit::cli_interactor::CliError::category)
@@ -100,6 +105,12 @@ pub fn finish_error(error: &anyhow::Error) {
                 "category".to_string(),
                 serde_json::Value::String(category.to_string()),
             );
+        }
+    }
+    if let Some(lookup) = error.downcast_ref::<ngit::repo_lookup::RepositoryLookupError>() {
+        if let Some(document) = value.as_object_mut() {
+            document.insert("category".to_string(), lookup.category.into());
+            document.insert("details".to_string(), lookup.details.clone());
         }
     }
     let rendered = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());

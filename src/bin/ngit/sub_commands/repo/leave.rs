@@ -3,11 +3,9 @@ use std::{collections::HashSet, path::Path};
 use anyhow::{Context, Result};
 use ngit::{
     cli_interactor::cli_error,
-    client::{
-        Params, get_event_from_global_cache, get_events_from_local_cache, get_repo_ref_from_cache,
-        send_events,
-    },
+    client::{Params, get_event_from_global_cache, get_events_from_local_cache, send_events},
     event_ordering::latest_event,
+    repo_lookup::RepositoryLookup,
     repo_ref::RepoRef,
 };
 use nostr::prelude::{Event, Filter, Kind, PublicKey, Timestamp, ToBech32};
@@ -238,6 +236,7 @@ pub async fn launch(_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<
         ));
     };
     print_selected_repo(&resolved_repo_coordinate);
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo_coordinate)?;
     let mut repo_coordinate = resolved_repo_coordinate.coordinate;
 
     // Fetch latest data from relays
@@ -249,7 +248,7 @@ pub async fn launch(_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<
         &user_ref,
     )
     .await;
-    ngit::client::fetching_with_private_discovery(
+    let report = ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,
         &mut repo_coordinate,
@@ -257,15 +256,8 @@ pub async fn launch(_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<
     )
     .await?;
 
-    let Some(repo_ref) =
-        (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
-    else {
-        return Err(cli_error(
-            "no announcement found on relays for this repository",
-            &[],
-            &["if this is a relay or network issue, try again later"],
-        ));
-    };
+    lookup.record(&report);
+    let repo_ref = lookup.load(git_repo_path).await?;
 
     let my_event = my_announcement_event(git_repo_path, &repo_ref, &my_pubkey).await;
     let my_ref = my_event

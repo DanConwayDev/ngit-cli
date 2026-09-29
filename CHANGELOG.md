@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply source-aware repository lookup diagnostics across commands, including
+  offline reads, repository membership, sync and publishing. Preserve lookup
+  categories and per-relay outcomes in JSON errors.
+
 - Make `ngit init` lookup errors show the selected repository source and Nostr
   relay outcomes instead of calling the repository name a coordinate. Keep
   the warning about creating an announcement with `ngit init --force`.

@@ -2,15 +2,16 @@ use anyhow::{Context, Result, bail};
 use ngit::{
     client::{Params, send_events},
     git_events::{KIND_LABEL, get_labels_and_subject},
+    repo_lookup::RepositoryLookup,
 };
 use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache},
+    client::{Client, Connect, get_events_from_local_cache},
     git::{Repo, RepoActions},
     login,
-    repo_ref::get_repo_coordinates_for_publishing,
+    repo_ref::get_resolved_repo_coordinate_for_publishing,
     sub_commands::{
         id_resolver::{load_and_resolve_issue, load_and_resolve_pr_root},
         repository_fetch::fetching_with_account,
@@ -40,7 +41,9 @@ async fn publish_set_subject_event(
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
+    let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !offline {
         fetching_with_account(
@@ -48,12 +51,13 @@ async fn publish_set_subject_event(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             auth,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
 
     // Resolve the target event from cache.
     let target = if target_kind == "issue" {

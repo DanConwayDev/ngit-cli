@@ -3451,7 +3451,7 @@ async fn get_repo_coordinate_from_user_prompt(
         ),
     );
     let git_repo_path = git_repo.get_path()?;
-    let coordinate = {
+    let (coordinate, repo_ref) = {
         loop {
             let input = Interactor::default()
                 .input(PromptInputParms::default().with_prompt("nostr repository"))?;
@@ -3465,13 +3465,20 @@ async fn get_repo_coordinate_from_user_prompt(
                 eprintln!("not a valid naddr or git nostr remote URL starting nostr://");
                 continue;
             };
+            let mut lookup = crate::repo_lookup::RepositoryLookup::new(
+                coordinate.clone(),
+                "your repository input".to_string(),
+                input,
+                "Check the repository address you entered.".to_string(),
+            );
+            let mut searches = crate::client::AnnouncementSearches::default();
             let term = console::Term::stderr();
             write_progress_line(&term, "searching for repository...")?;
             if let PrivateGitRelayDiscovery::Unavailable(error) = private_discovery {
                 bail!("private Git relay discovery is unavailable: {error}");
             }
             let mut repository_relays_only = private_discovery.requires_repository_only_probe();
-            let report = loop {
+            let mut report = loop {
                 let mut private_coordinate = coordinate.clone();
                 private_coordinate.relays = private_discovery.relays().to_vec();
                 let fetch_coordinate = if repository_relays_only {
@@ -3488,6 +3495,7 @@ async fn get_repo_coordinate_from_user_prompt(
                         repository_relays_only,
                     )
                     .await?;
+                searches.merge(progress_reporter.announcement_searches.clone());
                 finish_fetch_progress(&relay_reports, progress_reporter)?;
                 let outcome = consolidate_fetch_outcome(relay_reports);
                 if repository_relays_only {
@@ -3514,18 +3522,22 @@ async fn get_repo_coordinate_from_user_prompt(
                 }
                 break outcome.report;
             };
-            if report.to_string().is_empty() {
-                eprintln!("couldn't find repository");
-                continue;
-            } else {
-                if !is_quiet() {
-                    eprintln!("repository found");
+            report.announcement_searches.merge(searches);
+            lookup.record(&report);
+            match get_repo_ref_from_cache(Some(git_repo_path), &coordinate).await {
+                Ok(repo_ref) => {
+                    if !is_quiet() {
+                        eprintln!("repository found");
+                    }
+                    break (coordinate, repo_ref);
                 }
-                break coordinate;
+                Err(error) if error.is::<crate::client::MissingRepoAnnouncement>() => {
+                    eprintln!("{}", lookup.explain(error));
+                }
+                Err(error) => return Err(error),
             }
         }
     };
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate).await?;
 
     if Interactor::default().confirm(
         PromptConfirmParms::default()

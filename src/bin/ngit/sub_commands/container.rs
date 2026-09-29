@@ -26,8 +26,8 @@ use nostr::prelude::{
 use serde_json::{Value, json};
 
 use super::publication::{
-    BlossomUploadProgress, PublicationContext, PublicationError, WarningJson,
-    blossom_replication_warning, coded_error_with_details,
+    BlossomUploadProgress, PublicationContext, WarningJson, blossom_replication_warning,
+    coded_error_with_details,
 };
 use crate::{
     cli::{ContainerPublishArgs, SignerParams},
@@ -44,16 +44,7 @@ pub async fn launch(
     match result {
         Ok(()) => Ok(()),
         Err(error) if json_output => {
-            let (code, message, details) = error.downcast_ref::<PublicationError>().map_or_else(
-                || {
-                    (
-                        "operation_failed",
-                        format!("{error:#}"),
-                        Value::Object(serde_json::Map::new()),
-                    )
-                },
-                |error| (error.code, error.message.clone(), error.details.clone()),
-            );
+            let (code, message, details) = super::publication::error_details(&error);
             output::set_value(json!({
                 "format_version": 2,
                 "command_status": "error",

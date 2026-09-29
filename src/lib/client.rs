@@ -3984,7 +3984,7 @@ impl AnnouncementSearches {
         }
     }
 
-    fn has_response(&self) -> bool {
+    pub(crate) fn has_response(&self) -> bool {
         self.results
             .values()
             .any(|result| !matches!(result, AnnouncementSearchResult::Failed(_)))
@@ -3994,6 +3994,27 @@ impl AnnouncementSearches {
         self.results
             .values()
             .any(|result| matches!(result, AnnouncementSearchResult::Failed(_)))
+    }
+
+    pub(crate) fn diagnostic_details(&self) -> serde_json::Value {
+        let mut results: Vec<_> = self.results.iter().collect();
+        results.sort_unstable_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        serde_json::Value::Array(
+            results
+                .into_iter()
+                .map(|(relay, result)| match result {
+                    AnnouncementSearchResult::NoMatch => {
+                        serde_json::json!({"url": relay, "outcome": "not_found"})
+                    }
+                    AnnouncementSearchResult::Returned => {
+                        serde_json::json!({"url": relay, "outcome": "returned"})
+                    }
+                    AnnouncementSearchResult::Failed(reason) => {
+                        serde_json::json!({"url": relay, "outcome": "failed", "reason": reason})
+                    }
+                })
+                .collect(),
+        )
     }
 
     fn description(&self) -> String {
@@ -4624,8 +4645,10 @@ pub async fn fetching_quietly(
             repository_relays_only,
         )
         .await?;
+    let searches = progress_reporter.announcement_searches.clone();
     let had_errors = finish_fetch_progress(&relay_reports, progress_reporter)?;
-    let report = consolidate_fetch_reports(relay_reports);
+    let mut report = consolidate_fetch_reports(relay_reports);
+    report.announcement_searches.merge(searches);
     Ok((report, had_errors))
 }
 

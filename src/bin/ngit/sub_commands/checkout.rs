@@ -12,12 +12,13 @@ use ngit::{
         pr_event_clone_tag_urls, tag_value,
     },
     git_http_auth::prepare_private_git_auth_for_repo,
+    repo_lookup::RepositoryLookup,
     repo_ref::RepoRef,
 };
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
+    client::{Client, Connect, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
     repo_ref::{
@@ -38,6 +39,7 @@ pub async fn launch(id: &str, force: bool, offline: bool, auth: SignerParams<'_>
     let resolved_repo =
         get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
     let nostr_remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo)?;
     let mut repo_coordinates = resolved_repo.coordinate;
 
     if !offline {
@@ -46,12 +48,13 @@ pub async fn launch(id: &str, force: bool, offline: bool, auth: SignerParams<'_>
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             auth,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let private_signer =
         prepare_private_git_auth_for_repo(&repo_ref, &git_repo, auth.info, auth.password).await?;

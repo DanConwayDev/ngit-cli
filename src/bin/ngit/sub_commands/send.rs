@@ -13,6 +13,7 @@ use ngit::{
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
     push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
+    repo_lookup::RepositoryLookup,
     utils::{get_all_proposals, get_open_or_draft_proposals, proposal_tip_is_pr_or_pr_update},
 };
 use nostr::prelude::{ToBech32, event::Event, nip10::Nip10Tag, nip19::Nip19Event};
@@ -23,14 +24,11 @@ use crate::{
         Interactor, InteractorPrompt, PromptConfirmParms, PromptInputParms, PromptMultiChoiceParms,
         cli_error,
     },
-    client::{
-        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        warn_if_invited_as_maintainer,
-    },
+    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions, identify_ahead_behind},
     git_events::{event_is_patch_set_root, event_tag_from_nip19_or_hex},
     login,
-    repo_ref::get_repo_coordinates_for_publishing,
+    repo_ref::get_resolved_repo_coordinate_for_publishing,
     sub_commands::repository_fetch::fetching_with_account,
 };
 
@@ -173,7 +171,9 @@ pub async fn launch(
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
+    let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !no_fetch {
         fetching_with_account(
@@ -181,12 +181,13 @@ pub async fn launch(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             signer,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let (root_proposal, mention_tags) =

@@ -9,8 +9,9 @@ use std::{collections::HashSet, path::Path};
 use anyhow::{Context, Result};
 use console::Style;
 use ngit::{
-    client::{Params, fetching_quietly, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
+    client::{Params, fetching_quietly, warn_if_invited_as_maintainer},
     login::{existing::load_existing_login, user::get_user_ref_from_cache},
+    repo_lookup::RepositoryLookup,
     repo_ref::{
         InvalidSelfDefer, RepoRef, RoleSource, extract_npub, format_grasp_server_url_as_relay_url,
         is_grasp_server_clone_url, normalize_grasp_server_url,
@@ -487,10 +488,12 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
     };
     let selected_remote =
         get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo)?;
     let repo_coordinate = resolved_repo.coordinate;
     // Fetch latest data from relays — suppress the summary line.
     // fetching_quietly writes a blank line to stderr after errors so there
     // is clear separation before the repo info below.
+    let mut fetch_error = None;
     if !offline {
         let private_discovery = if let Some((signer, user_ref, _)) = active_login.as_ref() {
             prepare_account_for_repo_fetch(
@@ -504,74 +507,82 @@ async fn show_info(offline: bool, json: bool, signer: SignerParams<'_>) -> Resul
         } else {
             ngit::login::user::PrivateGitRelayDiscovery::Absent
         };
-        let _ =
-            fetching_quietly(git_repo_path, &client, &repo_coordinate, &private_discovery).await;
+        match fetching_quietly(git_repo_path, &client, &repo_coordinate, &private_discovery).await {
+            Ok((report, _)) => lookup.record(&report),
+            Err(error) => fetch_error = Some(error),
+        }
     }
 
-    let Some(repo_ref) =
-        (get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await).ok()
-    else {
-        if json {
-            // Coordinate found but no announcement yet — still a nostr repo
-            let nostr_url = selected_remote.map(|remote| remote.decoded_url.original_string);
-            crate::output::set(RepoInfoJson {
-                is_nostr_repo: true,
-                name: None,
-                identifier: Some(repo_coordinate.identifier.clone()),
-                description: None,
-                nostr_url,
-                coordinate: repo_coordinate.to_bech32().ok(),
-                web: None,
-                upstream: None,
-                maintainers: None,
-                selected_maintainer: Some(
-                    repo_coordinate
-                        .public_key
-                        .to_bech32()
-                        .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
-                ),
-                confirmed_maintainers: None,
-                invited_maintainers: None,
-                lead_maintainer: None,
-                lead_source: None,
-                lead_path: None,
-                recommended_coordinate: None,
-                follow_lead_command: None,
-                pending_actions: None,
-                health: None,
-                maintainer_edges: None,
-                moderators: None,
-                confirmed_moderators: None,
-                members: None,
-                grasp_servers: None,
-                git_servers: None,
-                relays: None,
-                hashtags: None,
-            })?;
-        } else {
-            println!(
-                "subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)"
-            );
-            println!();
-            println!(
-                "coordinate found ({}) but no announcement on relays",
-                repo_coordinate.identifier
-            );
-            println!();
-            println!(
-                "if you created this repository, run `ngit repo init` to publish an announcement"
-            );
-            println!(
-                "if you are a co-maintainer, run `ngit repo accept` to publish your announcement"
-            );
+    let repo_ref = lookup.load(git_repo_path).await;
+    let repo_ref = match repo_ref {
+        Ok(repo_ref) => repo_ref,
+        Err(error) => {
+            let error = fetch_error.unwrap_or(error);
+            if json {
+                // Coordinate found but no announcement yet — still a nostr repo
+                let nostr_url = selected_remote.map(|remote| remote.decoded_url.original_string);
+                let mut value = serde_json::to_value(RepoInfoJson {
+                    is_nostr_repo: true,
+                    name: None,
+                    identifier: Some(repo_coordinate.identifier.clone()),
+                    description: None,
+                    nostr_url,
+                    coordinate: repo_coordinate.to_bech32().ok(),
+                    web: None,
+                    upstream: None,
+                    maintainers: None,
+                    selected_maintainer: Some(
+                        repo_coordinate
+                            .public_key
+                            .to_bech32()
+                            .unwrap_or_else(|_| repo_coordinate.public_key.to_hex()),
+                    ),
+                    confirmed_maintainers: None,
+                    invited_maintainers: None,
+                    lead_maintainer: None,
+                    lead_source: None,
+                    lead_path: None,
+                    recommended_coordinate: None,
+                    follow_lead_command: None,
+                    pending_actions: None,
+                    health: None,
+                    maintainer_edges: None,
+                    moderators: None,
+                    confirmed_moderators: None,
+                    members: None,
+                    grasp_servers: None,
+                    git_servers: None,
+                    relays: None,
+                    hashtags: None,
+                })?;
+                value["lookup"] = crate::output::error_document(&error);
+                crate::output::set_value(value);
+            } else {
+                println!(
+                    "subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)"
+                );
+                println!();
+                println!("{error:#}");
+            }
+            return Ok(());
         }
-        return Ok(());
     };
+    if let Some(error) = &fetch_error {
+        eprintln!(
+            "warning: couldn't refresh repository information; showing cached data: {error:#}"
+        );
+    }
 
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     if json {
-        print_repo_info_json(&repo_ref, &repo_coordinate, &git_repo, my_pubkey.as_ref())?;
+        print_repo_info_json(
+            &repo_ref,
+            &repo_coordinate,
+            &git_repo,
+            my_pubkey.as_ref(),
+            fetch_error.as_ref(),
+        )?;
     } else {
         println!("subcommands: init, edit, accept, leave  (run `ngit repo --help` for details)");
         println!();
@@ -592,6 +603,7 @@ fn print_repo_info_json(
     coordinate: &Nip19Coordinate,
     git_repo: &Repo,
     my_pubkey: Option<&PublicKey>,
+    refresh_error: Option<&anyhow::Error>,
 ) -> Result<()> {
     let nostr_url = git_repo
         .git_repo
@@ -809,7 +821,14 @@ fn print_repo_info_json(
         },
     };
 
-    crate::output::set(info)
+    let mut value = serde_json::to_value(info)?;
+    if let Some(error) = refresh_error {
+        value["warnings"] = serde_json::json!([{
+            "code": "repository_refresh_failed", "message": format!("couldn't refresh repository information; showing cached data: {error:#}")
+        }]);
+    }
+    crate::output::set_value(value);
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]

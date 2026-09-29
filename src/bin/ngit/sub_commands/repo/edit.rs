@@ -6,9 +6,10 @@ use ngit::{
     cli_interactor::{cli_error, cli_error_with_category},
     client::{
         Params, fetch_filters_to_local_cache, get_event_from_global_cache,
-        get_events_from_local_cache, get_repo_ref_from_cache,
+        get_events_from_local_cache,
     },
     event_ordering::latest_event,
+    repo_lookup::RepositoryLookup,
     repo_ref::{
         LeadSource, MaintainerAcknowledgement, RepoRef,
         announcement_author_validly_declines_maintainership, detect_existing_grasp_servers,
@@ -902,20 +903,20 @@ pub async fn launch(
         ));
     };
     print_selected_repo(&resolved);
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved)?;
     let mut coordinate = resolved.coordinate;
     let private_discovery =
         prepare_account_for_repo_fetch(&git_repo, &mut client, &coordinate, &signer, &user_ref)
             .await;
-    ngit::client::fetching_with_private_discovery(
+    let report = ngit::client::fetching_with_private_discovery(
         git_repo_path,
         &client,
         &mut coordinate,
         &private_discovery,
     )
     .await?;
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate)
-        .await
-        .context("no repository announcement found on relays")?;
+    lookup.record(&report);
+    let repo_ref = lookup.load(git_repo_path).await?;
     refresh_own_announcement_from_account_relays(
         cli,
         &git_repo,
@@ -925,7 +926,8 @@ pub async fn launch(
         &repo_ref,
     )
     .await?;
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &coordinate)
+    let repo_ref = lookup
+        .load(git_repo_path)
         .await
         .context("no repository announcement found after refreshing account write relays")?;
     let my_pubkey = user_ref.public_key;

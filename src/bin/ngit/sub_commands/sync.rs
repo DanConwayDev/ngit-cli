@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use git2::Oid;
 use ngit::{
     client::{
-        Client, Connect, Params, fetching_with_private_discovery, get_repo_ref_from_cache,
-        get_state_from_cache, warn_if_invited_as_maintainer,
+        Client, Connect, Params, fetching_with_private_discovery, get_state_from_cache,
+        warn_if_invited_as_maintainer,
     },
     fetch::fetch_from_git_server,
     git::{
@@ -19,6 +19,7 @@ use ngit::{
     git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
     list::{get_ahead_behind, list_from_remotes},
     login::{self, existing::load_existing_login},
+    repo_lookup::RepositoryLookup,
     repo_ref::{
         get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_for_publishing,
         grasp_server_relay_urls, is_grasp_server_clone_url,
@@ -168,6 +169,7 @@ pub(crate) async fn sync_with_client(
         )?;
     let nostr_remote_name = selected_remote.name;
     let decoded_nostr_url = selected_remote.decoded_url;
+    let mut lookup = RepositoryLookup::from_resolved(git_repo, &resolved_repo)?;
     let mut repo_coordinate = resolved_repo.coordinate;
     let private_discovery = if let Some((signer, user_ref)) = active_login.as_ref() {
         prepare_account_for_repo_fetch(git_repo, client, &repo_coordinate, signer, user_ref).await
@@ -183,7 +185,8 @@ pub(crate) async fn sync_with_client(
     )
     .await?;
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinate).await?;
+    lookup.record(&fetch_report);
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     clear_private_git_auth();

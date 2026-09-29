@@ -13,10 +13,11 @@ use ngit::{
     ci::trust::Coverage,
     client::{
         Client, Connect, Params, get_events_from_local_cache,
-        get_proposals_and_revisions_from_cache, get_repo_ref_from_cache,
+        get_proposals_and_revisions_from_cache,
     },
     git::{Repo, RepoActions},
     git_events::event_is_revision_root,
+    repo_lookup::RepositoryLookup,
     repo_ref::RepoRef,
 };
 use nostr::prelude::{Event, EventId, Filter};
@@ -27,7 +28,7 @@ use crate::{
         ProjectionRequest, Target, Tier, build_report, pull_request_target, relay_coverage, short,
     },
     cli::{CiTrustFloor, LogTailMode, SignerParams},
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::get_resolved_repo_coordinate_when_remote_unknown,
     sub_commands::{
         id_resolver::{parse_event_id, pr_description, resolve_pr_root_or_prefix},
         repository_fetch::fetching_with_account,
@@ -53,8 +54,10 @@ pub async fn launch(
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates =
-        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
+    let selected_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     let fetch_report = if offline {
         None
@@ -65,13 +68,14 @@ pub async fn launch(
                 git_repo_path,
                 &mut client,
                 &mut repo_coordinates,
+                &mut lookup,
                 auth,
             )
             .await?,
         )
     };
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     // A repository relay that did not answer leaves this view incomplete
     // whatever the trust layer finds locally.
     let input_coverage = fetch_report.as_ref().map_or(Coverage::Complete, |report| {

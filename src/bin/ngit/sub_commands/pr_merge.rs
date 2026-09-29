@@ -19,6 +19,7 @@ use ngit::{
     git_http_auth::prepare_private_git_auth_for_repo,
     login::{get_curent_user, user::extract_user_metadata},
     proposal_base::resolve_target_branch_tip_with_known_tip,
+    repo_lookup::RepositoryLookup,
     utils::get_open_or_draft_proposals,
 };
 use nostr::prelude::{EventId, Kind, PublicKey, RelayUrl, ToBech32, nip19::Nip19Event};
@@ -29,13 +30,10 @@ use crate::{
         CiReport, ProjectionRequest, Tier, build_report, pull_request_target, relay_coverage,
     },
     cli::{CiTrustFloor, LogTailMode, SignerParams},
-    client::{
-        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        warn_if_invited_as_maintainer,
-    },
+    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions, str_to_sha1},
     git_events::event_to_cover_letter,
-    repo_ref::{RepoRef, get_repo_coordinates_when_remote_unknown},
+    repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
     sub_commands::{
         id_resolver::{pr_description, proposal_roots, resolve_pr_root_id_or_prefix},
         repository_fetch::fetching_with_account,
@@ -54,8 +52,10 @@ pub async fn launch(
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates =
-        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
+    let selected_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     let fetch_report = if offline {
         None
@@ -66,13 +66,14 @@ pub async fn launch(
                 git_repo_path,
                 &mut client,
                 &mut repo_coordinates,
+                &mut lookup,
                 auth,
             )
             .await?,
         )
     };
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let private_signer =
         prepare_private_git_auth_for_repo(&repo_ref, &git_repo, auth.info, auth.password).await?;

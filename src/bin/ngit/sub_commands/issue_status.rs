@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use ngit::{
     client::{Params, get_issues_from_cache, send_events},
     git_events::{get_status, sign_ordered_status_event, status_kinds},
+    repo_lookup::RepositoryLookup,
 };
 use nostr::prelude::{
     EventBuilder, Kind, Tag,
@@ -11,10 +12,10 @@ use nostr::prelude::{
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache},
+    client::{Client, Connect, get_events_from_local_cache},
     git::{Repo, RepoActions},
     login,
-    repo_ref::get_repo_coordinates_for_publishing,
+    repo_ref::get_resolved_repo_coordinate_for_publishing,
     sub_commands::{
         id_resolver::{issue_description, resolve_issue_or_prefix},
         repository_fetch::fetching_with_account,
@@ -34,7 +35,9 @@ async fn launch_status(
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
+    let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !offline {
         fetching_with_account(
@@ -42,12 +45,13 @@ async fn launch_status(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             auth,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
 
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 

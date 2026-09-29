@@ -19,6 +19,7 @@ use ngit::{
         process_cover_note, status_kinds, tag_value,
     },
     git_http_auth::prepare_private_git_auth_for_repo,
+    repo_lookup::RepositoryLookup,
     repo_ref::RepoRef,
 };
 use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
@@ -30,18 +31,14 @@ use crate::{
     },
     cli::{LogTailMode, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
-    client::{
-        Client, Connect, get_events_from_local_cache, get_repo_ref_from_cache,
-        warn_if_invited_as_maintainer,
-    },
+    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions, str_to_sha1},
     git_events::{
         commit_msg_from_patch_oneliner, event_is_revision_root, event_to_cover_letter,
         get_parent_commit_from_patch,
     },
     repo_ref::{
-        get_nostr_remote_for_resolved_coordinate, get_repo_coordinates_when_remote_unknown,
-        get_resolved_repo_coordinate_when_remote_unknown,
+        get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_when_remote_unknown,
     },
     sub_commands::{
         checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
@@ -70,8 +67,10 @@ pub async fn launch(
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let mut repo_coordinates =
-        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
+    let selected_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     let fetch_report = if offline {
         None
@@ -82,13 +81,14 @@ pub async fn launch(
                 git_repo_path,
                 &mut client,
                 &mut repo_coordinates,
+                &mut lookup,
                 auth,
             )
             .await?,
         )
     };
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     // A repository relay that did not answer leaves the CI view incomplete
@@ -773,6 +773,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
         get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
             .await?
             .map(|remote| remote.name);
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo)?;
     let mut repo_coordinates = resolved_repo.coordinate;
 
     fetching_with_account(
@@ -780,12 +781,13 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
         git_repo_path,
         &mut client,
         &mut repo_coordinates,
+        &mut lookup,
         auth,
     )
     .await?;
     let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let proposals_and_revisions: Vec<nostr::prelude::Event> =

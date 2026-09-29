@@ -6,15 +6,16 @@ use ngit::{
     },
     content_tags::{dedup_tags, tags_from_content},
     git_events::KIND_COMMENT,
+    repo_lookup::RepositoryLookup,
 };
 use nostr::prelude::{EventBuilder, EventId, Kind, PublicKey, Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
+    client::{Client, Connect, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions},
     login,
-    repo_ref::get_repo_coordinates_for_publishing,
+    repo_ref::get_resolved_repo_coordinate_for_publishing,
     sub_commands::{
         id_resolver::{
             issue_description, parse_event_id, pr_description, resolve_issue_or_prefix,
@@ -213,7 +214,9 @@ pub async fn launch_pr_comment(
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
+    let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !offline {
         fetching_with_account(
@@ -221,12 +224,13 @@ pub async fn launch_pr_comment(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             signer,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let proposals =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
@@ -264,7 +268,9 @@ pub async fn launch_issue_comment(
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-    let mut repo_coordinates = get_repo_coordinates_for_publishing(&git_repo, &mut client).await?;
+    let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !offline {
         fetching_with_account(
@@ -272,12 +278,13 @@ pub async fn launch_issue_comment(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             signer,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
     let issues = get_issues_from_cache(git_repo_path, repo_ref.coordinates()).await?;
 

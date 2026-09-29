@@ -29,6 +29,7 @@ use ngit::{
     git_http_auth::{clear_private_git_auth, prepare_private_git_auth},
     list::{list_from_remote, list_from_remotes},
     output_mode::is_quiet,
+    repo_lookup::RepositoryLookup,
     repo_ref::{
         apply_grasp_infrastructure, detect_existing_grasp_servers, extract_npub, extract_pks,
         format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, latest_event_repo_ref,
@@ -46,7 +47,7 @@ use crate::{
     cli::{Cli, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{
-        Client, Connect, FetchReport, MissingRepoAnnouncement, fetching_with_private_discovery,
+        Client, Connect, MissingRepoAnnouncement, fetching_with_private_discovery,
         fetching_with_report, get_repo_ref_from_cache,
     },
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
@@ -74,7 +75,7 @@ enum InitState {
     /// A repository is selected but no usable announcement was found (State B).
     CoordinateOnly {
         coordinate: Nip19Coordinate,
-        lookup_error: anyhow::Error,
+        lookup_error: ngit::repo_lookup::RepositoryLookupError,
     },
     /// Announcement exists, I am the selected maintainer (State C)
     MyAnnouncement {
@@ -959,13 +960,9 @@ fn validate_post_fetch(
 ) -> Result<()> {
     if let InitState::CoordinateOnly { lookup_error, .. } = state {
         if !cli.force && (mode == LaunchMode::Init || !cli.interactive) {
-            return Err(cli_error(
-                &format!(
-                    "{lookup_error}\n\nOnly use `ngit init --force` if you are sure this repository does not already\nhave an announcement on a Nostr relay."
-                ),
-                &[],
-                &[],
-            ));
+            return Err(lookup_error.clone().with_advice(
+                "Only use `ngit init --force` if you are sure this repository does not already\nhave an announcement on a Nostr relay."
+            ).into());
         }
     }
     if mode == LaunchMode::Init {
@@ -2216,6 +2213,10 @@ async fn launch_with_mode(
 
     client.set_signer(signer.clone()).await;
     let resolved_repo_coordinate = try_resolve_repo_coordinate(&git_repo).await?;
+    let mut lookup = resolved_repo_coordinate
+        .as_ref()
+        .map(|selected| RepositoryLookup::from_resolved(&git_repo, selected))
+        .transpose()?;
     let private_discovery = if let Some(resolved) = &resolved_repo_coordinate {
         prepare_account_for_repo_fetch(
             &git_repo,
@@ -2252,15 +2253,17 @@ async fn launch_with_mode(
     )?;
 
     // Phase 4: Network fetch (only if coordinate exists)
-    let mut fetch_report = FetchReport::default();
     let repo_ref = if let Some(repo_coordinate) = &mut repo_coordinate {
-        fetch_report = fetching_with_private_discovery(
+        let report = fetching_with_private_discovery(
             git_repo_path,
             &client,
             repo_coordinate,
             &private_discovery,
         )
         .await?;
+        if let Some(lookup) = &mut lookup {
+            lookup.record(&report);
+        }
         match get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await {
             Ok(repo_ref) => Some(repo_ref),
             Err(error) if error.is::<MissingRepoAnnouncement>() => None,
@@ -2280,21 +2283,13 @@ async fn launch_with_mode(
     // Phase 4: Determine state + post-fetch validation
     let state = match (&repo_coordinate, &repo_ref) {
         (None, _) => InitState::Fresh,
-        (Some(coord), None) => {
-            let selected = resolved_repo_coordinate
+        (Some(coord), None) => InitState::CoordinateOnly {
+            coordinate: coord.clone(),
+            lookup_error: lookup
                 .as_ref()
-                .context("repository lookup is missing its source")?;
-            let (source, value, guidance) = selected.lookup_diagnostic_source(&git_repo)?;
-            InitState::CoordinateOnly {
-                coordinate: coord.clone(),
-                lookup_error: MissingRepoAnnouncement(coord.clone()).diagnostic(
-                    &source,
-                    &value,
-                    &guidance,
-                    &fetch_report,
-                ),
-            }
-        }
+                .context("repository lookup is missing its source")?
+                .missing(),
+        },
         (Some(coord), Some(rr)) => {
             if coord.coordinate.public_key == user_ref.public_key {
                 InitState::MyAnnouncement {
@@ -2595,7 +2590,8 @@ async fn handoff_removed_maintainer_state(
     .context("repository state handoff failed; the maintainer relationship was not removed")?;
 
     let mut coordinate = selected_repo.coordinate.clone();
-    fetching_with_private_discovery(
+    let mut lookup = RepositoryLookup::from_resolved(git_repo, selected_repo)?;
+    let report = fetching_with_private_discovery(
         git_repo.get_path()?,
         client,
         &mut coordinate,
@@ -2605,8 +2601,8 @@ async fn handoff_removed_maintainer_state(
     .context(
         "failed to refresh the repository after state handoff; the maintainer relationship was not removed",
     )?;
-    let refreshed = get_repo_ref_from_cache(Some(git_repo.get_path()?), &coordinate)
-        .await
+    lookup.record(&report);
+    let refreshed = lookup.load(git_repo.get_path()?).await
         .context(
             "failed to resolve the repository after state handoff; the maintainer relationship was not removed",
         )?;

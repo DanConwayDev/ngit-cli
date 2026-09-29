@@ -10,10 +10,11 @@ use ngit::{
     blossom::{BlossomServerOutcome, summarize_blossom_replication},
     client::{
         Client, Connect, Params, fetch_filters_to_local_cache, fetching_with_report,
-        fetching_without_summary, get_events_from_local_cache, get_repo_ref_from_cache,
+        fetching_without_summary, get_events_from_local_cache,
     },
     git::{Repo, RepoActions},
     login::{self, existing::load_existing_login, user::UserRef},
+    repo_lookup::RepositoryLookup,
     repo_ref::{RepoRef, get_resolved_repo_coordinate_when_remote_unknown},
 };
 use nostr::prelude::{
@@ -113,6 +114,16 @@ impl fmt::Display for PublicationError {
 
 impl std::error::Error for PublicationError {}
 
+pub(crate) fn error_details(error: &anyhow::Error) -> (&'static str, String, Value) {
+    if let Some(error) = error.downcast_ref::<PublicationError>() {
+        (error.code, error.message.clone(), error.details.clone())
+    } else if let Some(error) = error.downcast_ref::<ngit::repo_lookup::RepositoryLookupError>() {
+        (error.category, error.message.clone(), error.details.clone())
+    } else {
+        ("operation_failed", format!("{error:#}"), json!({}))
+    }
+}
+
 pub(crate) fn coded_error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     PublicationError {
         code,
@@ -139,6 +150,7 @@ pub(crate) struct PublicationContext {
     pub git_repo: Repo,
     pub client: Client,
     pub selected_coordinate: Nip19Coordinate,
+    lookup: RepositoryLookup,
     pub repo_ref: RepoRef,
     pub signer: Option<Arc<NgitSigner>>,
     pub user_ref: Option<UserRef>,
@@ -195,14 +207,16 @@ impl PublicationContext {
             (None, None)
         };
 
+        let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected)?;
         // Attach an explicitly selected signer before repository relays are
         // contacted. A NIP-42 challenge is single-use; fetching anonymously
         // first can consume it and leave a later publication racing a relay's
         // replacement challenge.
         if !offline {
-            fetching_with_report(git_repo_path, &client, &selected.coordinate).await?;
+            let report = fetching_with_report(git_repo_path, &client, &selected.coordinate).await?;
+            lookup.record(&report);
         }
-        let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &selected.coordinate).await?;
+        let repo_ref = lookup.load(git_repo_path).await?;
 
         let explicit_relays = parse_relays(explicit_relays)?;
         let mut discovery_relays = repo_ref.relays.clone();
@@ -218,6 +232,7 @@ impl PublicationContext {
             git_repo,
             client,
             selected_coordinate: selected.coordinate,
+            lookup,
             repo_ref,
             signer,
             user_ref,
@@ -246,14 +261,14 @@ impl PublicationContext {
     }
 
     pub(crate) async fn refresh_repository(&mut self) -> Result<()> {
-        fetching_without_summary(
+        let report = fetching_without_summary(
             self.git_repo_path()?,
             &self.client,
             &self.selected_coordinate,
         )
         .await?;
-        self.repo_ref =
-            get_repo_ref_from_cache(Some(self.git_repo_path()?), &self.selected_coordinate).await?;
+        self.lookup.record(&report);
+        self.repo_ref = self.lookup.load(self.git_repo_path()?).await?;
         Ok(())
     }
 

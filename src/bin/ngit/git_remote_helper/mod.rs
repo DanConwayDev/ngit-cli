@@ -34,6 +34,7 @@ use ngit::{
     },
     output_mode::{OutputMode, is_quiet, is_verbose, set_git_verbosity, set_output_mode},
     relay_information::discover_private_repository_relays,
+    repo_lookup::RepositoryLookup,
     signer::NgitSigner,
     utils::read_line,
 };
@@ -471,33 +472,25 @@ pub async fn run(args: &[String]) -> Result<()> {
     }
     let fetch_report = fetch_result?;
 
-    let mut repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &discovery_coordinate)
-        .await
-        .map_err(|error| {
-            if let Some(missing) = error.downcast_ref::<client::MissingRepoAnnouncement>() {
-                // Git also uses the URL itself as the remote name for direct URL operations.
-                let name = remote_name
-                    .as_deref()
-                    .filter(|name| *name != decoded_nostr_url.original_string);
-                let source = name.map_or_else(
-                    || "the supplied URL".to_string(),
-                    |name| format!("Git remote {name:?}"),
-                );
-                let guidance = if name.is_some() {
-                    "Check the remote URL with `git remote -v`."
-                } else {
-                    "Check the repository URL supplied to Git."
-                };
-                missing.diagnostic(
-                    &source,
-                    &decoded_nostr_url.original_string,
-                    guidance,
-                    &fetch_report,
-                )
-            } else {
-                error
-            }
-        })?;
+    let name = remote_name
+        .as_deref()
+        .filter(|name| *name != decoded_nostr_url.original_string);
+    let mut lookup = RepositoryLookup::new(
+        decoded_nostr_url.coordinate.clone(),
+        name.map_or_else(
+            || "the supplied URL".to_string(),
+            |name| format!("Git remote {name:?}"),
+        ),
+        decoded_nostr_url.original_string.clone(),
+        if name.is_some() {
+            "Check the remote URL with `git remote -v`."
+        } else {
+            "Check the repository URL supplied to Git."
+        }
+        .to_string(),
+    );
+    lookup.record(&fetch_report);
+    let mut repo_ref = lookup.load(git_repo_path).await?;
     // this is the repository the helper operates on, so its privacy
     // classification may be recorded in the local git config
     save_repository_privacy_to_git_config(git_repo_path, repo_ref.private);

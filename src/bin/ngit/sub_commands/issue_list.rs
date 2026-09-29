@@ -7,14 +7,15 @@ use ngit::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, get_labels_and_subject, get_status,
         process_cover_note, status_kinds, tag_value,
     },
+    repo_lookup::RepositoryLookup,
 };
 use nostr::prelude::{Kind, RelayUrl, ToBech32, filter::SingleLetterTag, nip19::Nip19Event};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_repo_ref_from_cache, warn_if_invited_as_maintainer},
+    client::{Client, Connect, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions},
-    repo_ref::get_repo_coordinates_when_remote_unknown,
+    repo_ref::get_resolved_repo_coordinate_when_remote_unknown,
     sub_commands::{
         id_resolver::resolve_issue_id_or_prefix, repository_fetch::fetching_with_account,
     },
@@ -144,8 +145,10 @@ pub async fn launch(
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
 
-    let mut repo_coordinates =
-        get_repo_coordinates_when_remote_unknown(&git_repo, &mut client).await?;
+    let selected_repo =
+        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
+    let mut repo_coordinates = selected_repo.coordinate;
 
     if !offline {
         fetching_with_account(
@@ -153,12 +156,13 @@ pub async fn launch(
             git_repo_path,
             &mut client,
             &mut repo_coordinates,
+            &mut lookup,
             auth,
         )
         .await?;
     }
 
-    let repo_ref = get_repo_ref_from_cache(Some(git_repo_path), &repo_coordinates).await?;
+    let repo_ref = lookup.load(git_repo_path).await?;
     warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
 
     let issues: Vec<nostr::prelude::Event> =

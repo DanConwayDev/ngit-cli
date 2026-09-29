@@ -59,17 +59,7 @@ pub async fn launch(
             Ok(())
         }
         Err(error) if json_output => {
-            let (code, message, details) =
-                error.downcast_ref::<support::ReleaseError>().map_or_else(
-                    || {
-                        (
-                            "operation_failed",
-                            format!("{error:#}"),
-                            serde_json::Value::Object(serde_json::Map::new()),
-                        )
-                    },
-                    |error| (error.code, error.message.clone(), error.details.clone()),
-                );
+            let (code, message, details) = super::publication::error_details(&error);
             output::set_value(json!({
                 "format_version": 2,
                 "command_status": "error",
