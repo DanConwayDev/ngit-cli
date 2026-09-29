@@ -19,6 +19,7 @@ pub struct RepositoryLookup {
     value: String,
     guidance: String,
     searches: Option<AnnouncementSearches>,
+    search_history_known: bool,
 }
 
 impl RepositoryLookup {
@@ -44,18 +45,23 @@ impl RepositoryLookup {
             value,
             guidance,
             searches: None,
+            search_history_known: true,
         }
     }
 
     /// Use for a related repository address discovered by the command itself.
     pub fn related(coordinate: Nip19Coordinate, source: &str) -> Result<Self> {
         let value = coordinate.to_bech32()?;
-        Ok(Self::new(
+        let mut lookup = Self::new(
             coordinate,
             source.to_string(),
             value,
             "Check this repository address and refresh its data from Nostr relays.".to_string(),
-        ))
+        );
+        // The parent lookup may have fetched related announcements. Its relay
+        // evidence describes the selected address, not this derived address.
+        lookup.search_history_known = false;
+        Ok(lookup)
     }
 
     pub fn record(&mut self, report: &FetchReport) {
@@ -99,8 +105,13 @@ impl RepositoryLookup {
                     "relays": searches.diagnostic_details()}),
             }
         } else {
+            let network_advice = if self.search_history_known {
+                "No Nostr relays were searched. Run again with network fetching enabled\n(without `--offline` or `--no-fetch`) to check the relays.\n\n"
+            } else {
+                ""
+            };
             let mut message = format!(
-                "couldn't find the repository specified by {} in the local cache:\n  {}\n\nNo Nostr relays were searched. Run again with network fetching enabled\n(without `--offline` or `--no-fetch`) to check the relays.\n\n{}",
+                "couldn't find the repository specified by {} in the local cache:\n  {}\n\n{network_advice}{}",
                 self.source, self.value, self.guidance
             );
             if crate::output_mode::is_verbose() {
@@ -113,7 +124,7 @@ impl RepositoryLookup {
                 category: "repository_not_cached",
                 message,
                 details: json!({"source": self.source, "value": self.value,
-                    "coordinate": self.coordinate.to_bech32().ok(), "network_searched": false, "relays": []}),
+                    "coordinate": self.coordinate.to_bech32().ok(), "network_searched": self.search_history_known.then_some(false), "relays": []}),
             }
         }
     }
@@ -146,6 +157,22 @@ mod tests {
     use nostr::prelude::{Coordinate, Keys, Kind};
 
     use super::*;
+
+    #[test]
+    fn related_repository_does_not_claim_that_no_network_search_happened() {
+        let coordinate = Nip19Coordinate::new(
+            Coordinate::new(Kind::GitRepoAnnouncement, Keys::generate().public_key())
+                .identifier("lead"),
+            [],
+        );
+        let diagnostic =
+            RepositoryLookup::related(coordinate, "the repository's lead announcement")
+                .unwrap()
+                .missing();
+        assert!(diagnostic.details["network_searched"].is_null());
+        assert!(!diagnostic.message.contains("No Nostr relays were searched"));
+        assert!(diagnostic.message.contains("local cache"));
+    }
 
     #[test]
     fn only_missing_announcements_receive_lookup_diagnostics() {

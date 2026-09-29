@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep related-repository lookup diagnostics explicit about unavailable
+  search history instead of claiming that no Nostr relays were searched.
+
 - Include paths and access guidance when Git repositories or signing-key
   files cannot be opened, while preserving the underlying filesystem error.
 
