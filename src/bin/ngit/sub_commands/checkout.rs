@@ -137,7 +137,7 @@ fn print_diverged_branch_help(branch_name: &str) {
     eprintln!("{}", console::style("  ngit push --force").yellow());
 }
 
-async fn checkout_pr(
+pub(super) async fn checkout_pr(
     git_repo: &Repo,
     repo_ref: &RepoRef,
     cover_letter: &crate::git_events::CoverLetter,

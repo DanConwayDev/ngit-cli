@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Set up remote tracking after interactive patch checkouts. Interactive PR
+  checkout now shares the ordinary checkout logic for updates and protection
+  of unpublished commits.
+
 - Honor status and label filters and offline mode in the interactive PR menu.
   Show the requested PR when an ID is supplied instead of opening the menu.
 

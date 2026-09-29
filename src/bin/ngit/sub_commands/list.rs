@@ -11,12 +11,11 @@ use ngit::{
         Params, get_all_proposal_patch_pr_pr_update_events_from_cache,
         get_proposals_and_revisions_from_cache,
     },
-    fetch::ensure_commit_local,
     git_events::{
         KIND_COMMENT, KIND_COVER_NOTE, KIND_LABEL, KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE,
         get_commit_id_from_patch, get_labels_and_subject,
-        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, pr_event_clone_tag_urls,
-        process_cover_note, status_kinds, tag_value,
+        get_pr_tip_event_or_most_recent_patch_with_ancestors, get_status, process_cover_note,
+        status_kinds, tag_value,
     },
     git_http_auth::prepare_private_git_auth_for_repo,
     repo_lookup::RepositoryLookup,
@@ -41,7 +40,7 @@ use crate::{
         get_nostr_remote_for_resolved_coordinate, get_resolved_repo_coordinate_when_remote_unknown,
     },
     sub_commands::{
-        checkout::{maybe_setup_nostr_remote_tracking, tracking_suffix},
+        checkout::{checkout_pr, maybe_setup_nostr_remote_tracking, tracking_suffix},
         id_resolver::resolve_pr_root_id_or_prefix,
         repository_fetch::fetching_with_account,
     },
@@ -932,35 +931,7 @@ async fn launch_interactive(
                     ]),
             )? {
                 0 => {
-                    if let Some(local_branch_tip) = local_branch_tip {
-                        git_repo
-                            .checkout(&branch_name)
-                            .context("cannot checkout existing proposal branch")?;
-                        if local_branch_tip.to_string() == proposal_tip {
-                            let tracked = maybe_setup_nostr_remote_tracking(
-                                git_repo,
-                                nostr_remote_name,
-                                &branch_name,
-                            )?;
-                            println!(
-                                "checked out up-to-date proposal branch '{branch_name}'{}",
-                                tracking_suffix(tracked, nostr_remote_name),
-                            );
-                            return Ok(());
-                        }
-                        if git_repo.does_commit_exist(&proposal_tip)? {
-                            let tracked = maybe_setup_nostr_remote_tracking(
-                                git_repo,
-                                nostr_remote_name,
-                                &branch_name,
-                            )?;
-                            println!(
-                                "checked out proposal branch and updated tip '{branch_name}'{}",
-                                tracking_suffix(tracked, nostr_remote_name),
-                            );
-                            return Ok(());
-                        }
-                    }
+                    check_clean(git_repo)?;
                     let private_signer = prepare_private_git_auth_for_repo(
                         repo_ref,
                         git_repo,
@@ -968,34 +939,16 @@ async fn launch_interactive(
                         auth.password,
                     )
                     .await?;
-                    ensure_commit_local(
-                        &proposal_tip,
+                    return checkout_pr(
                         git_repo,
                         repo_ref,
-                        &pr_event_clone_tag_urls(proposal_tip_event),
-                        &console::Term::stderr(),
+                        &cover_letter,
+                        &most_recent_proposal_patch_chain_or_pr_or_pr_update,
+                        nostr_remote_name,
+                        false,
                         private_signer.as_ref(),
                     )
-                    .await?;
-                    git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
-                    git_repo.checkout(&branch_name)?;
-                    let tracked = maybe_setup_nostr_remote_tracking(
-                        git_repo,
-                        nostr_remote_name,
-                        &branch_name,
-                    )?;
-                    if local_branch_tip.is_some() {
-                        println!(
-                            "created and checked out proposal branch '{branch_name}'{}",
-                            tracking_suffix(tracked, nostr_remote_name),
-                        );
-                    } else {
-                        println!(
-                            "checked out proposal branch and pulled updates '{branch_name}'{}",
-                            tracking_suffix(tracked, nostr_remote_name),
-                        );
-                    }
-                    return Ok(());
+                    .await;
                 }
                 1 => {
                     continue;
@@ -1020,15 +973,12 @@ async fn launch_interactive(
             .get_checked_out_branch_name()?
             .eq(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?);
 
-        // TODO(follow-up): the patch-kind interactive checkout arms below
-        // (~975-1297) do not yet call `maybe_setup_nostr_remote_tracking` /
-        // append `tracking_suffix(...)` to their success-path prints. The
-        // non-interactive `ngit pr checkout` path covers both PR-kind and
-        // patch-kind; this interactive sibling currently only does PR-kind
-        // (see the arm just above at ~830). `nostr_remote_name` is already
-        // in scope and the helpers are imported from `crate::sub_commands::
-        // checkout`; the change is mechanical but voluminous (10+ println
-        // sites) and was deferred to keep this diff reviewable.
+        let branch_name = cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?;
+        let tracking = || -> Result<String> {
+            let tracked =
+                maybe_setup_nostr_remote_tracking(git_repo, nostr_remote_name, &branch_name)?;
+            Ok(tracking_suffix(tracked, nostr_remote_name))
+        };
 
         let last_patch = most_recent_proposal_patch_chain_or_pr_or_pr_update
             .last()
@@ -1106,9 +1056,11 @@ async fn launch_interactive(
                         )
                         .context("failed to apply patch chain")?;
 
+                    let tracking = tracking()?;
                     println!(
-                        "checked out proposal as '{}' branch",
-                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
+                        "checked out proposal as '{}' branch{}",
+                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1127,13 +1079,16 @@ async fn launch_interactive(
         // up-to-date
         if proposal_tip.eq(&local_branch_tip) {
             if checked_out_proposal_branch {
-                println!("branch checked out and up-to-date");
                 return match Interactor::default().choice(
                     PromptChoiceParms::default()
                         .with_default(0)
                         .with_choices(vec!["exit".to_string(), "back".to_string()]),
                 )? {
-                    0 => Ok(()),
+                    0 => {
+                        let tracking = tracking()?;
+                        println!("branch checked out and up-to-date{}", tracking);
+                        Ok(())
+                    }
                     1 => continue,
                     _ => {
                         bail!("unexpected choice")
@@ -1160,9 +1115,11 @@ async fn launch_interactive(
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
+                    let tracking = tracking()?;
                     println!(
-                        "checked out proposal as '{}' branch",
-                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?
+                        "checked out proposal as '{}' branch{}",
+                        cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1213,11 +1170,13 @@ async fn launch_interactive(
                             most_recent_proposal_patch_chain_or_pr_or_pr_update,
                         )
                         .context("failed to apply patch chain")?;
+                    let tracking = tracking()?;
                     println!(
-                        "checked out proposal branch and applied {} appendments ({} ahead {} behind '{main_branch_name}')",
+                        "checked out proposal branch and applied {} appendments ({} ahead {} behind '{main_branch_name}'){}",
                         &index,
                         local_ahead_of_main.len().add(&index),
                         local_beind_main.len(),
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1270,12 +1229,14 @@ async fn launch_interactive(
                             most_recent_proposal_patch_chain_or_pr_or_pr_update,
                         )
                         .context("failed to apply patch chain")?;
+                    let tracking = tracking()?;
                     println!(
-                        "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}')",
+                        "checked out new version of proposal ({} ahead {} behind '{main_branch_name}'), replacing old version ({} ahead {} behind '{main_branch_name}'){}",
                         chain_length,
                         proposal_behind_main_len,
                         local_ahead_of_main.len(),
                         local_beind_main.len(),
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1284,10 +1245,12 @@ async fn launch_interactive(
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
+                    let tracking = tracking()?;
                     println!(
-                        "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
+                        "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}'){}",
                         local_ahead_of_main.len(),
                         local_beind_main.len(),
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1334,11 +1297,13 @@ async fn launch_interactive(
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
+                    let tracking = tracking()?;
                     println!(
-                        "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}')",
+                        "checked out proposal branch with {} unpublished commits ({} ahead {} behind '{main_branch_name}'){}",
                         local_ahead_of_proposal.len(),
                         local_ahead_of_main.len(),
                         proposal_behind_main_len,
+                        tracking,
                     );
                     Ok(())
                 }
@@ -1402,10 +1367,12 @@ async fn launch_interactive(
                 check_clean(git_repo)?;
                 git_repo
                     .checkout(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
+                let tracking = tracking()?;
                 println!(
-                    "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}')",
+                    "checked out old proposal in existing branch ({} ahead {} behind '{main_branch_name}'){}",
                     local_ahead_of_main.len(),
                     local_beind_main.len(),
+                    tracking,
                 );
                 Ok(())
             }
@@ -1421,12 +1388,14 @@ async fn launch_interactive(
 
                 git_repo
                     .checkout(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
+                let tracking = tracking()?;
                 println!(
-                    "checked out latest version of proposal ({} ahead {} behind '{main_branch_name}'), replacing unpublished version ({} ahead {} behind '{main_branch_name}')",
+                    "checked out latest version of proposal ({} ahead {} behind '{main_branch_name}'), replacing unpublished version ({} ahead {} behind '{main_branch_name}'){}",
                     chain_length,
                     proposal_behind_main_len,
                     local_ahead_of_main.len(),
                     local_beind_main.len(),
+                    tracking,
                 );
                 Ok(())
             }
