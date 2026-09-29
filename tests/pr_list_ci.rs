@@ -293,5 +293,26 @@ async fn every_ci_state_gets_its_own_row() -> Result<()> {
         assert_eq!(green["classification"], "maintainer-directed", "{green}");
     }
 
+    // Both filters apply before the menu. An empty selection succeeds
+    // without trying to read terminal input.
+    for filter in [["--status", "closed"], ["--label", "absent-label"]] {
+        let out = publisher
+            .ngit([
+                "pr",
+                "list",
+                "--interactive",
+                "--offline",
+                filter[0],
+                filter[1],
+            ])
+            .output()
+            .await?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     Ok(())
 }

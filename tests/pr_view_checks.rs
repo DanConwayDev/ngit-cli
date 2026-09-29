@@ -450,6 +450,28 @@ async fn a_delegated_job_and_a_signer_with_no_context_are_labelled_separately() 
         offline["ci"]["coverage"], "partial",
         "the skipped domain ladder leaves the cache tier partial: {offline}"
     );
+    // An explicit ID still renders that PR in interactive mode instead of
+    // opening a selection menu, so it needs no terminal input.
+    let interactive = arranged
+        .publisher
+        .ngit([
+            "pr",
+            "view",
+            &pr.event_id.to_hex(),
+            "--interactive",
+            "--offline",
+            "--comments",
+            "--log-tail",
+            "none",
+        ])
+        .output()
+        .await?;
+    assert!(
+        interactive.status.success(),
+        "{}",
+        String::from_utf8_lossy(&interactive.stderr)
+    );
+
     let offline_directed = runs(&offline)
         .iter()
         .find(|run| run["coordinator"] == coordinator_npub.as_str())

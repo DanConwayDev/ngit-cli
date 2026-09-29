@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Honor status and label filters and offline mode in the interactive PR menu.
+  Show the requested PR when an ID is supplied instead of opening the menu.
+
 - Make `ngit issue create --interactive` prompt for missing subject, body and
   labels instead of rejecting the subject or publishing an empty body without
   asking. Preserve explicit values and use `--subject` in missing-input errors.

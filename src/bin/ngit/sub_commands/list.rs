@@ -58,10 +58,6 @@ pub async fn launch(
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    if std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
-        return launch_interactive(auth).await;
-    }
-
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -70,7 +66,7 @@ pub async fn launch(
     let selected_repo =
         get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
     let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
-    let mut repo_coordinates = selected_repo.coordinate;
+    let mut repo_coordinates = selected_repo.coordinate.clone();
 
     let fetch_report = if offline {
         None
@@ -263,6 +259,20 @@ pub async fn launch(
             relay_hint,
             &ci,
         );
+    }
+
+    // Explicit detail and JSON requests keep their normal output. The menu
+    // uses the same fetched/cache-only data and filters as the table.
+    if !json && std::env::var("NGIT_INTERACTIVE_MODE").is_ok() {
+        let remote = get_nostr_remote_for_resolved_coordinate(&git_repo, &selected_repo).await?;
+        return launch_interactive(
+            &git_repo,
+            &repo_ref,
+            &filtered_proposals,
+            remote.as_ref().map(|remote| remote.name.as_str()),
+            auth,
+        )
+        .await;
     }
 
     let ci_rows = list_ci_rows(
@@ -757,95 +767,30 @@ fn chrono_timestamp(unix_secs: u64) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
-    let git_repo = Repo::discover().context("failed to find a git repository")?;
+async fn launch_interactive(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    proposals: &[(&nostr::prelude::Event, Kind, Vec<String>, Option<String>)],
+    nostr_remote_name: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
     let git_repo_path = git_repo.get_path()?;
-
-    // TODO: check for empty repo
-    // TODO: check for existing maintaiers file
-    // TODO: check for other claims
-
-    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
-
-    let resolved_repo =
-        get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
-    let nostr_remote_name: Option<String> =
-        get_nostr_remote_for_resolved_coordinate(&git_repo, &resolved_repo)
-            .await?
-            .map(|remote| remote.name);
-    let mut lookup = RepositoryLookup::from_resolved(&git_repo, &resolved_repo)?;
-    let mut repo_coordinates = resolved_repo.coordinate;
-
-    fetching_with_account(
-        &git_repo,
-        git_repo_path,
-        &mut client,
-        &mut repo_coordinates,
-        &mut lookup,
-        auth,
-    )
-    .await?;
-    let nostr_remote_name: Option<&str> = nostr_remote_name.as_deref();
-
-    let repo_ref = lookup.load(git_repo_path).await?;
-    warn_if_invited_as_maintainer(git_repo_path, &repo_ref).await;
-
-    let proposals_and_revisions: Vec<nostr::prelude::Event> =
-        get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
-    if proposals_and_revisions.is_empty() {
-        println!("no proposals found... create one? try `ngit send`");
+    if proposals.is_empty() {
+        println!("no proposals match the requested filters");
         return Ok(());
     }
-
-    let statuses: Vec<nostr::prelude::Event> = {
-        let mut statuses = get_events_from_local_cache(
-            git_repo_path,
-            vec![
-                nostr::prelude::Filter::default()
-                    .kinds(status_kinds().clone())
-                    .events(proposals_and_revisions.iter().map(|e| e.id)),
-                nostr::prelude::Filter::default()
-                    .custom_tags(
-                        SingleLetterTag::UPPERCASE_E,
-                        proposals_and_revisions.iter().map(|e| e.id),
-                    )
-                    .kinds(status_kinds().clone()),
-            ],
-        )
-        .await?;
-        statuses.sort_by_key(|e| e.created_at);
-        statuses.reverse();
-        statuses
+    let group = |kind| {
+        proposals
+            .iter()
+            .filter(|(_, status, _, _)| *status == kind)
+            .map(|(event, _, _, _)| *event)
+            .collect::<Vec<_>>()
     };
-
-    let mut open_proposals: Vec<&nostr::prelude::Event> = vec![];
-    let mut draft_proposals: Vec<&nostr::prelude::Event> = vec![];
-    let mut closed_proposals: Vec<&nostr::prelude::Event> = vec![];
-    let mut applied_proposals: Vec<&nostr::prelude::Event> = vec![];
-
-    let proposals: Vec<nostr::prelude::Event> = proposals_and_revisions
-        .iter()
-        .filter(|e|
-            // If we wanted to treat to list Pull Requests that revise a Patch we would do this:
-            // e.kind.eq(&KIND_PULL_REQUEST) ||
-            !event_is_revision_root(e))
-        .cloned()
-        .collect();
-
-    for proposal in &proposals {
-        let status = get_status(proposal, &repo_ref, &statuses, &proposals);
-        if status.eq(&Kind::GitStatusOpen) {
-            open_proposals.push(proposal);
-        } else if status.eq(&Kind::GitStatusClosed) {
-            closed_proposals.push(proposal);
-        } else if status.eq(&Kind::GitStatusDraft) {
-            draft_proposals.push(proposal);
-        } else if status.eq(&Kind::GitStatusApplied) {
-            applied_proposals.push(proposal);
-        }
-    }
-
-    let mut selected_status = Kind::GitStatusOpen;
+    let open_proposals = group(Kind::GitStatusOpen);
+    let draft_proposals = group(Kind::GitStatusDraft);
+    let closed_proposals = group(Kind::GitStatusClosed);
+    let applied_proposals = group(Kind::GitStatusApplied);
+    let mut selected_status = proposals[0].1;
 
     loop {
         let proposals_for_status = if selected_status == Kind::GitStatusOpen {
@@ -879,7 +824,13 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
         let mut choices: Vec<String> = proposals_for_status
             .iter()
             .map(|e| {
-                if let Ok(cl) = event_to_cover_letter(e) {
+                if let Some(subject) = proposals
+                    .iter()
+                    .find(|(proposal, _, _, _)| proposal.id == e.id)
+                    .and_then(|(_, _, _, subject)| subject.as_ref())
+                {
+                    subject.clone()
+                } else if let Ok(cl) = event_to_cover_letter(e) {
                     cl.title
                 } else if let Ok(msg) = tag_value(e, "description") {
                     msg.split('\n').collect::<Vec<&str>>()[0].to_string()
@@ -931,7 +882,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
         let commits_events: Vec<nostr::prelude::Event> =
             get_all_proposal_patch_pr_pr_update_events_from_cache(
                 git_repo_path,
-                &repo_ref,
+                repo_ref,
                 &proposals_for_status[selected_index].id,
             )
             .await?;
@@ -987,7 +938,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                             .context("cannot checkout existing proposal branch")?;
                         if local_branch_tip.to_string() == proposal_tip {
                             let tracked = maybe_setup_nostr_remote_tracking(
-                                &git_repo,
+                                git_repo,
                                 nostr_remote_name,
                                 &branch_name,
                             )?;
@@ -999,7 +950,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                         }
                         if git_repo.does_commit_exist(&proposal_tip)? {
                             let tracked = maybe_setup_nostr_remote_tracking(
-                                &git_repo,
+                                git_repo,
                                 nostr_remote_name,
                                 &branch_name,
                             )?;
@@ -1011,16 +962,16 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                         }
                     }
                     let private_signer = prepare_private_git_auth_for_repo(
-                        &repo_ref,
-                        &git_repo,
+                        repo_ref,
+                        git_repo,
                         auth.info,
                         auth.password,
                     )
                     .await?;
                     ensure_commit_local(
                         &proposal_tip,
-                        &git_repo,
-                        &repo_ref,
+                        git_repo,
+                        repo_ref,
                         &pr_event_clone_tag_urls(proposal_tip_event),
                         &console::Term::stderr(),
                         private_signer.as_ref(),
@@ -1029,7 +980,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     git_repo.create_branch_at_commit(&branch_name, &proposal_tip)?;
                     git_repo.checkout(&branch_name)?;
                     let tracked = maybe_setup_nostr_remote_tracking(
-                        &git_repo,
+                        git_repo,
                         nostr_remote_name,
                         &branch_name,
                     )?;
@@ -1083,7 +1034,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
             .last()
             .context("there should be at least one patch as we have already checked for this")?;
 
-        let proposal_base_commit = get_parent_commit_from_patch(last_patch, Some(&git_repo))
+        let proposal_base_commit = get_parent_commit_from_patch(last_patch, Some(git_repo))
             .ok()
             .and_then(|s| str_to_sha1(&s).ok());
 
@@ -1105,7 +1056,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 ))? {
                     0 | 3 => continue,
                     1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
-                    2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
+                    2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, git_repo),
                     _ => {
                         bail!("unexpected choice")
                     }
@@ -1147,7 +1098,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 "back".to_string(),
             ]))? {
                 0 => {
-                    check_clean(&git_repo)?;
+                    check_clean(git_repo)?;
                     let _ = git_repo
                         .apply_patch_chain(
                             &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
@@ -1162,7 +1113,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     Ok(())
                 }
                 1 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
-                2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, &git_repo),
+                2 => save_patches_to_dir(most_recent_proposal_patch_chain_or_pr_or_pr_update, git_repo),
                 3 => continue,
                 _ => {
                     bail!("unexpected choice")
@@ -1205,7 +1156,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     ]),
             )? {
                 0 => {
-                    check_clean(&git_repo)?;
+                    check_clean(git_repo)?;
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
@@ -1220,7 +1171,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 }
                 2 => save_patches_to_dir(
                     most_recent_proposal_patch_chain_or_pr_or_pr_update,
-                    &git_repo,
+                    git_repo,
                 ),
                 3 => continue,
                 _ => {
@@ -1252,7 +1203,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     ]),
             )? {
                 0 => {
-                    check_clean(&git_repo)?;
+                    check_clean(git_repo)?;
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
@@ -1275,7 +1226,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 }
                 2 => save_patches_to_dir(
                     most_recent_proposal_patch_chain_or_pr_or_pr_update,
-                    &git_repo,
+                    git_repo,
                 ),
                 3 => continue,
                 _ => {
@@ -1311,7 +1262,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     ]),
             )? {
                 0 => {
-                    check_clean(&git_repo)?;
+                    check_clean(git_repo)?;
                     let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                     let _ = git_repo
                         .apply_patch_chain(
@@ -1329,7 +1280,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                     Ok(())
                 }
                 1 => {
-                    check_clean(&git_repo)?;
+                    check_clean(git_repo)?;
                     git_repo.checkout(
                         &cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?,
                     )?;
@@ -1345,7 +1296,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 }
                 3 => save_patches_to_dir(
                     most_recent_proposal_patch_chain_or_pr_or_pr_update,
-                    &git_repo,
+                    git_repo,
                 ),
                 4 => continue,
                 _ => {
@@ -1448,7 +1399,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 ]),
         )? {
             0 => {
-                check_clean(&git_repo)?;
+                check_clean(git_repo)?;
                 git_repo
                     .checkout(&cover_letter.get_branch_name_with_pr_prefix_and_shorthand_id()?)?;
                 println!(
@@ -1459,7 +1410,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
                 Ok(())
             }
             1 => {
-                check_clean(&git_repo)?;
+                check_clean(git_repo)?;
                 let chain_length = most_recent_proposal_patch_chain_or_pr_or_pr_update.len();
                 let _ = git_repo
                     .apply_patch_chain(
@@ -1482,7 +1433,7 @@ async fn launch_interactive(auth: SignerParams<'_>) -> Result<()> {
             2 => launch_git_am_with_patches(most_recent_proposal_patch_chain_or_pr_or_pr_update),
             3 => save_patches_to_dir(
                 most_recent_proposal_patch_chain_or_pr_or_pr_update,
-                &git_repo,
+                git_repo,
             ),
             4 => continue,
             _ => {
