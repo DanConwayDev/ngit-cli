@@ -12,9 +12,9 @@ use crate::{
 
 #[derive(Parser)]
 pub struct SubCommandArgs {
-    /// Display name for the new account
-    #[arg(long, required = true)]
-    pub name: String,
+    /// Display name for the new account (required unless --interactive)
+    #[arg(long)]
+    pub name: Option<String>,
 
     /// Relay URLs for the new account's relay list (can be specified multiple
     /// times). Defaults to the relay-default-set if not provided.
@@ -42,6 +42,10 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
         })?;
         credential_store::set_policy_override(policy);
     }
+    let name = args
+        .name
+        .as_ref()
+        .context("provide `--name`, or use `--interactive` to enter it")?;
     let git_repo = Repo::discover().ok();
 
     let params = Params::with_git_config_relay_defaults(&git_repo.as_ref());
@@ -61,7 +65,7 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
     let publish = !args.offline;
 
     let (_signer, public_key, signer_info, _keys) = signup_non_interactive(
-        args.name.clone(),
+        name.clone(),
         client.as_ref(),
         args.local,
         publish,
@@ -76,14 +80,14 @@ pub async fn launch(_cli: &Cli, args: &SubCommandArgs) -> Result<()> {
             "command_status": "ok",
             "action": "created",
             "entity": "account",
-            "name": args.name,
+            "name": name,
             "npub": npub,
             "scope": if args.local { "local" } else { "global" },
             "published": publish,
         }));
     } else {
         println!("\n✓ Account created successfully!");
-        println!("\nDisplay name: {}", args.name);
+        println!("\nDisplay name: {name}");
         println!("Public key (npub): {npub}");
         println!("\nYour secret key (nsec) has been stored securely.");
         println!("Run 'ngit account export-keys' to view it.\n");

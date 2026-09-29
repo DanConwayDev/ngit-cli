@@ -1318,9 +1318,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Comment body
+        /// Comment body (required unless --interactive)
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         /// Reply to a specific comment event-id (hex) or nevent (bech32);
         /// defaults to top-level
         #[arg(long, value_name = "ID|nevent")]
@@ -1340,8 +1340,8 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Label to apply (repeatable: --label bug --label help-wanted)
-        #[arg(long = "label", value_name = "LABEL", required = true)]
+        /// Label to apply (repeatable; required unless --interactive)
+        #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
@@ -1353,9 +1353,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// New subject/title for the PR
+        /// New subject/title for the PR (required unless --interactive)
         #[arg(long, alias = "title")]
-        subject: String,
+        subject: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1369,9 +1369,9 @@ pub enum PrCommands {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Markdown body for the cover note
+        /// Markdown body for the cover note (required unless --interactive)
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1612,9 +1612,9 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Comment body
+        /// Comment body (required unless --interactive)
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         /// Reply to a specific comment event-id (hex) or nevent (bech32);
         /// defaults to top-level
         #[arg(long, value_name = "ID|nevent")]
@@ -1628,8 +1628,8 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Label to apply (repeatable: --label bug --label help-wanted)
-        #[arg(long = "label", value_name = "LABEL", required = true)]
+        /// Label to apply (repeatable; required unless --interactive)
+        #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
@@ -1641,9 +1641,9 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// New subject/title for the issue
+        /// New subject/title for the issue (required unless --interactive)
         #[arg(long, alias = "title")]
-        subject: String,
+        subject: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1657,9 +1657,9 @@ pub enum IssueCommands {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Markdown body for the cover note
+        /// Markdown body for the cover note (required unless --interactive)
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

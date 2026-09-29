@@ -291,6 +291,7 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
         .ngit([
             "account",
             "create",
+            "--interactive",
             "--local",
             "--name",
             "keyring alice",

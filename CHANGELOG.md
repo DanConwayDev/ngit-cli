@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prompt for missing account names, comment bodies, labels, subjects and cover
+  notes with `--interactive`. Preserve supplied values and reject missing or
+  blank required input before creating accounts or publishing edits.
+
 - Set up remote tracking after interactive patch checkouts. Interactive PR
   checkout now shares the ordinary checkout logic for updates and protection
   of unpublished commits.

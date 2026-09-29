@@ -11,6 +11,7 @@ use cli::{
 };
 
 mod cli;
+mod command_input;
 use ngit::{
     cli_interactor::{self, CliError},
     client,
@@ -79,7 +80,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     output::set_json_mode(cli.json);
     set_output_mode(if cli.quiet {
         OutputMode::Quiet
@@ -128,10 +129,16 @@ async fn main() {
         print_skill_notice_if_available().await;
     }
 
-    // Resolve an explicitly supplied signer once, before dispatch. This makes
+    // Complete required inputs before any signing operation, then resolve
+    // an explicitly supplied signer once, before dispatch. This makes
     // invalid signer files fail closed instead of allowing an individual
     // command to fall back to a configured account.
-    let signer_info = match extract_signer_cli_arguments(&cli) {
+    let signer_info = match command_input::complete(&mut cli, |params| {
+        use cli_interactor::InteractorPrompt;
+        cli_interactor::Interactor::default().input(params)
+    })
+    .and_then(|()| extract_signer_cli_arguments(&cli))
+    {
         Ok(signer_info) => signer_info,
         Err(err) => {
             if cli.json {
@@ -293,7 +300,7 @@ async fn main() {
                 } => {
                     sub_commands::comment::launch_pr_comment(
                         id,
-                        body,
+                        body.as_deref().unwrap_or_default(),
                         reply_to.as_deref(),
                         *offline,
                         signer_params,
@@ -324,7 +331,7 @@ async fn main() {
                 } => {
                     sub_commands::set_subject::launch_pr_set_subject(
                         id,
-                        subject,
+                        subject.as_deref().unwrap_or_default(),
                         *offline,
                         signer_params,
                     )
@@ -333,7 +340,7 @@ async fn main() {
                 PrCommands::SetCoverNote { id, body, offline } => {
                     sub_commands::set_cover_note::launch_pr_set_cover_note(
                         id,
-                        body,
+                        body.as_deref().unwrap_or_default(),
                         *offline,
                         signer_params,
                     )
@@ -440,7 +447,7 @@ async fn main() {
                 } => {
                     sub_commands::comment::launch_issue_comment(
                         id,
-                        body,
+                        body.as_deref().unwrap_or_default(),
                         reply_to.as_deref(),
                         *offline,
                         signer_params,
@@ -462,7 +469,7 @@ async fn main() {
                 } => {
                     sub_commands::set_subject::launch_issue_set_subject(
                         id,
-                        subject,
+                        subject.as_deref().unwrap_or_default(),
                         *offline,
                         signer_params,
                     )
@@ -471,7 +478,7 @@ async fn main() {
                 IssueCommands::SetCoverNote { id, body, offline } => {
                     sub_commands::set_cover_note::launch_issue_set_cover_note(
                         id,
-                        body,
+                        body.as_deref().unwrap_or_default(),
                         *offline,
                         signer_params,
                     )
