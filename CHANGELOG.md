@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Give issue, PR and comment lookup failures consistent guidance for finding
+  the ID, checking the selected repository and refreshing offline data.
+
 - Explain how to correct repository selection and malformed `nostr.repo`
   settings. Retain the actual resolution failure for explicit remote names
   and Nostr URLs instead of reporting every failure as invalid input.

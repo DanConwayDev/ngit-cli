@@ -99,12 +99,7 @@ async fn publish_comment(args: CommentArgs<'_>) -> Result<()> {
         let parent = events
             .into_iter()
             .find(|e| e.id == reply_id)
-            .with_context(|| {
-                format!(
-                    "comment with id {} not found in cache; try without --offline",
-                    reply_id.to_hex()
-                )
-            })?;
+            .with_context(|| super::id_resolver::missing_item("comment", &reply_id.to_hex()))?;
         (parent.id, parent.pubkey, KIND_COMMENT)
     } else {
         // Top-level comment: parent == root

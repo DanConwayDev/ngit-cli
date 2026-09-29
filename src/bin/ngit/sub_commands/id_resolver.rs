@@ -10,6 +10,21 @@ use nostr::prelude::{EventId, FromBech32, ToBech32, nip19::Nip19};
 
 use crate::git_events::event_to_cover_letter;
 
+pub fn missing_item(item_name: &str, id: &str) -> String {
+    let advice = match item_name {
+        "issue" => "Run `ngit issue list --status open,draft,closed,applied` and check the ID.",
+        "PR" | "proposal" => {
+            "Run `ngit pr list --status open,draft,closed,applied` and check the ID."
+        }
+        _ => {
+            "Open the parent issue or PR with `ngit issue view <ID> --comments` or `ngit pr view <ID> --comments` and check the reply ID."
+        }
+    };
+    format!(
+        "couldn't find {item_name} {id} in the data available for the selected repository. {advice} Use `--repo` if it belongs to another repository. If you used `--offline`, try again without it."
+    )
+}
+
 pub fn parse_event_id(id: &str) -> Result<EventId> {
     let id = id.trim();
 
@@ -22,7 +37,7 @@ pub fn parse_event_id(id: &str) -> Result<EventId> {
     }
 
     let hex = id.strip_prefix('#').unwrap_or(id);
-    EventId::from_hex(hex).with_context(|| format!("invalid event-id or nevent: {id}"))
+    EventId::from_hex(hex).context("couldn't read this ID. Copy an ID from `ngit issue list` or `ngit pr list`, or supply a full 64-character hexadecimal ID or a Nostr event link starting with `nevent` or `note`.")
 }
 
 pub fn resolve_event_id_or_prefix<'a, I, F>(
@@ -54,10 +69,10 @@ where
         .collect();
 
     match matches.as_slice() {
-        [] => bail!("no {item_name} matches event-id prefix #{prefix}"),
+        [] => bail!("{}", missing_item(item_name, &format!("#{prefix}"))),
         [only] => Ok(only.id),
         _ => bail!(
-            "event-id prefix #{prefix} matches multiple {item_name}s:\n{}\nspecify a longer prefix, full event-id, or nevent",
+            "ID prefix #{prefix} matches multiple {item_name}s:\n{}\nspecify a longer prefix from one of these IDs, or copy its full ID",
             matching_items(&matches, describe)
         ),
     }
@@ -79,12 +94,7 @@ where
     candidates
         .into_iter()
         .find(|event| event.id == event_id)
-        .with_context(|| {
-            format!(
-                "{item_name} with id {} not found in cache",
-                event_id.to_hex()
-            )
-        })
+        .with_context(|| missing_item(item_name, &event_id.to_hex()))
 }
 
 pub fn proposal_roots(
@@ -149,7 +159,7 @@ where
     if candidates.iter().any(|event| event.id == event_id) {
         Ok(event_id)
     } else {
-        bail!("PR with id {} not found in cache", event_id.to_hex())
+        bail!("{}", missing_item("PR", &event_id.to_hex()))
     }
 }
 
@@ -176,7 +186,7 @@ where
     if candidates.iter().any(|event| event.id == event_id) {
         Ok(event_id)
     } else {
-        bail!("issue with id {} not found in cache", event_id.to_hex())
+        bail!("{}", missing_item("issue", &event_id.to_hex()))
     }
 }
 
@@ -342,8 +352,8 @@ mod tests {
                 .expect_err("full revision-root id must not resolve as a PR root")
                 .to_string();
 
-        assert!(prefix_err.contains("no PR matches event-id prefix"));
-        assert!(full_err.contains("not found in cache"));
+        assert!(prefix_err.contains("couldn't find PR"));
+        assert!(full_err.contains("ngit pr list"));
     }
 
     #[test]
@@ -356,7 +366,7 @@ mod tests {
                 .expect_err("full revision-root id must not resolve as a PR root id")
                 .to_string();
 
-        assert!(err.contains("PR with id"));
-        assert!(err.contains("not found in cache"));
+        assert!(err.contains("couldn't find PR"));
+        assert!(err.contains("ngit pr list"));
     }
 }

@@ -91,10 +91,7 @@ pub async fn launch(
 
     let proposal = proposal_roots(&proposals_and_revisions)
         .find(|e| e.id == event_id)
-        .context(format!(
-            "PR with id {} not found in cache",
-            event_id.to_hex()
-        ))?
+        .with_context(|| super::id_resolver::missing_item("PR", &event_id.to_hex()))?
         .clone();
 
     // Explicit IDs can resolve closed and already-applied proposals, while
