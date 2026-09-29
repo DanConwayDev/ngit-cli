@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Explain how to correct repository selection and malformed `nostr.repo`
+  settings. Retain the actual resolution failure for explicit remote names
+  and Nostr URLs instead of reporting every failure as invalid input.
+
 - Apply source-aware repository lookup diagnostics across commands, including
   offline reads, repository membership, sync and publishing. Preserve lookup
   categories and per-relay outcomes in JSON errors.

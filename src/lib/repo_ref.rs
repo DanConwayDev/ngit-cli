@@ -2977,13 +2977,15 @@ pub async fn resolve_repo_coordinate(git_repo: &Repo) -> Result<ResolvedRepoCoor
         .await
 }
 
+const NO_REPOSITORY_SELECTED: &str = "couldn't select a Nostr repository for this directory. Run `git remote -v` to check your remotes, or use `--repo <nostr://URL|naddr>` with the repository address supplied by its maintainer. If you intend to create a new repository, run `ngit init`.";
+
 async fn resolve_repo_coordinate_with_options(
     git_repo: &Repo,
     options: &RepoCoordinateResolutionOptions,
 ) -> Result<ResolvedRepoCoordinate> {
     try_resolve_repo_coordinate_with_options(git_repo, options)
         .await?
-        .context("no nostr git remotes or git config \"nostr.repo\" value")
+        .context(NO_REPOSITORY_SELECTED)
 }
 
 pub async fn try_resolve_repo_coordinate(
@@ -3086,8 +3088,12 @@ async fn try_resolve_repo_coordinate_with_options(
 
 async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRepoCoordinate> {
     // 1a. Match against configured remote names.
-    let nostr_remotes = get_nostr_remotes(git_repo).await?;
-    if let Some(decoded_url) = nostr_remotes.get(raw).cloned() {
+    if let Ok(remote) = git_repo.git_repo.find_remote(raw) {
+        let url = remote.url().context(
+            "the selected Git remote has no readable URL; inspect it with `git remote -v`",
+        )?;
+        let decoded_url = NostrUrlDecoded::parse_and_resolve(url, &Some(git_repo)).await
+            .with_context(|| format!("couldn't resolve Git remote {raw:?} selected by `--repo`. Check its URL with `git remote -v`; this command needs a Nostr repository address starting with `nostr://`."))?;
         let remote = ResolvedNostrRemote {
             name: raw.to_string(),
             decoded_url,
@@ -3098,7 +3104,7 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
             remote: Some(remote),
         });
     }
-
+    let nostr_remotes = get_nostr_remotes(git_repo).await?;
     // 1b. Parse as an naddr.
     if let Ok(c) = Nip19Coordinate::from_bech32(raw) {
         let remote = find_matching_nostr_remote(&nostr_remotes, &c);
@@ -3110,7 +3116,9 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
     }
 
     // 1c. Parse as a nostr:// URL.
-    if let Ok(nostr_url) = NostrUrlDecoded::parse_and_resolve(raw, &Some(git_repo)).await {
+    if raw.starts_with("nostr://") {
+        let nostr_url = NostrUrlDecoded::parse_and_resolve(raw, &Some(git_repo)).await
+            .context("couldn't resolve the repository URL supplied with `--repo`. Check the address with its maintainer; if the cause below is a connection failure, check your network and retry.")?;
         let remote = find_matching_nostr_remote(&nostr_remotes, &nostr_url.coordinate);
         return Ok(ResolvedRepoCoordinate {
             coordinate: nostr_url.coordinate,
@@ -3120,7 +3128,7 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
     }
 
     bail!(
-        "--repo value {raw:?} did not match any configured git remote name and is neither a valid naddr nor a nostr:// URL"
+        "couldn't use `--repo`: supply a Nostr Git remote name (see `git remote -v`), a repository address starting with `naddr`, or a URL starting with `nostr://`"
     )
 }
 
@@ -3293,7 +3301,7 @@ pub async fn get_resolved_repo_coordinate_when_remote_unknown(
                 remote: find_nostr_remote_for_coordinate(git_repo, &c).await?,
             })
         }
-        None => bail!("no nostr git remotes or git config \"nostr.repo\" value"),
+        None => bail!(NO_REPOSITORY_SELECTED),
     }
 }
 
@@ -3366,7 +3374,7 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Option<Nip19C
         .get_git_config_item("nostr.repo", Some(false))?
         .map(|value| {
             Nip19Coordinate::from_bech32(&value)
-                .context("git config item \"nostr.repo\" is not an naddr")
+                .context("Git setting `nostr.repo` is not a valid repository address starting with `naddr`. Locate it with `git config --show-origin --get nostr.repo`, then replace it with the address supplied by the repository maintainer. Use `--repo` to select a repository for just this command.")
         })
         .transpose()
 }
@@ -8874,8 +8882,7 @@ mod tests {
                 .unwrap();
             let msg = format!("{err}");
             assert!(
-                msg.contains("--repo value")
-                    && msg.contains("neither a valid naddr nor a nostr:// URL"),
+                msg.contains("--repo") && msg.contains("git remote -v"),
                 "unexpected error: {msg}"
             );
         }
@@ -8894,12 +8901,42 @@ mod tests {
             .unwrap_err();
 
             assert!(
-                err.to_string().contains("--repo value"),
+                err.to_string().contains("--repo"),
                 "unexpected error: {err}"
             );
         }
 
         // ---- Tier 2: nostr.repo config ------------------------------------
+
+        #[tokio::test]
+        async fn explicit_broken_remote_preserves_resolution_failure() {
+            let (test_repo, repo) = setup_repo();
+            test_repo.add_remote("broken", "nostr://").unwrap();
+            test_repo
+                .add_remote("origin", &nostr_url(PUBKEY_A_HEX, "healthy"))
+                .unwrap();
+            let error = resolve(&repo, Some("broken".into())).await.unwrap_err();
+            assert!(error.to_string().contains("Git remote \"broken\""));
+            assert!(
+                error.chain().count() > 1,
+                "the parse failure must remain available"
+            );
+            let url_error = resolve(&repo, Some("nostr://".into())).await.unwrap_err();
+            assert!(url_error.to_string().contains("URL supplied with `--repo`"));
+            assert!(url_error.chain().count() > 1);
+        }
+
+        #[tokio::test]
+        async fn invalid_override_does_not_echo_a_possible_secret() {
+            let (_test_repo, repo) = setup_repo();
+            let secret = nostr::prelude::Keys::generate()
+                .secret_key()
+                .to_bech32()
+                .unwrap();
+            let error = resolve(&repo, Some(secret.clone())).await.unwrap_err();
+            assert!(!format!("{error:#}").contains(&secret));
+            assert!(error.to_string().contains("git remote -v"));
+        }
 
         #[tokio::test]
         async fn tier2_nostr_repo_config_wins_over_remotes() {
@@ -8942,7 +8979,7 @@ mod tests {
             let err = resolve(&repo, None).await.unwrap_err();
             assert!(
                 err.to_string()
-                    .contains("git config item \"nostr.repo\" is not an naddr"),
+                    .contains("git config --show-origin --get nostr.repo"),
                 "unexpected error: {err}"
             );
         }
