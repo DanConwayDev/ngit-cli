@@ -105,14 +105,14 @@ impl RepositoryLookup {
                     "relays": searches.diagnostic_details()}),
             }
         } else {
-            let network_advice = if self.search_history_known {
-                "No Nostr relays were searched. Run again with network fetching enabled\n(without `--offline` or `--no-fetch`) to check the relays.\n\n"
+            let advice = if self.search_history_known {
+                "No Nostr relays were searched. Run again without `--offline` or `--no-fetch`."
             } else {
-                ""
+                &self.guidance
             };
             let mut message = format!(
-                "couldn't find the repository specified by {} in the local cache:\n  {}\n\n{network_advice}{}",
-                self.source, self.value, self.guidance
+                "couldn't find the repository specified by {} in the local cache:\n  {}\n\n{advice}",
+                self.source, self.value
             );
             if crate::output_mode::is_verbose() {
                 message.push_str(&format!(

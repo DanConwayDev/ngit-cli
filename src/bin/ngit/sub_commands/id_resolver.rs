@@ -17,12 +17,10 @@ pub fn missing_item(item_name: &str, id: &str) -> String {
             "Run `ngit pr list --status open,draft,closed,applied` and check the ID."
         }
         _ => {
-            "Open the parent issue or PR with `ngit issue view <ID> --comments` or `ngit pr view <ID> --comments` and check the reply ID."
+            "Check the reply ID in the parent thread: `ngit issue view <ID> --comments` or `ngit pr view <ID> --comments`."
         }
     };
-    format!(
-        "couldn't find {item_name} {id} in the data available for the selected repository. {advice} Use `--repo` if it belongs to another repository. If you used `--offline`, try again without it."
-    )
+    format!("couldn't find {item_name} {id} in this repository's local data.\n\n{advice}")
 }
 
 pub fn parse_event_id(id: &str) -> Result<EventId> {
@@ -37,7 +35,7 @@ pub fn parse_event_id(id: &str) -> Result<EventId> {
     }
 
     let hex = id.strip_prefix('#').unwrap_or(id);
-    EventId::from_hex(hex).context("couldn't read this ID. Copy an ID from `ngit issue list` or `ngit pr list`, or supply a full 64-character hexadecimal ID or a Nostr event link starting with `nevent` or `note`.")
+    EventId::from_hex(hex).context("invalid ID.\nUse a full 64-character hexadecimal ID or a Nostr event link starting with `nevent` or `note`.")
 }
 
 pub fn resolve_event_id_or_prefix<'a, I, F>(

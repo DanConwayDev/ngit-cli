@@ -354,15 +354,15 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options
-        .open(path)
-        .with_context(|| format!("couldn't open the file supplied with `--{label}-file`: {}. Check the path and read permissions.", path.display()))?;
-    let meta = file.metadata().with_context(|| {
+    let file = options.open(path).with_context(|| {
         format!(
-            "couldn't inspect the file supplied with `--{label}-file`: {}",
+            "couldn't open `--{label}-file`: {}.\nCheck the path and read permissions.",
             path.display()
         )
     })?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("couldn't inspect `--{label}-file`: {}", path.display()))?;
     if !meta.is_file() {
         bail!("{label} file path must resolve to a regular file");
     }
@@ -371,7 +371,7 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
         use std::os::unix::fs::PermissionsExt;
         if !matches!(meta.permissions().mode() & 0o777, 0o400 | 0o600) {
             bail!(
-                "the file supplied with `--{label}-file` ({}) must be readable only by its owner (permissions 0400 or 0600). Restrict access to this file before trying again.",
+                "`--{label}-file` ({}) must be accessible only to its owner.\nSet its permissions to 0400 or 0600.",
                 path.display()
             );
         }
@@ -384,7 +384,7 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
     let mut raw = Vec::with_capacity(capacity);
     file.take(4097)
         .read_to_end(&mut raw)
-        .with_context(|| format!("couldn't read the file supplied with `--{label}-file`: {}. Check the filesystem error below.", path.display()))?;
+        .with_context(|| format!("couldn't read `--{label}-file`: {}", path.display()))?;
     if raw.len() > 4096 {
         bail!("{label} file must contain 1 to 4096 bytes");
     }

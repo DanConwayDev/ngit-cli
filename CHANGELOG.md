@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shorten error messages to focused recovery steps while retaining source
+  details, grouped relay results and underlying causes. Repository-selection
+  guidance now includes both `nostr.repo` and Git remotes.
+
 - Keep related-repository lookup diagnostics explicit about unavailable
   search history instead of claiming that no Nostr relays were searched.
 

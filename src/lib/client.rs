@@ -1709,7 +1709,7 @@ async fn fetch_complete_events(
                         Some(Ok(event)) => {
                             // Preserve the SDK fetch API's default buffer bound.
                             if events.len() >= 10_000 && !events.contains(&event) {
-                                bail!("the Nostr relay returned more results than ngit can safely process in one search (10,000). Try another relay or report this limit with the command you ran.");
+                                bail!("the Nostr relay exceeded ngit's search limit (10,000 results). Report this limit with the command you ran.");
                             }
                             events.insert(event);
                         }
@@ -4913,7 +4913,7 @@ fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()
     }
     if outcomes.is_empty() {
         bail!(
-            "couldn't publish: no publication relays are configured. Check the repository relay list with `ngit repo` and the selected account with `ngit account list`."
+            "couldn't publish: no publication relays are configured.\nCheck relay settings in `ngit repo` and `ngit account list`."
         );
     }
     let failures = outcomes
@@ -4928,7 +4928,7 @@ fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()
         .collect::<Vec<_>>()
         .join("\n");
     bail!(
-        "couldn't publish all requested updates to any Nostr relay:\n{failures}\n\nCheck the relay errors above: connection failures require checking your network or relay addresses; rejections may require permission from the relay operator. Some individual updates may already have been accepted."
+        "couldn't publish all requested updates to any Nostr relay:\n{failures}\n\nResolve the relay errors above before retrying. Some updates may already have been accepted."
     )
 }
 

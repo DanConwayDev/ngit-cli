@@ -27,12 +27,12 @@ fn validate_remote_signed_event(
 ) -> Result<Event> {
     if event.pubkey != expected_public_key {
         bail!(
-            "the remote signer signed as a different account than requested. The signature was rejected. Check which account your signing app has authorized for ngit."
+            "signature rejected: the signing app used a different account.\nCheck the account authorized for ngit in your signing app."
         );
     }
     if event.id != expected_event_id {
         bail!(
-            "the remote signer changed the data it was asked to sign. The signature was rejected. Check your signing app before trying again."
+            "signature rejected: the signing app changed the data.\nCheck your signing app before retrying."
         );
     }
     event.verify().context(

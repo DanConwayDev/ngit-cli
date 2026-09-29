@@ -36,16 +36,15 @@ pub struct Repo {
 
 impl Repo {
     pub fn discover() -> Result<Self> {
-        let directory = current_dir().context(
-            "couldn't read the current directory. Change to an existing directory and try again.",
-        )?;
+        let directory = current_dir()
+            .context("couldn't read the current directory. Change to an existing directory.")?;
         Ok(Self {
-            git_repo: git2::Repository::discover(&directory).with_context(|| format!("couldn't open a Git repository from {}. Run this command inside your cloned repository; check the filesystem error below if you are already there.", directory.display()))?,
+            git_repo: git2::Repository::discover(&directory).with_context(|| format!("couldn't open a Git repository from {}.\nRun this command inside your repository.", directory.display()))?,
         })
     }
     pub fn from_path(path: &PathBuf) -> Result<Self> {
         Ok(Self {
-            git_repo: git2::Repository::open(path).with_context(|| format!("couldn't open the Git repository at {}. Check the path and your access permissions.", path.display()))?,
+            git_repo: git2::Repository::open(path).with_context(|| format!("couldn't open the Git repository at {}.\nCheck the path and access permissions.", path.display()))?,
         })
     }
 }

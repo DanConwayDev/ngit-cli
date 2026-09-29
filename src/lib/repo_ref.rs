@@ -2977,7 +2977,7 @@ pub async fn resolve_repo_coordinate(git_repo: &Repo) -> Result<ResolvedRepoCoor
         .await
 }
 
-const NO_REPOSITORY_SELECTED: &str = "couldn't select a Nostr repository for this directory. Run `git remote -v` to check your remotes, or use `--repo <nostr://URL|naddr>` with the repository address supplied by its maintainer. If you intend to create a new repository, run `ngit init`.";
+const NO_REPOSITORY_SELECTED: &str = "couldn't select a Nostr repository.\n\nCheck the repository setting and Git remotes:\n  git config --show-origin --get nostr.repo\n  git remote -v\n\nOr select one with `--repo <remote-name|naddr|nostr://URL>`.";
 
 async fn resolve_repo_coordinate_with_options(
     git_repo: &Repo,
@@ -3093,7 +3093,7 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
             "the selected Git remote has no readable URL; inspect it with `git remote -v`",
         )?;
         let decoded_url = NostrUrlDecoded::parse_and_resolve(url, &Some(git_repo)).await
-            .with_context(|| format!("couldn't resolve Git remote {raw:?} selected by `--repo`. Check its URL with `git remote -v`; this command needs a Nostr repository address starting with `nostr://`."))?;
+            .with_context(|| format!("couldn't resolve Git remote {raw:?} selected by `--repo`.\nCheck its Nostr URL with `git remote -v`."))?;
         let remote = ResolvedNostrRemote {
             name: raw.to_string(),
             decoded_url,
@@ -3118,7 +3118,7 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
     // 1c. Parse as a nostr:// URL.
     if raw.starts_with("nostr://") {
         let nostr_url = NostrUrlDecoded::parse_and_resolve(raw, &Some(git_repo)).await
-            .context("couldn't resolve the repository URL supplied with `--repo`. Check the address with its maintainer; if the cause below is a connection failure, check your network and retry.")?;
+            .context("couldn't resolve the repository URL supplied with `--repo`.\nCheck the address and the cause below.")?;
         let remote = find_matching_nostr_remote(&nostr_remotes, &nostr_url.coordinate);
         return Ok(ResolvedRepoCoordinate {
             coordinate: nostr_url.coordinate,
@@ -3128,7 +3128,7 @@ async fn resolve_repo_override(git_repo: &Repo, raw: &str) -> Result<ResolvedRep
     }
 
     bail!(
-        "couldn't use `--repo`: supply a Nostr Git remote name (see `git remote -v`), a repository address starting with `naddr`, or a URL starting with `nostr://`"
+        "invalid `--repo` value.\nUse a remote name from `git remote -v`, an `naddr` repository address, or a `nostr://` URL."
     )
 }
 
@@ -3374,7 +3374,7 @@ fn get_repo_coordinates_from_git_config(git_repo: &Repo) -> Result<Option<Nip19C
         .get_git_config_item("nostr.repo", Some(false))?
         .map(|value| {
             Nip19Coordinate::from_bech32(&value)
-                .context("Git setting `nostr.repo` is not a valid repository address starting with `naddr`. Locate it with `git config --show-origin --get nostr.repo`, then replace it with the address supplied by the repository maintainer. Use `--repo` to select a repository for just this command.")
+                .context("the repository address in `nostr.repo` is invalid.\n\nCheck the setting:\n  git config --show-origin --get nostr.repo\n\nExpected a repository address starting with `naddr`.")
         })
         .transpose()
 }

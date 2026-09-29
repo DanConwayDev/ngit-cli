@@ -37,7 +37,7 @@ pub(super) struct SignerInfoNotFound;
 impl std::fmt::Display for SignerInfoNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "couldn't find a signing account for this command. Run `ngit account login` to connect an account, or use `--signer` to select an account you already configured.",
+            "no signing account selected.\nRun `ngit account login`, or select an existing account with `--signer`.",
         )
     }
 }

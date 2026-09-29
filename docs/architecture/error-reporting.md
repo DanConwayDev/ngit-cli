@@ -18,6 +18,13 @@ secret pasted into the wrong argument. Keep underlying causes available when
 adding context. Do not suggest weakening authentication, bypassing repository
 membership rules, or creating a new announcement to repair a lookup failure.
 
+Keep the default human message brief: one failure sentence, the relevant
+source or evidence, and one focused next step. Put inspection commands on
+separate lines when that helps scanning. Do not append a checklist of every
+possible cause or repeat source-correction advice after an offline-cache miss.
+Keep relay groups and underlying causes even when shortening the surrounding
+prose. Structured JSON evidence should remain intact.
+
 ## Shared reporting boundaries
 
 | Failure family | Shared boundary | Reporting behavior |
@@ -25,7 +32,7 @@ membership rules, or creating a new announcement to repair a lookup failure.
 | Repository discovery | `repo_ref.rs`, `RepositoryLookup` | Capture the selected source before fetching. Retain the real cause of explicit remote/URL resolution failures. |
 | Required repository reads | `repo_lookup.rs` | Translate only `MissingRepoAnnouncement`; preserve other failures. Accumulate exact announcement-search outcomes from fetch reports. |
 | Offline reads | `RepositoryLookup` captured before a cache-only read | State that the repository is missing from local data and no relays were searched. |
-| Issue, PR and comment lookup | CLI `id_resolver.rs` | Use the same missing-item guidance for full IDs and prefixes, explain repository selection and offline mode, and show candidates for ambiguous IDs. |
+| Issue, PR and comment lookup | CLI `id_resolver.rs` | Use the same missing-item guidance for full IDs and prefixes, point to listing or thread commands that refresh the available data, and show candidates for ambiguous IDs. |
 | Account and key failures | `login/mod.rs`, `login/existing.rs`, CLI login, `signer.rs` | Share key recovery guidance across selection and login; explain rejected signatures without exposing secrets. |
 | Relay searches and publication | `client.rs` | Explain unfinished searches in plain language; preserve relay failure reasons and do not imply a partially delivered publication had no effects. |
 | Git object downloads | `fetch.rs` | Keep per-server and per-connection-method failures through the final error; distinguish no configured servers from failed attempts. |

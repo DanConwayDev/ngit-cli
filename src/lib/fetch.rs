@@ -102,11 +102,11 @@ pub async fn ensure_commit_local(
         let short = if oid.len() >= 8 { &oid[..8] } else { oid };
         if failures.is_empty() {
             bail!(
-                "couldn't download commit {short}: no Git servers were available to try. Run `ngit repo` to check the repository's Git servers and ask its maintainer for a server containing this commit."
+                "couldn't download commit {short}: no Git servers were available to try.\nCheck the repository's Git servers with `ngit repo`."
             );
         }
         bail!(
-            "couldn't download commit {short} from the Git servers tried:\n{}\n\nCheck the server errors above. For connection failures, check your network; for access failures, check your Git credentials. If the commit is unavailable, ask its author to push it to a listed Git server.",
+            "couldn't download commit {short} from the Git servers tried:\n{}\n\nCheck the configured Git servers with `ngit repo`.",
             failures.join("\n")
         );
     }
@@ -324,9 +324,7 @@ fn fetch_from_git_server_url(
     term: &console::Term,
 ) -> Result<()> {
     if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
-        bail!(
-            "ngit couldn't find a default SSH key file for this connection. Check your Git SSH authentication configuration, or use an HTTPS Git URL."
-        );
+        bail!("no default SSH key file found.\nCheck your Git SSH setup or use an HTTPS Git URL.");
     }
     let git_config = git_repo.config()?;
     let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;
