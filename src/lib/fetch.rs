@@ -70,6 +70,7 @@ pub async fn ensure_commit_local(
         }
     }
 
+    let mut failures = Vec::new();
     for git_server_url in ordered_servers {
         if repo_ref.private {
             prepare_private_git_auth(
@@ -79,25 +80,35 @@ pub async fn ensure_commit_local(
             )
             .await?;
         }
-        if fetch_from_git_server(
+        let result = fetch_from_git_server(
             git_repo,
             &[oid.to_string()],
             git_server_url,
             &nostr_url,
             term,
             is_grasp_server_in_list(git_server_url, &grasp_servers),
-        )
-        .is_ok()
-            && git_repo.does_commit_exist(oid)?
-        {
+        );
+        if result.is_ok() && git_repo.does_commit_exist(oid)? {
             let _ = write_progress_line(term, &format!("fetched git data from {git_server_url}"));
             return Ok(());
         }
+        failures.push(match result {
+            Ok(()) => format!("  {git_server_url}: the transfer completed, but commit {oid} is still unavailable locally"),
+            Err(error) => format!("  {git_server_url}: {error:#}"),
+        });
     }
 
     if !git_repo.does_commit_exist(oid)? {
         let short = if oid.len() >= 8 { &oid[..8] } else { oid };
-        bail!("cannot find git data ({short}) on any of the configured git servers");
+        if failures.is_empty() {
+            bail!(
+                "couldn't download commit {short}: no Git servers were available to try. Run `ngit repo` to check the repository's Git servers and ask its maintainer for a server containing this commit."
+            );
+        }
+        bail!(
+            "couldn't download commit {short} from the Git servers tried:\n{}\n\nCheck the server errors above. For connection failures, check your network; for access failures, check your Git credentials. If the commit is unavailable, ask its author to push it to a listed Git server.",
+            failures.join("\n")
+        );
     }
     Ok(())
 }
@@ -146,6 +157,7 @@ pub fn fetch_from_git_server(
         get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
+    let mut failure_reasons = Vec::new();
     let mut success = false;
     for protocol in &protocols_to_attempt {
         write_progress_line(
@@ -178,6 +190,7 @@ pub fn fetch_from_git_server(
                     }
                 ),
             )?;
+            failure_reasons.push(format!("  {protocol}: {error:#}"));
             failed_protocols.push(protocol);
         } else {
             success = true;
@@ -192,14 +205,15 @@ pub fn fetch_from_git_server(
         Ok(())
     } else {
         let error = anyhow!(
-            "{} failed over {}{}",
+            "Git server {} could not be fetched over {}{}:\n{}",
             server_url.short_name(),
             join_with_and(&failed_protocols),
             if decoded_nostr_url.protocol.is_some() {
-                " and nostr url contains protocol override so no other protocols were attempted"
+                " (the Nostr URL restricts which connection methods may be tried)"
             } else {
                 ""
             },
+            failure_reasons.join("\n"),
         );
         write_progress_line(term, format!("fetch: {error}").as_str())?;
         Err(error)
@@ -256,6 +270,7 @@ pub fn fetch_refs_from_git_server(
         get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
+    let mut failure_reasons = Vec::new();
     let mut success = false;
     for protocol in &protocols_to_attempt {
         write_progress_line(
@@ -276,6 +291,7 @@ pub fn fetch_refs_from_git_server(
                 term,
                 &format!("fetch: {formatted_url} failed over {protocol}: {error}"),
             )?;
+            failure_reasons.push(format!("  {protocol}: {error:#}"));
             failed_protocols.push(protocol);
         } else {
             success = true;
@@ -286,9 +302,10 @@ pub fn fetch_refs_from_git_server(
         Ok(())
     } else {
         let error = anyhow!(
-            "{} failed over {}",
+            "Git server {} could not be fetched over {}:\n{}",
             server_url.short_name(),
-            join_with_and(&failed_protocols)
+            join_with_and(&failed_protocols),
+            failure_reasons.join("\n"),
         );
         write_progress_line(term, format!("fetch: {error}").as_str())?;
         Err(error)
@@ -307,7 +324,9 @@ fn fetch_from_git_server_url(
     term: &console::Term,
 ) -> Result<()> {
     if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
-        bail!("no ssh keys found");
+        bail!(
+            "ngit couldn't find a default SSH key file for this connection. Check your Git SSH authentication configuration, or use an HTTPS Git URL."
+        );
     }
     let git_config = git_repo.config()?;
     let mut git_server_remote = git_repo.remote_anonymous(git_server_url)?;

@@ -1661,9 +1661,11 @@ async fn get_events_of(
 
     if !relay.status().is_connected() {
         if let Some(e) = last_error {
-            bail!("connection timeout: {}", e);
+            bail!("Nostr relay connection timeout: {e}. Check your network and the relay address.");
         } else {
-            bail!("connection timeout here");
+            bail!(
+                "Nostr relay connection timeout: the relay did not connect. Check your network and the relay address."
+            );
         }
     } else if let Some(pb) = pb {
         pb.set_prefix(
@@ -1707,7 +1709,7 @@ async fn fetch_complete_events(
                         Some(Ok(event)) => {
                             // Preserve the SDK fetch API's default buffer bound.
                             if events.len() >= 10_000 && !events.contains(&event) {
-                                bail!("too many fetched events");
+                                bail!("the Nostr relay returned more results than ngit can safely process in one search (10,000). Try another relay or report this limit with the command you ran.");
                             }
                             events.insert(event);
                         }
@@ -1724,14 +1726,14 @@ async fn fetch_complete_events(
                         }
                         Some(RelayNotification::RelayStatus {
                             status: RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned,
-                        }) | None => bail!("relay disconnected before EOSE"),
+                        }) | None => bail!("Nostr relay disconnected before finishing the search"),
                         _ => {}
                     }
                 }
             }
         }
         Ok(events.into_iter().collect())
-    }).await.context("timed out before complete EOSE")?
+    }).await.context("timed out waiting for the Nostr relay to finish the search")?
 }
 
 pub struct Params {
@@ -4910,20 +4912,24 @@ fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()
         return Ok(());
     }
     if outcomes.is_empty() {
-        bail!("failed to publish events: no publication relays configured");
+        bail!(
+            "couldn't publish: no publication relays are configured. Check the repository relay list with `ngit repo` and the selected account with `ngit account list`."
+        );
     }
     let failures = outcomes
         .iter()
         .map(|outcome| {
             format!(
-                "{}: {}",
+                "  {}: {}",
                 outcome.relay,
                 outcome.error.as_deref().unwrap_or("unknown error")
             )
         })
         .collect::<Vec<_>>()
-        .join("; ");
-    bail!("failed to publish events to any relay: {failures}")
+        .join("\n");
+    bail!(
+        "couldn't publish all requested updates to any Nostr relay:\n{failures}\n\nCheck the relay errors above: connection failures require checking your network or relay addresses; rejections may require permission from the relay operator. Some individual updates may already have been accepted."
+    )
 }
 
 /// Publish events, requiring at least one relay to accept the entire batch.

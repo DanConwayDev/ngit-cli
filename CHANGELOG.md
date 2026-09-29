@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retain Git server and connection-method failures when fetching commits.
+  Explain relay timeouts, incomplete searches and publication failures in
+  plain language, including the possibility of partially accepted updates.
+
 - Use consistent account and signing-key guidance for missing passwords,
   invalid keys and account mismatches. Explain rejected remote signatures
   without requiring knowledge of Nostr key or event terminology.
