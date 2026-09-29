@@ -46,8 +46,8 @@ use crate::{
     cli::{Cli, SignerParams},
     cli_interactor::{Interactor, InteractorPrompt, PromptInputParms},
     client::{
-        Client, Connect, fetching_with_private_discovery, fetching_with_report,
-        get_repo_ref_from_cache,
+        Client, Connect, FetchReport, MissingRepoAnnouncement, fetching_with_private_discovery,
+        fetching_with_report, get_repo_ref_from_cache,
     },
     git::{Repo, RepoActions, nostr_url::convert_clone_url_to_https},
     git_remote_helper::push::{
@@ -71,8 +71,11 @@ use crate::{
 enum InitState {
     /// No coordinate found anywhere (State A)
     Fresh,
-    /// Coordinate found but no announcement event on relays (State B)
-    CoordinateOnly { coordinate: Nip19Coordinate },
+    /// A repository is selected but no usable announcement was found (State B).
+    CoordinateOnly {
+        coordinate: Nip19Coordinate,
+        lookup_error: anyhow::Error,
+    },
     /// Announcement exists, I am the selected maintainer (State C)
     MyAnnouncement {
         coordinate: Nip19Coordinate,
@@ -244,7 +247,7 @@ impl InitState {
     fn coordinate(&self) -> Option<&Nip19Coordinate> {
         match self {
             Self::Fresh => None,
-            Self::CoordinateOnly { coordinate }
+            Self::CoordinateOnly { coordinate, .. }
             | Self::MyAnnouncement { coordinate, .. }
             | Self::CoMaintainer { coordinate, .. }
             | Self::NotListed { coordinate, .. } => Some(coordinate),
@@ -954,25 +957,20 @@ fn validate_post_fetch(
     state: &InitState,
     my_pubkey: PublicKey,
 ) -> Result<()> {
+    if let InitState::CoordinateOnly { lookup_error, .. } = state {
+        if !cli.force && (mode == LaunchMode::Init || !cli.interactive) {
+            return Err(cli_error(
+                &format!(
+                    "{lookup_error}\n\nOnly use `ngit init --force` if you are sure this repository does not already\nhave an announcement on a Nostr relay."
+                ),
+                &[],
+                &[],
+            ));
+        }
+    }
     if mode == LaunchMode::Init {
         return match state {
-            InitState::Fresh => Ok(()),
-            InitState::CoordinateOnly { coordinate } => {
-                if cli.force {
-                    Ok(())
-                } else {
-                    let id = &coordinate.identifier;
-                    Err(cli_error(
-                        &format!(
-                            "no announcement found for coordinate '{id}'\n\n\
-                             \x20 This could be a relay or network issue. Only proceed with --force\n\
-                             \x20 if you are sure there isn't an existing announcement event."
-                        ),
-                        &[],
-                        &["ngit init --force"],
-                    ))
-                }
-            }
+            InitState::Fresh | InitState::CoordinateOnly { .. } => Ok(()),
             InitState::MyAnnouncement { .. } => Err(cli_error(
                 "this repository has already been initialized",
                 &[],
@@ -1008,26 +1006,9 @@ fn validate_post_fetch(
     }
 
     match state {
-        InitState::Fresh => {
-            // Already validated in pre-fetch
-            Ok(())
-        }
-        InitState::CoordinateOnly { coordinate } => {
-            if cli.force {
-                Ok(())
-            } else {
-                let id = &coordinate.identifier;
-                Err(cli_error(
-                    &format!(
-                        "no announcement found for coordinate '{id}'\n\n\
-                         \x20 This could be a relay or network issue. Only proceed with --force\n\
-                         \x20 if you are sure there isn't an existing announcement event."
-                    ),
-                    &[],
-                    &["ngit init --force"],
-                ))
-            }
-        }
+        // Fresh repositories were validated before fetching; missing
+        // announcements passed the force/interactive check above.
+        InitState::Fresh | InitState::CoordinateOnly { .. } => Ok(()),
         InitState::MyAnnouncement { repo_ref, .. } => {
             if let Some(new_id) = &args.identifier {
                 if *new_id != repo_ref.identifier && !cli.force {
@@ -2271,15 +2252,20 @@ async fn launch_with_mode(
     )?;
 
     // Phase 4: Network fetch (only if coordinate exists)
+    let mut fetch_report = FetchReport::default();
     let repo_ref = if let Some(repo_coordinate) = &mut repo_coordinate {
-        fetching_with_private_discovery(
+        fetch_report = fetching_with_private_discovery(
             git_repo_path,
             &client,
             repo_coordinate,
             &private_discovery,
         )
         .await?;
-        (get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await).ok()
+        match get_repo_ref_from_cache(Some(git_repo_path), repo_coordinate).await {
+            Ok(repo_ref) => Some(repo_ref),
+            Err(error) if error.is::<MissingRepoAnnouncement>() => None,
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
@@ -2294,9 +2280,21 @@ async fn launch_with_mode(
     // Phase 4: Determine state + post-fetch validation
     let state = match (&repo_coordinate, &repo_ref) {
         (None, _) => InitState::Fresh,
-        (Some(coord), None) => InitState::CoordinateOnly {
-            coordinate: coord.clone(),
-        },
+        (Some(coord), None) => {
+            let selected = resolved_repo_coordinate
+                .as_ref()
+                .context("repository lookup is missing its source")?;
+            let (source, value, guidance) = selected.lookup_diagnostic_source(&git_repo)?;
+            InitState::CoordinateOnly {
+                coordinate: coord.clone(),
+                lookup_error: MissingRepoAnnouncement(coord.clone()).diagnostic(
+                    &source,
+                    &value,
+                    &guidance,
+                    &fetch_report,
+                ),
+            }
+        }
         (Some(coord), Some(rr)) => {
             if coord.coordinate.public_key == user_ref.public_key {
                 InitState::MyAnnouncement {

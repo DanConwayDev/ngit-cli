@@ -1,40 +1,15 @@
-//! `ngit init` State B "CoordinateOnly" — successor to legacy
-//! `tests/legacy/ngit_init.rs::state_b_coordinate_only::*`.
-//!
-//! State B is a `nostr.repo` git config that points at a coordinate
-//! (kind:pubkey:identifier triple) that **no relay carries an
-//! announcement for**. ngit's lookup completes the network round-trip,
-//! finds nothing, and `validate_post_fetch` (init.rs:515-530) trips the
-//! `CoordinateOnly` arm — bare `ngit init` is rejected unless `--force`
-//! is set, even with `--defaults`.
-//!
-//! ## Coverage
-//!
-//! - **Errors** (2 tests, no shared setup):
-//!   - `bare_no_flags_errors_no_announcement` → "no announcement found for
-//!     coordinate"
-//!   - `defaults_still_errors_no_announcement` → same error even with
-//!     `--defaults`
-//! - **Success** (1 captured snapshot, 3 rstest cases asserting on the
-//!   `--force` path's announcement). Setup is shared via
-//!   [`tokio::sync::OnceCell`] — same discipline as `tests/init_state_fresh.rs`
-//!   and `tests/send_patch.rs`.
-//!
-//! ## Why two arrange invocations in errors
-//!
-//! Each error case uses its own
-//! [`Harness::arrange_init_state_b_coordinate_only`] call rather than sharing
-//! one. Setup is cheap (account create + seed commits + a single `git config`
-//! write), and giving each error case its own harness keeps assertion noise
-//! isolated when one fails. Sharing would require the success snapshot's `Arc`
-//! discipline for tests that don't actually need it.
+//! Missing-announcement diagnostics for `ngit init`: identify the configured
+//! repository, distinguish completed relay searches from failures, and require
+//! `--force` before creating an announcement. Rejected attempts must not
+//! publish or change the selected repository. The success snapshot checks that
+//! forced creation still inherits the selected identifier.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use nostr_sdk::prelude::*;
 use rstest::*;
-use test_harness::Harness;
+use test_harness::{ArrangedInitStateB, Harness, Repo};
 use tokio::sync::OnceCell;
 
 // ---------------------------------------------------------------------------
@@ -54,9 +29,9 @@ async fn bare_no_flags_errors_no_announcement() -> Result<()> {
     .build()
     .await?;
 
-    let (repo, _state) = harness.arrange_init_state_b_coordinate_only().await?;
+    let (repo, state) = harness.arrange_init_state_b_coordinate_only().await?;
     let out = repo
-        .ngit(["init"])
+        .ngit(["--quiet", "init"])
         .output()
         .await
         .context("failed to spawn ngit init")?;
@@ -74,9 +49,28 @@ async fn bare_no_flags_errors_no_announcement() -> Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        combined.contains("no announcement found for coordinate"),
+        combined.contains("couldn't find the repository specified by Git setting `nostr.repo`"),
         "expected coordinate-only error, got: {combined}",
     );
+    assert!(combined.contains(&state.coordinate_bech32), "{combined}");
+    assert!(
+        combined.contains("git config --show-origin --get nostr.repo"),
+        "{combined}"
+    );
+    assert!(
+        combined.contains(&format!(
+            "Nostr relays that responded but didn't return this repository (1):\n  {}",
+            harness.relay("default").url()
+        )),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("Only use `ngit init --force`"),
+        "{combined}"
+    );
+    assert!(!combined.contains("30617:"), "{combined}");
+    assert!(!combined.contains("retrying may help"), "{combined}");
+    assert_unchanged(&harness, &repo, &state, &state.coordinate_bech32).await?;
     Ok(())
 }
 
@@ -95,7 +89,7 @@ async fn defaults_still_errors_no_announcement() -> Result<()> {
     .build()
     .await?;
 
-    let (repo, _state) = harness.arrange_init_state_b_coordinate_only().await?;
+    let (repo, state) = harness.arrange_init_state_b_coordinate_only().await?;
     let out = repo
         .ngit(["init", "--defaults"])
         .output()
@@ -112,9 +106,138 @@ async fn defaults_still_errors_no_announcement() -> Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        combined.contains("no announcement found for coordinate"),
+        combined.contains("couldn't find the repository specified by Git setting `nostr.repo`"),
         "expected coordinate-only error even with --defaults, got: {combined}",
     );
+    assert!(combined.contains(&state.coordinate_bech32), "{combined}");
+    let coordinate = Nip19Coordinate::from_bech32(&state.coordinate_bech32)?;
+    assert!(
+        combined.contains(&format!("Repository coordinate: {}", coordinate.coordinate)),
+        "{combined}"
+    );
+    assert!(
+        combined.contains("Only use `ngit init --force`"),
+        "{combined}"
+    );
+    assert_unchanged(&harness, &repo, &state, &state.coordinate_bech32).await?;
+    Ok(())
+}
+
+async fn assert_unchanged(
+    harness: &Harness,
+    repo: &Repo,
+    state: &ArrangedInitStateB,
+    address: &str,
+) -> Result<()> {
+    assert_eq!(repo.config("nostr.repo").await?.as_deref(), Some(address));
+    assert!(
+        harness
+            .relay("default")
+            .events(
+                Filter::new()
+                    .kind(Kind::GitRepoAnnouncement)
+                    .author(state.keys.public_key())
+                    .identifier(&state.coordinate_identifier)
+            )
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_remote_overrides_config_in_missing_announcement_diagnostic() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .build()
+    .await?;
+    let (repo, state) = harness.arrange_init_state_b_coordinate_only().await?;
+    let url = format!("nostr://{}/{}", state.npub, state.coordinate_identifier);
+    repo.git_ok(["remote", "add", "origin", &url], "add repository remote")
+        .await?;
+    let output = repo
+        .ngit(["--quiet", "--repo", "origin", "init"])
+        .output()
+        .await?;
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("specified by Git remote \"origin\""),
+        "{error}"
+    );
+    assert!(error.contains(&url), "{error}");
+    assert!(error.contains("git remote -v"), "{error}");
+    assert!(!error.contains("Git setting `nostr.repo`"), "{error}");
+    assert!(error.contains("Only use `ngit init --force`"), "{error}");
+    assert_unchanged(&harness, &repo, &state, &state.coordinate_bech32).await?;
+    Ok(())
+}
+
+#[rstest]
+#[case(true)]
+#[case(false)]
+#[tokio::test]
+async fn incomplete_init_searches_retain_force_warning(
+    #[case] include_responding_relay: bool,
+) -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .build()
+    .await?;
+    let (repo, state) = harness.arrange_init_state_b_coordinate_only().await?;
+    // Hold the port throughout so the connection stalls without a port reuse race.
+    let unresponsive = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let unresponsive_url = format!("ws://{}", unresponsive.local_addr()?);
+    let mut coordinate = Nip19Coordinate::from_bech32(&state.coordinate_bech32)?;
+    coordinate.relays = vec![RelayUrl::parse(&unresponsive_url)?];
+    if include_responding_relay {
+        coordinate
+            .relays
+            .push(RelayUrl::parse(harness.relay("default").url())?);
+    }
+    let address = coordinate.to_bech32()?;
+    repo.git_ok(["config", "nostr.repo", &address], "set relay hints")
+        .await?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        repo.ngit(["--quiet", "init", "--defaults"]).output(),
+    )
+    .await??;
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains(&address), "{error}");
+    assert!(
+        error.contains("Nostr relays that couldn't be checked (1):"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!(
+            "{unresponsive_url} — timed out waiting for a response"
+        )),
+        "{error}"
+    );
+    assert!(error.contains("retrying may help"), "{error}");
+    assert!(error.contains("Only use `ngit init --force`"), "{error}");
+    if include_responding_relay {
+        assert!(error.contains("couldn't find the repository"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "Nostr relays that responded but didn't return this repository (1):\n  {}",
+                harness.relay("default").url()
+            )),
+            "{error}"
+        );
+    } else {
+        assert!(error.contains("couldn't check the repository"), "{error}");
+        assert!(!error.contains("didn't return this repository"), "{error}");
+    }
+    assert_unchanged(&harness, &repo, &state, &address).await?;
     Ok(())
 }
 

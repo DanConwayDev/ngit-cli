@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make `ngit init` lookup errors show the selected repository source and Nostr
+  relay outcomes instead of calling the repository name a coordinate. Keep
+  the warning about creating an announcement with `ngit init --force`.
 - Make repository lookup errors identify the Git remote, URL, `nostr.repo`
   setting or `--repo` value to check. Group Nostr relays by whether they
   responded without the repository, returned unusable data, or could not be
