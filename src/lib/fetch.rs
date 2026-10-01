@@ -554,6 +554,53 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn unavailable_commit_retains_each_server_failure_and_handles_no_servers() -> Result<()> {
+        use nostr::prelude::*;
+
+        let directory = tempfile::tempdir()?;
+        let git_repo = Repository::init_opts(
+            directory.path(),
+            git2::RepositoryInitOptions::new()
+                .initial_head("main")
+                .external_template(false),
+        )?;
+        // Direct library calls run in the test process, outside the harness's
+        // child environment. Attach only this fixture's config to libgit2.
+        let mut config = git2::Config::open(&git_repo.path().join("config"))?;
+        config.set_str("init.defaultBranch", "main")?;
+        git_repo.set_config(&config)?;
+        let repo = Repo { git_repo };
+        let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "")
+            .tags([Tag::identifier("fetch-errors")])
+            .finalize(&Keys::generate())?;
+        let mut reference = RepoRef::try_from((announcement, None))?;
+        let missing = "1111111111111111111111111111111111111111";
+        let term = console::Term::buffered_stderr();
+        let error = ensure_commit_local(missing, &repo, &reference, &[], &term, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no Git servers were available"));
+        // Rejected transports provide distinct, deterministic failures without
+        // contacting external hosts or invoking a helper subprocess.
+        reference.git_server = vec!["nostr://invalid-git-server".into(), "fd::12".into()];
+        let error = ensure_commit_local(missing, &repo, &reference, &[], &term, None)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("nostr://invalid-git-server"), "{message}");
+        assert!(message.contains("fd::12"), "{message}");
+        assert!(message.contains("recursively invoke"), "{message}");
+        assert!(message.contains("file-descriptor transport"), "{message}");
+        assert!(
+            repo.git_repo
+                .find_commit(git2::Oid::from_str(missing)?)
+                .is_err()
+        );
+        assert!(repo.git_repo.is_empty()?);
+        Ok(())
+    }
+
     fn pass_through_fetch_reporter_proces_remote_msg(msgs: Vec<&str>) -> Vec<String> {
         let term = console::Term::stdout();
         let mut reporter = FetchReporter::new(&term);
