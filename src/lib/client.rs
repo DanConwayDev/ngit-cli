@@ -1540,20 +1540,36 @@ fn author_announcement_discovery_pending(
     is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
 }
 
-fn long_timeout() -> u64 {
-    if std::env::var("NGITTEST").is_ok() {
-        1
+fn relay_timeout(default: u64) -> u64 {
+    relay_timeout_for_mode(
+        default,
+        std::env::var("NGITTEST").is_ok(),
+        std::env::var(crate::test_timeouts::RELAY_TIMEOUT_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn relay_timeout_for_mode(default: u64, test_mode: bool, override_secs: Option<&str>) -> u64 {
+    if test_mode {
+        override_secs
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map_or(
+                crate::test_timeouts::RelayTimeout::Normal.seconds(),
+                u64::from,
+            )
     } else {
-        45
+        default
     }
 }
 
+fn long_timeout() -> u64 {
+    relay_timeout(45)
+}
+
 fn short_timeout() -> u64 {
-    if std::env::var("NGITTEST").is_ok() {
-        1
-    } else {
-        7
-    }
+    relay_timeout(7)
 }
 
 async fn get_events_of(
@@ -7420,6 +7436,30 @@ mod fetch_completion_tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
+
+    #[test]
+    fn test_relay_budget_preserves_production_and_failure_test_defaults() {
+        for default in [7, 45] {
+            for override_secs in [None, Some("5"), Some("0"), Some("invalid")] {
+                assert_eq!(
+                    relay_timeout_for_mode(default, false, override_secs),
+                    default
+                );
+            }
+            for override_secs in [None, Some("0"), Some("invalid"), Some("-1")] {
+                assert_eq!(
+                    relay_timeout_for_mode(default, true, override_secs),
+                    crate::test_timeouts::RelayTimeout::Normal.seconds()
+                );
+            }
+            let failure = crate::test_timeouts::RelayTimeout::ExpectedFailure.seconds();
+            assert_eq!(
+                relay_timeout_for_mode(default, true, Some(&failure.to_string())),
+                failure
+            );
+            assert_eq!(relay_timeout_for_mode(default, true, Some("10")), 10);
+        }
+    }
 
     #[tokio::test]
     async fn fetch_requires_eose_instead_of_accepting_partial_history() {

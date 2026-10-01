@@ -244,7 +244,7 @@ async fn failed_republish_leaves_previous_state_authoritative() -> Result<()> {
     let dead_url = format!("http://{}/repo.git", unavailable.addr());
 
     let failed = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(10),
         run_edit(
             &repo,
             &[

@@ -19,6 +19,8 @@ async fn grasp_acceptance_keeps_state_push_success_when_remaining_relay_is_down(
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .with_grasp_server("repo")
     .build()

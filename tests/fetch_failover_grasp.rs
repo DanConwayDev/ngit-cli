@@ -44,6 +44,8 @@ async fn clone_falls_through_when_first_grasp_is_unreachable() -> Result<()> {
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .with_grasp_server("primary")
     .with_grasp_server("secondary")

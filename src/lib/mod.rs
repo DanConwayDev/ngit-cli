@@ -33,6 +33,8 @@ pub mod repo_state;
 pub mod self_update;
 pub mod signer;
 pub mod software_release;
+#[doc(hidden)]
+pub mod test_timeouts;
 pub mod tls;
 pub mod utils;
 pub mod version_check;

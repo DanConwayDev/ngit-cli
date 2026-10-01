@@ -324,6 +324,8 @@ async fn undelivered_issue_edits_do_not_enter_the_cache() -> Result<()> {
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .with_grasp_server("repo")
     .build()

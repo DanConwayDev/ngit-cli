@@ -1873,7 +1873,10 @@ impl Harness {
         &self,
         extra_tags: Vec<Tag>,
     ) -> Result<(Repo, ArrangedInitStateC)> {
-        let (repo, state_b) = self.arrange_init_state_b_coordinate_only().await?;
+        let (mut repo, state_b) = self.arrange_init_state_b_coordinate_only().await?;
+        // This fixture deliberately includes a non-routable marker relay.
+        // Bound expected failures for every test consuming it.
+        repo.set_relay_timeout(crate::RelayTimeout::ExpectedFailure);
 
         let additional_maintainer_keys: Vec<Keys> = vec![Keys::generate()];
 

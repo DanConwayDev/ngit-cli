@@ -211,6 +211,12 @@ impl Harness {
         };
         let mut env = vec![
             ("NGITTEST".to_string(), "TRUE".to_string()),
+            // Give responsive relays headroom without inheriting caller budgets.
+            // Deliberate timeout tests select the ExpectedFailure profile.
+            (
+                crate::timeouts::RELAY_TIMEOUT_ENV.to_string(),
+                crate::RelayTimeout::Normal.seconds().to_string(),
+            ),
             // Plaintext-in-git-config policy so tests never touch a real
             // credential store; keyring scenarios override this per command
             // together with `NGIT_KEYRING_FILE`.
@@ -345,6 +351,14 @@ impl HarnessBuilder {
         self
     }
 
+    /// Select a centrally managed relay budget for this fixture's children.
+    pub fn with_relay_timeout(self, timeout: crate::RelayTimeout) -> Self {
+        self.with_child_env(
+            crate::timeouts::RELAY_TIMEOUT_ENV,
+            timeout.seconds().to_string(),
+        )
+    }
+
     /// Register a vanilla nostr relay under the given role label.
     ///
     /// Standard roles consumed by `Params::default()`:
@@ -465,7 +479,7 @@ impl HarnessBuilder {
 
     /// Build the harness: allocate ports, start every relay and grasp
     /// subprocess, then return when all are accepting connections.
-    pub async fn build(self) -> Result<Harness> {
+    pub async fn build(mut self) -> Result<Harness> {
         if !self.ngit_bin.exists() {
             return Err(anyhow!(
                 "ngit binary not found at {} — did `cargo test` build it?",
@@ -477,6 +491,17 @@ impl HarnessBuilder {
                 "git-remote-nostr binary not found at {} — did `cargo test` build it?",
                 self.git_remote_nostr_bin.display()
             ));
+        }
+
+        // Public membership discovery queries signer fallback relays even when
+        // no remote signer is used. Own a responsive fixture instead of falling
+        // through to the legacy, usually unavailable localhost:8051 address.
+        if !self
+            .relay_roles
+            .iter()
+            .any(|(role, _)| role == "signer_fallback")
+        {
+            self.relay_roles.push(("signer_fallback".to_string(), None));
         }
 
         let mut relays: BTreeMap<String, Vec<VanillaRelay>> = BTreeMap::new();
@@ -572,4 +597,44 @@ fn sandbox_home() -> Result<TempDir> {
     std::fs::write(&gitconfig, "")
         .with_context(|| format!("failed to create {}", gitconfig.display()))?;
     Ok(home)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn signer_fallback_is_queryable_and_explicit_configuration_is_preserved() -> Result<()> {
+        let executable = std::env::current_exe()?;
+        for explicit in [false, true] {
+            let mut builder = Harness::builder(&executable, &executable);
+            if explicit {
+                builder = builder
+                    .with_relay("signer_fallback")
+                    .with_relay_timeout(crate::RelayTimeout::ExpectedFailure);
+            }
+            let harness = builder.build().await?;
+            assert_eq!(harness.relays("signer_fallback").len(), 1);
+            let relay = harness.relay("signer_fallback");
+            assert!(
+                relay
+                    .events(nostr_sdk::prelude::Filter::new())
+                    .await?
+                    .is_empty()
+            );
+            let env: BTreeMap<_, _> = harness.env().into_iter().collect();
+            assert_eq!(env["NGIT_RELAY_SIGNER_FALLBACK_SET"], relay.url());
+            assert_eq!(
+                env[crate::timeouts::RELAY_TIMEOUT_ENV],
+                if explicit {
+                    crate::RelayTimeout::ExpectedFailure
+                } else {
+                    crate::RelayTimeout::Normal
+                }
+                .seconds()
+                .to_string(),
+            );
+        }
+        Ok(())
+    }
 }

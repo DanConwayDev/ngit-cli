@@ -112,6 +112,8 @@ async fn missing_announcement_groups_completed_and_incomplete_relay_searches() -
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .build()
     .await?;

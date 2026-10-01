@@ -396,6 +396,8 @@ async fn edit_refuses_when_an_account_write_relay_cannot_be_read() -> Result<()>
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .with_grasp_server("repo")
     .build()

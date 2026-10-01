@@ -259,7 +259,12 @@ async fn commit_ish_targets_resolve_and_carry_the_local_integrity_marker() -> Re
     assert_eq!(json["ci"]["revision_matched"], true);
     assert_eq!(json["target"]["kind"], "commit");
     assert_eq!(json["target"]["commit"], head);
-    assert_eq!(runs(&json).len(), 2, "both workflows are current: {json}");
+    assert_eq!(
+        runs(&json).len(),
+        2,
+        "both workflows are current: {json}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
 
     let coordinator_npub = arranged.coordinator.public_key().to_bech32()?;
     let good = runs(&json)

@@ -263,15 +263,34 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
         .output()
         .await?;
     require_success("outsider login", &outsider_login)?;
-    let outsider = harness
-        .clone_url_with_git_config(&clone_url, &[("nostr.signer", "outsider")])
-        .await;
-    if let Ok(outsider) = outsider {
-        panic!(
-            "a non-member unexpectedly cloned the private repo with refs: {:?}",
-            outsider.snapshot()?.refs
-        );
-    }
+    // Authentication failure is expected; retain a short fetch deadline for
+    // the rejected subscription without shortening the member's happy path.
+    let outsider_clone = outsider
+        .git([
+            "-c",
+            "nostr.signer=outsider",
+            "clone",
+            &clone_url,
+            "unauthorized-clone",
+        ])
+        .output()
+        .await?;
+    assert!(
+        !outsider_clone.status.success(),
+        "a non-member unexpectedly cloned the private repo",
+    );
+
+    // A generic lookup timeout must not masquerade as access rejection.
+    // The private service closes the non-member's relay connection; the
+    // authenticated clone below also proves that the repository is available.
+    let outsider_error = String::from_utf8_lossy(&outsider_clone.stderr);
+    assert!(
+        outsider_error.contains(&format!(
+            "{} — Nostr relay disconnected before finishing the search",
+            harness.grasp("repo").relay_url().trim_end_matches('/'),
+        )),
+        "non-member clone did not observe the private service disconnect: {outsider_error}",
+    );
 
     let member_clone = harness
         .clone_url_with_git_config(&clone_url, &[("nostr.signer", "member")])

@@ -18,7 +18,7 @@ use nostr_sdk::{
 /// Default query budget — generous enough for in-process / loopback relays
 /// under load on CI, short enough to keep tests from hanging indefinitely
 /// when the relay has dropped events.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(crate::RelayTimeout::Normal.seconds());
 
 /// Connect to `relay_url`, REQ with `filter`, await EOSE, then disconnect.
 pub(crate) async fn fetch_events(relay_url: &str, filter: Filter) -> Result<Vec<Event>> {

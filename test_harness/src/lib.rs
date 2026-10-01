@@ -127,3 +127,8 @@ pub fn finalize_ordered_fixture(
         policy,
     )?)?)
 }
+
+// Share the policy without a circular dependency on ngit.
+#[path = "../../src/lib/test_timeouts.rs"]
+pub mod timeouts;
+pub use timeouts::RelayTimeout;

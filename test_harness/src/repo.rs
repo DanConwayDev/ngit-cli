@@ -55,6 +55,15 @@ impl Repo {
         self.env.push((key, value.into()));
     }
 
+    /// Select a centrally managed relay budget for subsequently spawned
+    /// children.
+    pub fn set_relay_timeout(&mut self, timeout: crate::RelayTimeout) {
+        self.set_env(
+            crate::timeouts::RELAY_TIMEOUT_ENV,
+            timeout.seconds().to_string(),
+        );
+    }
+
     pub(crate) fn init(harness: &Harness) -> Result<Self> {
         let (tempdir, augmented_path) = Self::alloc_tempdir_and_path(harness)?;
         let dir = tempdir.path().to_path_buf();

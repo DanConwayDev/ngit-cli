@@ -403,6 +403,13 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
             cloner
                 .git(args)
                 .env("XDG_CACHE_HOME", plaintext_cache.path())
+                // The cached private relay deliberately never answers.
+                .env(
+                    test_harness::timeouts::RELAY_TIMEOUT_ENV,
+                    test_harness::RelayTimeout::ExpectedFailure
+                        .seconds()
+                        .to_string(),
+                )
                 .kill_on_drop(true)
                 .output(),
         )
@@ -477,6 +484,13 @@ async fn announce_push_then_clone_via_nostr_url_over_grasp() -> Result<()> {
                 "public-from-announcement-indexer",
             ])
             .env("XDG_CACHE_HOME", plaintext_cache.path())
+            // Reuse the deliberately unresponsive private relay cache.
+            .env(
+                test_harness::timeouts::RELAY_TIMEOUT_ENV,
+                test_harness::RelayTimeout::ExpectedFailure
+                    .seconds()
+                    .to_string(),
+            )
             .kill_on_drop(true)
             .output(),
     )

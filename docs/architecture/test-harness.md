@@ -74,6 +74,35 @@ Three observations underpin this:
 
 Nothing is process-global. Nothing requires `#[serial]`.
 
+Relay budgets are defined centrally in `src/lib/test_timeouts.rs`, shared by
+ngit's test mode and the harness without a circular crate dependency:
+
+- `RelayTimeout::Normal`: ten seconds for connections, fetches and real-wire
+  fixture queries. Completed queries return immediately, including empty
+  results followed by EOSE; these are ceilings, not mandatory waits.
+- `RelayTimeout::ExpectedFailure`: three seconds for deliberately unavailable
+  or unresponsive relay fixtures. Select it with
+  `.with_relay_timeout(RelayTimeout::ExpectedFailure)` on a harness builder or
+  `repo.set_relay_timeout(...)` for subsequent commands. Command-local overrides
+  use the same policy's `seconds()` value and `timeouts::RELAY_TIMEOUT_ENV`.
+
+Three seconds trades some failure-path runtime for scheduling headroom on busy
+CI workers. Do not shorten a query merely because it expects no matching
+events: a responsive relay can confirm absence with EOSE. A longer allowance
+alone cannot prevent false passes: negative tests must check the intended
+failure reason and relevant side effects, not just a nonzero exit. Permission
+checks against responsive services keep the normal budget.
+
+The harness explicitly sets the child override so inherited values cannot
+change the policy. The override sets both maximum and grace budgets, accepts
+positive integer seconds, and is ignored outside `NGITTEST`. Missing or invalid
+values retain the normal test default. Production budgets and explicit
+controlled-clock timeout tests are unaffected. The shared marker-relay fixture
+selects the failure profile because its unreachable URL is intentional. A
+harness owns a responsive `signer_fallback` relay unless one was explicitly
+supplied, so ordinary membership discovery never waits on the legacy localhost
+fallback.
+
 ### Sandboxed HOME
 
 `Harness::env` points `HOME`, every XDG base dir and the Git config

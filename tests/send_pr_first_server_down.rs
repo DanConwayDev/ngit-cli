@@ -172,6 +172,8 @@ async fn capture_snapshot() -> Result<Snapshot> {
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .with_relay("default")
     .with_grasp_server("repo")
     .with_grasp_server("repo_secondary")

@@ -1823,6 +1823,8 @@ async fn account_creation_without_relay_acceptance_does_not_cache_events() -> Re
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // Relay failure is intentional; use the shared failure allowance.
+    .with_relay_timeout(test_harness::RelayTimeout::ExpectedFailure)
     .build()
     .await?;
     let unavailable = test_harness::port::UnavailableTcpEndpoint::start().await?;
