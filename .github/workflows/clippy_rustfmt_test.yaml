@@ -15,8 +15,9 @@ jobs:
       - run: nix develop --command cargo clippy
       - run: nix develop --command cargo fmt --all -- --check
       - run: nix develop --command cargo test --workspace
-      - name: Test pinned Buzz compatibility
-        run: nix develop --command cargo test --test private_buzz -- --ignored
+      # Re-enable with the Buzz Nix fixture once a25396d8 is resolved.
+      # - name: Test pinned Buzz compatibility
+      #   run: nix develop --command cargo test --test private_buzz -- --ignored
 
   windows:
     runs-on: windows-latest

@@ -5,7 +5,14 @@ partial.
 
 ## Integration-test target
 
-The integration fixture consumes `buzz-server-binaries` from
+The Buzz Nix fixture and its explicit CI steps are temporarily commented out
+until advertisement issue `a25396d8` is resolved in ngit's released dependency
+chain. The test remains ignored by default; `nix develop` no longer supplies
+Buzz, PostgreSQL, Redis, or Garage for it. To restore coverage, uncomment the
+Buzz input, package list, shell export, and both CI steps, restore the `buzz`
+outputs argument and package-list append, and regenerate `flake.lock`.
+
+The retained configuration selects `buzz-server-binaries` from
 [`mulatta/buzz.nix`](https://github.com/mulatta/buzz.nix), pinned in `flake.nix`
 to packaging commit `fc51e7947203fc8974fcea71cdea148a59d6d0e7`.
 That package builds upstream Buzz tag `desktop-v0.5.26`

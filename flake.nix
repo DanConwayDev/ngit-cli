@@ -7,15 +7,15 @@
     };
     flake-utils.url = "github:numtide/flake-utils";
 
-    # Buzz provides the relay used by the authenticated Smart HTTP integration
-    # test. Pin reviewed packaging and retain its own locked build dependencies.
-    # Consume only server binaries; the fixture does not need the web frontends.
-    buzz = {
-      url = "github:mulatta/buzz.nix/fc51e7947203fc8974fcea71cdea148a59d6d0e7";
-    };
+    # Disabled until a25396d8 is resolved in ngit's released libgit2 dependency.
+    # Restore this input and add `buzz` to the outputs arguments when re-enabling
+    # the packages and shell hook below. Keep the reviewed packaging pin.
+    # buzz = {
+    #   url = "github:mulatta/buzz.nix/fc51e7947203fc8974fcea71cdea148a59d6d0e7";
+    # };
   };
 
-  outputs = { nixpkgs, rust-overlay, flake-utils, buzz, ... }:
+  outputs = { nixpkgs, rust-overlay, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -47,12 +47,13 @@
           # exercises the resulting binary instead.
           doCheck = false;
         };
-        buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-          buzz.packages.${system}.buzz-server-binaries
-          pkgs.postgresql_17
-          pkgs.redis
-          pkgs.garage_2
-        ];
+        # Restore with the Buzz CI steps once a25396d8 is resolved.
+        # buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+        #   buzz.packages.${system}.buzz-server-binaries
+        #   pkgs.postgresql_17
+        #   pkgs.redis
+        #   pkgs.garage_2
+        # ];
       in with pkgs; {
         devShells.default = mkShell {
 
@@ -72,7 +73,7 @@
             openssl
             dbus
             ngit-grasp-pkg
-          ] ++ buzz-test-packages;
+          ]; # Restore `++ buzz-test-packages` once a25396d8 is resolved.
           shellHook = ''
             # auto-install git hooks
             dot_git="$(git rev-parse --git-common-dir)"
@@ -85,11 +86,11 @@
             # Point the test harness at the exact pinned ngit-grasp binary.
             export NGIT_GRASP_BIN=${ngit-grasp-pkg}/bin/ngit-grasp
 
-          '' + lib.optionalString stdenv.hostPlatform.isLinux ''
-            # Run the Buzz integration test against the exact Nix-built
-            # server binaries from the pinned packaging revision.
-            export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
           '';
+          # Once a25396d8 is resolved, append this to shellHook:
+          # + lib.optionalString stdenv.hostPlatform.isLinux ''
+          #   export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
+          # ''
         };
         # Create packages for each binary defined in Cargo.toml
         packages.default = pkgs.rustPlatform.buildRustPackage {

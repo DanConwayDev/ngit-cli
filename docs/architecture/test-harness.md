@@ -174,7 +174,9 @@ Three relay primitives:
   authenticated Nostr, then exercise Buzz's `buzz-channel` ACL and
   repository-scoped NIP-98 through ngit. The fixture is Linux-only and its
   integration test is ignored by the default Cargo test suite because it
-  starts four external services. CI runs it explicitly with
+  starts four external services. Its Nix fixture and explicit CI step are
+  temporarily commented out pending advertisement issue `a25396d8`. Once
+  restored, CI runs it explicitly with
   `cargo test --test private_buzz -- --ignored` inside `nix develop`, which
   supplies `BUZZ_RELAY_BIN` and the service binaries.
 
