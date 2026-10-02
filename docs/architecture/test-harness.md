@@ -168,7 +168,8 @@ Three relay primitives:
   git smart-http for the actual git data. Vanilla nostr events like
   kind 0 are rejected.
 - **Buzz server** (`BuzzServer::start`) — the exact Nix-built relay
-  revision pinned in `flake.lock`, backed by isolated Postgres, Redis,
+  source selected by the pinned `mulatta/buzz.nix` server-binaries package,
+  backed by isolated Postgres, Redis,
   and Garage processes. Tests create channels and announcements over
   authenticated Nostr, then exercise Buzz's `buzz-channel` ACL and
   repository-scoped NIP-98 through ngit. The fixture is Linux-only and its

@@ -3,7 +3,34 @@
 Status: transport support implemented; collaboration interoperability remains
 partial.
 
-## Compatibility target
+## Integration-test target
+
+The integration fixture consumes `buzz-server-binaries` from
+[`mulatta/buzz.nix`](https://github.com/mulatta/buzz.nix), pinned in `flake.nix`
+to packaging commit `fc51e7947203fc8974fcea71cdea148a59d6d0e7`.
+That package builds upstream Buzz tag `desktop-v0.5.26`
+(commit `2b4b138dc5cf2d9cc1a0ceb21d9063ff56fe8bf4`); the relay's own version
+remains `0.2.1`. It excludes the desktop and web frontend builds.
+
+Keep the packaging flake's own locked build dependencies. Review packaging,
+source pins, and patches when updating it, then explicitly run
+`cargo test --test private_buzz -- --ignored` with the development environment.
+The fixture does not require the packaging author's binary cache or acceptance
+of that flake's `nixConfig`.
+
+On 2026-10-02, the unchanged `private_buzz` integration test passed 9 of 10
+consecutive runs against this package. One run failed at the authenticated
+clone after the first successful push, with libgit2 reporting
+`cannot fetch a specific object from the remote repository`. The prior Buzz
+pin passed three control runs, and both Buzz-specific library tests passed.
+This update therefore does not establish that the intermittent Git transport
+failure is fixed; its cause remains unconfirmed.
+
+## Earlier compatibility assessment
+
+The analysis below was recorded against Buzz 0.5.11. Updating the relay test
+fixture does not revalidate desktop behavior or the untested collaboration
+workflows described here.
 
 This document records the compatibility boundary intended for the next minor
 ngit release. It is an evaluation of specific versions, not a promise about all
@@ -15,7 +42,6 @@ future Buzz releases.
 | Buzz Desktop | 0.5.11 | `b12739b23da92b0f1e99626b02749ab55c51b8ce` |
 | `buzz-relay` | 0.2.1 | `b12739b23da92b0f1e99626b02749ab55c51b8ce` |
 
-The ngit integration fixture pins that exact Buzz revision in `flake.nix`.
 The Buzz Desktop and relay versions are recorded separately because the relay
 has an independent release cadence, while the repository UI and its Nostr
 event conventions ship with Buzz Desktop.

@@ -8,11 +8,10 @@
     flake-utils.url = "github:numtide/flake-utils";
 
     # Buzz provides the relay used by the authenticated Smart HTTP integration
-    # test. Keep this on the exact Nix-support PR revision until that work is
-    # merged upstream.
+    # test. Pin reviewed packaging and retain its own locked build dependencies.
+    # Consume only server binaries; the fixture does not need the web frontends.
     buzz = {
-      url = "github:danconwaydev/buzz/b12739b23da92b0f1e99626b02749ab55c51b8ce";
-      inputs.nixpkgs.follows = "nixpkgs";
+      url = "github:mulatta/buzz.nix/fc51e7947203fc8974fcea71cdea148a59d6d0e7";
     };
   };
 
@@ -49,7 +48,7 @@
           doCheck = false;
         };
         buzz-test-packages = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-          buzz.packages.${system}.buzz-relay
+          buzz.packages.${system}.buzz-server-binaries
           pkgs.postgresql_17
           pkgs.redis
           pkgs.garage_2
@@ -88,8 +87,8 @@
 
           '' + lib.optionalString stdenv.hostPlatform.isLinux ''
             # Run the Buzz integration test against the exact Nix-built
-            # binaries from the pinned PR revision.
-            export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-relay}/bin/buzz-relay
+            # server binaries from the pinned packaging revision.
+            export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
           '';
         };
         # Create packages for each binary defined in Cargo.toml
