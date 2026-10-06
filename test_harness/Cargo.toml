@@ -11,6 +11,7 @@ anyhow = "1.0.104"
 # file content for the `w` tag with the same SHA-256 implementation ngit
 # verifies it against.
 bitcoin_hashes = "1.2"
+futures = "0.3.34"
 git2 = "0.21.0"
 http-body-util = "0.1"
 hyper = { version = "1.11", features = ["full"] }

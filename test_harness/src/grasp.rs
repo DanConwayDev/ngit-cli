@@ -461,6 +461,53 @@ impl GraspServer {
         query::fetch_events(&self.relay_url(), filter).await
     }
 
+    /// Complete a NIP-42 handshake and return the relay's explicit decision.
+    /// A disconnect, missing acknowledgement or timeout is an error, never a
+    /// rejection. Match the acknowledgement to the signed AUTH event so an
+    /// unrelated OK cannot satisfy a negative test.
+    pub async fn authentication_accepted(&self, keys: &Keys) -> Result<bool> {
+        use futures::SinkExt;
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        tokio::time::timeout(
+            Duration::from_secs(crate::RelayTimeout::Normal.seconds()),
+            async {
+                let relay_url = self.relay_url();
+                let (mut socket, _) = connect_async(&relay_url).await?;
+                let mut auth_id = None;
+                while let Some(frame) = socket.next().await {
+                    match frame? {
+                        Message::Text(text) => match RelayMessage::from_json(text.as_bytes())? {
+                            RelayMessage::Auth { challenge } if auth_id.is_none() => {
+                                let event = ClientAuthentication::new(
+                                    challenge.into_owned(),
+                                    RelayUrl::parse(&relay_url)?,
+                                )
+                                .finalize(keys)?;
+                                auth_id = Some(event.id);
+                                socket
+                                    .send(Message::Text(
+                                        ClientMessage::auth(event).as_json().into(),
+                                    ))
+                                    .await?;
+                            }
+                            RelayMessage::Ok {
+                                event_id, status, ..
+                            } if Some(event_id) == auth_id => return Ok(status),
+                            _ => {}
+                        },
+                        Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
+                }
+                bail!("relay disconnected without acknowledging the AUTH event")
+            },
+        )
+        .await
+        .context("timed out waiting for the relay's AUTH acknowledgement")?
+    }
+
     /// Query a GRASP-08 service as an authenticated member. The short-lived
     /// client answers the service's NIP-42 challenge before issuing its REQ.
     pub async fn events_as(&self, keys: &Keys, filter: Filter) -> Result<Vec<Event>> {
