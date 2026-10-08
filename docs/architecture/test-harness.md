@@ -110,6 +110,13 @@ therefore prove a completed empty response, rather than an unavailable relay.
 This is a query-completion guarantee, not a barrier for future publications;
 wait on the producer's completion contract before checking for absent effects.
 
+Negative command tests must check the intended refusal as well as failure and
+preserved state: an unrelated relay failure can also leave state untouched.
+Assert stable command refusal reasons or structured error categories. For
+transport races, use protocol evidence and allow valid competing outcomes
+rather than selecting one incidental diagnostic. Keep positive controls where
+available, such as successful forced checkout or a matching-lease push.
+
 ### Sandboxed HOME
 
 `Harness::env` points `HOME`, every XDG base dir and the Git config

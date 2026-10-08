@@ -216,10 +216,13 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
             .context("configure backing repository to reject deletes")?,
     )?;
 
-    let rejected_delete = cloned.nostr_push(["origin", "--delete", "main"]).await;
+    let rejected_delete = cloned
+        .nostr_push_expecting_failure(["origin", "--delete", "main"])
+        .await?;
+    let stderr = String::from_utf8_lossy(&rejected_delete.stderr);
     assert!(
-        rejected_delete.is_err(),
-        "nostr push must fail when the external helper rejects its ref update"
+        stderr.contains("denying ref deletion for refs/heads/main"),
+        "push failed before the helper rejected deletion: {stderr}"
     );
 
     let backing_oid_after_rejection = publisher

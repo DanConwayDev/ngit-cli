@@ -420,10 +420,14 @@ async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> R
     .await?;
 
     // Without --force `checkout_patch` Case 5 should bail.
-    let res = run_pr_checkout(&test_repo, series).await;
+    let error = run_pr_checkout(&test_repo, series)
+        .await
+        .expect_err("expected `ngit pr checkout` to fail on a diverged branch without --force");
     assert!(
-        res.is_err(),
-        "expected `ngit pr checkout` to fail on a diverged branch without --force",
+        error.to_string().contains(&format!(
+            "branch '{branch}' has diverged from the published proposal"
+        )),
+        "checkout failed before detecting the diverged branch: {error:#}",
     );
 
     // Amended local commit must survive the failed checkout.
@@ -624,10 +628,14 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
 
     // (3) Without --force the branch must NOT be overwritten —
     //     `checkout_patch` Case 5 bails.
-    let res = run_pr_checkout(&test_repo, series).await;
-    assert!(
-        res.is_err(),
+    let error = run_pr_checkout(&test_repo, series).await.expect_err(
         "expected `ngit pr checkout` to fail on a diverged branch without --force after revision",
+    );
+    assert!(
+        error.to_string().contains(&format!(
+            "branch '{branch}' has diverged from the published proposal"
+        )),
+        "checkout failed before detecting the diverged branch: {error:#}",
     );
 
     // (4) --force overwrites via `apply_patch_chain`.

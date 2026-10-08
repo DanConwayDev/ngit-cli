@@ -250,12 +250,18 @@ async fn assert_refusal_preserves_local_state(
     out: &std::process::Output,
     expected: &LocalGitState,
     label: &str,
+    expected_reason: &str,
 ) -> Result<()> {
     assert!(
         !out.status.success(),
         "{label} must refuse the proposal\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(expected_reason),
+        "{label} failed for the wrong reason: {stderr}"
     );
     assert_eq!(
         &local_git_state(repo).await?,
@@ -728,6 +734,11 @@ async fn conflicting_saved_worktree_rolls_back_merge_and_restores_source() -> Re
         !out.status.success(),
         "ngit merge must fail when the saved work cannot apply cleanly to the merged target",
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("saved working-directory changes conflict with the merged tree"),
+        "merge failed before exercising rollback: {stderr}"
+    );
     assert_eq!(
         current_branch(&publisher).await?,
         "local-work",
@@ -862,6 +873,11 @@ async fn merge_without_id_off_pr_branch_fails() -> Result<()> {
         !out.status.success(),
         "ngit merge with no id off a pr/ branch should fail",
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not on a `pr/` branch"),
+        "wrong merge refusal: {stderr}"
+    );
 
     Ok(())
 }
@@ -913,6 +929,7 @@ async fn canonical_and_alias_refuse_closed_and_applied_prs() -> Result<()> {
         &closed_merge,
         &state_before,
         "canonical ngit pr merge of a closed PR",
+        "PR is closed",
     )
     .await?;
 
@@ -922,6 +939,7 @@ async fn canonical_and_alias_refuse_closed_and_applied_prs() -> Result<()> {
         &closed_alias,
         &state_before,
         "top-level ngit merge of a closed PR",
+        "PR is closed",
     )
     .await?;
 
@@ -931,6 +949,7 @@ async fn canonical_and_alias_refuse_closed_and_applied_prs() -> Result<()> {
         &applied_canonical,
         &state_before,
         "canonical ngit pr merge of an applied PR",
+        "PR is already applied/merged",
     )
     .await?;
 
@@ -940,6 +959,7 @@ async fn canonical_and_alias_refuse_closed_and_applied_prs() -> Result<()> {
         &applied_merge,
         &state_before,
         "top-level ngit merge of an applied PR",
+        "PR is already applied/merged",
     )
     .await?;
 
@@ -1273,6 +1293,12 @@ async fn local_branch_ahead_of_published_tip_aborts_merge() -> Result<()> {
         String::from_utf8_lossy(&out.stderr),
     );
 
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ahead of the published PR tip"),
+        "wrong merge refusal: {stderr}"
+    );
+
     // main must not have advanced.
     assert_eq!(
         rev_parse(&publisher, "main").await?,
@@ -1367,6 +1393,12 @@ async fn self_submitted_bare_branch_ahead_of_published_tip_aborts_merge() -> Res
         "ngit merge must abort when the bare self-submitted pr/ branch is ahead of the published tip\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ahead of the published PR tip"),
+        "wrong merge refusal: {stderr}"
     );
 
     // main must not have advanced.

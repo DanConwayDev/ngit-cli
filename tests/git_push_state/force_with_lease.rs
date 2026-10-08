@@ -83,11 +83,12 @@ async fn stale_lease_rejects_before_matching_lease_updates_state() -> Result<()>
     let rejected_tip = stale_checkout.rev_parse("HEAD").await?;
 
     let rejected = stale_checkout
-        .nostr_push(["--force-with-lease", "origin", "main"])
-        .await;
+        .nostr_push_expecting_failure(["--force-with-lease", "origin", "main"])
+        .await?;
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert!(
-        rejected.is_err(),
-        "stale force-with-lease unexpectedly succeeded"
+        stderr.contains("stale info"),
+        "push failed before rejecting the stale lease: {stderr}"
     );
 
     let state_events = harness

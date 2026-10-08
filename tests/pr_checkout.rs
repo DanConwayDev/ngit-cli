@@ -141,8 +141,7 @@ fn expected_branch_name(pr: &PublishedPr) -> String {
 // ---------------------------------------------------------------------------
 
 /// `ngit pr checkout <hex>`. Returns Ok only on clean exit; `Err` carries
-/// captured stdout/stderr so tests asserting `.is_err()` can still surface
-/// the cause when they actually expected success.
+/// captured stdout/stderr so negative tests can check the refusal reason.
 async fn run_pr_checkout(repo: &Repo, pr: &PublishedPr) -> Result<()> {
     let event_id_hex = pr.event_id.to_hex();
     let out = repo
@@ -453,10 +452,14 @@ async fn local_amendments_are_preserved_when_checkout_without_force_fails() -> R
 
     // `ngit pr checkout` should refuse to overwrite the diverged branch
     // without `--force` (checkout.rs:288 fall-through path).
-    let res = run_pr_checkout(&test_repo, pr).await;
+    let error = run_pr_checkout(&test_repo, pr)
+        .await
+        .expect_err("expected `ngit pr checkout` to fail on a diverged branch without --force");
     assert!(
-        res.is_err(),
-        "expected `ngit pr checkout` to fail on a diverged branch without --force",
+        error.to_string().contains(&format!(
+            "branch '{branch}' has diverged from the published proposal"
+        )),
+        "checkout failed before detecting the diverged branch: {error:#}",
     );
 
     // The amended local commit must survive the failed checkout.
@@ -676,10 +679,14 @@ async fn newer_revision_force_updates_to_revised_tip() -> Result<()> {
 
     // (3) test_repo refuses to overwrite without `--force` — branch is
     //     now diverged from the freshly-published revision tip.
-    let res = run_pr_checkout(&test_repo, pr).await;
-    assert!(
-        res.is_err(),
+    let error = run_pr_checkout(&test_repo, pr).await.expect_err(
         "expected `ngit pr checkout` to fail on a diverged branch without --force after revision",
+    );
+    assert!(
+        error.to_string().contains(&format!(
+            "branch '{branch}' has diverged from the published proposal"
+        )),
+        "checkout failed before detecting the diverged branch: {error:#}",
     );
 
     // (4) `--force` updates the branch to the revision's tip.

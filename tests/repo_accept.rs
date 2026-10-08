@@ -320,6 +320,11 @@ async fn repeated_acceptance_refuses_without_republishing() -> Result<()> {
         !output.status.success(),
         "an already confirmed maintainer must not accept again",
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("already a confirmed maintainer"),
+        "wrong membership refusal: {stderr}"
+    );
 
     let after = harness
         .relay("default")
@@ -378,6 +383,13 @@ async fn accept_refuses_an_existing_announcement_without_republishing() -> Resul
     assert!(
         !output.status.success(),
         "an existing same-identifier announcement must block acceptance"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "accepting would replace your existing same-identifier repository announcement"
+        ),
+        "wrong membership refusal: {stderr}"
     );
 
     let surviving = harness
@@ -475,6 +487,11 @@ async fn leave_after_accept_ends_the_self_role_with_a_boundary() -> Result<()> {
     assert!(
         !again.status.success(),
         "a second leave must fail: the announcement already records the role as ended",
+    );
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("your announcement already records your role as ended"),
+        "wrong membership refusal: {stderr}"
     );
     // the refused leave must not have published anything: the NIP-01
     // winner on the relay is still the first leave's announcement
