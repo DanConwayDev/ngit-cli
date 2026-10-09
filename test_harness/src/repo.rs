@@ -242,6 +242,9 @@ impl Repo {
 
     fn configure(&self, cmd: &mut Command) {
         cmd.current_dir(&self.dir);
+        // Native CI sets this for the real repository. Fixture commands must
+        // discover their own repository unless a test explicitly overrides it.
+        cmd.env_remove("NGIT_REPO");
         // env_clear() would also remove harmless inherited vars that git
         // needs; instead we just override the keys we care about. That set
         // includes `HOME`, the XDG base dirs, and `GIT_CONFIG_GLOBAL` /
