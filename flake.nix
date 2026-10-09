@@ -92,6 +92,26 @@
           #   export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
           # ''
         };
+        apps.ci-checks = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "ngit-ci-checks";
+            runtimeInputs = [ pkgs.nix pkgs.git ];
+            text = ''
+              exec nix develop --command ${pkgs.bash}/bin/bash ${./nix/ci-checks.sh}
+            '';
+          }}/bin/ngit-ci-checks";
+        };
+        apps.publish-crate = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "ngit-publish-crate";
+            runtimeInputs = [ pkgs.nix pkgs.git ];
+            text = ''
+              exec nix develop --command ${pkgs.bash}/bin/bash ${./nix/publish-crate.sh}
+            '';
+          }}/bin/ngit-publish-crate";
+        };
         # Create packages for each binary defined in Cargo.toml
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = manifest.package.name;

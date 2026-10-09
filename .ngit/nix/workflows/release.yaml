@@ -1,0 +1,12 @@
+version: 1
+name: Crates.io release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  ci:
+    run: apps.x86_64-linux.ci-checks
+  publish:
+    needs: [ci]
+    run: apps.x86_64-linux.publish-crate
+    secrets: [CARGO_REGISTRY_TOKEN]

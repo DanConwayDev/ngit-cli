@@ -1,0 +1,9 @@
+version: 1
+name: Rust CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+jobs:
+  ci:
+    run: apps.x86_64-linux.ci-checks
