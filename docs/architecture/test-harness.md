@@ -103,6 +103,20 @@ harness owns a responsive `signer_fallback` relay unless one was explicitly
 supplied, so ordinary membership discovery never waits on the legacy localhost
 fallback.
 
+Relay fixture `events(...)` queries require EOSE for their own subscription and
+drain the SDK-validated event stream before returning. A disconnect, rejection,
+or expired deadline is an error, even if some events arrived. Empty results
+therefore prove a completed empty response, rather than an unavailable relay.
+This is a query-completion guarantee, not a barrier for future publications;
+wait on the producer's completion contract before checking for absent effects.
+
+Negative command tests must check the intended refusal as well as failure and
+preserved state: an unrelated relay failure can also leave state untouched.
+Assert stable command refusal reasons or structured error categories. For
+transport races, use protocol evidence and allow valid competing outcomes
+rather than selecting one incidental diagnostic. Keep positive controls where
+available, such as successful forced checkout or a matching-lease push.
+
 ### Sandboxed HOME
 
 `Harness::env` points `HOME`, every XDG base dir and the Git config
