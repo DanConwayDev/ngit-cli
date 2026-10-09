@@ -7,13 +7,14 @@ manifest is `.ngit/release.yaml` (singular).
 ## Publishing the ngit crate
 
 Nostr CI publishes `ngit` to crates.io after the existing lint, formatting and
-test steps pass for a `v*` tag push. The tag must exactly match `v` followed by
-the package version in `Cargo.toml`, including any prerelease suffix. Branch
+test job passes for a `v*` tag push in `.ngit/nix/workflows/release.yaml`.
+The tag must exactly match `v` followed by the package version in `Cargo.toml`, including any prerelease suffix. Branch
 pushes and pull requests do not publish crates.
 
 Configure the repository's `CARGO_REGISTRY_TOKEN` secret in ngit-ci with a
-crates.io token scoped to publishing `ngit`. The token is supplied only to the
-publication step; Cargo does not write a login credential file. The workflow
+crates.io token scoped to publishing `ngit`. The token is read from the
+publication job's private secret file and supplied only to Cargo through its
+environment; Cargo does not write a login credential file. The workflow
 uses `cargo publish --locked --registry crates-io --package ngit`, including
 Cargo's package verification. It fails if the token is missing or the version
 is already published; it does not overwrite or automatically bump releases.
@@ -21,6 +22,22 @@ is already published; it does not overwrite or automatically bump releases.
 This runs independently of the platform archive/NIP-82 release workflow and
 requires no GitHub registry authentication. The workflow must be included in
 the tagged commit; adding it does not backfill existing tags.
+
+## Nix CI checks
+
+Branch pushes and pull requests run `.ngit/nix/workflows/ci.yaml`. Tag pushes
+run checks once in the release workflow, before its secret-bearing publisher.
+Both select the root flake's `ci-checks` app and the pinned development shell:
+
+```sh
+nix run .#ci-checks
+```
+
+The app runs Clippy, formatting and workspace tests, with optional named step
+measurements separating compilation from execution. No diagnostic artifacts
+are produced. The provider's Nix cache can reuse tool closures; this migration
+does not introduce a persistent Cargo target cache. The separate GitHub platform
+archive workflow remains responsible for platform release binaries.
 
 ## Quick start
 
