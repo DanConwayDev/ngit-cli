@@ -10,6 +10,7 @@ jobs:
   rust:
     steps:
       - dependencies: {build: packages.x86_64-linux.ci-dependencies}
+      - test-server: {build: packages.x86_64-linux.ci-test-server}
       - format
       - compile
       - lint

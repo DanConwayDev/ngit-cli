@@ -101,6 +101,7 @@
         };
         ciCommands = ci.commands;
         packages.ci-dependencies = ci.dependencies;
+        packages.ci-test-server = ci.test-server;
         # Create packages for each binary defined in Cargo.toml
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = manifest.package.name;

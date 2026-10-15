@@ -26,10 +26,12 @@ the tagged commit; adding it does not backfill existing tags.
 ## Nix CI checks
 
 Branch pushes, PRs and manual requests run `.ngit/nix/workflows/ci.yaml`.
-Its Rust job reports dependency-cache, format, compile, lint and test steps.
+Its Rust job reports dependency, test-server, format, compile, lint and test steps.
 The compile step restores Nix-cached third-party objects and builds the current
 source and test binaries; lint and tests share the same writable target tree.
 The dependency cache uses the pinned toolchain, Cargo.lock and dev profile.
+The next build step caches the pinned Grasp integration-test server separately,
+keeping heavy builds sequential and giving each its own timing and cache checkpoint.
 No secrets enter these builds or cached outputs.
 
 `.ngit/nix/workflows/default.nix` owns commands scoped by workflow, job and

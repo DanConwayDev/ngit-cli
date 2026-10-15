@@ -45,6 +45,7 @@ let
   '';
 in {
   inherit dependencies;
+  test-server = ngit-grasp;
   commands = {
     ci.rust = {
       format = command "format" ''
