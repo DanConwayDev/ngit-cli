@@ -25,19 +25,32 @@ the tagged commit; adding it does not backfill existing tags.
 
 ## Nix CI checks
 
-Branch pushes and pull requests run `.ngit/nix/workflows/ci.yaml`. Tag pushes
-run checks once in the release workflow, before its secret-bearing publisher.
-Both select the root flake's `ci-checks` app and the pinned development shell:
+Branch pushes, PRs and manual requests run `.ngit/nix/workflows/ci.yaml`.
+Its Rust job reports dependency-cache, format, compile, lint and test steps.
+The compile step restores Nix-cached third-party objects and builds the current
+source and test binaries; lint and tests share the same writable target tree.
+The dependency cache uses the pinned toolchain, Cargo.lock and dev profile.
+No secrets enter these builds or cached outputs.
+
+`.ngit/nix/workflows/default.nix` owns commands scoped by workflow, job and
+step (`ci.rust.compile`, `release.publish`). The root flake exposes them as
+`ngit-ci.commands`; YAML step names select them without repeated `run:` fields.
+For local checks, use the pinned development shell:
 
 ```sh
-nix run .#ci-checks
+nix develop --command cargo fmt --all -- --check
+nix develop --command cargo clippy --workspace --all-targets --locked -- --deny warnings
+nix develop --command cargo test --workspace --locked
 ```
 
-The app runs Clippy, formatting and workspace tests, with optional named step
-measurements separating compilation from execution. No diagnostic artifacts
-are produced. The provider's Nix cache can reuse tool closures; this migration
-does not introduce a persistent Cargo target cache. The separate GitHub platform
-archive workflow remains responsible for platform release binaries.
+The release workflow depends on the complete CI workflow at the peeled tag
+commit, reusing compatible successful checks instead of repeating them. Missing
+checks are scheduled; failures block publication. `reuse: never` keeps the
+publisher specific to each tag push. Its ten-minute cancellation grace allows
+an active `cargo publish` to finish after TERM; cancellation before publication
+starts exits immediately. Forced cancellation still bounds the process lifetime.
+Cargo's own package verification remains enabled. The separate platform archive
+workflow remains responsible for platform release binaries.
 
 ## Quick start
 

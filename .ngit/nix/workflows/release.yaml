@@ -1,12 +1,16 @@
 version: 1
 name: Crates.io release
+system: x86_64-linux
+reuse: never
 on:
   push:
     tags: ["v*"]
+needs-workflows:
+  ci: ci.yaml
 jobs:
-  ci:
-    run: apps.x86_64-linux.ci-checks
   publish:
-    needs: [ci]
-    run: apps.x86_64-linux.publish-crate
+    cancellation: {grace: 10m}
+    concurrency:
+      group: crates-io
+      cancel-in-progress: false
     secrets: [CARGO_REGISTRY_TOKEN]
