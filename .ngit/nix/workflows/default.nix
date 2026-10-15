@@ -21,7 +21,7 @@ let
     inherit name;
     runtimeInputs = with pkgs; [
       rust-bin.stable.latest.default stdenv.cc pkg-config
-      bash git coreutils jq gnumake gnused gnugrep gnutar gzip
+      bash git coreutils jq gnumake gnused gnugrep gnutar gzip gawk findutils
     ];
     runtimeEnv = {
       PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.dbus.dev ];
