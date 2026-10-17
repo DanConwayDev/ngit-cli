@@ -6,7 +6,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane/2c71e194474d13de031d729b729c968ddbe3507f";
-    flake-utils.url = "github:numtide/flake-utils";
 
     # Disabled until a25396d8 is resolved in ngit's released libgit2 dependency.
     # Restore this input and add `buzz` to the outputs arguments when re-enabling
@@ -16,8 +15,12 @@
     # };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, crane, flake-utils, ... }:
-    let perSystem = flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, rust-overlay, crane, ... }:
+    let
+      forAllSystems = nixpkgs.lib.genAttrs [
+        "aarch64-linux" "x86_64-linux" "aarch64-darwin" "x86_64-darwin"
+      ];
+      perSystem = forAllSystems (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
@@ -130,7 +133,9 @@
           '';
         };
       });
-    in (builtins.removeAttrs perSystem [ "ciCommands" ]) // {
-      ngit-ci.commands = perSystem.ciCommands;
+    in {
+      packages = forAllSystems (system: perSystem.${system}.packages);
+      devShells = forAllSystems (system: perSystem.${system}.devShells);
+      ngit-ci.commands = forAllSystems (system: perSystem.${system}.ciCommands);
     };
 }
