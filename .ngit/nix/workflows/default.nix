@@ -25,6 +25,9 @@ let
     inherit name;
     runtimeInputs = tools;
     runtimeEnv = {
+      # Match stdenv's build-script fingerprints when restoring Cargo objects.
+      CC = if pkgs.stdenv.cc.isClang then "clang" else "gcc";
+      PKG_CONFIG = "pkg-config";
       PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.dbus.dev ];
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     };
@@ -32,6 +35,7 @@ let
   };
   rust = name: script: command name ''
     # Match the cached dev-profile objects; keep current source and tests local.
+    export AR="ar"
     export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
     export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/target}"
     if [[ ! -e "$CARGO_TARGET_DIR/.rustc_info.json" ]]; then
