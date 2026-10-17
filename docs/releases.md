@@ -29,7 +29,9 @@ Branch pushes, PRs and manual requests run `.ngit/nix/workflows/ci.yaml`.
 Its Rust job reports dependency, test-server, format, compile, lint and test steps.
 The compile step restores Nix-cached third-party objects and builds the current
 source and test binaries; lint and tests share the same writable target tree.
-The dependency cache uses the pinned toolchain, Cargo.lock and dev profile.
+The dependency cache includes the pinned toolchain, formatter, vendored crate
+sources and native build tools as well as dev-profile objects. Compile, lint
+and tests use Cargo's offline mode, so they do not contact the crate registry.
 The next build step caches the pinned Grasp integration-test server separately,
 keeping heavy builds sequential and giving each its own timing and cache checkpoint.
 No secrets enter these builds or cached outputs.

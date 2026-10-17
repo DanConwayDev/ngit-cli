@@ -17,12 +17,13 @@ let
     doCompressAndInstallFullArchive = true;
   });
   vendor = craneLib.vendorCargoDeps { inherit (cargo) src; };
-  command = name: script: pkgs.writeShellApplication {
-    inherit name;
-    runtimeInputs = with pkgs; [
+  tools = with pkgs; [
       rust-bin.stable.latest.default stdenv.cc pkg-config
       bash git coreutils jq gnumake gnused gnugrep gnutar gzip gawk findutils
-    ];
+  ];
+  command = name: script: pkgs.writeShellApplication {
+    inherit name;
+    runtimeInputs = tools;
     runtimeEnv = {
       PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.dbus.dev ];
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -44,7 +45,14 @@ let
     ${script}
   '';
 in {
-  inherit dependencies;
+  # Compressed Cargo objects do not retain references to all their build inputs.
+  dependencies = pkgs.linkFarm "ngit-ci-dependencies" ([
+    { name = "objects"; path = dependencies; }
+    { name = "sources"; path = vendor; }
+    { name = "rustfmt"; path = pkgs.rust-bin.nightly."2026-08-27".rustfmt; }
+    { name = "openssl"; path = pkgs.openssl.dev; }
+    { name = "dbus"; path = pkgs.dbus.dev; }
+  ] ++ map (tool: { name = tool.name; path = tool; }) tools);
   test-server = ngit-grasp;
   commands = {
     ci.rust = {
