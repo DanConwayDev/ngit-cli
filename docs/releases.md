@@ -36,6 +36,11 @@ The next build step caches the pinned Grasp integration-test server separately,
 keeping heavy builds sequential and giving each its own timing and cache checkpoint.
 No secrets enter these builds or cached outputs.
 
+The Rust and crate-publication jobs require at least 5 GiB of guest RAM,
+leaving headroom for compilation and parallel test fixtures. This is a
+provider-selection minimum, not a memory cap; publication also compiles
+the packaged crate during Cargo verification.
+
 `.ngit/nix/workflows/default.nix` owns commands scoped by workflow, job and
 step (`ci.rust.compile`, `release.publish`). The root flake exposes them as
 `ngit-ci.commands`; YAML step names select them without repeated `run:` fields.

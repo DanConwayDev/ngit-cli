@@ -9,6 +9,9 @@ needs-workflows:
   ci: ci.yaml
 jobs:
   publish:
+    requirements:
+      resources:
+        memory-mib: {gte: 5120}
     cancellation: {grace: 10m}
     concurrency:
       group: crates-io
