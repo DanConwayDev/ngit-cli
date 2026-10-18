@@ -5,7 +5,7 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    crane.url = "github:ipetkov/crane/2c71e194474d13de031d729b729c968ddbe3507f";
+    crane.url = "github:ipetkov/crane";
 
     # Disabled until a25396d8 is resolved in ngit's released libgit2 dependency.
     # Restore this input and add `buzz` to the outputs arguments when re-enabling
