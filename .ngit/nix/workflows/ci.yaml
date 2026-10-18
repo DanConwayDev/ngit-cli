@@ -11,6 +11,7 @@ jobs:
     requirements:
       resources:
         memory-mib: {gte: 5120}
+        scratch-mib: {gte: 16384}
     steps:
       - dependencies: {build: packages.x86_64-linux.ci-dependencies}
       - test-server: {build: packages.x86_64-linux.ci-test-server}
