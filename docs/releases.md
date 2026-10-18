@@ -41,6 +41,11 @@ leaving headroom for compilation and parallel test fixtures. This is a
 provider-selection minimum, not a memory cap; publication also compiles
 the packaged crate during Cargo verification.
 
+Review the provider summary at the top of the final job log when tuning these
+minimums: observed guest RAM includes the guest OS, and swap activity or OOM
+kills signal pressure. Compare cold dependency builds with cached runs and
+leave headroom; a successful run alone does not measure peak memory.
+
 `.ngit/nix/workflows/default.nix` owns commands scoped by workflow, job and
 step (`ci.rust.compile`, `release.publish`). The root flake exposes them as
 `ngit-ci.commands`; YAML step names select them without repeated `run:` fields.
