@@ -341,6 +341,111 @@ async fn reinstalling_committed_guidance_reports_no_repository_changes() -> Resu
     Ok(())
 }
 
+/// `ngit skill install --global` writes the shared discovery layout into the
+/// user's home directory (the harness sandbox) without touching the current
+/// repository, and `skill status` reports the user scope.
+#[tokio::test]
+async fn global_install_targets_the_user_home_without_touching_the_repository() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+
+    let install = repo
+        .ngit(["skill", "install", "--global", "--json"])
+        .output()
+        .await?;
+    assert!(
+        install.status.success(),
+        "global skill install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&install.stdout)?;
+    assert_eq!(json["command_status"], "ok");
+    assert_eq!(json["action"], "installed");
+    assert_eq!(json["scope"], "global");
+    assert_eq!(json["changes_uncommitted"], false);
+
+    let home = harness.home();
+    assert!(home.join(".agents/skills/ngit/SKILL.md").is_file());
+    assert!(home.join(".claude/skills/ngit/SKILL.md").is_file());
+    for (name, content) in agent_guidance::bundled_references() {
+        assert_eq!(
+            fs::read_to_string(home.join(format!(".agents/skills/ngit/reference/{name}")))?,
+            *content
+        );
+    }
+    assert!(!repo.dir().join(".agents").exists());
+    assert!(!repo.dir().join(".claude").exists());
+
+    let status = repo.ngit(["skill", "status", "--json"]).output().await?;
+    assert!(status.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status_json["scopes"]["global"]["installed"], true);
+    assert_eq!(
+        status_json["scopes"]["global"]["installed_version"],
+        status_json["scopes"]["global"]["bundled_version"]
+    );
+    assert_eq!(status_json["scopes"]["system"]["installed"], false);
+    assert_eq!(status_json["scopes"]["repository"]["installed"], false);
+    Ok(())
+}
+
+/// `ngit skill install --system` uses the single canonical directory and
+/// honors `NGIT_SYSTEM_SKILLS_DIR` so non-root users can target it too.
+#[tokio::test]
+async fn system_install_uses_the_overridden_canonical_directory() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let system_dir = tempfile::tempdir().context("create system skills directory")?;
+
+    let mut command = repo.ngit(["skill", "install", "--system", "--json"]);
+    command.env("NGIT_SYSTEM_SKILLS_DIR", system_dir.path());
+    let install = command.output().await?;
+    assert!(
+        install.status.success(),
+        "system skill install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&install.stdout)?;
+    assert_eq!(json["command_status"], "ok");
+    assert_eq!(json["scope"], "system");
+    assert_eq!(json["changes_uncommitted"], false);
+
+    assert!(system_dir.path().join("ngit/SKILL.md").is_file());
+    for (name, content) in agent_guidance::bundled_references() {
+        assert_eq!(
+            fs::read_to_string(system_dir.path().join(format!("ngit/reference/{name}")))?,
+            *content
+        );
+    }
+    assert!(!system_dir.path().join(".agents").exists());
+    assert!(!harness.home().join(".agents/skills/ngit").exists());
+    assert!(!repo.dir().join(".agents").exists());
+    Ok(())
+}
+
+/// `--no-agent-file` declines the pointer a repository install would
+/// otherwise add to existing instruction files.
+#[tokio::test]
+async fn install_respects_no_agent_file() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let agents = "# Local instructions\n";
+    fs::write(repo.dir().join("AGENTS.md"), agents)?;
+
+    let install = repo
+        .ngit(["skill", "install", "--no-agent-file"])
+        .output()
+        .await?;
+    assert!(
+        install.status.success(),
+        "skill install with --no-agent-file failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
+    assert_eq!(fs::read_to_string(repo.dir().join("AGENTS.md"))?, agents);
+    Ok(())
+}
+
 #[tokio::test]
 async fn opt_out_is_reported_by_status() -> Result<()> {
     let harness = harness().await?;

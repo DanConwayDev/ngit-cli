@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Teach `ngit skill install` and `ngit skill upgrade` about install scopes.
+  Interactive runs choose between the current repository, the user's home
+  directory (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`), and a
+  machine-wide directory (`/usr/local/share/agents/skills/ngit`, override
+  with `NGIT_SYSTEM_SKILLS_DIR`); `--global` and `--system` pick a scope
+  without prompting, and non-interactive runs keep the repository scope. A
+  first repository install now asks before adding the skill pointer to
+  existing `AGENTS.md`/`CLAUDE.md` files (default yes; `--no-agent-file`
+  declines), and `ngit skill status` reports every scope through a new
+  `scopes` object in its JSON output.
+
 ### Fixed
 
 - Prompt for missing account names, comment bodies, labels, subjects and cover

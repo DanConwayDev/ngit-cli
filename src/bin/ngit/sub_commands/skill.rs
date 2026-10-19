@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ngit::{
-    agent_guidance,
+    agent_guidance::{self, InstallScope},
+    cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms, PromptConfirmParms},
     client::get_repo_ref_from_cache,
     git::{Repo, RepoActions},
     login::{
@@ -13,7 +14,7 @@ use ngit::{
 };
 use serde::Serialize;
 
-use crate::cli::{SignerParams, SkillCommands, SkillOptOutArgs};
+use crate::cli::{SignerParams, SkillCommands, SkillInstallArgs, SkillOptOutArgs};
 
 struct SkillContext {
     repo: Repo,
@@ -25,14 +26,23 @@ struct Output {
     command_status: &'static str,
     #[serde(flatten)]
     guidance: agent_guidance::GuidanceStatus,
+    scopes: ScopeStatuses,
     is_maintainer: Option<bool>,
     reminders_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ScopeStatuses {
+    repository: agent_guidance::GuidanceStatus,
+    global: agent_guidance::GuidanceStatus,
+    system: agent_guidance::GuidanceStatus,
 }
 
 #[derive(Serialize)]
 struct ReconcileOutput {
     command_status: &'static str,
     action: &'static str,
+    scope: &'static str,
     changed_files: Vec<String>,
     changes_uncommitted: bool,
     is_maintainer: Option<bool>,
@@ -58,13 +68,23 @@ pub async fn launch(
 
     let context = resolve_context()?;
     match command {
-        SkillCommands::Install | SkillCommands::Upgrade => {
-            reconcile(&context, force, json, auth).await
+        SkillCommands::Install(args) | SkillCommands::Upgrade(args) => {
+            let scope = resolve_scope(args)?;
+            match scope {
+                InstallScope::Repository => {
+                    let is_maintainer = resolve_maintainer(&context, auth).await;
+                    reconcile_repository(&context, args, force, json, is_maintainer)
+                }
+                InstallScope::Global | InstallScope::System => {
+                    reconcile_outside_repository(scope, force, json)
+                }
+            }
         }
         SkillCommands::Status => {
             let output = Output {
                 command_status: "ok",
                 guidance: agent_guidance::status(&context.root)?,
+                scopes: scope_statuses(&context)?,
                 is_maintainer: resolve_maintainer(&context, auth).await,
                 reminders_enabled: agent_guidance::reminders_enabled(&context.repo)?,
             };
@@ -77,6 +97,66 @@ pub async fn launch(
         }
         SkillCommands::OptOut(_) => unreachable!("opt-out handled before resolving a worktree"),
     }
+}
+
+/// Choose the install scope. Explicit flags win; otherwise an interactive
+/// session picks between the repository, the user's home directory, and the
+/// machine-wide directory, defaulting to the repository.
+fn resolve_scope(args: &SkillInstallArgs) -> Result<InstallScope> {
+    if args.system {
+        return Ok(InstallScope::System);
+    }
+    if args.global {
+        return Ok(InstallScope::Global);
+    }
+    let choice = Interactor::default().choice(
+        PromptChoiceParms::default()
+            .with_prompt("install the ngit skill for")
+            .with_choices(vec![
+                "this repository (shared with everyone who clones it)".to_string(),
+                "your user account (all of your repositories)".to_string(),
+                "all users on this machine (may need elevated permissions)".to_string(),
+            ])
+            .with_default(0),
+    )?;
+    Ok(match choice {
+        1 => InstallScope::Global,
+        2 => InstallScope::System,
+        _ => InstallScope::Repository,
+    })
+}
+
+/// Decide whether a first repository install may add a pointer to the managed
+/// skill in existing AGENTS.md/CLAUDE.md files. Declining via
+/// `--no-agent-file` wins; an interactive session is asked (default yes);
+/// non-interactive sessions keep the pre-existing automatic pointer.
+fn resolve_update_instructions(
+    args: &SkillInstallArgs,
+    root: &Path,
+    first_install: bool,
+) -> Result<bool> {
+    if !first_install || args.no_agent_file {
+        return Ok(false);
+    }
+    let (base, layout) = InstallScope::Repository.base(Some(root))?;
+    if !layout.instruction_files_present(&base)? {
+        return Ok(false);
+    }
+    Interactor::default().confirm(
+        PromptConfirmParms::default()
+            .with_prompt("add a pointer to the ngit skill in existing AGENTS.md/CLAUDE.md files?")
+            .with_default(true),
+    )
+}
+
+fn scope_statuses(context: &SkillContext) -> Result<ScopeStatuses> {
+    Ok(ScopeStatuses {
+        repository: agent_guidance::status(&context.root)?,
+        global: agent_guidance::scope_status(InstallScope::Global, None)
+            .with_context(|| "failed to inspect the user-scope ngit skill".to_string())?,
+        system: agent_guidance::scope_status(InstallScope::System, None)
+            .with_context(|| "failed to inspect the system-scope ngit skill".to_string())?,
+    })
 }
 
 fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
@@ -95,30 +175,29 @@ fn opt_out(args: &SkillOptOutArgs) -> Result<()> {
     Ok(())
 }
 
-async fn reconcile(
+#[allow(clippy::too_many_arguments)]
+fn reconcile_repository(
     context: &SkillContext,
-    force: bool,
-    json: bool,
-    auth: SignerParams<'_>,
-) -> Result<()> {
-    let is_maintainer = resolve_maintainer(context, auth).await;
-    reconcile_for_account(context, force, json, is_maintainer)
-}
-
-fn reconcile_for_account(
-    context: &SkillContext,
+    args: &SkillInstallArgs,
     force: bool,
     json: bool,
     is_maintainer: Option<bool>,
 ) -> Result<()> {
     let before = agent_guidance::status(&context.root)?;
+    let update_instructions = resolve_update_instructions(args, &context.root, !before.installed)?;
     let mut attempted_paths = vec![];
-    let update = agent_guidance::update_with_report(&context.root, force, &mut |path: &Path| {
-        let path = path.to_path_buf();
-        if !attempted_paths.contains(&path) {
-            attempted_paths.push(path);
-        }
-    });
+    let update = agent_guidance::update_scope(
+        InstallScope::Repository,
+        Some(&context.root),
+        force,
+        update_instructions,
+        &mut |path: &Path| {
+            let path = path.to_path_buf();
+            if !attempted_paths.contains(&path) {
+                attempted_paths.push(path);
+            }
+        },
+    );
     let inspection = uncommitted_paths(context, &attempted_paths);
     for warning in inspection.warnings {
         eprintln!("warning: {warning}");
@@ -133,6 +212,7 @@ fn reconcile_for_account(
                 crate::output::set_value(serde_json::json!({
                     "command_status": "error",
                     "action": "failed",
+                    "scope": InstallScope::Repository.label(),
                     "error": format!("{error:#}"),
                     "changed_files": changed_files,
                     "changes_uncommitted": changes_uncommitted,
@@ -174,6 +254,7 @@ fn reconcile_for_account(
         crate::output::set(ReconcileOutput {
             command_status: "ok",
             action,
+            scope: InstallScope::Repository.label(),
             changed_files,
             changes_uncommitted,
             is_maintainer,
@@ -181,6 +262,106 @@ fn reconcile_for_account(
         })?;
     }
     Ok(())
+}
+
+fn reconcile_outside_repository(scope: InstallScope, force: bool, json: bool) -> Result<()> {
+    let (base, _) = scope.base(None)?;
+    let noun = scope_noun(scope);
+    let before = agent_guidance::scope_status(scope, None)?;
+    let mut written_paths = vec![];
+    let update = agent_guidance::update_scope(scope, None, force, false, &mut |path: &Path| {
+        let path = path.to_path_buf();
+        if !written_paths.contains(&path) {
+            written_paths.push(path);
+        }
+    });
+    let changed_files = written_paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let after = match update {
+        Ok(after) => after,
+        Err(mut error) => {
+            if !written_paths.is_empty() {
+                eprintln!("ngit {noun} update stopped after changing:");
+                for path in &written_paths {
+                    eprintln!("  {}", base.join(path).display());
+                }
+            }
+            if scope == InstallScope::System {
+                error = error.context(format!(
+                    "failed to update the system-wide ngit skill under {}; writing there may require elevated permissions",
+                    base.display()
+                ));
+            }
+            if json {
+                crate::output::set_value(serde_json::json!({
+                    "command_status": "error",
+                    "action": "failed",
+                    "scope": scope.label(),
+                    "error": format!("{error:#}"),
+                    "changed_files": changed_files,
+                    "changes_uncommitted": false,
+                    "is_maintainer": serde_json::Value::Null,
+                }));
+            }
+            return Err(error);
+        }
+    };
+    let action;
+    if !before.installed {
+        action = "installed";
+        eprintln!(
+            "installed ngit {noun} version {} under {}",
+            after.bundled_version,
+            base.display()
+        );
+    } else if before.update_available {
+        action = "upgraded";
+        eprintln!(
+            "upgraded ngit {noun} from {} to {}",
+            before.installed_version.as_deref().unwrap_or("unknown"),
+            after.bundled_version
+        );
+    } else if written_paths.is_empty() {
+        action = "unchanged";
+        eprintln!(
+            "ngit {noun} is already at bundled version {}",
+            after.bundled_version
+        );
+    } else {
+        action = "reconciled";
+        eprintln!(
+            "reconciled ngit {noun} at bundled version {}",
+            after.bundled_version
+        );
+    }
+    if !written_paths.is_empty() {
+        eprintln!("changed {noun} files:");
+        for path in &written_paths {
+            eprintln!("  {}", base.join(path).display());
+        }
+    }
+    if json {
+        crate::output::set(ReconcileOutput {
+            command_status: "ok",
+            action,
+            scope: scope.label(),
+            changed_files,
+            changes_uncommitted: false,
+            is_maintainer: None,
+            guidance: after,
+        })?;
+    }
+    Ok(())
+}
+
+fn scope_noun(scope: InstallScope) -> &'static str {
+    match scope {
+        InstallScope::Repository => "repository skill",
+        InstallScope::Global => "user skill",
+        InstallScope::System => "system skill",
+    }
 }
 
 fn uncommitted_paths(context: &SkillContext, attempted_paths: &[PathBuf]) -> UncommittedPathReport {
@@ -270,6 +451,20 @@ fn print_status(output: &Output) {
         "managed files: {}",
         output.guidance.managed_files.join(", ")
     );
+    for (label, scope) in [
+        ("user scope", &output.scopes.global),
+        ("system scope", &output.scopes.system),
+    ] {
+        if scope.installed {
+            println!(
+                "{label}: installed (version {}, update available: {})",
+                scope.installed_version.as_deref().unwrap_or("unknown"),
+                scope.update_available
+            );
+        } else {
+            println!("{label}: not installed");
+        }
+    }
 }
 
 fn resolve_context() -> Result<SkillContext> {
@@ -475,7 +670,7 @@ mod tests {
             .peel_to_commit()
             .unwrap();
 
-        reconcile_for_account(&context, false, false, None).unwrap();
+        reconcile_repository(&context, &default_install_args(), false, false, None).unwrap();
 
         let head = context
             .repo
@@ -510,7 +705,7 @@ mod tests {
             root: root.clone(),
         };
 
-        reconcile_for_account(&context, false, false, None).unwrap();
+        reconcile_repository(&context, &default_install_args(), false, false, None).unwrap();
 
         assert!(root.join(agent_guidance::SKILL_PATH).is_file());
         assert!(
@@ -547,5 +742,59 @@ mod tests {
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("unreadable"));
         assert!(report.warnings[0].contains("corrupt index"));
+    }
+
+    fn default_install_args() -> SkillInstallArgs {
+        SkillInstallArgs {
+            global: false,
+            system: false,
+            no_agent_file: false,
+        }
+    }
+
+    /// Scope resolution never prompts when a flag picks the scope; without a
+    /// flag the non-interactive default keeps the repository scope.
+    #[test]
+    fn scope_flags_win_without_prompting() {
+        let mut args = default_install_args();
+        args.global = true;
+        assert_eq!(resolve_scope(&args).unwrap(), InstallScope::Global);
+        args = default_install_args();
+        args.system = true;
+        assert_eq!(resolve_scope(&args).unwrap(), InstallScope::System);
+        assert_eq!(
+            resolve_scope(&default_install_args()).unwrap(),
+            InstallScope::Repository
+        );
+    }
+
+    #[test]
+    fn instruction_pointers_honor_the_flag_and_first_install_gate() {
+        let (repo, root) = repository();
+        fs::write(root.join("AGENTS.md"), "# Local instructions\n").unwrap();
+        let context = SkillContext {
+            repo,
+            root: root.clone(),
+        };
+
+        // Not a first install: nothing to decide.
+        assert!(
+            !resolve_update_instructions(&default_install_args(), &context.root, false).unwrap()
+        );
+
+        // First install, no instruction files at the repository root of a
+        // fresh repository: the question would be pointless.
+        let (bare_repo, bare_root) = repository();
+        assert!(!resolve_update_instructions(&default_install_args(), &bare_root, true).unwrap());
+        drop(bare_repo);
+
+        // First install with instruction files present: non-interactive runs
+        // keep the automatic pointer, `--no-agent-file` declines it.
+        assert!(resolve_update_instructions(&default_install_args(), &context.root, true).unwrap());
+        let mut declined = default_install_args();
+        declined.no_agent_file = true;
+        assert!(!resolve_update_instructions(&declined, &context.root, true).unwrap());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

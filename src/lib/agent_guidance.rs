@@ -1,9 +1,11 @@
-//! Repository-managed coding-agent guidance.
+//! Managed coding-agent guidance.
 //!
 //! The installed `SKILL.md` is the source of truth for status and upgrades.
 //! Existing `AGENTS.md` and `CLAUDE.md` files may receive a compact
 //! install-time pointer, but instruction documents remain user-owned and are
-//! never created, tracked, or upgraded.
+//! never created, tracked, or upgraded. Installs target one of three scopes:
+//! the current repository, the user's home directory, or a machine-wide
+//! directory.
 
 use std::{
     cmp::Ordering,
@@ -15,6 +17,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use console::{Color, Style};
+use directories::BaseDirs;
 use serde::Serialize;
 
 pub const SKILL_PATH: &str = ".agents/skills/ngit/SKILL.md";
@@ -22,6 +25,9 @@ pub const CLAUDE_SKILL_PATH: &str = ".claude/skills/ngit/SKILL.md";
 pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
 pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
+/// Environment variable overriding the machine-wide skill directory, for
+/// packagers and tests that cannot write to `/usr/local/share`.
+pub const SYSTEM_SKILLS_DIR_ENV: &str = "NGIT_SYSTEM_SKILLS_DIR";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
@@ -56,6 +62,11 @@ const REFERENCE_FILES: &[(&str, &str)] = &[
         include_str!("../../skills/ngit/reference/sync-config.md"),
     ),
 ];
+
+/// Reference files bundled by earlier ngit versions and since merged into
+/// other references. An upgrade deletes any installed copy so a stale document
+/// cannot outlive the guidance that superseded it.
+const RETIRED_REFERENCE_FILES: &[&str] = &["repo-settings.md"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuidanceStatus {
@@ -104,79 +115,232 @@ fn skill_version(content: &str) -> Option<String> {
     None
 }
 
-fn skill_paths() -> [&'static str; 2] {
-    [SKILL_PATH, CLAUDE_SKILL_PATH]
+/// Skill discovery directories, relative to the install base, shared by the
+/// repository and user-home scopes. Codex-style agents read `.agents/skills`
+/// and Claude Code reads `.claude/skills`.
+const SHARED_SKILL_DIRS: [&str; 2] = [".agents/skills/ngit", ".claude/skills/ngit"];
+
+/// Single skill directory, relative to the machine-wide install base, used by
+/// the system scope. Machine-wide locations avoid dot-prefixed directories.
+const CANONICAL_SKILL_DIR: &str = "ngit";
+
+/// Where `ngit skill install` places the managed skill files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstallScope {
+    /// Inside the current Git repository, shared with everyone who clones it.
+    Repository,
+    /// Inside the user's home directory, available in all of their repositories.
+    Global,
+    /// In a machine-wide directory, available to every user.
+    System,
 }
 
-/// Managed reference locations: `<skill dir>/reference/<file>` for every
-/// bundled reference in both discovery paths. Kept static so per-path checks
-/// never allocate.
-const REFERENCE_PATHS: [&str; 16] = [
-    ".agents/skills/ngit/reference/accounts.md",
-    ".agents/skills/ngit/reference/ci.md",
-    ".agents/skills/ngit/reference/containers.md",
-    ".agents/skills/ngit/reference/issues.md",
-    ".agents/skills/ngit/reference/nsites.md",
-    ".agents/skills/ngit/reference/prs.md",
-    ".agents/skills/ngit/reference/repositories.md",
-    ".agents/skills/ngit/reference/sync-config.md",
-    ".claude/skills/ngit/reference/accounts.md",
-    ".claude/skills/ngit/reference/ci.md",
-    ".claude/skills/ngit/reference/containers.md",
-    ".claude/skills/ngit/reference/issues.md",
-    ".claude/skills/ngit/reference/nsites.md",
-    ".claude/skills/ngit/reference/prs.md",
-    ".claude/skills/ngit/reference/repositories.md",
-    ".claude/skills/ngit/reference/sync-config.md",
-];
+impl InstallScope {
+    /// Resolve the absolute install base and the managed layout for this
+    /// scope. `repo_root` is only required for [`InstallScope::Repository`].
+    pub fn base(self, repo_root: Option<&Path>) -> Result<(PathBuf, SkillLayout)> {
+        match self {
+            InstallScope::Repository => {
+                let root =
+                    repo_root.context("the repository skill scope needs a Git working tree")?;
+                Ok((root.to_path_buf(), SkillLayout::repository()))
+            }
+            InstallScope::Global => Ok((global_base()?, SkillLayout::shared())),
+            InstallScope::System => Ok((system_base(), SkillLayout::canonical())),
+        }
+    }
 
-/// Reference files bundled by earlier ngit versions and since merged into
-/// other references. An upgrade deletes any installed copy so a stale document
-/// cannot outlive the guidance that superseded it.
-const RETIRED_REFERENCE_FILES: &[&str] = &["repo-settings.md"];
-
-/// Retired reference locations in both discovery paths, mirroring
-/// [`REFERENCE_PATHS`].
-const RETIRED_REFERENCE_PATHS: [&str; 2] = [
-    ".agents/skills/ngit/reference/repo-settings.md",
-    ".claude/skills/ngit/reference/repo-settings.md",
-];
-
-fn is_retired_reference_path(relative: &str) -> bool {
-    RETIRED_REFERENCE_PATHS.contains(&relative)
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            InstallScope::Repository => "repository",
+            InstallScope::Global => "global",
+            InstallScope::System => "system",
+        }
+    }
 }
 
-fn validate_retired_reference_path(root: &Path, relative: &str) -> Result<PathBuf> {
-    if !is_retired_reference_path(relative) {
-        bail!("unexpected retired reference path `{relative}`");
+/// The managed skill files of one install scope, described relative to the
+/// scope's install base so every scope shares the same write and validation
+/// engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLayout {
+    /// Logical skill directories relative to the install base.
+    skill_dirs: Vec<String>,
+    /// Existing instruction files that may receive an install-time pointer,
+    /// paired with the managed skill path the pointer names. Only the
+    /// repository scope owns instruction files.
+    instruction_files: Vec<(String, String)>,
+}
+
+impl SkillLayout {
+    fn from_skill_dirs(skill_dirs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            skill_dirs: skill_dirs.into_iter().map(Into::into).collect(),
+            instruction_files: vec![],
+        }
+    }
+
+    /// Repository layout: both discovery locations, plus pointers from
+    /// existing `AGENTS.md` / `CLAUDE.md` files.
+    fn repository() -> Self {
+        Self {
+            instruction_files: vec![
+                (AGENTS_PATH.to_string(), SKILL_PATH.to_string()),
+                (CLAUDE_PATH.to_string(), CLAUDE_SKILL_PATH.to_string()),
+            ],
+            ..Self::from_skill_dirs(SHARED_SKILL_DIRS)
+        }
+    }
+
+    /// User-home layout: both discovery locations, no instruction files.
+    fn shared() -> Self {
+        Self::from_skill_dirs(SHARED_SKILL_DIRS)
+    }
+
+    /// Machine-wide layout: one canonical `ngit` directory.
+    fn canonical() -> Self {
+        Self::from_skill_dirs([CANONICAL_SKILL_DIR])
+    }
+
+    fn skill_paths(&self) -> Vec<PathBuf> {
+        self.skill_dirs
+            .iter()
+            .map(|dir| Path::new(dir).join(SKILL_FILE_NAME))
+            .collect()
+    }
+
+    fn reference_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(self.skill_dirs.len() * REFERENCE_FILES.len());
+        for dir in &self.skill_dirs {
+            for (name, _) in REFERENCE_FILES {
+                paths.push(Path::new(dir).join("reference").join(name));
+            }
+        }
+        paths
+    }
+
+    fn retired_reference_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(self.skill_dirs.len() * RETIRED_REFERENCE_FILES.len());
+        for dir in &self.skill_dirs {
+            for name in RETIRED_REFERENCE_FILES {
+                paths.push(Path::new(dir).join("reference").join(name));
+            }
+        }
+        paths
+    }
+
+    fn is_skill_path(&self, relative: &Path) -> bool {
+        self.skill_paths().iter().any(|path| path == relative)
+    }
+
+    fn is_reference_path(&self, relative: &Path) -> bool {
+        self.reference_paths().iter().any(|path| path == relative)
+    }
+
+    fn is_retired_reference_path(&self, relative: &Path) -> bool {
+        self.retired_reference_paths()
+            .iter()
+            .any(|path| path == relative)
+    }
+
+    fn is_managed(&self, relative: &Path) -> bool {
+        self.is_skill_path(relative) || self.is_reference_path(relative)
+    }
+
+    /// Whether any instruction file this layout may point from already exists
+    /// at the install base. Asked before offering the install-time pointer.
+    pub fn instruction_files_present(&self, base: &Path) -> Result<bool> {
+        for (relative, _) in &self.instruction_files {
+            match fs::symlink_metadata(base.join(relative)) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to inspect instruction file `{relative}`")
+                    });
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Resolve the user's home directory, the install base of the global scope.
+pub fn global_base() -> Result<PathBuf> {
+    BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .context("failed to resolve the user's home directory for the global skill scope")
+}
+
+/// Resolve the machine-wide install base, honoring an explicit override.
+fn system_base_with_override(override_dir: Option<&Path>) -> PathBuf {
+    if let Some(dir) = override_dir {
+        return dir.to_path_buf();
+    }
+    if cfg!(windows) {
+        std::env::var_os("ALLUSERSPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("agents")
+            .join("skills")
+    } else {
+        PathBuf::from("/usr/local/share/agents/skills")
+    }
+}
+
+/// Resolve the machine-wide install base for the system scope.
+pub fn system_base() -> PathBuf {
+    system_base_with_override(
+        std::env::var_os(SYSTEM_SKILLS_DIR_ENV)
+            .as_deref()
+            .map(Path::new),
+    )
+}
+
+fn validate_retired_reference_path(
+    base: &Path,
+    layout: &SkillLayout,
+    relative: &Path,
+) -> Result<PathBuf> {
+    if !layout.is_retired_reference_path(relative) {
+        bail!("unexpected retired reference path `{}`", relative.display());
     }
     let expected_name = relative
-        .rsplit_once('/')
-        .map(|(_, name)| name)
+        .file_name()
+        .and_then(OsStr::to_str)
         .expect("retired reference path has a file name");
-    resolve_managed_symlink(root, relative, expected_name, "reference")
+    resolve_managed_symlink(base, relative, expected_name, "reference")
 }
 
 /// Installed copies of retired references beside each existing skill,
 /// resolved through any canonical symlink. Only files that exist are returned.
-fn retired_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<PathBuf>> {
+fn retired_files(
+    base: &Path,
+    layout: &SkillLayout,
+    existing_skills: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     let mut files = vec![];
     for logical in existing_skills {
-        let Some(dir) = logical.rsplit_once('/').map(|(dir, _)| dir) else {
+        let Some(dir) = logical.parent() else {
             continue;
         };
         for name in RETIRED_REFERENCE_FILES {
-            let relative = format!("{dir}/reference/{name}");
-            match fs::symlink_metadata(root.join(&relative)) {
+            let relative = dir.join("reference").join(name);
+            match fs::symlink_metadata(base.join(&relative)) {
                 Ok(_) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(error) => {
                     return Err(error).with_context(|| {
-                        format!("failed to inspect retired reference `{relative}`")
+                        format!(
+                            "failed to inspect retired reference `{}`",
+                            relative.display()
+                        )
                     });
                 }
             }
-            let path = validate_retired_reference_path(root, &relative)?;
+            let path = validate_retired_reference_path(base, layout, &relative)?;
             if !files.contains(&path) {
                 files.push(path);
             }
@@ -185,49 +349,34 @@ fn retired_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<Pa
     Ok(files)
 }
 
-fn is_reference_path(relative: &str) -> bool {
-    REFERENCE_PATHS.contains(&relative)
-}
-
-fn is_managed_skill_file(relative: &str) -> bool {
-    skill_paths().contains(&relative) || is_reference_path(relative)
-}
-
-fn validate_managed_skill_file(root: &Path, relative: &str) -> Result<PathBuf> {
-    if skill_paths().contains(&relative) {
-        validate_skill_path(root, relative)
-    } else {
-        validate_reference_path(root, relative)
-    }
-}
-
-fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path
+fn validate_managed_path(base: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.is_absolute()
+        || relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
-        bail!("invalid managed guidance path `{relative}`");
+        bail!("invalid managed guidance path `{}`", relative.display());
     }
 
-    let canonical_root = fs::canonicalize(root)
-        .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
-    let mut current = root.to_path_buf();
-    let components = relative_path.components().collect::<Vec<_>>();
+    let canonical_base = fs::canonicalize(base)
+        .with_context(|| format!("failed to resolve install base {}", base.display()))?;
+    let mut current = base.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
                     bail!(
-                        "refusing to access managed guidance path `{relative}` because {} is a symlink",
+                        "refusing to access managed guidance path `{}` because {} is a symlink",
+                        relative.display(),
                         current.display()
                     );
                 }
                 if index + 1 < components.len() && !metadata.is_dir() {
                     bail!(
-                        "refusing to access managed guidance path `{relative}` because {} is not a directory",
+                        "refusing to access managed guidance path `{}` because {} is not a directory",
+                        relative.display(),
                         current.display()
                     );
                 }
@@ -237,9 +386,10 @@ fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
                         current.display()
                     )
                 })?;
-                if !resolved.starts_with(&canonical_root) {
+                if !resolved.starts_with(&canonical_base) {
                     bail!(
-                        "refusing to access managed guidance path `{relative}` outside the repository"
+                        "refusing to access managed guidance path `{}` outside the install base",
+                        relative.display()
                     );
                 }
             }
@@ -254,30 +404,29 @@ fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
             }
         }
     }
-    Ok(root.join(relative_path))
+    Ok(base.join(relative))
 }
 
 /// Resolve a managed skill or reference location while allowing it to symlink
-/// to a canonical copy kept elsewhere in the repository. That covers one
+/// to a canonical copy kept elsewhere under the install base. That covers one
 /// managed location pointing at the other and a repository that keeps a single
-/// canonical copy outside both. The returned path is the real in-repository
-/// file, so callers update a shared target only once without replacing the
-/// symlink.
+/// canonical copy outside both. The returned path is the real managed file,
+/// so callers update a shared target only once without replacing the symlink.
 ///
 /// `allowed_target_name` is the only file name guidance may be written through
-/// this symlink to; without that restriction an unrelated repository file
-/// could be overwritten with guidance content by following a symlink pointed
-/// at it.
+/// this symlink to; without that restriction an unrelated file under the
+/// install base could be overwritten with guidance content by following a
+/// symlink pointed at it.
 fn resolve_managed_symlink(
-    root: &Path,
-    relative: &str,
+    base: &Path,
+    relative: &Path,
     allowed_target_name: &str,
     kind: &str,
 ) -> Result<PathBuf> {
-    let requested = root.join(relative);
+    let requested = base.join(relative);
     match fs::symlink_metadata(&requested) {
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return validate_managed_path(root, relative);
+            return validate_managed_path(base, relative);
         }
         Err(error) => {
             return Err(error)
@@ -285,84 +434,102 @@ fn resolve_managed_symlink(
         }
         Ok(_) => {}
     }
-    if let Ok(path) = validate_managed_path(root, relative) {
+    if let Ok(path) = validate_managed_path(base, relative) {
         return Ok(path);
     }
 
-    let canonical_root = fs::canonicalize(root)
-        .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
+    let canonical_base = fs::canonicalize(base)
+        .with_context(|| format!("failed to resolve install base {}", base.display()))?;
     let resolved = fs::canonicalize(&requested).with_context(|| {
         format!(
-            "failed to resolve symlinked repository {kind} {}",
+            "failed to resolve symlinked managed {kind} {}",
             requested.display()
         )
     })?;
-    let Ok(target) = resolved.strip_prefix(&canonical_root) else {
+    let Ok(target) = resolved.strip_prefix(&canonical_base) else {
         bail!(
-            "refusing to access repository {kind} `{relative}` because its symlink target is outside the repository"
+            "refusing to access managed {kind} `{}` because its symlink target is outside the install base",
+            relative.display()
         );
     };
     if !resolved.is_file() {
-        bail!("refusing to access repository {kind} `{relative}` because its target is not a file");
+        bail!(
+            "refusing to access managed {kind} `{}` because its target is not a file",
+            relative.display()
+        );
     }
     if target.file_name() != Some(OsStr::new(allowed_target_name)) {
         bail!(
-            "refusing to access repository {kind} `{relative}` because its symlink target `{}` is not a {allowed_target_name} file",
+            "refusing to access managed {kind} `{}` because its symlink target `{}` is not a {allowed_target_name} file",
+            relative.display(),
             target.display()
         );
     }
-    Ok(root.join(target))
+    Ok(base.join(target))
 }
 
-fn validate_skill_path(root: &Path, relative: &str) -> Result<PathBuf> {
-    if !skill_paths().contains(&relative) {
-        bail!("unexpected repository skill path `{relative}`");
+fn validate_skill_path(base: &Path, layout: &SkillLayout, relative: &Path) -> Result<PathBuf> {
+    if !layout.is_skill_path(relative) {
+        bail!("unexpected managed skill path `{}`", relative.display());
     }
-    resolve_managed_symlink(root, relative, SKILL_FILE_NAME, "skill")
+    resolve_managed_symlink(base, relative, SKILL_FILE_NAME, "skill")
 }
 
-fn validate_reference_path(root: &Path, relative: &str) -> Result<PathBuf> {
-    if !is_reference_path(relative) {
-        bail!("unexpected repository reference path `{relative}`");
+fn validate_reference_path(base: &Path, layout: &SkillLayout, relative: &Path) -> Result<PathBuf> {
+    if !layout.is_reference_path(relative) {
+        bail!("unexpected managed reference path `{}`", relative.display());
     }
     let expected_name = relative
-        .rsplit_once('/')
-        .map(|(_, name)| name)
+        .file_name()
+        .and_then(OsStr::to_str)
         .expect("reference path has a file name");
-    resolve_managed_symlink(root, relative, expected_name, "reference")
+    resolve_managed_symlink(base, relative, expected_name, "reference")
 }
 
-fn existing_skill_paths(root: &Path) -> Result<Vec<&'static str>> {
+fn validate_managed_skill_file(
+    base: &Path,
+    layout: &SkillLayout,
+    relative: &Path,
+) -> Result<PathBuf> {
+    if layout.is_skill_path(relative) {
+        validate_skill_path(base, layout, relative)
+    } else {
+        validate_reference_path(base, layout, relative)
+    }
+}
+
+fn existing_skill_paths(base: &Path, layout: &SkillLayout) -> Result<Vec<PathBuf>> {
     let mut paths = vec![];
-    for relative in skill_paths() {
-        match fs::symlink_metadata(root.join(relative)) {
+    for relative in layout.skill_paths() {
+        match fs::symlink_metadata(base.join(&relative)) {
             Ok(_) => {
-                let _ = validate_skill_path(root, relative)?;
+                let _ = validate_skill_path(base, layout, &relative)?;
                 paths.push(relative);
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to inspect repository skill `{relative}`"));
+                return Err(error).with_context(|| {
+                    format!("failed to inspect managed skill `{}`", relative.display())
+                });
             }
         }
     }
     Ok(paths)
 }
 
-fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
-    let relative_path = Path::new(relative);
-    let Some(parent) = relative_path.parent() else {
+fn create_managed_parent_dirs(base: &Path, relative: &Path) -> Result<()> {
+    let Some(parent) = relative.parent() else {
         return Ok(());
     };
-    let mut current = root.to_path_buf();
+    let mut current = base.to_path_buf();
     for component in parent.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     bail!(
-                        "refusing to create managed guidance path `{relative}` through {}",
+                        "refusing to create managed guidance path `{}` through {}",
+                        relative.display(),
                         current.display()
                     );
                 }
@@ -388,7 +555,8 @@ fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
                 })?;
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     bail!(
-                        "refusing to create managed guidance path `{relative}` through {}",
+                        "refusing to create managed guidance path `{}` through {}",
+                        relative.display(),
                         current.display()
                     );
                 }
@@ -403,7 +571,7 @@ fn create_managed_parent_dirs(root: &Path, relative: &str) -> Result<()> {
             }
         }
     }
-    let _ = validate_managed_path(root, relative)?;
+    let _ = validate_managed_path(base, relative)?;
     Ok(())
 }
 
@@ -433,28 +601,42 @@ fn append_policy(existing: &str, skill_path: &str) -> String {
     }
 }
 
-fn expected_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<(String, String)>> {
+fn expected_files(
+    base: &Path,
+    layout: &SkillLayout,
+    existing_skills: &[PathBuf],
+    update_instructions: bool,
+) -> Result<Vec<(String, String)>> {
     let first_install = existing_skills.is_empty();
     let targets = if first_install {
-        skill_paths().to_vec()
+        layout.skill_paths()
     } else {
         existing_skills.to_vec()
     };
     let mut files = Vec::with_capacity(targets.len() * (1 + REFERENCE_FILES.len()));
     for path in targets {
-        files.push((path.to_string(), CANONICAL_SKILL.to_string()));
-        let Some(dir) = path.rsplit_once('/').map(|(dir, _)| dir) else {
+        files.push((
+            path.to_string_lossy().into_owned(),
+            CANONICAL_SKILL.to_string(),
+        ));
+        let Some(dir) = path.parent() else {
             continue;
         };
         for (name, content) in REFERENCE_FILES {
-            files.push((format!("{dir}/reference/{name}"), content.to_string()));
+            files.push((
+                dir.join("reference")
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned(),
+                content.to_string(),
+            ));
         }
     }
-    if !first_install {
+    if !first_install || !update_instructions {
         return Ok(files);
     }
-    for (relative, skill_path) in [(AGENTS_PATH, SKILL_PATH), (CLAUDE_PATH, CLAUDE_SKILL_PATH)] {
-        let path = validate_managed_path(root, relative)?;
+    for (relative, skill_path) in &layout.instruction_files {
+        let path = validate_managed_path(base, Path::new(relative))?;
         let Some(existing) = read_optional_text(&path)? else {
             continue;
         };
@@ -466,9 +648,22 @@ fn expected_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<(
     Ok(files)
 }
 
+/// Status of the repository-scope guidance, the scope reminder notices and
+/// `ngit init` suggestions inspect.
 pub fn status(root: &Path) -> Result<GuidanceStatus> {
+    status_at(root, &SkillLayout::repository())
+}
+
+/// Status of the guidance installed at one scope. `repo_root` is only
+/// required for [`InstallScope::Repository`].
+pub fn scope_status(scope: InstallScope, repo_root: Option<&Path>) -> Result<GuidanceStatus> {
+    let (base, layout) = scope.base(repo_root)?;
+    status_at(&base, &layout)
+}
+
+fn status_at(base: &Path, layout: &SkillLayout) -> Result<GuidanceStatus> {
     let bundled_version = bundled_version()?;
-    let logical_paths = existing_skill_paths(root)?;
+    let logical_paths = existing_skill_paths(base, layout)?;
     if logical_paths.is_empty() {
         return Ok(GuidanceStatus {
             installed: false,
@@ -484,7 +679,7 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
     let mut update_available = false;
     let mut modified_files = vec![];
     for logical in &logical_paths {
-        let path = validate_skill_path(root, logical)?;
+        let path = validate_skill_path(base, layout, logical)?;
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read managed file {}", path.display()))?;
         let version = skill_version(&content);
@@ -494,8 +689,8 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
         update_available |= comparison == Some(Ordering::Less);
         if content != CANONICAL_SKILL && comparison != Some(Ordering::Less) {
             let actual = path
-                .strip_prefix(root)
-                .context("managed skill path outside worktree")?
+                .strip_prefix(base)
+                .context("managed skill path outside the install base")?
                 .to_string_lossy()
                 .into_owned();
             if !modified_files.contains(&actual) {
@@ -504,12 +699,11 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
         }
         versions.push(version);
         let dir = logical
-            .rsplit_once('/')
-            .map(|(dir, _)| dir)
+            .parent()
             .context("managed skill path has a directory")?;
         for (name, bundled) in REFERENCE_FILES {
-            let relative = format!("{dir}/reference/{name}");
-            let path = validate_reference_path(root, &relative)?;
+            let relative = dir.join("reference").join(name);
+            let path = validate_reference_path(base, layout, &relative)?;
             let content = match fs::read_to_string(&path) {
                 Ok(content) => content,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
@@ -521,8 +715,8 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
             };
             if content != *bundled {
                 let actual = path
-                    .strip_prefix(root)
-                    .context("managed reference path outside worktree")?
+                    .strip_prefix(base)
+                    .context("managed reference path outside the install base")?
                     .to_string_lossy()
                     .into_owned();
                 if !modified_files.contains(&actual) {
@@ -545,17 +739,31 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
         installed_version,
         bundled_version,
         modified_files,
-        managed_files: logical_paths.into_iter().map(str::to_string).collect(),
+        managed_files: logical_paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
     })
 }
 
 pub fn setup(root: &Path, force: bool) -> Result<GuidanceStatus> {
-    write_guidance(root, force, &mut |_| {})?;
-    status(root)
+    update_scope(
+        InstallScope::Repository,
+        Some(root),
+        force,
+        true,
+        &mut |_| {},
+    )
 }
 
 pub fn update(root: &Path, force: bool) -> Result<GuidanceStatus> {
-    update_with_report(root, force, &mut |_| {})
+    update_scope(
+        InstallScope::Repository,
+        Some(root),
+        force,
+        true,
+        &mut |_| {},
+    )
 }
 
 /// Update managed guidance and report each repository-relative path immediately
@@ -566,18 +774,65 @@ pub fn update_with_report(
     force: bool,
     report: &mut impl FnMut(&Path),
 ) -> Result<GuidanceStatus> {
-    write_guidance(root, force, report)?;
-    status(root)
+    update_scope(InstallScope::Repository, Some(root), force, true, report)
 }
 
-fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> Result<()> {
-    let existing_skills = existing_skill_paths(root)?;
-    let files = expected_files(root, &existing_skills)?;
+/// Update the managed guidance installed at one scope and report each
+/// base-relative path immediately before a write or removal is attempted.
+/// `update_instructions` gates the one-time pointer added to existing
+/// instruction files, which only the repository scope has. `repo_root` is
+/// only required for [`InstallScope::Repository`].
+pub fn update_scope(
+    scope: InstallScope,
+    repo_root: Option<&Path>,
+    force: bool,
+    update_instructions: bool,
+    report: &mut impl FnMut(&Path),
+) -> Result<GuidanceStatus> {
+    let (base, layout) = scope.base(repo_root)?;
+    create_install_base(scope, &base)?;
+    write_guidance(&base, &layout, force, update_instructions, report)?;
+    status_at(&base, &layout)
+}
+
+/// Ensure the install base of a scope exists before guidance validation walks
+/// into it. Repository roots and home directories already do; the system-wide
+/// directory may not exist yet on a fresh machine.
+fn create_install_base(scope: InstallScope, base: &Path) -> Result<()> {
+    if base.exists() {
+        return Ok(());
+    }
+    let description = match scope {
+        InstallScope::Repository => "repository skill",
+        InstallScope::Global => "user skill",
+        InstallScope::System => {
+            return fs::create_dir_all(base).context(format!(
+                "failed to create the system-wide skill directory {}; writing there may require elevated permissions",
+                base.display()
+            ));
+        }
+    };
+    fs::create_dir_all(base).context(format!(
+        "failed to create the {description} directory {}",
+        base.display()
+    ))
+}
+
+fn write_guidance(
+    base: &Path,
+    layout: &SkillLayout,
+    force: bool,
+    update_instructions: bool,
+    report: &mut impl FnMut(&Path),
+) -> Result<()> {
+    let existing_skills = existing_skill_paths(base, layout)?;
+    let files = expected_files(base, layout, &existing_skills, update_instructions)?;
     for (relative, _) in &files {
-        if is_managed_skill_file(relative) {
-            let _ = validate_managed_skill_file(root, relative)?;
+        let relative_path = Path::new(relative);
+        if layout.is_managed(relative_path) {
+            let _ = validate_managed_skill_file(base, layout, relative_path)?;
         } else {
-            let _ = validate_managed_path(root, relative)?;
+            let _ = validate_managed_path(base, relative_path)?;
         }
     }
     let bundled = bundled_version()?;
@@ -585,12 +840,13 @@ fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> R
     // files. The reference checks below live in the same guarded block.
     if !force {
         for logical in &existing_skills {
-            let path = validate_skill_path(root, logical)?;
+            let path = validate_skill_path(base, layout, logical)?;
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read managed file {}", path.display()))?;
             let Some(installed) = skill_version(&content) else {
                 bail!(
-                    "refusing to overwrite unrecognized repository skill `{logical}`; rerun with --force to replace it"
+                    "refusing to overwrite unrecognized repository skill `{}`; rerun with --force to replace it",
+                    logical.display()
                 );
             };
             let comparison = compare_versions(&installed, &bundled);
@@ -606,7 +862,8 @@ fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> R
                 Some(Ordering::Equal) if content == CANONICAL_SKILL => {}
                 Some(Ordering::Equal) => {
                     bail!(
-                        "refusing to overwrite locally modified managed file `{logical}`; rerun with --force to replace it"
+                        "refusing to overwrite locally modified managed file `{}`; rerun with --force to replace it",
+                        logical.display()
                     );
                 }
                 Some(Ordering::Greater) => {
@@ -616,7 +873,8 @@ fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> R
                 }
                 None => {
                     bail!(
-                        "refusing to overwrite repository skill `{logical}` with invalid metadata.version `{installed}`; rerun with --force to replace it"
+                        "refusing to overwrite repository skill `{}` with invalid metadata.version `{installed}`; rerun with --force to replace it",
+                        logical.display()
                     );
                 }
                 Some(Ordering::Less) => unreachable!("outdated skills are handled above"),
@@ -624,49 +882,50 @@ fn write_guidance(root: &Path, force: bool, report: &mut impl FnMut(&Path)) -> R
             // The skill is at or ahead of the bundled version, so a reference
             // that differs is a local edit worth protecting.
             let dir = logical
-                .rsplit_once('/')
-                .map(|(dir, _)| dir)
+                .parent()
                 .context("managed skill path has a directory")?;
             for (name, bundled) in REFERENCE_FILES {
-                let relative = format!("{dir}/reference/{name}");
-                let path = validate_reference_path(root, &relative)?;
+                let relative = dir.join("reference").join(name);
+                let path = validate_reference_path(base, layout, &relative)?;
                 let Some(content) = read_optional_text(&path)? else {
                     continue;
                 };
                 if content != *bundled {
                     bail!(
-                        "refusing to overwrite locally modified managed file `{relative}`; rerun with --force to replace it"
+                        "refusing to overwrite locally modified managed file `{}`; rerun with --force to replace it",
+                        relative.display()
                     );
                 }
             }
         }
     }
     for (relative, content) in &files {
-        let managed = is_managed_skill_file(relative);
+        let relative_path = Path::new(relative);
+        let managed = layout.is_managed(relative_path);
         if !managed
-            || fs::symlink_metadata(root.join(relative))
+            || fs::symlink_metadata(base.join(relative_path))
                 .is_err_and(|error| error.kind() == ErrorKind::NotFound)
         {
-            create_managed_parent_dirs(root, relative)?;
+            create_managed_parent_dirs(base, relative_path)?;
         }
         let path = if managed {
-            validate_managed_skill_file(root, relative)?
+            validate_managed_skill_file(base, layout, relative_path)?
         } else {
-            validate_managed_path(root, relative)?
+            validate_managed_path(base, relative_path)?
         };
         if read_optional_text(&path)?.as_deref() != Some(content) {
             report(
-                path.strip_prefix(root)
-                    .context("managed guidance path outside worktree")?,
+                path.strip_prefix(base)
+                    .context("managed guidance path outside the install base")?,
             );
             fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
     }
-    for path in retired_files(root, &existing_skills)? {
+    for path in retired_files(base, layout, &existing_skills)? {
         report(
-            path.strip_prefix(root)
-                .context("managed guidance path outside worktree")?,
+            path.strip_prefix(base)
+                .context("managed guidance path outside the install base")?,
         );
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -877,12 +1136,17 @@ mod tests {
             }
         }
         expected.sort();
-        let mut actual = REFERENCE_PATHS
-            .iter()
-            .map(|path| path.to_string())
+        let mut actual = SkillLayout::repository()
+            .reference_paths()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected);
+        assert_eq!(
+            SkillLayout::shared().reference_paths(),
+            SkillLayout::repository().reference_paths()
+        );
     }
 
     #[test]
@@ -894,9 +1158,10 @@ mod tests {
             }
         }
         expected.sort();
-        let mut actual = RETIRED_REFERENCE_PATHS
-            .iter()
-            .map(|path| path.to_string())
+        let mut actual = SkillLayout::repository()
+            .retired_reference_paths()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, expected);
@@ -1149,7 +1414,7 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("failed to inspect repository skill")
+                .contains("failed to inspect managed skill")
         );
         assert!(!root.join(SKILL_PATH).exists());
         assert!(!root.join(AGENTS_PATH).exists());
@@ -1409,7 +1674,7 @@ mod tests {
             update(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("outside the repository")
+                .contains("outside the install base")
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), bundled_skill());
 
@@ -1433,7 +1698,7 @@ mod tests {
             "version: \"0.1\"",
         );
         fs::write(&canonical, older).unwrap();
-        for relative in skill_paths() {
+        for relative in SkillLayout::repository().skill_paths() {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             symlink("../../../skills/ngit/SKILL.md", &path).unwrap();
@@ -1462,13 +1727,14 @@ mod tests {
                 "upgrade rewrote the shared reference `skills/ngit/reference/{name}`"
             );
         }
-        for relative in skill_paths() {
+        for relative in SkillLayout::repository().skill_paths() {
             assert!(
-                fs::symlink_metadata(root.join(relative))
+                fs::symlink_metadata(root.join(&relative))
                     .unwrap()
                     .file_type()
                     .is_symlink(),
-                "upgrade replaced the `{relative}` symlink"
+                "upgrade replaced the `{}` symlink",
+                relative.display()
             );
         }
         let after = status(&root).unwrap();
@@ -1496,6 +1762,135 @@ mod tests {
             fs::read_to_string(root.join(AGENTS_PATH)).unwrap(),
             instructions
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn layouts_target_their_discovery_directories() {
+        let repository = SkillLayout::repository();
+        assert_eq!(
+            repository.skill_paths(),
+            vec![PathBuf::from(SKILL_PATH), PathBuf::from(CLAUDE_SKILL_PATH)]
+        );
+
+        let with_instructions = temp_root();
+        fs::write(with_instructions.join(AGENTS_PATH), "# Local\n").unwrap();
+        assert!(
+            repository
+                .instruction_files_present(&with_instructions)
+                .unwrap()
+        );
+        fs::remove_dir_all(with_instructions).unwrap();
+        let without_instructions = temp_root();
+        assert!(
+            !repository
+                .instruction_files_present(&without_instructions)
+                .unwrap()
+        );
+        fs::remove_dir_all(without_instructions).unwrap();
+
+        // The user-home scope shares the repository's discovery directories
+        // but owns no instruction files to point from.
+        let shared = SkillLayout::shared();
+        assert_eq!(shared.skill_paths(), repository.skill_paths());
+        assert!(shared.instruction_files.is_empty());
+
+        // The system scope installs one canonical, non-hidden directory.
+        let canonical = SkillLayout::canonical();
+        assert_eq!(
+            canonical.skill_paths(),
+            vec![PathBuf::from("ngit/SKILL.md")]
+        );
+        assert!(canonical.instruction_files.is_empty());
+        assert!(
+            canonical
+                .reference_paths()
+                .iter()
+                .all(|path| path.starts_with("ngit/reference/"))
+        );
+    }
+
+    #[test]
+    fn system_base_honors_the_override_and_falls_back_to_the_platform_default() {
+        let overridden = temp_root();
+        assert_eq!(system_base_with_override(Some(&overridden)), overridden);
+        #[cfg(unix)]
+        assert_eq!(
+            system_base_with_override(None),
+            PathBuf::from("/usr/local/share/agents/skills")
+        );
+    }
+
+    #[test]
+    fn first_install_can_skip_instruction_file_pointers() {
+        let root = temp_root();
+        let instructions = "# Local instructions\n";
+        fs::write(root.join(AGENTS_PATH), instructions).unwrap();
+        let layout = SkillLayout::repository();
+
+        write_guidance(&root, &layout, false, false, &mut |_| {}).unwrap();
+
+        assert!(root.join(SKILL_PATH).is_file());
+        assert_eq!(
+            fs::read_to_string(root.join(AGENTS_PATH)).unwrap(),
+            instructions,
+            "a declined instruction update still rewrote AGENTS.md"
+        );
+
+        write_guidance(&root, &layout, false, true, &mut |_| {}).unwrap();
+
+        // Once the skill exists the install is no longer a first install, so
+        // instruction files stay untouched either way.
+        assert_eq!(
+            fs::read_to_string(root.join(AGENTS_PATH)).unwrap(),
+            instructions
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_scope_install_skips_instruction_files() {
+        let root = temp_root();
+        fs::write(root.join(AGENTS_PATH), "# Local instructions\n").unwrap();
+        let layout = SkillLayout::shared();
+
+        write_guidance(&root, &layout, false, true, &mut |_| {}).unwrap();
+
+        assert!(root.join(SKILL_PATH).is_file());
+        assert!(root.join(CLAUDE_SKILL_PATH).is_file());
+        assert_eq!(
+            fs::read_to_string(root.join(AGENTS_PATH)).unwrap(),
+            "# Local instructions\n",
+            "the user-home scope must not point from repository instruction files"
+        );
+        let status = status_at(&root, &layout).unwrap();
+        assert!(status.installed);
+        assert_eq!(
+            status.managed_files,
+            vec![SKILL_PATH.to_string(), CLAUDE_SKILL_PATH.to_string()]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_scope_install_uses_one_directory() {
+        let root = temp_root();
+        let layout = SkillLayout::canonical();
+
+        write_guidance(&root, &layout, false, true, &mut |_| {}).unwrap();
+
+        assert!(root.join("ngit/SKILL.md").is_file());
+        for (name, content) in REFERENCE_FILES {
+            assert_eq!(
+                fs::read_to_string(root.join(format!("ngit/reference/{name}"))).unwrap(),
+                *content
+            );
+        }
+        assert!(!root.join(".agents").exists());
+        assert!(!root.join(".claude").exists());
+        let status = status_at(&root, &layout).unwrap();
+        assert!(status.installed);
+        assert_eq!(status.managed_files, vec!["ngit/SKILL.md".to_string()]);
         fs::remove_dir_all(root).unwrap();
     }
 }

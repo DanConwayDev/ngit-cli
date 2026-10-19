@@ -439,7 +439,7 @@ pub enum Commands {
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
     Sync(sub_commands::sync::SubCommandArgs),
-    /// install and update ngit's repository skill for coding agents
+    /// install and update ngit's skill for coding agents
     Skill(SkillArgs),
     /// inspect and update the ngit installation
     Update(UpdateArgs),
@@ -541,14 +541,29 @@ pub struct SkillArgs {
 
 #[derive(Subcommand)]
 pub enum SkillCommands {
-    /// Install the bundled repository skill
-    Install,
-    /// Upgrade the repository skill to the version bundled with ngit
-    Upgrade,
+    /// Install the bundled ngit skill
+    Install(SkillInstallArgs),
+    /// Upgrade the installed ngit skill to the version bundled with ngit
+    Upgrade(SkillInstallArgs),
     /// Show installed and bundled skill versions without changing files
     Status,
     /// Disable repository skill reminders
     OptOut(SkillOptOutArgs),
+}
+
+#[derive(clap::Args)]
+pub struct SkillInstallArgs {
+    /// Install into your home directory for all of your repositories
+    /// (~/.agents/skills and ~/.claude/skills)
+    #[arg(long, conflicts_with = "system")]
+    pub global: bool,
+    /// Install into the machine-wide directory for every user
+    /// (`/usr/local/share/agents/skills`, or `$NGIT_SYSTEM_SKILLS_DIR`)
+    #[arg(long, conflicts_with = "global")]
+    pub system: bool,
+    /// Skip adding a skill pointer to existing AGENTS.md/CLAUDE.md files
+    #[arg(long)]
+    pub no_agent_file: bool,
 }
 
 #[derive(clap::Args)]

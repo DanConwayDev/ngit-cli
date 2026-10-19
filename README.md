@@ -144,23 +144,38 @@ eg self-hosted, github, codeberg, etc.
                          └─────────┘
 ```
 
-## Repository-managed skill
+## Coding-agent skill
 
-Run `ngit skill install` to add repository guidance that teaches coding agents
-to use ngit. The command installs the skill in the Codex and Claude discovery
-locations and adds a compact pointer to existing `AGENTS.md` or `CLAUDE.md`
-files without creating either file. Use `ngit skill upgrade` to update existing
-copies from the version in the skill metadata; it does not restore a copy that
-was removed after installation. Install and upgrade leave their changes
-uncommitted so the repository's normal validation and commit workflow can run.
-Contributors who are not maintainers should commit the changes on a `pr/`
-branch and push it to propose a pull request. With `--json`, `changed_files`
-lists the managed paths that remain as Git changes and `changes_uncommitted`
-states whether there is anything to commit. Git-ignored managed files are
-installed but omitted from those fields because ordinary Git staging excludes
-them. Successful commands set `action` to `installed`, `upgraded`,
-`reconciled`, or `unchanged`; partial update failures use `failed`, report the
-same change fields for files already left in the worktree, and omit post-update
-guidance status fields.
+Run `ngit skill install` to add guidance that teaches coding agents to use
+ngit. Interactive runs (`-i`) first ask where to install: this repository
+(shared with everyone who clones it), your user account, or every user on
+this machine. Non-interactive runs keep the repository scope; pass
+`--global` or `--system` to choose another scope without prompting.
+
+The repository scope installs the skill in the Codex and Claude discovery
+locations and, on a first install, adds a compact pointer to existing
+`AGENTS.md` or `CLAUDE.md` files without creating either file; interactive
+runs ask before adding the pointer, and `--no-agent-file` skips it. The
+global scope installs the same layout under `~/.agents/skills/ngit` and
+`~/.claude/skills/ngit` for all of your repositories. The system scope
+installs one canonical copy in `/usr/local/share/agents/skills/ngit`
+(`%ALLUSERSPROFILE%\agents\skills\ngit` on Windows; override with
+`NGIT_SYSTEM_SKILLS_DIR`) and may need elevated permissions.
+
+Use `ngit skill upgrade` to update installed copies from the version in the
+skill metadata; it does not restore a copy that was removed after
+installation. Repository-scope install and upgrade leave their changes
+uncommitted so the repository's normal validation and commit workflow can
+run. Contributors who are not maintainers should commit the changes on a
+`pr/` branch and push it to propose a pull request. With `--json`,
+`changed_files` lists the managed paths that remain as Git changes and
+`changes_uncommitted` states whether there is anything to commit. Git-ignored
+managed files are installed but omitted from those fields because ordinary
+Git staging excludes them. Successful commands set `action` to `installed`,
+`upgraded`, `reconciled`, or `unchanged` and report the `scope` they
+targeted; partial update failures use `failed`, report the same change
+fields for files already left in the worktree, and omit post-update guidance
+status fields. `ngit skill status` reports every scope; the `scopes` object
+in its `--json` output carries the per-scope install state.
 
 Run `ngit skill --help` for status and reminder opt-out commands.
