@@ -5,7 +5,7 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
 
     # Disabled until a25396d8 is resolved in ngit's released libgit2 dependency.
     # Restore this input and add `buzz` to the outputs arguments when re-enabling
@@ -15,11 +15,21 @@
     # };
   };
 
-  outputs = { nixpkgs, rust-overlay, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, rust-overlay, crane, ... }:
+    let
+      forAllSystems = nixpkgs.lib.genAttrs [
+        "aarch64-linux" "x86_64-linux" "aarch64-darwin" "x86_64-darwin"
+      ];
+      perSystem = forAllSystems (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
+        ci = import ./.ngit/nix/workflows {
+          inherit pkgs;
+          src = self;
+          craneLib = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable.latest.default;
+          ngit-grasp = ngit-grasp-pkg;
+        };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
         # Pin the v3.0.7 release.
         ngitGraspRevision = "59efc8259a51c7204cd837f67cb8ec14156d2956";
@@ -92,26 +102,9 @@
           #   export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
           # ''
         };
-        apps.ci-checks = {
-          type = "app";
-          program = "${pkgs.writeShellApplication {
-            name = "ngit-ci-checks";
-            runtimeInputs = [ pkgs.nix pkgs.git ];
-            text = ''
-              exec nix develop --command ${pkgs.bash}/bin/bash ${./nix/ci-checks.sh}
-            '';
-          }}/bin/ngit-ci-checks";
-        };
-        apps.publish-crate = {
-          type = "app";
-          program = "${pkgs.writeShellApplication {
-            name = "ngit-publish-crate";
-            runtimeInputs = [ pkgs.nix pkgs.git ];
-            text = ''
-              exec nix develop --command ${pkgs.bash}/bin/bash ${./nix/publish-crate.sh}
-            '';
-          }}/bin/ngit-publish-crate";
-        };
+        ciCommands = ci.commands;
+        packages.ci-dependencies = ci.dependencies;
+        packages.ci-test-server = ci.test-server;
         # Create packages for each binary defined in Cargo.toml
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = manifest.package.name;
@@ -140,4 +133,9 @@
           '';
         };
       });
+    in {
+      packages = forAllSystems (system: perSystem.${system}.packages);
+      devShells = forAllSystems (system: perSystem.${system}.devShells);
+      ngit-ci.commands = forAllSystems (system: perSystem.${system}.ciCommands);
+    };
 }
