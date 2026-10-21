@@ -195,6 +195,7 @@ mod tests {
             relays: vec![],
         };
         let mut client = Client::new(Params {
+            proactive_auth: false,
             keys: None,
             relay_default_set: vec![],
             announcement_indexer_relays: vec![],
