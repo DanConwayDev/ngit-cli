@@ -7,3 +7,6 @@ test-cli-expect-output.txt
 /event-shapes.md
 /event-shapes.ndjson
 result
+
+# Local working files and investigation notes
+/work/

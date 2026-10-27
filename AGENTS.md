@@ -80,6 +80,18 @@ ngit/
 - Run `cargo clippy` to catch common issues
 - Use `anyhow::Result` for error handling
 - Prefer explicit error messages with context
+- Update `CHANGELOG.md` under `Unreleased` in the same commit as each relevant
+  behavior, dependency, or security change. Describe the user-facing effect and
+  distinguish upstream fixes from demonstrated ngit exposure.
+
+### Dependency updates
+
+When available, consult the local [dependency update runbook](work/dependency-updates.md)
+for dependency changes and security reports. This Git-ignored file is optional
+and is not distributed with the repository. Keep its watchlist focused on active
+findings and upgrade constraints; remove resolved items. If it is absent,
+proceed with the normal dependency checks. Keep private watchlist details out of
+public documentation, commits, and PRs.
 
 ### Testing
 
