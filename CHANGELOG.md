@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update the pinned ngit-grasp integration-test fixture from 3.0.7 to 3.0.9
+  so compatibility checks exercise the current server release.
 - Refresh the pinned nixpkgs, rust-overlay, and crane inputs for Nix builds
   and development. The development toolchain moves to Rust 1.99.1; the Nix
   Linux package uses OpenSSL 3.5.9 LTS. Keep Intel macOS on the supported

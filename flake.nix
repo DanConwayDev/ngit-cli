@@ -34,8 +34,8 @@
           ngit-grasp = ngit-grasp-pkg;
         };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
-        # Pin the v3.0.7 release.
-        ngitGraspRevision = "59efc8259a51c7204cd837f67cb8ec14156d2956";
+        # Pin the v3.0.9 release.
+        ngitGraspRevision = "053ee62610e0af37c73c1e3016d12cba4ab28e07";
         # The pinned repository contains Gitlinks without .gitmodules entries.
         # Nix 2.34 and 2.35 disagree about whether their empty directories are
         # retained in a flake Git input, producing different NAR hashes for the
@@ -43,12 +43,12 @@
         ngitGraspSource = pkgs.fetchgit {
           url = "https://gitnostr.com/npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr/ngit-grasp.git";
           rev = ngitGraspRevision;
-          hash = "sha256-RCVgBBm+5m+BG4EEL3QTl+9QWJDPzrHl/pvJYcABpHM=";
+          hash = "sha256-5i4fRkCHy/bAlsPccK9qa9SwVVyVW6YQS64PVicotJQ=";
           fetchSubmodules = false;
         };
         ngit-grasp-pkg = pkgs.rustPlatform.buildRustPackage {
           pname = "ngit-grasp";
-          version = "3.0.7";
+          version = "3.0.9";
           src = ngitGraspSource;
           NGIT_BUILD_REVISION = ngitGraspRevision;
           cargoLock.lockFile = "${ngitGraspSource}/Cargo.lock";
