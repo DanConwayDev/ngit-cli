@@ -3592,9 +3592,9 @@ pub fn get_repo_config_from_yaml(git_repo: &Repo) -> Result<RepoConfigYaml> {
         .context("should open maintainers.yaml if it exists")
         .context("maintainers.yaml doesnt exist")?;
     let reader = BufReader::new(file);
-    let repo_config_yaml: RepoConfigYaml = serde_yaml::from_reader(reader)
-        .context("should read maintainers.yaml with serde_yaml")
-        .context("maintainers.yaml incorrectly formatted")?;
+    let repo_config_yaml: RepoConfigYaml =
+        serde_saphyr::from_reader_with_options(reader, crate::yaml::options())
+            .context("maintainers.yaml incorrectly formatted")?;
     Ok(repo_config_yaml)
 }
 
@@ -3615,7 +3615,7 @@ pub fn save_repo_config_to_yaml(
     relays: Vec<String>,
 ) -> Result<()> {
     let path = git_repo.get_path()?.join("maintainers.yaml");
-    let file = if path.exists() {
+    let mut file = if path.exists() {
         std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -3632,15 +3632,15 @@ pub fn save_repo_config_to_yaml(
                 .context("failed to convert public key into npub")?,
         );
     }
-    serde_yaml::to_writer(
-        file,
+    serde_saphyr::to_io_writer(
+        &mut file,
         &RepoConfigYaml {
             identifier: Some(identifier),
             maintainers: maintainers_npubs,
             relays,
         },
     )
-    .context("failed to write maintainers to maintainers.yaml file serde_yaml")
+    .context("failed to write maintainers to maintainers.yaml file")
 }
 
 pub fn detect_existing_grasp_servers(
@@ -3965,6 +3965,64 @@ mod tests {
     use once_cell::sync::Lazy;
 
     use super::*;
+
+    #[test]
+    fn yaml_compat_reads_legacy_config_and_round_trips_saved_values() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let repo = Repo {
+            git_repo: git2::Repository::init(directory.path())?,
+        };
+        let path = directory.path().join("maintainers.yaml");
+        std::fs::write(
+            &path,
+            "---\n# Legacy configuration\nmaintainers: &members [first, second]\nrelays: [wss://relay.example]\nextra: *members\n",
+        )?;
+        let legacy = get_repo_config_from_yaml(&repo)?;
+        assert_eq!(legacy.identifier, None);
+        assert_eq!(legacy.maintainers, ["first", "second"]);
+        assert_eq!(legacy.relays, ["wss://relay.example"]);
+
+        let key = TEST_KEY_1_KEYS.public_key();
+        for identifier in ["true", "null", "123", "repo: café # release\nnext line"] {
+            save_repo_config_to_yaml(
+                &repo,
+                identifier.into(),
+                vec![key],
+                vec!["wss://relay.example".into()],
+            )?;
+            assert_eq!(
+                get_repo_config_from_yaml(&repo)?,
+                RepoConfigYaml {
+                    identifier: Some(identifier.into()),
+                    maintainers: vec![key.to_bech32()?],
+                    relays: vec!["wss://relay.example".into()],
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn yaml_compat_config_rejects_duplicates_and_multiple_documents() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let repo = Repo {
+            git_repo: git2::Repository::init(directory.path())?,
+        };
+        for input in [
+            "identifier: one\nidentifier: two\nmaintainers: []\nrelays: []\n",
+            "maintainers: []\nrelays: []\n---\nmaintainers: []\nrelays: []\n",
+        ] {
+            std::fs::write(directory.path().join("maintainers.yaml"), input)?;
+            let error = get_repo_config_from_yaml(&repo).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("maintainers.yaml incorrectly formatted")
+            );
+            assert!(error.source().is_some());
+        }
+        Ok(())
+    }
 
     // Two stable nsec values are used so the public-key-ordered
     // `maintainers` tag is deterministic.

@@ -38,6 +38,7 @@ pub mod test_timeouts;
 pub mod tls;
 pub mod utils;
 pub mod version_check;
+mod yaml;
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
