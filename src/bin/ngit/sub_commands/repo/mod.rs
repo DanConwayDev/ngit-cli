@@ -379,7 +379,7 @@ fn maintainer_json_fields(repo_ref: &RepoRef) -> MaintainerJsonFields {
         .map(&encode)
         .collect();
     let invited = repo_ref.invited_maintainers().iter().map(&encode).collect();
-    let lead = repo_ref.lead_maintainer().as_ref().map(&encode);
+    let lead = repo_ref.lead_maintainer().as_ref().map(encode);
     let edges = repo_ref
         .maintainer_edges()
         .iter()

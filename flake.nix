@@ -1,6 +1,8 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Unstable no longer supports Intel macOS; retain its supported stable branch.
+    nixpkgs-intel-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,7 +17,7 @@
     # };
   };
 
-  outputs = { self, nixpkgs, rust-overlay, crane, ... }:
+  outputs = { self, nixpkgs, nixpkgs-intel-darwin, rust-overlay, crane, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "aarch64-linux" "x86_64-linux" "aarch64-darwin" "x86_64-darwin"
@@ -23,7 +25,8 @@
       perSystem = forAllSystems (system:
       let
         overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs { inherit system overlays; };
+        packageSet = if system == "x86_64-darwin" then nixpkgs-intel-darwin else nixpkgs;
+        pkgs = import packageSet { inherit system overlays; };
         ci = import ./.ngit/nix/workflows {
           inherit pkgs;
           src = self;

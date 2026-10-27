@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh the pinned nixpkgs, rust-overlay, and crane inputs for Nix builds
+  and development. The development toolchain moves to Rust 1.99.1; the Nix
+  Linux package uses OpenSSL 3.5.9 LTS. Keep Intel macOS on the supported
+  nixpkgs 26.05 branch after unstable dropped that platform.
+  The native OpenSSL update also includes the crafted-certificate allocation
+  fix ([CVE-2026-35189](https://openssl-library.org/news/vulnerabilities/#CVE-2026-35189))
+  for Nix-installed ngit; downloadable archives use a separate vendored version.
 - Refresh Rustls, ZIP, Negentropy, ctutils, faster-hex, and Tokio, including
   upstream security and safety fixes for which no affected production path was
   identified in ngit. Adapt APK filename decoding to ZIP 9.
