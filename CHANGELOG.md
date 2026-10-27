@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh Rustls, ZIP, Negentropy, ctutils, faster-hex, and Tokio, including
   upstream security and safety fixes for which no affected production path was
   identified in ngit. Adapt APK filename decoding to ZIP 9.
+- Refresh serde_json to 1.0.154, passwords to 3.1.19, tokio-util to 0.7.20,
+  tokio-rustls to 0.26.6, libc to 0.2.191, hyper to 1.12.0, and hyper-util to
+  0.1.21 within the existing dependency requirements.
 - Refresh mailparse, zeroize, and rstest alongside the security dependency updates.
 
 ### Fixed
