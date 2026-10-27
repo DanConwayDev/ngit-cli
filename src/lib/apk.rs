@@ -152,7 +152,9 @@ fn inspect_apk_archive<R: Read + Seek>(reader: R) -> Result<ApkPlatformInference
         let entry = archive
             .by_index(index)
             .with_context(|| format!("failed to inspect APK ZIP entry {index}"))?;
-        let name = entry.name();
+        let name = entry
+            .name()
+            .with_context(|| format!("failed to decode APK ZIP entry {index} name"))?;
         if name == ANDROID_MANIFEST {
             manifest_count += 1;
             if entry.is_dir() || entry.size() == 0 {
@@ -280,6 +282,27 @@ mod tests {
                 .to_string()
                 .contains("non-empty")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_encoded_native_names_are_supported() -> Result<()> {
+        let name = "lib/x86/cafe.so";
+        let mut bytes = apk(&[("AndroidManifest.xml", b"manifest"), (name, b"contents")])?;
+        // Encode the accented filename in CP437 in both ZIP headers.
+        // ZIP 9 returns an owned, decoded name for this legacy encoding.
+        let offsets = bytes
+            .windows(name.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == name.as_bytes()).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset + 11] = 0x82; // CP437 é, replacing the ASCII e.
+        }
+        let inferred = inspect_apk_archive(Cursor::new(bytes))?;
+        assert!(inferred.native_libraries_present);
+        assert_eq!(inferred.derived_platforms, ["android-x86"]);
         Ok(())
     }
 }

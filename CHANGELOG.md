@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Reject compromised eMudhra/emSign intermediate certificates with
+  rustls-webpki 0.103.16 and remove the affected root from bundled certificate
+  stores with roots 1.0.11. This addresses the risk of TLS endpoint impersonation,
+  including relay connections and Android HTTPS. These three advisories cover
+  the same CA incident ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html),
+  [0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html),
+  [0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html)).
+
+### Changed
+
+- Refresh Rustls, ZIP, Negentropy, ctutils, faster-hex, and Tokio, including
+  upstream security and safety fixes for which no affected production path was
+  identified in ngit. Adapt APK filename decoding to ZIP 9.
+- Refresh mailparse, zeroize, and rstest alongside the security dependency updates.
+
 ### Fixed
 
 - Prompt for missing account names, comment bodies, labels, subjects and cover
