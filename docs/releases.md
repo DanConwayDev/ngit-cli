@@ -66,6 +66,30 @@ starts exits immediately. Forced cancellation still bounds the process lifetime.
 Cargo's own package verification remains enabled. The separate platform archive
 workflow remains responsible for platform release binaries.
 
+## OpenSSL in downloadable archives
+
+The Unix archive workflow builds checksum-pinned OpenSSL 3.5.9 LTS with
+`tools/release/build-openssl.py` and statically links it through
+`openssl-sys`'s target-specific `OPENSSL_DIR`, `OPENSSL_STATIC`, and
+`OPENSSL_NO_VENDOR` settings. Keep these settings even though Cargo enables
+`vendored-openssl`: the compatible `openssl-src` 300.x release still contains
+OpenSSL 3.6.3. Updating a Nix library or running Cargo audit does not update
+these bundled libraries. Windows uses WinHTTP/WinCNG and does not bundle
+OpenSSL with the current dependency features. Remove the separate build only
+after a compatible, patched source crate is available and the resulting
+archives are verified.
+
+Run `python3 -m unittest discover -s tools/release` for the packaging checks.
+Inspect each built archive with `tools/release/verify-openssl.py`. On Linux,
+`NGIT_TLS_TEST_BIN_DIR=/absolute/path/to/unpacked/archive cargo test --locked
+--test git_https` exercises that exact `ngit`/`git-remote-nostr` pair against a
+local HTTPS Git server, including rejection with an unrelated trust anchor.
+The macOS scan checks each architecture's provider version independently,
+since a crypto-only link can omit the full TLS version banner.
+The version scan is a packaging guard; it does not replace native platform
+builds, dynamic-link inspection, or TLS runtime tests. Repeat inspection on
+published downloads before reporting a release vulnerability as resolved.
+
 ## Quick start
 
 For one local file, pass its path and every platform supported by those exact

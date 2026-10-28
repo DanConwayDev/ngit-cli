@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Build downloadable Unix release archives with statically linked OpenSSL 3.5.9
+  LTS instead of the 3.6.3 supplied by `openssl-src` 300.x. This includes the
+  crafted-certificate memory allocation fix for Git HTTPS
+  ([CVE-2026-35189](https://openssl-library.org/news/vulnerabilities/#CVE-2026-35189))
+  and the other upstream fixes through September 2026. Verify the embedded
+  version in packaged binaries before NIP-82 publication. These are upstream
+  fixes, not evidence of exploitation against ngit. Source builds using Cargo's
+  `vendored-openssl` feature alone still require a patched external static
+  OpenSSL until a compatible fixed `openssl-src` is available.
+
 ### Fixed
 
 - List Git-server refs without downloading repository history. Server checks
