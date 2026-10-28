@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.5] - 2026-10-28
+
+Repair bundled OpenSSL in Unix release archives and avoid unnecessary
+repository-history downloads when listing Git-server refs.
+
 ### Changed
 
 - Update the pinned ngit-grasp integration-test fixture from 3.0.9 to 3.0.10
