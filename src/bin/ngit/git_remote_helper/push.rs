@@ -753,6 +753,21 @@ async fn process_proposal_refspecs(
     if proposal_refspecs.is_empty() {
         return Ok((events, rejected_proposal_refspecs));
     }
+    // Ref advertisements do not transfer objects. A maintainer may have
+    // advanced the destination since this contributor last fetched, so obtain
+    // its default-branch history before computing proposal merge bases.
+    if let Some(tip) = default_branch.tip {
+        ngit::fetch::ensure_commit_local(
+            &tip.to_string(),
+            git_repo,
+            repo_ref,
+            &[],
+            term,
+            Some(signer),
+        )
+        .await
+        .context("failed to fetch destination default branch for proposal base calculation")?;
+    }
     let all_proposals = get_all_proposals(git_repo, repo_ref).await?;
     let explicit_base = if let Some(reference) = &proposal_options.base {
         Some(resolve_explicit_base(git_repo, repo_ref, reference, &all_proposals).await?)

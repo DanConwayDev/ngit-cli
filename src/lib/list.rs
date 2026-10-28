@@ -593,10 +593,12 @@ fn list_from_remote_url(
     if let Some(header) = authorization.as_deref() {
         fetch_options.custom_headers(&[header]);
     }
-    // `connect_auth` cannot carry custom HTTP headers. An empty download
-    // performs the same advertisement exchange while preserving access to
-    // `Remote::list`, and applies the NIP-98 header to `/info/refs`.
-    git_server_remote.download(&[] as &[&str], Some(&mut fetch_options))?;
+    // `connect_auth` cannot carry the NIP-98 header. Use download to obtain
+    // the advertisement, but exclude every ref and disable automatic tags:
+    // an empty refspec list implicitly fetches HEAD and its entire history.
+    // Listing servers must not download packs into the shared object database.
+    fetch_options.download_tags(git2::AutotagOption::None);
+    git_server_remote.download(&["^*"], Some(&mut fetch_options))?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {
@@ -932,6 +934,48 @@ pub fn generate_remote_sync_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listing_refs_does_not_download_objects() -> Result<()> {
+        let source_dir = tempfile::tempdir()?;
+        let source = git2::Repository::init_bare(source_dir.path())?;
+        source.set_head("refs/heads/main")?;
+        let tree_id = source.treebuilder(None)?.write()?;
+        let tree = source.find_tree(tree_id)?;
+        let signature = git2::Signature::now("Test", "test@example.com")?;
+        let commit = source.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])?;
+        let object = source.find_object(commit, None)?;
+        source.branch("feature", &source.find_commit(commit)?, false)?;
+        let tag = source.tag("v1", &object, &signature, "release", false)?;
+
+        let file_url = reqwest::Url::from_directory_path(source_dir.path()).unwrap();
+        let server = test_harness::VanillaGitServer::start(
+            "list-refs",
+            test_harness::port::reserve_port()?,
+            source_dir.path(),
+        )
+        .await?;
+        for url in [file_url.as_str(), server.url()] {
+            let destination_dir = tempfile::tempdir()?;
+            let destination = Repo {
+                git_repo: git2::Repository::init(destination_dir.path())?,
+            };
+            let refs = list_from_remote_url(&destination, url, None, true)?;
+            assert_eq!(refs.get("HEAD"), Some(&"ref: refs/heads/main".to_string()));
+            assert_eq!(refs.get("refs/heads/main"), Some(&commit.to_string()));
+            assert_eq!(refs.get("refs/heads/feature"), Some(&commit.to_string()));
+            assert_eq!(refs.get("refs/tags/v1"), Some(&tag.to_string()));
+            assert!(!refs.contains_key("refs/tags/v1^{}"));
+            let mut object_count = 0;
+            destination.git_repo.odb()?.foreach(|_| {
+                object_count += 1;
+                true
+            })?;
+            assert_eq!(object_count, 0, "listing refs must not fetch Git objects");
+            assert_eq!(destination.git_repo.references()?.count(), 0);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_format_ref_issue_single_branch_with_ahead_behind() {

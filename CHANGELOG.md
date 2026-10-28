@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- List Git-server refs without downloading repository history. Server checks
+  previously fetched HEAD from each server into the same object database,
+  causing unnecessary transfers and 60-second timeouts when cloning repositories
+  such as Amber. Proposal pushes fetch missing destination history explicitly
+  when calculating their base. Private-repository HTTP authorization is preserved.
+
 ## [3.0.4] - 2026-10-27
 
 Update certificate trust and dependencies, improve interactive workflows and
