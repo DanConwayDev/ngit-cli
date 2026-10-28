@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Update the pinned ngit-grasp integration-test fixture from 3.0.9 to 3.0.10
+  so development and Nix CI use the current server release.
+
 ### Security
 
 - Build downloadable Unix release archives with statically linked OpenSSL 3.5.9
