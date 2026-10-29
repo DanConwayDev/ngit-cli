@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep account operations scoped to the intended login: incomplete local signer
+  configuration now fails instead of letting `ngit init` and other signing
+  commands fall back to a global identity. `ngit account logout --local` never
+  clears the global login, even if no local login remains; `--global` explicitly
+  clears only the global login. Plain logout still prefers the local login.
+
 ## [3.0.5] - 2026-10-28
 
 Repair bundled OpenSSL in Unix release archives and avoid unnecessary

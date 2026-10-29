@@ -181,7 +181,19 @@ is still read: `false` maps to `git-config`, `true` to `auto`.
 
 ## Logout
 
-`ngit account logout` removes the login from git config but deliberately
+Commands such as `ngit init` select command-line credentials (`--signer` or
+`--nsec`) first, then repository-local, global, and system Git configuration.
+A configured local login that cannot be loaded causes an error rather than
+falling back to a different global identity. Use `ngit account whoami --offline`
+to inspect the active account and its scope.
+
+`ngit account logout` removes the local login when one exists, otherwise the
+global login. Use `--local` to clear only this repository's login (including
+when it is already absent), or `--global` to clear only the global login while
+preserving the local one. `--local` requires a Git repository. After removing a
+local login, subsequent commands can use the remaining global login.
+
+Logout removes the login from git config but deliberately
 keeps the stored secret: the credential store may hold the only copy of an
 identity key, so deleting it on logout could destroy the account. Logout
 prints the exact command to remove the secret as well —

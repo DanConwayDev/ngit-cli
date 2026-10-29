@@ -16,6 +16,12 @@ use crate::{
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
+    /// remove only this repository's login; never fall back to global logout
+    #[arg(long, conflicts_with = "global")]
+    pub local: bool,
+    /// remove only the global login, preserving this repository's login
+    #[arg(long)]
+    pub global: bool,
     /// also remove the account secret from the credential store
     #[arg(long)]
     pub forget: bool,
@@ -24,12 +30,19 @@ pub struct SubCommandArgs {
 pub async fn launch(args: &SubCommandArgs) -> Result<()> {
     let git_repo_result = Repo::discover().context("failed to find a git repository");
     let git_repo = { git_repo_result.ok() };
+    if args.local && git_repo.is_none() {
+        return Err(ngit::cli_interactor::cli_error(
+            "cannot log out locally outside a git repository",
+            &[],
+            &["run this command inside the repository whose login you want to remove"],
+        ));
+    }
     // Cached decrypted relay lists must not outlive the login session, but a
     // failed cache wipe must not block the logout itself.
     if let Err(error) = user::wipe_private_git_relay_list_cache() {
         eprintln!("warning: failed to remove cached decrypted private relay lists: {error:#}");
     }
-    logout(git_repo.as_ref(), args.forget).await
+    logout(git_repo.as_ref(), args).await
 }
 
 const LOGIN_CONFIG_ITEMS: [&str; 5] = [
@@ -40,13 +53,19 @@ const LOGIN_CONFIG_ITEMS: [&str; 5] = [
     "nostr.signer",
 ];
 
-async fn logout(git_repo: Option<&Repo>, forget: bool) -> Result<()> {
-    for source in if std::env::var("NGITTEST").is_ok() {
+async fn logout(git_repo: Option<&Repo>, args: &SubCommandArgs) -> Result<()> {
+    let forget = args.forget;
+    for source in if args.global {
+        vec![SignerInfoSource::GitGlobal]
+    } else if args.local || std::env::var("NGITTEST").is_ok() {
         vec![SignerInfoSource::GitLocal]
     } else {
         vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
     } {
         let scope = if source == SignerInfoSource::GitLocal {
+            if git_repo.is_none() {
+                continue;
+            }
             git_repo
         } else {
             None
