@@ -155,6 +155,32 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         contents
     );
 
+    // The helper must also work when Git creates a bare destination with no
+    // worktree.
+    let bare_dir = tempfile::tempdir().context("allocate bare clone directory")?;
+    let bare_path = bare_dir.path().join("clone.git");
+    let bare_path_str = bare_path.to_str().context("bare clone path is not UTF-8")?;
+    let bare_clone = publisher
+        .git([
+            "-c",
+            "protocol.ext.allow=always",
+            "clone",
+            "--bare",
+            nostr_url.as_str(),
+            bare_path_str,
+        ])
+        .output()
+        .await
+        .context("spawn git clone --bare over nostr")?;
+    require_success("git clone --bare over nostr", &bare_clone)?;
+    let bare_main = publisher
+        .git(["--git-dir", bare_path_str, "rev-parse", "refs/heads/main"])
+        .output()
+        .await
+        .context("read cloned bare main ref")?;
+    require_success("read cloned bare main ref", &bare_main)?;
+    assert_eq!(String::from_utf8(bare_main.stdout)?.trim(), main_oid);
+
     cloned
         .git_ok(
             ["config", "--local", "nostr.nsec", &nsec],

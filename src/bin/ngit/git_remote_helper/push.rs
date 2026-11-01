@@ -122,7 +122,9 @@ pub(super) async fn run_push(
 
     let existing_state = {
         // if no state events - create from first git server listed
-        if let Ok(nostr_state) = &get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await {
+        if let Ok(nostr_state) =
+            &get_state_from_cache(Some(git_repo.workdir_or_git_dir()), repo_ref).await
+        {
             nostr_state.state.clone()
         } else if let Some(url) = repo_ref
             .git_server
@@ -510,7 +512,7 @@ async fn create_events_and_proposals(
             // The latest cached state event is the NIP-01 ordering
             // reference for the candidate replacement.
             let old_state_event = get_events_from_local_cache(
-                git_repo.get_path()?,
+                git_repo.workdir_or_git_dir(),
                 vec![get_filter_state_events(&repo_ref.coordinates(), true)],
             )
             .await
