@@ -36,17 +36,19 @@ async fn logout_respects_explicit_and_implicit_scopes() -> Result<()> {
                 .ngit(args)
                 .env_remove("NGITTEST")
                 .env("GIT_CONFIG_GLOBAL", &global_config)
+                .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
                 .output()
                 .await?;
             assert_success(&output);
         }
         let global_before = std::fs::read(&global_config)?;
-        let mut args = vec!["account", "logout"];
+        let mut args = vec!["account", "logout", "--forget"];
         args.extend(scope);
         let output = repo
             .ngit(&args)
             .env_remove("NGITTEST")
             .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
             .output()
             .await?;
         assert_success(&output);
@@ -65,6 +67,7 @@ async fn logout_respects_explicit_and_implicit_scopes() -> Result<()> {
                 .ngit(["account", "logout", "--local"])
                 .env_remove("NGITTEST")
                 .env("GIT_CONFIG_GLOBAL", &global_config)
+                .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
                 .output()
                 .await?;
             assert_success(&output);
@@ -127,6 +130,7 @@ async fn init_uses_local_login_and_rejects_incomplete_local_credentials() -> Res
         .ngit(args)
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
+        .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
         .output()
         .await?;
     assert!(!output.status.success());
@@ -150,6 +154,7 @@ async fn init_uses_local_login_and_rejects_incomplete_local_credentials() -> Res
         ])
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
+        .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
         .output()
         .await?;
     assert_success(&output);
@@ -157,6 +162,7 @@ async fn init_uses_local_login_and_rejects_incomplete_local_credentials() -> Res
         .ngit(args)
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
+        .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
         .output()
         .await?;
     assert_success(&output);
@@ -195,15 +201,17 @@ async fn local_logout_outside_a_repository_preserves_global_login() -> Result<()
         .current_dir(outside.path())
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
+        .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
         .output()
         .await?;
     assert!(!output.status.success());
     assert_eq!(std::fs::read(&global_config)?, before);
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--forget"])
         .current_dir(outside.path())
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
+        .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
         .output()
         .await?;
     assert_success(&output);
@@ -292,6 +300,7 @@ async fn failed_storage_keeps_the_previous_login_and_global_switch_keeps_local()
             .ngit(["account", "login", "--offline", "--nsec", &replacement])
             .env_remove("NGITTEST")
             .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", repo.dir().join("credentials.json"))
             .output()
             .await?,
     );

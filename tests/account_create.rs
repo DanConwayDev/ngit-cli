@@ -349,7 +349,7 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
     );
 
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -360,19 +360,12 @@ async fn credential_file_stores_pointer_and_logout_keeps_entry_until_forgotten()
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(repo.config("nostr.nsec").await?.is_none());
-    // Logout keeps the stored secret - the store may hold the only copy of
-    // the key - and points at the explicit removal command instead.
+    // Explicit retention preserves the key for later reactivation.
     let entries: Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
     assert!(
         entries.get(format!("{SERVICE}/{pointer}")).is_some(),
         "logout must retain the credential entry"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("forget-keys"),
-        "logout should name the removal command: {stderr}"
-    );
-
     let output = repo
         .ngit(["account", "forget-keys", &pointer])
         .env("NGIT_SECRET_STORAGE", "auto")
@@ -552,7 +545,7 @@ async fn alias_only_login_reactivates_a_retained_file_signer() -> Result<()> {
     );
 
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -624,7 +617,7 @@ async fn npub_only_login_reactivates_a_retained_file_signer() -> Result<()> {
     assert!(output.status.success());
 
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -1329,7 +1322,7 @@ async fn logout_clears_broken_local_selection_before_a_valid_global_login() -> R
     assert!(output.status.success());
 
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", global.path())
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -1436,7 +1429,7 @@ async fn plaintext_is_read_without_migration_and_dangling_pointer_has_login_guid
         "missing dangling-pointer guidance: {stderr}"
     );
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -1484,7 +1477,7 @@ async fn local_logins_for_same_key_share_one_entry() -> Result<()> {
     assert_eq!(first_pointer, second_pointer);
 
     let output = first
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "auto")
         .env("NGIT_KEYRING_FILE", file.path())
         .output()
@@ -1531,7 +1524,7 @@ async fn create_named_account_then_logout(
         .await?
         .context("nostr.npub missing after account create")?;
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
         .output()

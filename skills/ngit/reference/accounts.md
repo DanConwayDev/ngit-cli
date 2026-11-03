@@ -16,7 +16,7 @@ ngit account login --local -i --profile alice     # pair a fresh signer and assi
 ngit account login --secret-storage file        # bypass the OS store; `git-config` stores plaintext and must be explicit
 ngit account create --name "Alice" --json
 ngit account export-keys --secret               # print only the nsec or nbunksec; --json adds the npub
-ngit account logout --json                      # clear login; global logout discards remote session
+ngit account logout --json                      # forget selected account; report remaining logins
 ngit account logout --keep-credentials          # retain remote session for reactivation
 ngit account logout --profile alice --forget    # delete stored profile even after logout
 ngit account forget-keys <entry> --json

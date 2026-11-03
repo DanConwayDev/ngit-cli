@@ -31,6 +31,13 @@ pub struct SubCommandArgs {
 struct WhoamiJson {
     accounts: Vec<AccountJson>,
     unavailable_accounts: Vec<UnavailableAccountJson>,
+    unavailable_logins: Vec<UnavailableLoginJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct UnavailableLoginJson {
+    scope: &'static str,
+    error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +106,7 @@ struct Account {
 }
 
 struct LoginScopes {
+    unavailable: Vec<UnavailableLoginJson>,
     local: Option<String>,
     global: Option<String>,
     system: Option<String>,
@@ -106,21 +114,44 @@ struct LoginScopes {
 
 impl LoginScopes {
     fn active(&self) -> Option<&str> {
-        self.local
-            .as_deref()
-            .or(self.global.as_deref())
-            .or(self.system.as_deref())
+        match self.active_label()? {
+            "local" => self.local.as_deref(),
+            "global" => self.global.as_deref(),
+            _ => self.system.as_deref(),
+        }
     }
 
     fn active_label(&self) -> Option<&'static str> {
-        if self.local.is_some() {
-            Some("local")
-        } else if self.global.is_some() {
-            Some("global")
-        } else if self.system.is_some() {
-            Some("system")
-        } else {
-            None
+        for (label, selected) in [
+            ("local", &self.local),
+            ("global", &self.global),
+            ("system", &self.system),
+        ] {
+            if self.unavailable.iter().any(|login| login.scope == label) {
+                return None;
+            }
+            if selected.is_some() {
+                return Some(label);
+            }
+        }
+        None
+    }
+
+    async fn read(
+        &mut self,
+        repo: Option<&Repo>,
+        source: SignerInfoSource,
+        label: &'static str,
+    ) -> Option<String> {
+        match configured_signer_npub(&repo, source).await {
+            Ok(npub) => npub,
+            Err(error) => {
+                self.unavailable.push(UnavailableLoginJson {
+                    scope: label,
+                    error: format!("{error:#}"),
+                });
+                None
+            }
         }
     }
 
@@ -143,19 +174,7 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
         .ok();
     let git_repo_ref = git_repo.as_ref();
 
-    let scopes = LoginScopes {
-        local: configured_signer_npub(&git_repo_ref, SignerInfoSource::GitLocal).await?,
-        global: if std::env::var("NGITTEST").is_err() {
-            configured_signer_npub(&git_repo_ref, SignerInfoSource::GitGlobal).await?
-        } else {
-            None
-        },
-        system: if std::env::var("NGITTEST").is_err() {
-            configured_signer_npub(&git_repo_ref, SignerInfoSource::GitSystem).await?
-        } else {
-            None
-        },
-    };
+    let scopes = read_login_scopes(git_repo_ref).await;
 
     let credential_inventory = credential_store::inventory()?;
     let mut candidate_npubs = credential_inventory.accounts;
@@ -228,9 +247,16 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
         crate::output::set(WhoamiJson {
             accounts: accounts.into_iter().map(Account::into_json).collect(),
             unavailable_accounts,
+            unavailable_logins: scopes.unavailable,
         })?;
     } else {
         print_human(&accounts);
+        for login in scopes.unavailable {
+            eprintln!(
+                "warning: {} login is unavailable: {}",
+                login.scope, login.error
+            );
+        }
         for account in unavailable_accounts {
             eprintln!(
                 "warning: inventory account {} is unavailable: {}",
@@ -239,6 +265,28 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn read_login_scopes(git_repo_ref: Option<&Repo>) -> LoginScopes {
+    let mut scopes = LoginScopes {
+        local: None,
+        global: None,
+        system: None,
+        unavailable: Vec::new(),
+    };
+    scopes.local = scopes
+        .read(git_repo_ref, SignerInfoSource::GitLocal, "local")
+        .await;
+    if std::env::var("NGITTEST").is_err() {
+        scopes.global = scopes
+            .read(git_repo_ref, SignerInfoSource::GitGlobal, "global")
+            .await;
+        scopes.system = scopes
+            .read(git_repo_ref, SignerInfoSource::GitSystem, "system")
+            .await;
+    }
+
+    scopes
 }
 
 async fn load_accounts(
@@ -399,6 +447,23 @@ fn selector(kind: &'static str, value: &str) -> SelectorJson {
     }
 }
 
+fn print_active_account(accounts: &[Account]) {
+    if let Some(account) = accounts.iter().find(|account| account.active) {
+        if account.scopes.iter().any(|scope| scope == "local") {
+            println!("Using {} for this repository.", account.name);
+            if let Some(default) = accounts
+                .iter()
+                .find(|account| account.scopes.iter().any(|scope| scope == "global"))
+            {
+                println!("Default account: {} (overridden here).", default.name);
+            }
+        } else {
+            println!("Using your default account: {}.", account.name);
+        }
+        println!();
+    }
+}
+
 fn print_human(accounts: &[Account]) {
     if accounts.is_empty() {
         println!("no accounts available");
@@ -407,12 +472,21 @@ fn print_human(accounts: &[Account]) {
         return;
     }
 
+    print_active_account(accounts);
     println!("available accounts:");
     for (index, account) in accounts.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        let mut badges = account.scopes.clone();
+        let mut badges: Vec<String> = account
+            .scopes
+            .iter()
+            .map(|scope| match scope.as_str() {
+                "local" => "repository-specific".to_string(),
+                "global" => "default".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
         if account.active {
             badges.push("active".to_string());
         }
@@ -563,11 +637,17 @@ fn print_logout_guidance(accounts: &[Account]) {
     });
     match fallback {
         Some((name, scope)) => {
-            println!("  ngit account logout                    remove local default");
-            println!("                                         activate {scope} {name}");
+            println!(
+                "  ngit account logout                    remove repository login and credentials"
+            );
+            println!(
+                "                                         use remaining {scope} account {name} if available"
+            );
         }
         None => {
-            println!("  ngit account logout                    remove local; no active account");
+            println!(
+                "  ngit account logout                    remove repository login and credentials"
+            );
         }
     }
 }

@@ -14,14 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ordinary logout forgets the selected account, including named profiles and
+  repository-specific connections, and lists remaining accounts. Plaintext
+  Git-config identity keys can no longer be silently lost:
+  use `--forget` to delete them or `--keep-credentials` to preserve them.
+
 - Remove retained credentials with `account logout ACCOUNT --forget`,
   `--profile NAME`, or `--signer`, even after logout and without contacting
   the signer. Clean deleted profile bindings and account inventory entries;
   ambiguous selections and missing targets now explain how to proceed.
-- Global logout discards remote sessions unless `--keep-credentials` is used.
-  Local logout preserves shared credentials; deleting identity keys still
-  requires `--forget`. Logout reports remaining login selections, and account
-  listings show a removal command for each signer.
+- Logout discards remote sessions unless `--keep-credentials` is used.
+  Deleting identity keys requires `--forget`; repository logout reports the
+  remaining default selection. Account listings show a removal command for
+  each signer.
 
 - Fresh remote-signer login replaces an npub’s default session instead of
   forcing users to accumulate profiles. Explicit named profiles keep their

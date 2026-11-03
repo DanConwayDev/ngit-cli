@@ -96,7 +96,7 @@ async fn global_logout_leaves_the_invoking_users_login_alone() -> Result<()> {
     write_config(&home_config, "nostr.nsec", &home_nsec)?;
 
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--forget"])
         .env_remove("NGITTEST")
         .env("GIT_CONFIG_GLOBAL", &global_config)
         .output()

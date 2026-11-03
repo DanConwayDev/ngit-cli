@@ -571,8 +571,8 @@ pub enum AccountCommands {
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
     Connect(sub_commands::login::SubCommandArgs),
-    /// clear a login and discard its remote session (local logout retains
-    /// shared credentials); --forget also deletes identity keys
+    /// remove the selected login and credentials; --forget permits deleting
+    /// identity keys
     Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
     #[command(

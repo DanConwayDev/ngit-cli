@@ -59,7 +59,7 @@ async fn activate_local_alias(
 
 async fn logout(repo: &Repo, credentials: &NamedTempFile) -> Result<()> {
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
         .output()
@@ -287,7 +287,7 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
         "ngit account login --local ACCOUNT",
         "ngit account login ACCOUNT --profile NAME",
         "ngit account logout",
-        "activate global Global Ghost",
+        "use remaining global account Global Ghost if available",
     ] {
         assert!(
             human.contains(expected),

@@ -67,7 +67,14 @@ async fn forget_after_logout_removes_only_selected_profile_without_contacting_si
     std::fs::write(file.path(), serde_json::to_vec(&initial)?)?;
     repo.git_ok(["config", "nostr.signer", "work"], "select work")
         .await?;
-    success(&command(&repo, file.path(), &["account", "logout", "--local"]).await?);
+    success(
+        &command(
+            &repo,
+            file.path(),
+            &["account", "logout", "--local", "--keep-credentials"],
+        )
+        .await?,
+    );
     assert_eq!(contents(file.path())?, initial);
     assert_eq!(repo.config("nostr.signer").await?, None);
     // The old record can even be corrupt: public profile metadata suffices.
@@ -246,7 +253,8 @@ async fn forgetting_last_profile_cleans_inventory_and_ambiguous_npub_is_rejected
 }
 
 #[tokio::test]
-async fn global_logout_preserves_identity_keys_and_locally_shared_sessions() -> Result<()> {
+async fn global_logout_requires_consent_for_identity_keys_and_removes_shared_sessions() -> Result<()>
+{
     let harness = harness().await?;
     for remote in [false, true] {
         let repo = harness.fresh_repo()?;
@@ -281,8 +289,17 @@ async fn global_logout_preserves_identity_keys_and_locally_shared_sessions() -> 
             .env("NGIT_KEYRING_FILE", file.path())
             .output()
             .await?;
-        success(&output);
-        assert_eq!(contents(file.path())?, initial);
+        if remote {
+            success(&output);
+            assert_eq!(contents(file.path())?, json!({}));
+        } else {
+            assert!(!output.status.success());
+            assert_eq!(contents(file.path())?, initial);
+            assert_eq!(
+                git2::Config::open(&global_path)?.get_string("nostr.signer")?,
+                npub
+            );
+        }
         if remote {
             assert_eq!(
                 repo.config("nostr.signer").await?.as_deref(),
