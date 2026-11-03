@@ -292,3 +292,8 @@ credential bindings are unchanged; no migration or re-pairing is needed.
 A signer profile is distinct from the account’s public Nostr display name.
 The stored Git-config keys and JSON `aliases` fields retain their existing
 names for compatibility.
+
+Login authenticates and stores the new signer before updating its selected
+scope. Failed authentication or credential storage leaves the previous login
+selection intact. A global login preserves repository-local overrides; use
+`account logout --local` to inherit the global selection in that repository.

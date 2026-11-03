@@ -3,7 +3,7 @@ use clap;
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     client::Params,
-    git::{get_git_config_item, remove_git_config_item},
+    git::get_git_config_item,
     login::{
         SignerInfo, SignerInfoSource, credential_store,
         existing::{load_existing_login, resolve_selection, selected_alias},
@@ -128,8 +128,9 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         )))
     };
 
-    let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
-    if logged_out || log_in_locally_only {
+    let (proceed, log_in_locally_only) =
+        choose_login_scope(git_repo.as_ref(), command_args.local).await?;
+    if proceed {
         let save_local = log_in_locally_only || command_args.local;
         if let Some(bunker_url) = &command_args.bunker_url {
             login_with_bunker_url(
@@ -353,67 +354,38 @@ fn implicit_alias_selection(
     })
 }
 
-/// return ( bool - logged out, bool - log in to local git locally)
-#[allow(clippy::too_many_lines)]
-async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
-    for source in if local_only || std::env::var("NGITTEST").is_ok() {
-        vec![SignerInfoSource::GitLocal]
+/// Decide where to save a replacement without clearing the working login.
+/// Authentication and credential storage can fail or be cancelled afterwards.
+async fn choose_login_scope(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
+    if Interactor::is_non_interactive() {
+        return Ok((true, local_only));
+    }
+    let source = if local_only || std::env::var("NGITTEST").is_ok() {
+        SignerInfoSource::GitLocal
     } else {
-        vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
-    } {
-        if let Ok((_, user_ref, source)) = load_existing_login(
-            &git_repo,
-            &None,
-            &None,
-            &Some(source),
-            None,
-            true,
-            false,
-            false,
-        )
-        .await
-        {
-            // In non-interactive mode, automatically logout without prompting
-            // Stored secrets are deliberately kept when switching accounts:
-            // the credential store may hold the only copy of the key, and a
-            // re-login of the same account reuses its entry. `ngit account
-            // forget-keys` removes entries explicitly.
-            if Interactor::is_non_interactive() {
-                for item in [
-                    "nostr.nsec",
-                    "nostr.npub",
-                    "nostr.bunker-uri",
-                    "nostr.bunker-app-key",
-                    "nostr.signer",
-                ] {
-                    if let Err(_error) = remove_git_config_item(
-                        if source == SignerInfoSource::GitLocal {
-                            &git_repo
-                        } else {
-                            &None
-                        },
-                        item,
-                    ) {
-                        use ngit::cli_interactor::cli_error;
-                        return Err(cli_error(
-                            &format!(
-                                "failed to edit {} git config item '{item}'",
-                                if source == SignerInfoSource::GitGlobal {
-                                    "global"
-                                } else {
-                                    "local"
-                                },
-                            ),
-                            &[],
-                            &["ngit account login --local --nsec <your-nsec>"],
-                        ));
-                    }
-                }
-                return Ok((true, local_only));
-            }
-
-            // Interactive mode: prompt user for what to do
-            let alias = selected_alias(&git_repo, &source)?;
+        SignerInfoSource::GitGlobal
+    };
+    if let Ok((_, user_ref, source)) = load_existing_login(
+        &git_repo,
+        &None,
+        &None,
+        &Some(source),
+        None,
+        true,
+        false,
+        false,
+    )
+    .await
+    {
+        let alias = selected_alias(&git_repo, &source)?;
+        let mut choices = vec![
+            "replace this login after signing in".to_string(),
+            "keep this login".to_string(),
+        ];
+        if source == SignerInfoSource::GitGlobal && git_repo.is_some() {
+            choices.push("log into this repository only".to_string());
+        }
+        return Ok(
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
@@ -422,71 +394,13 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                         &source,
                         alias.as_deref(),
                     ))
-                    .with_choices(if source == SignerInfoSource::GitGlobal {
-                        vec![
-                            "logout".to_string(),
-                            "remain logged in".to_string(),
-                            "login to local git repo only as another user".to_string(),
-                        ]
-                    } else {
-                        vec![
-                            alias.as_ref().map_or_else(
-                                || format!("logout as \"{}\"", user_ref.metadata.name),
-                                |alias| format!("logout as signer alias '{alias}'"),
-                            ),
-                            "remain logged in".to_string(),
-                        ]
-                    }),
+                    .with_choices(choices),
             )? {
-                0 => {
-                    for item in [
-                        "nostr.nsec",
-                        "nostr.npub",
-                        "nostr.bunker-uri",
-                        "nostr.bunker-app-key",
-                        "nostr.signer",
-                    ] {
-                        if let Err(error) = remove_git_config_item(
-                            if source == SignerInfoSource::GitLocal {
-                                &git_repo
-                            } else {
-                                &None
-                            },
-                            item,
-                        ) {
-                            eprintln!("{error:?}");
-
-                            eprintln!(
-                                "consider manually removing {} git config items: {}",
-                                if source == SignerInfoSource::GitGlobal {
-                                    "global"
-                                } else {
-                                    "local"
-                                },
-                                format_items_as_list(&get_global_login_config_items_set())
-                            );
-                            match Interactor::default().choice(
-                                PromptChoiceParms::default().with_default(0)
-                                .with_prompt("failed to remove the signer configuration from global Git config")
-                                .with_choices(
-                                    vec![
-                                        "continue with global login to reveal what git config items to manually set".to_string(),
-                                        "login to this local repository with a different account".to_string(),
-                                        "cancel".to_string(),
-                                    ]
-                                ),
-                            )? {
-                                0 => return Ok((true, false)),
-                                1 => return Ok((true, true)),
-                                _ => return Ok((false, local_only)),
-                            }
-                        }
-                    }
-                }
-                1 => return Ok((false, local_only)),
-                _ => return Ok((false, true)),
-            }
-        }
+                0 => (true, local_only),
+                1 => (false, local_only),
+                _ => (true, true),
+            },
+        );
     }
     Ok((true, local_only))
 }

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the previous login selected while authenticating and storing a new
+  signer. A failed login no longer signs out the working account. Global
+  login also preserves repository-local overrides.
+
 - Keep account operations scoped to the intended login: incomplete local signer
   configuration now fails instead of letting `ngit init` and other signing
   commands fall back to a global identity. `ngit account logout --local` never

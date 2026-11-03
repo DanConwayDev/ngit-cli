@@ -249,3 +249,56 @@ async fn profile_and_legacy_alias_select_the_same_stored_account() -> Result<()>
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn failed_storage_keeps_the_previous_login_and_global_switch_keeps_local() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let local = Keys::generate().secret_key().to_bech32()?;
+    let replacement = Keys::generate().secret_key().to_bech32()?;
+    assert_success(
+        &repo
+            .ngit(["account", "login", "--local", "--offline", "--nsec", &local])
+            .output()
+            .await?,
+    );
+    let before = std::fs::read(repo.dir().join(".git/config"))?;
+    // A directory cannot be used as the credential JSON file. Failure occurs
+    // after key validation, where the old login used to have been cleared.
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--local",
+            "--offline",
+            "--nsec",
+            &replacement,
+            "--secret-storage",
+            "file",
+        ])
+        .env("NGIT_KEYRING_FILE", repo.dir())
+        .output()
+        .await?;
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(repo.dir().join(".git/config"))?, before);
+    let global_config = repo.dir().join("global.gitconfig");
+    assert_success(
+        &repo
+            .ngit(["account", "login", "--offline", "--nsec", &replacement])
+            .env_remove("NGITTEST")
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .output()
+            .await?,
+    );
+    assert_eq!(std::fs::read(repo.dir().join(".git/config"))?, before);
+    assert_eq!(
+        git2::Config::open(&global_config)?.get_string("nostr.nsec")?,
+        replacement
+    );
+    Ok(())
+}

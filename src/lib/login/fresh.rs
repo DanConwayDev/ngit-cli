@@ -1354,17 +1354,6 @@ fn silently_save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
-    if global {
-        // remove local login otherwise it will override global next time ngit is called
-        if let Some(git_repo) = git_repo {
-            git_repo.remove_git_config_item("nostr.npub", false)?;
-            git_repo.remove_git_config_item("nostr.nsec", false)?;
-            git_repo.remove_git_config_item("nostr.bunker-uri", false)?;
-            git_repo.remove_git_config_item("nostr.bunker-app-key", false)?;
-            git_repo.remove_git_config_item("nostr.signer", false)?;
-        }
-    }
-
     let git_repo = if global {
         &None
     } else if git_repo.is_none() {
