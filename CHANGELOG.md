@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ngit release publish`, `ngit nsite deploy` and `ngit container` now print
+  plain Blossom upload progress lines when stderr is not a terminal (log files,
+  CI, scripts, coding agents) or when `--json` is used. Each asset and server
+  reports when it starts, how many bytes have been sent (every 10% or 15
+  seconds), retries, and when it finishes or fails. Previously the upload was
+  silent until the final replication summary, so a large upload looked like a
+  stalled signer. Interactive terminals keep the existing progress bars, and
+  `--json` stdout is unchanged.
+
 ## [3.0.5] - 2026-10-28
 
 Repair bundled OpenSSL in Unix release archives and avoid unnecessary

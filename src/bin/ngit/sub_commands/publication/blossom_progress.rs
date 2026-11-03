@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::IsTerminal,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +15,8 @@ use ngit::{
     output_mode::{is_quiet, is_verbose},
 };
 use reqwest::Url;
+
+use super::blossom_progress_lines::BlossomProgressLines;
 
 const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix:28} [{bar:22}] {bytes}/{total_bytes} {bytes_per_sec} {wide_msg}";
 const BLOSSOM_PHASE_ROW_TEMPLATE: &str =
@@ -45,6 +48,8 @@ pub(crate) struct BlossomUploadProgress {
     sequential_file: Mutex<Option<SequentialFileScope>>,
     presence: Mutex<BlossomPresenceActivity>,
     activity: Mutex<BlossomActivity>,
+    /// Append-only progress used when the bars cannot be drawn.
+    lines: Option<BlossomProgressLines>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,19 +289,26 @@ impl BlossomActivity {
 
 impl BlossomUploadProgress {
     pub(crate) fn new(json_output: bool) -> Result<Arc<Self>> {
-        let visible = !json_output && !is_quiet();
-        let draw_target = if visible {
+        // indicatif draws nothing on a stderr that is not a terminal, so logs,
+        // CI, scripts and agents get append-only lines instead. `--json` keeps
+        // stdout as one document and hides the bars, but still reports
+        // progress on stderr as plain lines.
+        let quiet = is_quiet();
+        let bars = !json_output && !quiet && std::io::stderr().is_terminal();
+        let draw_target = if bars {
             ProgressDrawTarget::stderr()
         } else {
             ProgressDrawTarget::hidden()
         };
-        Self::with_draw_target(draw_target, visible, visible && is_verbose())
+        let lines = (!quiet && !bars).then(BlossomProgressLines::stderr);
+        Self::with_draw_target(draw_target, bars, bars && is_verbose(), lines)
     }
 
     fn with_draw_target(
         draw_target: ProgressDrawTarget,
         render_to_stderr: bool,
         verbose: bool,
+        lines: Option<BlossomProgressLines>,
     ) -> Result<Arc<Self>> {
         let multi = MultiProgress::with_draw_target(draw_target);
         let heading_style =
@@ -343,6 +355,7 @@ impl BlossomUploadProgress {
             sequential_file: Mutex::new(None),
             presence: Mutex::new(BlossomPresenceActivity::default()),
             activity: Mutex::new(BlossomActivity::default()),
+            lines,
         }))
     }
 
@@ -1073,8 +1086,27 @@ fn blossom_timed_attempt_message(
     }
 }
 
+impl BlossomUploadProgress {
+    /// Number a batch by the outer sequential-file scope when one is set.
+    fn scoped_batch(&self, batch: usize, batches: usize) -> (usize, usize) {
+        self.sequential_file_scope()
+            .filter(|_| batch == 1 && batches == 1)
+            .map_or((batch, batches), |scope| (scope.index, scope.total))
+    }
+}
+
 impl BlossomProgress for BlossomUploadProgress {
     fn update(&self, event: &BlossomProgressEvent) {
+        if let Some(lines) = &self.lines {
+            let scope = match event {
+                BlossomProgressEvent::UploadBatchStarted { batch, batches, .. }
+                | BlossomProgressEvent::UploadBatchFinished { batch, batches } => {
+                    self.scoped_batch(*batch, *batches)
+                }
+                _ => (0, 0),
+            };
+            lines.update(event, scope);
+        }
         match event {
             BlossomProgressEvent::PresenceChecksStarted { .. }
             | BlossomProgressEvent::PresenceCheckFinished { .. }
@@ -1092,10 +1124,7 @@ impl BlossomProgress for BlossomUploadProgress {
                 unavailable,
                 ..
             } => {
-                let (batch, batches) = self
-                    .sequential_file_scope()
-                    .filter(|_| *batch == 1 && *batches == 1)
-                    .map_or((*batch, *batches), |scope| (scope.index, scope.total));
+                let (batch, batches) = self.scoped_batch(*batch, *batches);
                 self.start_upload_group(
                     batch,
                     batches,
@@ -1180,6 +1209,10 @@ impl Drop for BlossomUploadProgress {
 mod tests {
     use super::*;
 
+    fn hidden_progress() -> Result<Arc<BlossomUploadProgress>> {
+        BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false, None)
+    }
+
     #[test]
     fn blossom_batch_rows_reserve_the_spinner_column() {
         let rendered_bracket_column = |template: &str| {
@@ -1219,7 +1252,7 @@ mod tests {
 
     #[test]
     fn sequential_file_scope_preserves_outer_file_numbering() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress = hidden_progress()?;
         progress.set_sequential_file(2, 5, "layer.tar");
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
@@ -1247,7 +1280,7 @@ mod tests {
 
     #[test]
     fn completed_presence_checks_are_transient() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress = hidden_progress()?;
         let server = Url::parse("https://blossom.example/")?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
@@ -1276,7 +1309,7 @@ mod tests {
 
     #[test]
     fn blossom_progress_distinguishes_body_transfer_from_waiting_for_response() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress = hidden_progress()?;
         let server = Url::parse("https://blossom.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch: 1,
@@ -1360,8 +1393,12 @@ mod tests {
 
     #[test]
     fn blossom_progress_stops_rendering_while_authorization_is_signed() -> Result<()> {
-        let progress =
-            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::stderr(), true, false)?;
+        let progress = BlossomUploadProgress::with_draw_target(
+            ProgressDrawTarget::stderr(),
+            true,
+            false,
+            None,
+        )?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
@@ -1446,7 +1483,7 @@ mod tests {
 
     #[test]
     fn blossom_progress_combines_concurrent_placement_activity() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress = hidden_progress()?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
@@ -1549,7 +1586,7 @@ mod tests {
 
     #[test]
     fn compact_progress_keeps_each_server_file_row_until_batch_finishes() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress = hidden_progress()?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         let filenames = (0..6)
