@@ -968,12 +968,14 @@ pub fn command_signer_public_key(
     }
 }
 
-struct SelectorTarget {
-    npub: String,
-    credential: Option<String>,
+pub struct SelectorTarget {
+    pub npub: String,
+    pub credential: Option<String>,
 }
 
-fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<SelectorTarget> {
+/// Resolve public selection metadata without loading keys or contacting a
+/// signer.
+pub fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<SelectorTarget> {
     if selector.starts_with("npub1") {
         let npub = PublicKey::parse(selector)
             .context("--signer contains an invalid npub")?
@@ -985,6 +987,7 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Sel
         });
     }
     let alias = credential_store::normalize_alias(selector)?;
+    credential_store::ensure_profile_not_forgotten(&alias)?;
     let key = format!("nostr.signer-alias.{alias}");
     let mut store_error = None;
     match credential_store::retrieve_signer_alias_from(&alias, credential_store::Backend::Os) {

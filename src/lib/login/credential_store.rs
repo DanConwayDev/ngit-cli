@@ -47,6 +47,7 @@ const ALIAS_RECORD_VERSION: u8 = 1;
 const ALIAS_PREFIX: &str = "alias:";
 const ALIAS_CREDENTIAL_PREFIX: &str = "alias-credential:";
 const ALIAS_DEFAULT_CREDENTIAL: &str = "default";
+const FORGOTTEN_PROFILE_PREFIX: &str = "forgotten-profile:";
 const SIGNER_PREFIX: &str = "signer:";
 const ALIAS_SIGNER_PREFIX: &str = "signer-alias:";
 
@@ -598,8 +599,28 @@ pub fn store_alias(
         .context("failed to store the signer alias credential binding")?;
     // Keep this value as a raw npub: released clients parse it directly.
     let stored = store_value(&name, &npub, policy)?;
+    reactivate_profile(alias)?;
     remember_alias_for_listing(alias, &npub);
     Ok(stored)
+}
+
+pub(crate) fn reactivate_profile(alias: &str) -> Result<()> {
+    let alias = normalize_alias(alias)?;
+    file_store::delete(&format!("{FORGOTTEN_PROFILE_PREFIX}{alias}"))
+        .context("failed to reactivate the previously removed profile")?;
+    Ok(())
+}
+
+/// Prevent old Git alias mappings from silently selecting a different session
+/// after this machine's profile has been explicitly removed.
+pub fn ensure_profile_not_forgotten(alias: &str) -> Result<()> {
+    let alias = normalize_alias(alias)?;
+    if file_store::get_value(&format!("{FORGOTTEN_PROFILE_PREFIX}{alias}"))?.is_some() {
+        bail!(
+            "signer profile '{alias}' was removed; pair it again with `ngit account login -i --profile {alias}`"
+        );
+    }
+    Ok(())
 }
 
 /// Credential-store aliases are machine-wide because they take precedence
@@ -1040,16 +1061,100 @@ pub fn forget(name: &str) -> Result<bool> {
     if !valid_entry_name(name) {
         return Ok(false);
     }
+    let inventory = inventory()?;
+    let mut aliases = Vec::new();
+    let mut npubs = BTreeSet::new();
+    if let Some(npub) = name
+        .strip_prefix(SIGNER_PREFIX)
+        .or_else(|| parse_pointer(name))
+    {
+        npubs.insert(npub.to_string());
+    }
+    for (alias, npub) in &inventory.aliases {
+        let is_mapping = name == alias_entry_name(alias)?;
+        if !is_mapping && !npubs.contains(npub) && name != alias_signer_entry_name(alias)? {
+            continue;
+        }
+        let bound = match retrieve_signer_alias(alias) {
+            Ok(binding) => match binding.credential {
+                Some(entry) => entry,
+                None if stored_entry_exists(npub)? => npub.clone(),
+                None => format!("{SIGNER_PREFIX}{npub}"),
+            },
+            Err(LookupError::Missing(_)) => continue,
+            Err(error) => return Err(anyhow!(error)),
+        };
+        if is_mapping || name == bound {
+            aliases.push(alias.clone());
+            npubs.insert(npub.clone());
+        }
+    }
+    // Keep only a public guard against stale Git mappings in other repos.
+    // Write guards before deletion so a failed write leaves credentials intact.
+    for alias in &aliases {
+        file_store::set_value(&format!("{FORGOTTEN_PROFILE_PREFIX}{alias}"), "removed")?;
+    }
     let mut deleted = forget_from_backends(name)?;
-    if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
-        deleted |= forget_from_backends(&alias_credential_entry_name(alias)?)?;
-        if let Err(error) = account_registry::forget_alias(alias) {
-            eprintln!(
-                "warning: the signer alias was removed, but its account-list index entry could not be updated: {error:#}"
-            );
+    for alias in aliases {
+        deleted |= forget_from_backends(&alias_entry_name(&alias)?)?;
+        deleted |= forget_from_backends(&alias_credential_entry_name(&alias)?)?;
+        account_registry::forget_alias(&alias)?;
+    }
+    for npub in npubs {
+        // Keep the identity in the inventory only while another credential
+        // remains. Cached public Nostr metadata is independent of this index.
+        let remaining = inventory_for_npub(&npub)?;
+        if remaining.is_empty() {
+            account_registry::forget_account(&npub)?;
         }
     }
     Ok(deleted)
+}
+
+fn stored_entry_exists(name: &str) -> Result<bool> {
+    match retrieve_value(name) {
+        Ok(_) | Err(LookupError::Invalid(_)) => Ok(true),
+        Err(LookupError::Missing(_)) => Ok(false),
+        Err(error) => Err(anyhow!(error)),
+    }
+}
+
+fn inventory_for_npub(npub: &str) -> Result<Vec<String>> {
+    let mut entries = vec![npub.to_string(), signer_entry_name(npub)?];
+    for (alias, owner) in inventory()?.aliases {
+        if owner == npub {
+            entries.push(alias_signer_entry_name(&alias)?);
+        }
+    }
+    entries
+        .into_iter()
+        .filter_map(|entry| match stored_entry_exists(&entry) {
+            Ok(true) => Some(Ok(entry)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+/// Select an exact stored credential for removal without decoding its secret.
+/// This also works for corrupt records and offline remote signers.
+pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<String>> {
+    let npub = canonical_npub(npub)?;
+    if let Some(credential) = credential {
+        return Ok(vec![credential.to_string()]);
+    }
+    let entries = inventory_for_npub(&npub)?;
+    // Match normal bare-npub selection precedence, rather than deleting all
+    // the identity's explicit profiles.
+    for default in [&npub, &signer_entry_name(&npub)?] {
+        if entries.contains(default) {
+            return Ok(vec![default.clone()]);
+        }
+    }
+    if entries.len() > 1 {
+        bail!("account has multiple remote-signer profiles; select one with --profile NAME");
+    }
+    Ok(entries)
 }
 
 fn forget_from_backends(name: &str) -> Result<bool> {
@@ -1249,6 +1354,11 @@ mod account_registry {
                 Ok(true)
             }
         })
+    }
+
+    pub(super) fn forget_account(npub: &str) -> Result<()> {
+        let npub = canonical_npub(npub)?;
+        update(|registry| Ok(registry.accounts.remove(&npub)))
     }
 
     pub(super) fn forget_alias(alias: &str) -> Result<()> {
@@ -1474,9 +1584,13 @@ mod file_store {
             if let Some(npub) = parse_pointer(name) {
                 accounts.insert(canonical_npub(npub)?);
             } else if name.strip_prefix(ALIAS_SIGNER_PREFIX).is_some() {
-                let record: BunkerSignerRecord = serde_json::from_str(&value)
-                    .with_context(|| format!("credential '{name}' is not a valid signer record"))?;
-                accounts.insert(canonical_npub(&record.npub)?);
+                // Inventory is public metadata, not validation of the secret.
+                // A broken session must remain removable via its profile.
+                if let Ok(record) = serde_json::from_str::<BunkerSignerRecord>(&value) {
+                    if let Ok(npub) = canonical_npub(&record.npub) {
+                        accounts.insert(npub);
+                    }
+                }
             } else if let Some(npub) = name.strip_prefix(SIGNER_PREFIX) {
                 accounts.insert(canonical_npub(npub)?);
             } else if let Some(alias) = name.strip_prefix(ALIAS_PREFIX) {
@@ -1488,6 +1602,7 @@ mod file_store {
                 );
             }
         }
+        accounts.extend(aliases.values().cloned());
         Ok(CredentialInventory { accounts, aliases })
     }
 

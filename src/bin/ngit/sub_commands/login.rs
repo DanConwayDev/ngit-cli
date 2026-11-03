@@ -3,7 +3,6 @@ use clap;
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     client::Params,
-    git::get_git_config_item,
     login::{
         SignerInfo, SignerInfoSource, credential_store,
         existing::{load_existing_login, resolve_selection, selected_alias},
@@ -403,32 +402,6 @@ async fn choose_login_scope(git_repo: Option<&Repo>, local_only: bool) -> Result
         );
     }
     Ok((true, local_only))
-}
-
-pub fn get_global_login_config_items_set() -> Vec<&'static str> {
-    [
-        "nostr.nsec",
-        "nostr.npub",
-        "nostr.bunker-uri",
-        "nostr.bunker-app-key",
-        "nostr.signer",
-    ]
-    .iter()
-    .copied()
-    .filter(|item| get_git_config_item(&None, item).is_ok_and(|item| item.is_some()))
-    .collect::<Vec<&str>>()
-}
-
-pub fn format_items_as_list(items: &[&str]) -> String {
-    match items.len() {
-        0 => String::new(),
-        1 => items[0].to_string(),
-        2 => format!("{} and {}", items[0], items[1]),
-        _ => {
-            let all_but_last = items[..items.len() - 1].join(", ");
-            format!("{}, and {}", all_but_last, items[items.len() - 1])
-        }
-    }
 }
 
 #[cfg(test)]

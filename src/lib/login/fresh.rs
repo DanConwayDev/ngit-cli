@@ -1091,6 +1091,7 @@ fn save_signer_alias_into(
         remove_git_config_item(scope, "nostr.bunker-uri")?;
         remove_git_config_item(scope, "nostr.bunker-app-key")?;
     }
+    credential_store::reactivate_profile(&alias)?;
     Ok(())
 }
 

@@ -571,8 +571,8 @@ pub enum AccountCommands {
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
     Connect(sub_commands::login::SubCommandArgs),
-    /// remove nostr account details from git config; keeps the stored
-    /// secret unless --forget is passed
+    /// clear a login and discard its remote session (local logout retains
+    /// shared credentials); --forget also deletes identity keys
     Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
     #[command(

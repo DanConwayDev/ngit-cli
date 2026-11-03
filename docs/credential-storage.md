@@ -194,12 +194,40 @@ when it is already absent), or `--global` to clear only the global login while
 preserving the local one. `--local` requires a Git repository. After removing a
 local login, subsequent commands can use the remaining global login.
 
-Logout removes the login from git config but deliberately
-keeps the stored secret: the credential store may hold the only copy of an
-identity key, so deleting it on logout could destroy the account. Logout
-prints the exact command to remove the secret as well —
-`ngit account forget-keys <entry>` — and `ngit account logout --forget`
-does both in one step.
+Global logout discards its stored remote session by default. Add
+`--keep-credentials` to retain it for later reactivation. Repository-local
+logout retains machine-wide credentials because other repositories can share
+them. Explicit global logout also retains a session selected by the current
+repository's local override. Logout reports the remaining selection, including
+when removing a local override exposes the global login.
+
+Stored identity keys (nsecs) are retained unless `--forget` explicitly requests
+deletion. Explicit plaintext `git-config` storage keeps its existing behavior:
+logout removes the values from that scope, so retain your own key backup.
+
+To delete a retained credential after logout, or when its signer is offline:
+
+```bash
+ngit account logout --profile work --forget
+ngit account logout <npub> --forget
+ngit --signer work account logout --forget
+```
+
+Removal uses public selection metadata and does not contact the remote signer.
+An npub selects its default credential; multiple additional profiles without a
+default require `--profile NAME`. Deletion removes the selected credential and
+its dependent profile bindings, cleans the account inventory, and preserves
+other profiles. A public removal marker prevents old Git alias mappings in
+other repositories from falling back to another connection; pairing the named
+profile again clears that marker. No signing material is retained by it.
+`--forget` deletes shared credentials machine-wide, even with
+`--local`; other repositories pointing at that credential will need login.
+It does not revoke permissions in the remote signer application.
+
+`logout --forget` without an active login or explicit target fails with
+instructions rather than silently doing nothing. `account whoami` prints a
+removal command for each available signer. The low-level
+`account forget-keys ENTRY` command remains available for direct recovery.
 
 ## Interop convention
 

@@ -453,6 +453,14 @@ fn print_human(accounts: &[Account]) {
                 },
                 selectors.join(", ")
             );
+            if let Some(profile) = signer.aliases.iter().next() {
+                println!("      remove: ngit account logout --profile {profile} --forget");
+            } else if signer.npub_default {
+                println!(
+                    "      remove: ngit account logout {} --forget",
+                    account.npub
+                );
+            }
         }
         if account.name != account.npub
             && !account
