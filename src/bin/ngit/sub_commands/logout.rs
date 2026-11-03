@@ -19,6 +19,10 @@ pub struct SubCommandArgs {
     /// exact named signer profile to remove
     #[arg(long, value_name = "NAME", conflicts_with = "signer")]
     pub profile: Option<String>,
+    /// sign out all saved profiles and clear this repo plus non-local Git
+    /// logins
+    #[arg(long, conflicts_with_all = ["local", "global", "profile", "account", "signer"])]
+    pub all: bool,
     /// remove only this repository's login; never fall back to global logout
     #[arg(long, conflicts_with = "global")]
     pub local: bool,
@@ -45,6 +49,12 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     let repo = Repo::discover().ok();
     if args.local && repo.is_none() {
         bail!("cannot log out locally outside a git repository");
+    }
+    if args.all {
+        if signer.info.is_some() {
+            bail!("logout --all does not accept signing credentials");
+        }
+        return super::logout_all::launch(args, repo.as_ref()).await;
     }
     let command_selector = match signer.info {
         Some(SignerInfo::Selection { selector }) => Some(selector.as_str()),

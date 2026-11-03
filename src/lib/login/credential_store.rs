@@ -1136,6 +1136,49 @@ fn inventory_for_npub(npub: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+/// Enumerate ngit-managed entries, including orphaned file-store records.
+/// OS keyrings cannot be enumerated portably, so their entries are discovered
+/// through the public registry maintained by successful ngit writes.
+pub fn all_entries() -> Result<Vec<String>> {
+    let inventory = inventory()?;
+    let mut entries = file_store::entry_names()?;
+    for npub in inventory.accounts {
+        entries.insert(npub.clone());
+        entries.insert(signer_entry_name(&npub)?);
+    }
+    for alias in inventory.aliases.keys() {
+        entries.insert(alias_entry_name(alias)?);
+        entries.insert(alias_credential_entry_name(alias)?);
+        entries.insert(alias_signer_entry_name(alias)?);
+    }
+    entries
+        .into_iter()
+        .filter_map(|entry| match stored_entry_exists(&entry) {
+            Ok(true) => Some(Ok(entry)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+/// Remove an enumerated collection from both credential backends. Preserve
+/// public removal guards so stale repository selectors fail closed.
+pub fn forget_entries(entries: &[String]) -> Result<()> {
+    // Delete credentials before mappings, while the bindings still identify
+    // dependent profiles. The low-level mapping entries are removed last.
+    for metadata in [false, true] {
+        for entry in entries {
+            let is_metadata =
+                entry.starts_with(ALIAS_PREFIX) || entry.starts_with(ALIAS_CREDENTIAL_PREFIX);
+            if metadata == is_metadata {
+                forget(entry)
+                    .with_context(|| format!("failed to remove credential entry {entry}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Select an exact stored credential for removal without decoding its secret.
 /// This also works for corrupt records and offline remote signers.
 pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<String>> {
@@ -1567,6 +1610,16 @@ mod file_store {
 
     pub fn get_value(name: &str) -> Result<Option<String>> {
         get_value_at(&path()?, name)
+    }
+
+    pub(super) fn entry_names() -> Result<BTreeSet<String>> {
+        let prefix = format!("{SERVICE}/");
+        Ok(read(&path()?)?
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .filter(|name| super::valid_entry_name(name))
+            .map(str::to_string)
+            .collect())
     }
 
     pub(super) fn inventory() -> Result<CredentialInventory> {

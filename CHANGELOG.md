@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Add `account logout --all` to remove known saved sessions across credential
+  backends and clear current-repository and non-local Git login configuration,
+  including conditional includes, without scanning other repositories.
+  Identity keys require `--forget` or `--keep-credentials` before any changes.
 - Ordinary logout forgets the selected account, including named profiles and
   repository-specific connections, and lists remaining accounts. Plaintext
   Git-config identity keys can no longer be silently lost:

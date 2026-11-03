@@ -16,6 +16,7 @@ pub mod label;
 pub mod list;
 pub mod login;
 pub mod logout;
+mod logout_all;
 pub mod nsite;
 pub mod pr_merge;
 pub mod pr_status;

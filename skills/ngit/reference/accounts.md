@@ -17,6 +17,8 @@ ngit account login --secret-storage file        # bypass the OS store; `git-conf
 ngit account create --name "Alice" --json
 ngit account export-keys --secret               # print only the nsec or nbunksec; --json adds the npub
 ngit account logout --json                      # forget selected account; report remaining logins
+ngit account logout --all                       # remove known remote sessions and clear current/non-local config
+ngit account logout --all --forget              # also delete identity nsecs (explicitly destructive)
 ngit account logout --keep-credentials          # retain remote session for reactivation
 ngit account logout --profile alice --forget    # delete stored profile even after logout
 ngit account forget-keys <entry> --json

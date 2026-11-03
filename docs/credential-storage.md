@@ -205,6 +205,15 @@ global account remains authenticated. Repeating bare logout after removing the
 repository override targets the default account; use `--local` when only the
 repository-specific login should be affected.
 
+Use `ngit account logout --all` to remove all known saved profiles and remote
+sessions from both credential backends. It clears the current repository's
+login and non-local Git login configuration (user, XDG and enabled system
+files), including referenced files even when their include conditions are
+inactive here. It respects Git's config environment overrides. It never
+searches for other repositories: their local plaintext credentials and
+selections may remain. Shared stored sessions removed by `--all` become
+unavailable to those repositories.
+
 If logout would delete an identity nsec, it stops before making changes.
 Choose `--forget` to delete identity keys as well, or
 `--keep-credentials` to clear selections while preserving stored
