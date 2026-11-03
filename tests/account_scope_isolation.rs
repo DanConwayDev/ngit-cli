@@ -214,3 +214,38 @@ async fn local_logout_outside_a_repository_preserves_global_login() -> Result<()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn profile_and_legacy_alias_select_the_same_stored_account() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32()?;
+    for flag in ["--profile", "--alias"] {
+        let output = repo
+            .ngit([
+                "account",
+                "login",
+                "--local",
+                "--offline",
+                "--nsec",
+                &keys.secret_key().to_bech32()?,
+                flag,
+                "work",
+            ])
+            .output()
+            .await?;
+        assert_success(&output);
+        assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("work"));
+        assert_eq!(
+            repo.config("nostr.npub").await?.as_deref(),
+            Some(npub.as_str())
+        );
+    }
+    Ok(())
+}

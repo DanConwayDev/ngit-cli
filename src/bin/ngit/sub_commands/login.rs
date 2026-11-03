@@ -21,7 +21,7 @@ use crate::{
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
-    /// stored account to activate (full npub, alias, or exact Nostr profile
+    /// stored account to activate (full npub, profile, or exact Nostr display
     /// name)
     #[arg(
         value_name = "ACCOUNT",
@@ -71,8 +71,8 @@ pub struct SubCommandArgs {
     #[arg(long, value_name = "auto|file|git-config")]
     secret_storage: Option<String>,
 
-    /// save or reactivate a reusable name for an account
-    #[arg(long, value_name = "ALIAS")]
+    /// save or reactivate a named signer profile for an account
+    #[arg(long = "profile", alias = "alias", value_name = "NAME")]
     alias: Option<String>,
 }
 
@@ -168,7 +168,7 @@ fn missing_login_error() -> anyhow::Error {
         &[
             (
                 "ACCOUNT",
-                "reactivate by full npub, alias, or exact Nostr profile name",
+                "reactivate by full npub, profile, or exact Nostr display name",
             ),
             ("--nsec <key>", "provide secret key (nsec or hex)"),
             (
@@ -180,7 +180,7 @@ fn missing_login_error() -> anyhow::Error {
                 "--signer <alias|npub|nostr-display-name>",
                 "reactivate a stored signer",
             ),
-            ("--alias <alias>", "reactivate an existing stored alias"),
+            ("--profile <name>", "reactivate an existing stored profile"),
             ("--interactive", "for interactive nostr connect login"),
         ],
         &[
@@ -188,7 +188,7 @@ fn missing_login_error() -> anyhow::Error {
             "ngit account login --nsec <your-nsec>",
             "ngit account login --nbunksec-file <path>",
             "ngit account login --bunker-url <bunker-url>",
-            "ngit account login --local --alias <stored-alias>",
+            "ngit account login --local --profile <stored-profile>",
             "ngit account create",
         ],
     )

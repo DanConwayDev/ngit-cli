@@ -426,9 +426,9 @@ fn print_human(accounts: &[Account]) {
             println!("  nip05: {nip05}");
         }
         if account.aliases.is_empty() {
-            println!("  aliases: none");
+            println!("  profiles: none");
         } else {
-            println!("  aliases: {}", account.aliases.join(", "));
+            println!("  profiles: {}", account.aliases.join(", "));
         }
         println!("  signers:");
         for signer in &account.signers {
@@ -460,23 +460,23 @@ fn print_human(accounts: &[Account]) {
                 .iter()
                 .any(|selector| selector.kind == "profile")
         {
-            println!("  account name is ambiguous; use an available npub or alias as ACCOUNT");
+            println!("  account name is ambiguous; use an available npub or profile as ACCOUNT");
         }
         if !account.signers.iter().any(|signer| signer.npub_default) {
-            println!("  npub has multiple signer sessions; use an alias as ACCOUNT");
+            println!("  npub has multiple signer sessions; use a profile as ACCOUNT");
         }
     }
 
     println!();
-    println!("ACCOUNT can be any listed alias, an available full npub, or your exact");
-    println!("Nostr profile name.");
+    println!("ACCOUNT can be any listed profile, an available full npub, or your exact");
+    println!("Nostr display name.");
     println!();
     println!("commands:");
     println!("  ngit --signer ACCOUNT <command>        one ngit command");
     println!("  git -c nostr.signer=ACCOUNT <command>  one Git command");
     println!("  ngit account login ACCOUNT             set global default");
     println!("  ngit account login --local ACCOUNT     set repository default");
-    println!("  ngit account login ACCOUNT --alias ALIAS  add alias; set global default");
+    println!("  ngit account login ACCOUNT --profile NAME  name profile; set global default");
     print_logout_guidance(accounts);
 }
 

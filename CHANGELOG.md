@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Name reusable signer configurations with `account login --profile NAME`.
+  The old `--alias` spelling, stored bindings and JSON fields remain compatible.
+
 ### Fixed
 
 - Keep account operations scoped to the intended login: incomplete local signer

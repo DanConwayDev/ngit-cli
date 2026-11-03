@@ -77,11 +77,11 @@ Aliases are resolved from the OS credential store first, then
 is the direct fallback for systems where the OS credential store is
 unavailable. `nostr.signer = fred` (or an
 npub) makes a signer the default for that Git-config scope. `ngit account login
---alias fred` writes the mapping to the selected Git-config scope and, unless
+--profile fred` writes the mapping to the selected Git-config scope and, unless
 `git-config` secret storage was selected, the selected credential backend as
-well. After logout retains a stored signer, `ngit account login --local --alias
+well. After logout retains a stored signer, `ngit account login --local --profile
 fred` reactivates it without requiring the nsec or bunker URL again.
-`ngit account login --local -i --alias fred` instead starts a fresh interactive
+`ngit account login --local -i --profile fred` instead starts a fresh interactive
 login and assigns the resulting connection to `fred`, replacing that alias's
 previous signer connection while leaving the bare-npub default intact.
 
@@ -92,7 +92,7 @@ alias-specific connection without a default makes bare-npub selection
 ambiguous, so an alias is required. Pairing a different remote-signer
 connection for an npub that already has a default is refused before the stored
 connection is replaced. Supply a new alias, for example `ngit account login
---local --nbunksec-file dedicated.nbunksec --alias dedicated`, to retain both
+--local --nbunksec-file dedicated.nbunksec --profile dedicated`, to retain both
 sessions and bind that alias to the new one. An explicit `--secret-storage
 git-config` policy can still create a scoped plaintext override, but a
 credential collision never offers that as its automatic fallback.
@@ -283,3 +283,12 @@ the npub. Use `ngit --signer <account> account export-keys` to select a
 non-default stored account.
 
 [`keyring`]: https://crates.io/crates/keyring
+
+### Named signer profiles
+
+`account login --profile NAME` names or reactivates a signer profile. The old
+`--alias` spelling remains accepted for scripts. Existing alias names and
+credential bindings are unchanged; no migration or re-pairing is needed.
+A signer profile is distinct from the account’s public Nostr display name.
+The stored Git-config keys and JSON `aliases` fields retain their existing
+names for compatibility.

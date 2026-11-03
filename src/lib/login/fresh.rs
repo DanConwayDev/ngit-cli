@@ -1018,7 +1018,7 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
             format!("{scope} now selects signer {selector}")
         }
         SignerInfo::Selection { selector } => {
-            format!("{scope} now selects signer alias '{selector}'")
+            format!("{scope} now selects signer profile '{selector}'")
         }
         SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some() => {
             format!("{scope} now points to the stored account secret")
@@ -1064,7 +1064,7 @@ fn save_signer_alias_into(
         .transpose()
         .context("failed to save signer alias in the credential store")?
         .map(|(entry, backend)| CredentialStorageReport {
-            subject: format!("signer alias '{alias}'"),
+            subject: format!("signer profile '{alias}'"),
             entry,
             backend,
             os_fallback: policy == SecretStorage::Auto
@@ -1696,7 +1696,7 @@ mod storage_reporting_tests {
             os_fallback: true,
         };
         let alias = CredentialStorageReport {
-            subject: "signer alias 'dcagent'".to_string(),
+            subject: "signer profile 'dcagent'".to_string(),
             entry: "alias:dcagent".to_string(),
             backend: Backend::File,
             os_fallback: true,
@@ -1706,7 +1706,7 @@ mod storage_reporting_tests {
         assert_eq!(
             credential_storage_messages(Some(&secret), Some(&alias), path),
             vec![format!(
-                "signer alias 'dcagent' and associated account secret are stored in {path} (OS credential store unavailable)"
+                "signer profile 'dcagent' and associated account secret are stored in {path} (OS credential store unavailable)"
             )]
         );
         assert_eq!(
@@ -1731,7 +1731,7 @@ mod storage_reporting_tests {
             os_fallback: false,
         };
         let alias = CredentialStorageReport {
-            subject: "signer alias 'dcagent'".to_string(),
+            subject: "signer profile 'dcagent'".to_string(),
             entry: "alias:dcagent".to_string(),
             backend: Backend::Os,
             os_fallback: false,
@@ -1740,7 +1740,7 @@ mod storage_reporting_tests {
         assert_eq!(
             credential_storage_messages(Some(&secret), Some(&alias), "unused"),
             vec![
-                "signer alias 'dcagent' and associated account secret are stored in the OS credential store as entries 'alias:dcagent' and 'npub1account' under service 'nostr'"
+                "signer profile 'dcagent' and associated account secret are stored in the OS credential store as entries 'alias:dcagent' and 'npub1account' under service 'nostr'"
                     .to_string()
             ]
         );
@@ -1763,7 +1763,7 @@ mod status_message_tests {
                 SignerInfo::Selection {
                     selector: "dcagent".to_string(),
                 },
-                "this repository's local Git config now selects signer alias 'dcagent'",
+                "this repository's local Git config now selects signer profile 'dcagent'",
             ),
             (
                 true,

@@ -9,10 +9,10 @@ ngit account whoami --json --offline            # every usable signer with npub,
 ngit account login                              # interactive; the secret goes to the OS credential store or ngit's user-only file store
 ngit account login alice                        # make a stored identity the global default (alias, npub, or exact profile name)
 ngit account login --local alice                # …this repository's default, including for git push
-ngit account login --nsec-file /private/key --alias alice
-ngit account login --nbunksec-file /private/connection --alias alice   # store an established NIP-46 session
+ngit account login --nsec-file /private/key --profile alice
+ngit account login --nbunksec-file /private/connection --profile alice   # store an established NIP-46 session
 ngit account login --bunker-url bunker://...    # pair a remote signer
-ngit account login --local -i --alias alice     # pair a fresh signer and assign or replace this alias
+ngit account login --local -i --profile alice     # pair a fresh signer and assign or replace this alias
 ngit account login --secret-storage file        # bypass the OS store; `git-config` stores plaintext and must be explicit
 ngit account create --name "Alice" --json
 ngit account export-keys --secret               # print only the nsec or nbunksec; --json adds the npub
@@ -36,7 +36,7 @@ credentials.
 
 **Several NIP-46 connections for one npub.** The first connection stays the
 default selected by the bare npub; ngit refuses to replace it with another
-unaliased connection. Log in with `--alias` to keep an extra connection and
+unaliased connection. Log in with `--profile` to keep an extra connection and
 select it by alias. Older ngit versions ignore the exact-session binding and
 select the identity's default connection.
 

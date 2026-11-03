@@ -275,17 +275,17 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
     let local_npub_line = format!("  npub: {locally_logged_in}");
     for expected in [
         local_npub_line.as_str(),
-        "  aliases: dcdev, shipwright",
+        "  profiles: dcdev, shipwright",
         "    local key via npub, dcdev, shipwright [local, active]",
         "Plain Jane",
-        "  aliases: none",
-        "ACCOUNT can be any listed alias, an available full npub",
-        "or your exact\nNostr profile name.",
+        "  profiles: none",
+        "ACCOUNT can be any listed profile, an available full npub",
+        "or your exact\nNostr display name.",
         "ngit --signer ACCOUNT <command>",
         "git -c nostr.signer=ACCOUNT <command>",
         "ngit account login ACCOUNT",
         "ngit account login --local ACCOUNT",
-        "ngit account login ACCOUNT --alias ALIAS",
+        "ngit account login ACCOUNT --profile NAME",
         "ngit account logout",
         "activate global Global Ghost",
     ] {

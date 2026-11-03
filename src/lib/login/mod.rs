@@ -192,7 +192,7 @@ pub fn logged_out_message(
 pub fn login_identity(profile_name: &str, alias: Option<&str>) -> String {
     alias.map_or_else(
         || profile_name.to_string(),
-        |alias| format!("signer alias '{alias}'"),
+        |alias| format!("signer profile '{alias}'"),
     )
 }
 
@@ -247,11 +247,11 @@ mod display_tests {
         }
         assert_eq!(
             logged_in_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
-            "logged in to this local repository as signer alias 'dcagent'"
+            "logged in to this local repository as signer profile 'dcagent'"
         );
         assert_eq!(
             logged_out_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
-            "logged out of this local repository as signer alias 'dcagent'"
+            "logged out of this local repository as signer profile 'dcagent'"
         );
     }
 }
