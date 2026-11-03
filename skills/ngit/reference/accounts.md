@@ -34,11 +34,11 @@ holds stored credentials, and only the resolved npub is persisted. Selection
 fails closed when the selector is missing, ambiguous, or backed by invalid
 credentials.
 
-**Several NIP-46 connections for one npub.** The first connection stays the
-default selected by the bare npub; ngit refuses to replace it with another
-unaliased connection. Log in with `--profile` to keep an extra connection and
-select it by alias. Older ngit versions ignore the exact-session binding and
-select the identity's default connection.
+**Several NIP-46 connections for one npub.** Fresh login replaces the default
+remote session for that npub. Use `--profile NAME` to keep another connection
+or replace that named profile's connection. Other named profiles retain their
+exact sessions. An existing nsec is preserved; use a named profile to add a
+remote signer beside it.
 
 **nbunksec** is a portable established connection: remote-signer pubkey, client
 secret, relays, and optional pairing secret. It holds no npub, so one-shot use

@@ -88,7 +88,7 @@ impl fmt::Display for SignerCredentialConflict {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "a different signer credential is already stored for {}; refusing to replace it. Re-run with `--alias <name>` to store this remote signer connection separately",
+            "a different signer credential is already stored for {}; refusing to replace it. Re-run with `--profile <name>` to store this remote signer connection separately",
             self.npub
         )
     }
@@ -391,7 +391,12 @@ pub fn store_bunker_signer(
     );
     let signer = parse_bunker_signer("new remote signer", &npub, serialized.as_str())?;
     let name = bunker_signer_entry_for_store(&npub, alias, &signer)?;
+    preserve_other_default_profiles(&name, &npub, alias, serialized.as_str(), policy)?;
     let stored = store_value(&name, serialized.as_str(), policy)?;
+    if stored.1 == Backend::Os {
+        // A superseded fallback must not resurrect when the OS store is absent.
+        file_store::delete(&name).context("failed to retire the old file-store session")?;
+    }
     remember_account_for_listing(&npub);
     Ok(stored)
 }
@@ -406,7 +411,7 @@ fn bunker_signer_entry_for_store(
     let existing_default = bunker_signers_named(&default_name, npub)?;
 
     let Some(alias) = alias else {
-        if existing_nsec || existing_default.iter().any(|stored| stored != signer) {
+        if existing_nsec {
             return Err(SignerCredentialConflict {
                 npub: npub.to_string(),
             }
@@ -415,6 +420,16 @@ fn bunker_signer_entry_for_store(
         return Ok(default_name);
     };
 
+    // Re-pairing an existing profile replaces exactly its bound connection.
+    match retrieve_signer_alias(alias) {
+        Ok(binding) if binding.npub == npub => {
+            if let Some(credential) = binding.credential {
+                return Ok(credential);
+            }
+        }
+        Ok(_) | Err(LookupError::Missing(_)) => {}
+        Err(error) => return Err(anyhow!(error)),
+    }
     let alias_name = alias_signer_entry_name(alias)?;
     if !bunker_signers_named(&alias_name, npub)?.is_empty() {
         return Ok(alias_name);
@@ -424,6 +439,41 @@ fn bunker_signer_entry_for_store(
     } else {
         Ok(default_name)
     }
+}
+
+/// Legacy named profiles may point at the default slot. Keep their exact
+/// connection when another profile (or a bare-npub login) replaces that slot.
+fn preserve_other_default_profiles(
+    name: &str,
+    npub: &str,
+    selected_alias: Option<&str>,
+    replacement: &str,
+    policy: SecretStorage,
+) -> Result<()> {
+    if name != signer_entry_name(npub)? {
+        return Ok(());
+    }
+    let previous = match retrieve_value(name) {
+        Ok(value) if value != replacement => Zeroizing::new(value),
+        Ok(_) | Err(LookupError::Missing(_)) => return Ok(()),
+        Err(error) => return Err(anyhow!(error)),
+    };
+    for (alias, alias_npub) in inventory()?.aliases {
+        if alias_npub != npub || selected_alias == Some(alias.as_str()) {
+            continue;
+        }
+        let binding = retrieve_signer_alias(&alias)?;
+        if binding
+            .credential
+            .as_deref()
+            .is_none_or(|entry| entry == name)
+        {
+            let dedicated = alias_signer_entry_name(&alias)?;
+            store_value(&dedicated, previous.as_str(), policy)?;
+            store_alias(&alias, npub, Some(&dedicated), policy)?;
+        }
+    }
+    Ok(())
 }
 
 fn signer_nsec_exists(npub: &str) -> Result<bool> {

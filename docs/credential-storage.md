@@ -90,12 +90,13 @@ default has been removed and exactly one alias-specific connection remains,
 the npub and that alias both select the remaining connection. More than one
 alias-specific connection without a default makes bare-npub selection
 ambiguous, so an alias is required. Pairing a different remote-signer
-connection for an npub that already has a default is refused before the stored
-connection is replaced. Supply a new alias, for example `ngit account login
---local --nbunksec-file dedicated.nbunksec --profile dedicated`, to retain both
-sessions and bind that alias to the new one. An explicit `--secret-storage
-git-config` policy can still create a scoped plaintext override, but a
-credential collision never offers that as its automatic fallback.
+connection without `--profile` replaces the default remote session for that
+npub after authentication. Use `--profile NAME` to retain an additional
+connection, or to replace that named profile's connection. Existing named
+profiles keep their exact sessions when the default is replaced. An identity
+key is never overwritten by this operation: when an nsec exists, use a named
+profile for the additional remote signer. Replacement does not revoke the
+old client remotely. Explicit `git-config` storage remains scope-specific.
 
 A cached profile name is a third selector form: `--signer DanConwayDev` or
 `--signer "DanConwayDev's Agent"`. Selector precedence is npub, then alias,

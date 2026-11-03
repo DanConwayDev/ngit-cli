@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fresh remote-signer login replaces an npub’s default session instead of
+  forcing users to accumulate profiles. Explicit named profiles keep their
+  own connections, and identity keys are never overwritten.
+
 - Keep the previous login selected while authenticating and storing a new
   signer. A failed login no longer signs out the working account. Global
   login also preserves repository-local overrides.
