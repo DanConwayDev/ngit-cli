@@ -15,6 +15,7 @@ categories = ["command-line-utilities","development-tools"]
 anyhow = "1.0.104"
 apk-info = "1.0.13"
 async-trait = "0.1.92"
+async-utility = "0.3"
 auth-git2 = "0.6.0"
 # `nostr` stopped re-exporting `bitcoin_hashes` at 0.45.0-alpha.8, but its
 # NIP-34 API still takes `bitcoin_hashes::sha1::Hash`. Keep this in step with
@@ -66,6 +67,7 @@ tar = "0.4"
 tempfile = "3.27.0"
 tokio = { version = "1.53.3", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
+tracing = "0.1"
 urlencoding = "2.1.3"
 zip = { version = "9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zeroize = "1.9.1"

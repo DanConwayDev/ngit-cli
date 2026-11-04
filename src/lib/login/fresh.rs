@@ -17,7 +17,6 @@ use nostr::prelude::{
     key::AsyncGetPublicKey,
     nip46::NostrConnectUri,
 };
-use nostr_connect::client::NostrConnect;
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -40,6 +39,7 @@ use crate::{
     },
     client::{Connect, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
+    remote_signer::NostrConnect,
 };
 
 pub async fn fresh_login_or_signup(
@@ -438,10 +438,17 @@ pub async fn get_fresh_nip46_signer(
             // after "signer connection established".
             let nc_listener = Arc::clone(&nostr_connect);
             let pubkey_handle = tokio::spawn(async move {
-                let res = nc_listener
-                    .get_public_key_async()
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e));
+                let res = crate::signer_progress::run_remote_operation(
+                    &nc_listener,
+                    "waiting for remote signer pairing...",
+                    async {
+                        nc_listener
+                            .get_public_key_async()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                )
+                .await;
                 done_listener.store(true, Ordering::Relaxed);
                 res
             });
@@ -761,6 +768,16 @@ pub async fn listen_for_remote_signer(
     nostr_connect_url: &NostrConnectUri,
     printer: Arc<Mutex<Printer>>,
 ) -> Result<(Arc<crate::NgitSigner>, PublicKey, NostrConnectUri)> {
+    listen_for_remote_signer_when_listening(app_key, nostr_connect_url, printer, || {}).await
+}
+
+pub async fn listen_for_remote_signer_when_listening(
+    app_key: &Keys,
+    nostr_connect_url: &NostrConnectUri,
+    printer: Arc<Mutex<Printer>>,
+    listening: impl FnOnce(),
+) -> Result<(Arc<crate::NgitSigner>, PublicKey, NostrConnectUri)> {
+    let mut listening = Some(listening);
     let app_key = app_key.clone();
     let nostr_connect_url_clone = nostr_connect_url.clone();
 
@@ -779,9 +796,17 @@ pub async fn listen_for_remote_signer(
     let pubkey_future = {
         let nc = Arc::clone(&nostr_connect);
         async move {
-            nc.get_public_key_async()
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+            crate::signer_progress::run_remote_operation_when_listening(
+                &nc,
+                "waiting for remote signer pairing...",
+                async { nc.get_public_key_async().await.map_err(anyhow::Error::from) },
+                || {
+                    if let Some(callback) = listening.take() {
+                        callback();
+                    }
+                },
+            )
+            .await
         }
     };
 

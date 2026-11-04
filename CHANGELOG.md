@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Remote signer progress distinguishes pairing from public-key approval and
+  keeps the waiting operation prominent above one concise line per signer
+  relay, ending with recovery guidance based on request delivery. Subscription
+  details and request IDs require verbose output. Relay acceptance remains
+  distinct from signer receipt, including when a signing app reconnects after
+  missing an ephemeral request.
+
 - `account logout --all` removes all known saved profiles and credentials and
   clears current-repository and non-local Git login configuration, including
   conditional includes and Windows ProgramData configuration. It does not scan
