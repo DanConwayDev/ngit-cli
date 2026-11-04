@@ -1070,6 +1070,20 @@ pub fn forget(name: &str) -> Result<bool> {
     {
         npubs.insert(npub.to_string());
     }
+    // A file-store session may outlive its profile mapping. Its public owner
+    // still lets deletion clean the account registry without reconnecting.
+    if let Some(alias) = name.strip_prefix(ALIAS_SIGNER_PREFIX) {
+        if !inventory.aliases.contains_key(alias) {
+            aliases.push(alias.to_string());
+        }
+        if let Ok(value) = retrieve_value(name) {
+            if let Ok(record) = serde_json::from_str::<BunkerSignerRecord>(&value) {
+                if let Ok(npub) = canonical_npub(&record.npub) {
+                    npubs.insert(npub);
+                }
+            }
+        }
+    }
     for (alias, npub) in &inventory.aliases {
         let is_mapping = name == alias_entry_name(alias)?;
         if !is_mapping && !npubs.contains(npub) && name != alias_signer_entry_name(alias)? {
@@ -1089,6 +1103,8 @@ pub fn forget(name: &str) -> Result<bool> {
             npubs.insert(npub.clone());
         }
     }
+    aliases.sort();
+    aliases.dedup();
     // Keep only a public guard against stale Git mappings in other repos.
     // Write guards before deletion so a failed write leaves credentials intact.
     for alias in &aliases {
@@ -1136,6 +1152,55 @@ fn inventory_for_npub(npub: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+/// All known credentials and profile bindings belonging to one identity.
+/// Bare-npub removal is account-wide; normal signer selection stays selective.
+pub fn account_entries(npub: &str) -> Result<Vec<String>> {
+    let npub = canonical_npub(npub)?;
+    let inventory = inventory()?;
+    let mut entries: BTreeSet<String> = inventory_for_npub(&npub)?.into_iter().collect();
+    // Include older file-store key names as well as the canonical npub entry.
+    for entry in file_store::entry_names()? {
+        let orphan_session = if entry
+            .strip_prefix(ALIAS_SIGNER_PREFIX)
+            .is_some_and(|alias| !inventory.aliases.contains_key(alias))
+        {
+            file_store::get_value(&entry)?
+                .and_then(|value| serde_json::from_str::<BunkerSignerRecord>(&value).ok())
+                .is_some_and(|record| {
+                    canonical_npub(&record.npub).ok().as_deref() == Some(npub.as_str())
+                })
+        } else {
+            false
+        };
+        if parse_pointer(&entry) == Some(npub.as_str()) || orphan_session {
+            entries.insert(entry);
+        }
+    }
+    for (alias, owner) in inventory.aliases {
+        if owner == npub {
+            for entry in [
+                alias_entry_name(&alias)?,
+                alias_credential_entry_name(&alias)?,
+            ] {
+                if stored_entry_exists(&entry)? {
+                    entries.insert(entry);
+                }
+            }
+        }
+    }
+    Ok(entries.into_iter().collect())
+}
+
+/// Forget an identity's saved keys, remote sessions, and profile bindings.
+/// The caller must obtain any required consent before invoking this function.
+pub fn forget_account(npub: &str) -> Result<bool> {
+    let npub = canonical_npub(npub)?;
+    let entries = account_entries(&npub)?;
+    forget_entries(&entries)?;
+    account_registry::forget_account(&npub)?;
+    Ok(!entries.is_empty())
+}
+
 /// Enumerate ngit-managed entries, including orphaned file-store records.
 /// OS keyrings cannot be enumerated portably, so their entries are discovered
 /// through the public registry maintained by successful ngit writes.
@@ -1163,20 +1228,23 @@ pub fn all_entries() -> Result<Vec<String>> {
 
 /// Remove an enumerated collection from both credential backends. Preserve
 /// public removal guards so stale repository selectors fail closed.
-pub fn forget_entries(entries: &[String]) -> Result<()> {
+pub fn forget_entries(entries: &[String]) -> Result<usize> {
+    let mut removed = 0;
     // Delete credentials before mappings, while the bindings still identify
     // dependent profiles. The low-level mapping entries are removed last.
     for metadata in [false, true] {
         for entry in entries {
             let is_metadata =
                 entry.starts_with(ALIAS_PREFIX) || entry.starts_with(ALIAS_CREDENTIAL_PREFIX);
-            if metadata == is_metadata {
-                forget(entry)
-                    .with_context(|| format!("failed to remove credential entry {entry}"))?;
+            if metadata == is_metadata
+                && forget(entry)
+                    .with_context(|| format!("failed to remove credential entry {entry}"))?
+            {
+                removed += 1;
             }
         }
     }
-    Ok(())
+    Ok(removed)
 }
 
 /// Select an exact stored credential for removal without decoding its secret.

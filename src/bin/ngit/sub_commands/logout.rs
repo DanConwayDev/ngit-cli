@@ -13,7 +13,8 @@ use crate::{cli::SignerParams, git::Repo};
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
-    /// account to remove, even after its login selection has been cleared
+    /// account to remove, even after logout; an explicit npub removes all
+    /// saved credentials and profiles for that identity
     #[arg(value_name = "ACCOUNT", conflicts_with_all = ["profile", "signer"])]
     pub account: Option<String>,
     /// exact named signer profile to remove
@@ -72,7 +73,14 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         .or(args.account.as_deref())
         .or(command_selector);
     let target = if let Some(selector) = selector {
-        Some(target_entries(repo.as_ref(), selector, args.profile.is_none()).await?)
+        Some(
+            if args.profile.is_none() && credential_store::parse_pointer(selector) == Some(selector)
+            {
+                credential_store::account_entries(selector)?
+            } else {
+                target_entries(repo.as_ref(), selector, args.profile.is_none()).await?
+            },
+        )
     } else {
         None
     };
@@ -171,11 +179,9 @@ fn apply_logout(
     if args.keep_credentials {
         eprintln!("saved credentials retained at your request");
     } else {
-        for entry in entries {
-            if credential_store::forget(entry)? {
-                removed += 1;
-            }
-        }
+        // Credentials must be deleted before their alias metadata, so removal
+        // guards and account inventory can still be resolved from the bindings.
+        removed = credential_store::forget_entries(entries)?;
     }
     for scope in selected_scopes {
         for item in LOGIN_CONFIG_ITEMS {

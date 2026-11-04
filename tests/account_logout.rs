@@ -187,7 +187,7 @@ async fn global_logout_discards_remote_session_unless_retention_requested() -> R
 }
 
 #[tokio::test]
-async fn forgetting_last_profile_cleans_inventory_and_ambiguous_npub_is_rejected() -> Result<()> {
+async fn forgetting_npub_removes_all_profiles_and_cleans_inventory() -> Result<()> {
     let harness = harness().await?;
     let repo = harness.fresh_repo()?;
     let file = NamedTempFile::new()?;
@@ -213,18 +213,7 @@ async fn forgetting_last_profile_cleans_inventory_and_ambiguous_npub_is_rejected
         &["account", "logout", &npub, "--forget"],
     )
     .await?;
-    assert!(!output.status.success());
-    assert_eq!(contents(file.path())?, initial);
-    for name in ["one", "two"] {
-        success(
-            &command(
-                &repo,
-                file.path(),
-                &["account", "logout", "--profile", name, "--forget"],
-            )
-            .await?,
-        );
-    }
+    success(&output);
     assert_eq!(
         contents(file.path())?,
         json!({
@@ -368,5 +357,98 @@ async fn forget_follows_the_selector_instead_of_a_stale_legacy_pointer() -> Resu
     let stored = contents(file.path())?;
     assert!(stored.get("nostr/signer-alias:work").is_none());
     assert!(stored.get(format!("nostr/{other_npub}")).is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_npub_forgets_keys_and_all_sessions_but_not_other_identities() -> Result<()> {
+    let harness = harness().await?;
+    for low_level in [false, true] {
+        let repo = harness.fresh_repo()?;
+        let file = NamedTempFile::new()?;
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        let other = Keys::generate().public_key().to_bech32()?;
+        let other_session = session(&other)?;
+        let initial = json!({
+            format!("nostr/{npub}"): keys.secret_key().to_bech32()?,
+            format!("nostr/{npub}/1234abcd"): keys.secret_key().to_bech32()?,
+            format!("nostr/signer:{npub}"): session(&npub)?,
+            "nostr/signer-alias:work": "corrupt session remains removable",
+            "nostr/alias:work": npub,
+            "nostr/alias-credential:work": "signer-alias:work",
+            "nostr/signer-alias:orphan": session(&npub)?,
+            format!("nostr/signer:{other}"): other_session,
+        });
+        std::fs::write(file.path(), serde_json::to_vec(&initial)?)?;
+        repo.git_ok(["config", "nostr.signer", "work"], "select work")
+            .await?;
+        if !low_level {
+            let refused = command(&repo, file.path(), &["account", "logout", &npub]).await?;
+            assert!(!refused.status.success());
+            assert_eq!(contents(file.path())?, initial);
+            assert_eq!(repo.config("nostr.signer").await?.as_deref(), Some("work"));
+        }
+        let args = if low_level {
+            vec!["account", "forget-keys", &npub]
+        } else {
+            vec!["account", "logout", &npub, "--forget"]
+        };
+        success(&command(&repo, file.path(), &args).await?);
+        assert_eq!(
+            contents(file.path())?,
+            json!({
+                "nostr/forgotten-profile:work": "removed",
+                "nostr/forgotten-profile:orphan": "removed",
+                format!("nostr/signer:{other}"): other_session,
+            })
+        );
+        if !low_level {
+            assert_eq!(repo.config("nostr.signer").await?, None);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn forget_keys_npub_removes_a_remote_session_without_an_identity_key() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let npub = Keys::generate().public_key().to_bech32()?;
+    std::fs::write(
+        file.path(),
+        serde_json::to_vec(&json!({
+            format!("nostr/signer:{npub}"): session(&npub)?,
+        }))?,
+    )?;
+    success(&command(&repo, file.path(), &["account", "forget-keys", &npub]).await?);
+    assert_eq!(contents(file.path())?, json!({}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_remote_entry_removal_preserves_another_profile_for_the_same_npub() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let file = NamedTempFile::new()?;
+    let npub = Keys::generate().public_key().to_bech32()?;
+    let retained = json!({
+        "nostr/alias:work": npub,
+        "nostr/alias-credential:work": "signer-alias:work",
+        "nostr/signer-alias:work": session(&npub)?,
+    });
+    let mut initial = retained.clone();
+    initial[format!("nostr/signer:{npub}")] = json!(session(&npub)?);
+    std::fs::write(file.path(), serde_json::to_vec(&initial)?)?;
+    success(
+        &command(
+            &repo,
+            file.path(),
+            &["account", "forget-keys", &format!("signer:{npub}")],
+        )
+        .await?,
+    );
+    assert_eq!(contents(file.path())?, retained);
     Ok(())
 }

@@ -21,7 +21,7 @@ ngit account logout --all                       # remove known remote sessions a
 ngit account logout --all --forget              # also delete identity nsecs (explicitly destructive)
 ngit account logout --keep-credentials          # retain remote session for reactivation
 ngit account logout --profile alice --forget    # delete stored profile even after logout
-ngit account forget-keys <entry> --json
+ngit account forget-keys <npub> --json          # delete all stored credentials for this identity, including its key
 ngit --signer alice issue create --subject "Bug" --body "Details" --json   # one ngit command as alice
 git -c nostr.signer=alice push origin pr/topic  # one git command as alice
 ngit --nsec-file /private/key <command>         # one-shot key for CI; --nbunksec-file for a bunker session
@@ -68,3 +68,10 @@ current-repository and non-local Git login configuration, including referenced
 includes. It does not search other repositories for independent credentials or
 revoke remote signer permissions. Store/config cleanup failures are errors.
 The JSON result lists remaining accounts and unavailable login selections.
+
+**Explicit npub removal.** `account logout <npub>` targets all known credentials
+and profile bindings for that identity, not just its default connection; add
+`--forget` when identity keys are included. `account forget-keys <npub>` is the
+explicit destructive operation and includes identity keys without another
+confirmation. Use `logout --profile NAME` for one profile, or `forget-keys
+signer:<npub>` for only the default remote session. Other identities are untouched.

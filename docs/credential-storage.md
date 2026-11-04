@@ -241,10 +241,12 @@ ngit --signer work account logout --forget
 ```
 
 Removal uses public selection metadata and does not contact the remote signer.
-An npub selects its default credential; multiple additional profiles without a
-default require `--profile NAME`. Deletion removes the selected credential and
-its dependent profile bindings, cleans the account inventory, and preserves
-other profiles. A public removal marker prevents old Git alias mappings in
+An explicitly supplied npub removes all known stored credentials and profile
+bindings for that identity: its identity key, default remote session, named
+sessions, and known legacy key entries. Identity keys still require `--forget`.
+Use `--profile NAME` to remove just one profile instead. Ordinary logout without
+an explicit account continues to remove only the selected connection.
+Deletion cleans the account inventory and preserves other identities. A public removal marker prevents old Git alias mappings in
 other repositories from falling back to another connection; pairing the named
 profile again clears that marker. No signing material is retained by it.
 `--forget` deletes shared credentials machine-wide, even with
@@ -255,6 +257,13 @@ It does not revoke permissions in the remote signer application.
 instructions rather than silently doing nothing. `account whoami` prints a
 removal command for each available signer. The low-level
 `account forget-keys ENTRY` command remains available for direct recovery.
+`account forget-keys <npub>` explicitly deletes all known stored credentials for
+that identity, including its identity key, without another confirmation.
+`account forget-keys signer:<npub>` or `signer-alias:<name>` deletes only that
+exact entry and its dependent bindings. These low-level commands leave Git login
+selections in place; `account logout <npub> --forget` also clears matching login
+selections in the applicable scopes. Neither searches other repositories for
+independent plaintext credentials.
 
 ## Interop convention
 

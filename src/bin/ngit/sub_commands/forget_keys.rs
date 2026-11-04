@@ -3,8 +3,8 @@ use ngit::login::{credential_store, user};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
-    /// low-level credential entry name (npub, signer:npub, or
-    /// signer-alias:name)
+    /// npub to forget all saved credentials for an identity, or an exact
+    /// entry name (signer:npub or signer-alias:name)
     #[arg(value_name = "ENTRY")]
     pub entry: String,
 }
@@ -16,9 +16,14 @@ pub fn launch(args: &SubCommandArgs) -> Result<()> {
             args.entry
         );
     }
-    if credential_store::forget(&args.entry)? {
+    let removed = if credential_store::parse_pointer(&args.entry) == Some(args.entry.as_str()) {
+        credential_store::forget_account(&args.entry)?
+    } else {
+        credential_store::forget(&args.entry)?
+    };
+    if removed {
         eprintln!(
-            "removed stored secret '{}'; any login still pointing at it will need `ngit account login` again",
+            "removed stored credentials for '{}'; any login still pointing at it will need `ngit account login` again",
             args.entry
         );
     } else {

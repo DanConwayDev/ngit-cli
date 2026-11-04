@@ -579,8 +579,8 @@ pub enum AccountCommands {
         long_about = "export nostr keys to login to other nostr clients\n\nBy default, opens a menu for printing or displaying the npub and secret as a QR code. Use --secret to print only the nsec or nbunksec.\n\nExamples:\n  ngit account export-keys --secret\n  ngit --signer work account export-keys --secret"
     )]
     ExportKeys(sub_commands::export_keys::SubCommandArgs),
-    /// remove a stored account secret from the OS credential store / ngit
-    /// file store
+    /// delete all stored credentials for an npub, or one exact entry,
+    /// including identity keys without further confirmation
     ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),
