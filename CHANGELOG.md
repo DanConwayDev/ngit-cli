@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent logout from discarding legacy Git-config remote connections when
+  credential retention was requested, and protect identity keys even when
+  stale remote-app-key configuration references the same stored entry.
+
 - An explicit npub in `account logout` or `account forget-keys` now removes all
   known stored credentials and profile bindings for that identity, including
   remote sessions. Logout still requires `--forget` before deleting identity

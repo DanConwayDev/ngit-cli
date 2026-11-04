@@ -156,7 +156,21 @@ fn apply_logout(
     entries: &[String],
 ) -> Result<()> {
     let mut legacy_remote_entries = Vec::new();
+    let mut identity_entries = Vec::new();
     for scope in selected_scopes {
+        if args.keep_credentials
+            && (get_git_config_item(scope, "nostr.bunker-uri")?.is_some()
+                || get_git_config_item(scope, "nostr.bunker-app-key")?.is_some())
+        {
+            bail!(
+                "cannot retain a remote signer connection stored in Git config automatically; nothing changed. Export the connection first, then omit --keep-credentials to remove its local configuration"
+            );
+        }
+        if let Some(value) = get_git_config_item(scope, "nostr.nsec")? {
+            if credential_store::parse_pointer(&value).is_some() {
+                identity_entries.push(value);
+            }
+        }
         if let Some(pointer) = get_git_config_item(scope, "nostr.bunker-app-key")? {
             if credential_store::parse_pointer(&pointer).is_some() {
                 legacy_remote_entries.push(pointer);
@@ -167,7 +181,7 @@ fn apply_logout(
         && !args.keep_credentials
         && entries.iter().any(|entry| {
             credential_store::parse_pointer(entry).is_some()
-                && !legacy_remote_entries.contains(entry)
+                && (identity_entries.contains(entry) || !legacy_remote_entries.contains(entry))
         })
     {
         bail!(

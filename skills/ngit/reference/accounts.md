@@ -61,6 +61,8 @@ different named profiles remain independent even for the same npub.
 Deletion of an identity nsec returns an error before changes, with no prompt.
 Use `--forget` to authorize deletion or `--keep-credentials` to retain credentials.
 Remote session credentials (including nbunksec) do not need `--forget`.
+`--keep-credentials` refuses legacy remote connections stored in Git config;
+export those connections before clearing their configuration.
 Targeted logout works after deselection and without contacting the remote signer.
 
 `logout --all` removes all known profiles from the OS and file stores and clears

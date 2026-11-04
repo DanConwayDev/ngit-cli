@@ -31,8 +31,17 @@ pub(super) async fn launch(args: &SubCommandArgs, repo: Option<&Repo>) -> Result
     let configs = config_files(repo)?;
     let mut entries = credential_store::all_entries()?;
     let mut remote_keys = BTreeSet::new();
+    let mut identity_keys = BTreeSet::new();
     let mut plaintext_keys = Vec::new();
     for config in &configs {
+        if args.keep_credentials
+            && (config.values.contains_key("nostr.bunker-uri")
+                || config.values.contains_key("nostr.bunker-app-key"))
+        {
+            bail!(
+                "cannot retain remote signer connections stored in Git config automatically; nothing changed. Export those connections first, then omit --keep-credentials to remove their local configuration"
+            );
+        }
         if let Some(values) = config.values.get("nostr.bunker-app-key") {
             for value in values {
                 if credential_store::parse_pointer(value).is_some() {
@@ -43,6 +52,7 @@ pub(super) async fn launch(args: &SubCommandArgs, repo: Option<&Repo>) -> Result
         if let Some(values) = config.values.get("nostr.nsec") {
             for value in values {
                 if credential_store::parse_pointer(value).is_some() {
+                    identity_keys.insert(value.to_string());
                     entries.push(value.to_string());
                 } else if !value.is_empty() {
                     plaintext_keys.push(value.as_str());
@@ -55,7 +65,8 @@ pub(super) async fn launch(args: &SubCommandArgs, repo: Option<&Repo>) -> Result
     entries.dedup();
     let has_identity_keys = !plaintext_keys.is_empty()
         || entries.iter().any(|entry| {
-            credential_store::parse_pointer(entry).is_some() && !remote_keys.contains(entry)
+            credential_store::parse_pointer(entry).is_some()
+                && (identity_keys.contains(entry) || !remote_keys.contains(entry))
         });
     if has_identity_keys && !args.forget && !args.keep_credentials {
         bail!(

@@ -173,3 +173,66 @@ async fn plain_logout_requires_consent_before_removing_plaintext_identity_key() 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn retention_never_discards_a_git_config_remote_connection() -> Result<()> {
+    let harness = harness().await?;
+    for all in [false, true] {
+        let repo = harness.fresh_repo()?;
+        let file = repo.dir().join("credentials.json");
+        let global = repo.dir().join("global-config");
+        std::fs::write(&file, b"{}")?;
+        let mut config = git2::Config::open(&global)?;
+        config.set_str(
+            "nostr.bunker-uri",
+            &format!("bunker://{}", Keys::generate().public_key()),
+        )?;
+        config.set_str(
+            "nostr.bunker-app-key",
+            &Keys::generate().secret_key().to_bech32()?,
+        )?;
+        let before = std::fs::read(&global)?;
+        let mut args = vec!["account", "logout", "--keep-credentials"];
+        if all {
+            args.push("--all");
+        }
+        let output = run(&repo, &file, &global, &args).await?;
+        assert!(
+            !output.status.success(),
+            "unpreserved connection must not be discarded"
+        );
+        assert_eq!(std::fs::read(&global)?, before);
+        assert_eq!(stored(&file)?, json!({}));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_pointer_also_used_as_app_key_still_requires_consent() -> Result<()> {
+    let harness = harness().await?;
+    for all in [false, true] {
+        let repo = harness.fresh_repo()?;
+        let file = repo.dir().join("credentials.json");
+        let global = repo.dir().join("global-config");
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32()?;
+        let credentials = json!({format!("nostr/{npub}"): keys.secret_key().to_bech32()?});
+        std::fs::write(&file, serde_json::to_vec(&credentials)?)?;
+        let mut config = git2::Config::open(&global)?;
+        config.set_str("nostr.nsec", &npub)?;
+        config.set_str("nostr.bunker-app-key", &npub)?;
+        let before = std::fs::read(&global)?;
+        let mut args = vec!["account", "logout"];
+        if all {
+            args.push("--all");
+        }
+        let output = run(&repo, &file, &global, &args).await?;
+        assert!(
+            !output.status.success(),
+            "identity key needs explicit deletion consent"
+        );
+        assert_eq!(std::fs::read(&global)?, before);
+        assert_eq!(stored(&file)?, credentials);
+    }
+    Ok(())
+}

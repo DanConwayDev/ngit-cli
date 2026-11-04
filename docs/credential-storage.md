@@ -222,7 +222,11 @@ credentials. An nbunksec is a remote session, not an identity nsec. Ordinary
 logout also refuses to erase a plaintext identity key from Git config without
 `--forget` or `--keep-credentials`; the latter saves the key into the credential
 store first. Encrypted Git-config keys must be exported before removal because
-logout cannot preserve them automatically without decrypting them.
+logout cannot preserve them automatically without decrypting them. Likewise,
+`--keep-credentials` refuses to clear legacy remote signer configuration in Git
+config, since retaining only its app key would lose the connection details.
+Export that connection before removing its local configuration. These failures
+happen before changes, for both ordinary logout and `--all`.
 
 Every logout lists saved profiles and remaining selections using the offline
 account inventory (also returned in JSON). JSON `unavailable_logins` entries identify a scope
