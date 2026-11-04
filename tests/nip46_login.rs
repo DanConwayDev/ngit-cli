@@ -186,7 +186,7 @@ async fn run_nbunksec_login(
         encoded,
     ];
     if let Some(alias) = alias {
-        args.extend(["--alias", alias]);
+        args.extend(["--profile", alias]);
     }
     let mut command = repo.ngit(args);
     command
@@ -312,7 +312,7 @@ async fn bunker_login_persists_remote_signer_pubkey() {
 }
 
 #[tokio::test]
-async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Result<()> {
+async fn same_npub_remote_signers_respect_distinct_profiles() -> Result<()> {
     let relay = LocalRelayBuilder::default().build();
     let relay_url = relay.url().await;
     relay.run().await?;
@@ -360,7 +360,6 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     .build()
     .await?;
     let first_repo = harness.fresh_repo()?;
-    let rejected_repo = harness.fresh_repo()?;
     let aliased_repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
 
@@ -382,22 +381,6 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         Some("primary"),
         "credential-backed bunker login should persist its alias"
     );
-    let before_rejected_login = std::fs::read(credentials.path())?;
-
-    let rejected =
-        run_nbunksec_login(&rejected_repo, &second_encoded, credentials.path(), None).await?;
-    assert!(!rejected.status.success());
-    let stderr = String::from_utf8_lossy(&rejected.stderr);
-    assert!(
-        stderr.contains("different signer credential") && stderr.contains("--alias <name>"),
-        "same-npub replacement should explain the alias escape hatch: {stderr}"
-    );
-    assert_eq!(
-        std::fs::read(credentials.path())?,
-        before_rejected_login,
-        "a rejected same-npub login must not alter the original credential"
-    );
-
     let aliased = run_nbunksec_login(
         &aliased_repo,
         &second_encoded,
@@ -835,4 +818,124 @@ async fn sanitized_bunker_uri_reconnects_with_stored_client_key() {
     assert_eq!(event.pubkey, user_keys.public_key());
     assert_eq!(request_counts.get_public_key.load(Ordering::SeqCst), 0);
     assert_eq!(request_counts.sign_event.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fresh_login_replaces_default_but_preserves_named_connections() -> Result<()> {
+    let relay = LocalRelayBuilder::default().build();
+    let relay_url = relay.url().await;
+    relay.run().await?;
+
+    let user_keys = Keys::generate();
+    let first_remote_keys = Keys::generate();
+    let second_remote_keys = Keys::generate();
+    let first_client_keys = Keys::generate();
+    let second_client_keys = Keys::generate();
+    let first_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: first_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let second_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: second_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let first_uri = first_remote.bunker_uri().to_string();
+    let second_uri = second_remote.bunker_uri().to_string();
+    let first_task = tokio::spawn(async move { first_remote.serve(ApproveAll).await });
+    let second_task = tokio::spawn(async move { second_remote.serve(ApproveAll).await });
+    wait_until_signer_ready(&relay_url, first_remote_keys.public_key()).await;
+    wait_until_signer_ready(&relay_url, second_remote_keys.public_key()).await;
+
+    let first_encoded =
+        nbunksec::encode(&first_uri, &first_client_keys.secret_key().to_secret_hex())?;
+    let second_encoded = nbunksec::encode(
+        &second_uri,
+        &second_client_keys.secret_key().to_secret_hex(),
+    )?;
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let named_repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let npub = user_keys.public_key().to_bech32()?;
+    for encoded in [&first_encoded, &second_encoded, &first_encoded] {
+        let output = run_nbunksec_login(&repo, encoded, credentials.path(), None).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+        assert_eq!(
+            stored.as_object().unwrap().len(),
+            1,
+            "default replacement must not accumulate sessions"
+        );
+        let exported = export_stored_signer(&repo, credentials.path()).await?;
+        assert_eq!(exported, nbunksec::decode(encoded)?);
+    }
+    let output = run_nbunksec_login(
+        &named_repo,
+        &first_encoded,
+        credentials.path(),
+        Some("host"),
+    )
+    .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run_nbunksec_login(&repo, &second_encoded, credentials.path(), None).await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&named_repo, credentials.path()).await?,
+        nbunksec::decode(&first_encoded)?
+    );
+    assert_eq!(
+        export_stored_signer(&repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(stored["nostr/alias-credential:host"], "signer-alias:host");
+    assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
+    // Re-pair the named profile without changing the default connection.
+    let output = run_nbunksec_login(
+        &named_repo,
+        &second_encoded,
+        credentials.path(),
+        Some("host"),
+    )
+    .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&named_repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    first_task.abort();
+    second_task.abort();
+    Ok(())
 }

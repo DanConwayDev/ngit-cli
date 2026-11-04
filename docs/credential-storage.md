@@ -77,11 +77,11 @@ Aliases are resolved from the OS credential store first, then
 is the direct fallback for systems where the OS credential store is
 unavailable. `nostr.signer = fred` (or an
 npub) makes a signer the default for that Git-config scope. `ngit account login
---alias fred` writes the mapping to the selected Git-config scope and, unless
+--profile fred` writes the mapping to the selected Git-config scope and, unless
 `git-config` secret storage was selected, the selected credential backend as
-well. After logout retains a stored signer, `ngit account login --local --alias
+well. After `logout --keep-credentials` retains a stored signer, `ngit account login --local --profile
 fred` reactivates it without requiring the nsec or bunker URL again.
-`ngit account login --local -i --alias fred` instead starts a fresh interactive
+`ngit account login --local -i --profile fred` instead starts a fresh interactive
 login and assigns the resulting connection to `fred`, replacing that alias's
 previous signer connection while leaving the bare-npub default intact.
 
@@ -90,12 +90,13 @@ default has been removed and exactly one alias-specific connection remains,
 the npub and that alias both select the remaining connection. More than one
 alias-specific connection without a default makes bare-npub selection
 ambiguous, so an alias is required. Pairing a different remote-signer
-connection for an npub that already has a default is refused before the stored
-connection is replaced. Supply a new alias, for example `ngit account login
---local --nbunksec-file dedicated.nbunksec --alias dedicated`, to retain both
-sessions and bind that alias to the new one. An explicit `--secret-storage
-git-config` policy can still create a scoped plaintext override, but a
-credential collision never offers that as its automatic fallback.
+connection without `--profile` replaces the default remote session for that
+npub after authentication. Use `--profile NAME` to retain an additional
+connection, or to replace that named profile's connection. Existing named
+profiles keep their exact sessions when the default is replaced. An identity
+key is never overwritten by this operation: when an nsec exists, use a named
+profile for the additional remote signer. Replacement does not revoke the
+old client remotely. Explicit `git-config` storage remains scope-specific.
 
 A cached profile name is a third selector form: `--signer DanConwayDev` or
 `--signer "DanConwayDev's Agent"`. Selector precedence is npub, then alias,
@@ -181,12 +182,95 @@ is still read: `false` maps to `git-config`, `true` to `auto`.
 
 ## Logout
 
-`ngit account logout` removes the login from git config but deliberately
-keeps the stored secret: the credential store may hold the only copy of an
-identity key, so deleting it on logout could destroy the account. Logout
-prints the exact command to remove the secret as well —
-`ngit account forget-keys <entry>` — and `ngit account logout --forget`
-does both in one step.
+Commands such as `ngit init` select command-line credentials (`--signer` or
+`--nsec`) first, then repository-local, global, and system Git configuration.
+A configured local login that cannot be loaded causes an error rather than
+falling back to a different global identity. Use `ngit account whoami --offline`
+to inspect the active account and its scope.
+
+`ngit account logout` removes the local login when one exists, otherwise the
+global login. Use `--local` to clear only this repository's login (including
+when it is already absent), or `--global` to clear only the global login while
+preserving the local one. `--local` requires a Git repository. After removing a
+local login, subsequent commands can use the remaining global login.
+
+Ordinary logout removes the selected account's stored credentials and named
+profile bindings from both credential backends. Other profiles are untouched,
+even if they share the same npub. Other repositories selecting the deleted
+profile lose access too; their selections remain and fail rather than silently
+choosing another signer. Use `--keep-credentials` to explicitly retain credentials.
+After removing a repository-specific login, ngit reports that this repository
+now uses the default account selection, and lists its availability. A different
+global account remains authenticated. Repeating bare logout after removing the
+repository override targets the default account; use `--local` when only the
+repository-specific login should be affected.
+
+Use `ngit account logout --all` to remove all known saved profiles and remote
+sessions from both credential backends. It clears the current repository's
+login and non-local Git login configuration (user, XDG and enabled system
+files), including referenced files even when their include conditions are
+inactive here. It respects Git's config environment overrides. It never
+searches for other repositories: their local plaintext credentials and
+selections may remain. Shared stored sessions removed by `--all` become
+unavailable to those repositories.
+
+If logout would delete an identity nsec, it returns an error before making
+changes. There is no interactive confirmation, including with `-i`.
+Choose `--forget` to delete identity keys as well, or
+`--keep-credentials` to clear selections while preserving stored
+credentials. An nbunksec is a remote session, not an identity nsec. Ordinary
+logout also refuses to erase a plaintext identity key from Git config without
+`--forget` or `--keep-credentials`; the latter saves the key into the credential
+store first. Encrypted Git-config keys must be exported before removal because
+logout cannot preserve them automatically without decrypting them. Likewise,
+`--keep-credentials` refuses to clear legacy remote signer configuration in Git
+config, since retaining only its app key would lose the connection details.
+Export that connection before removing its local configuration. These failures
+happen before changes, for both ordinary logout and `--all`.
+
+Every logout lists saved profiles and remaining selections using the offline
+account inventory (also returned in JSON). JSON `unavailable_logins` entries identify a scope
+and error when a remaining selection cannot be used; they do not activate
+a lower-priority account. Backend or configuration cleanup
+failures are errors rather than a claim of complete sign-out. OS credentials
+are discoverable through ngit's public registry; arbitrary entries created by
+other applications outside that registry cannot be enumerated portably.
+
+To delete a retained credential after logout, or when its signer is offline:
+
+```bash
+ngit account logout --profile work --forget
+ngit account logout <npub> --forget
+ngit --signer work account logout --forget
+```
+
+Removal uses public selection metadata and does not contact the remote signer.
+An explicitly supplied npub removes all known stored credentials and profile
+bindings for that identity: its identity key, default remote session, named
+sessions, and known legacy key entries. Identity keys still require `--forget`.
+Use `--profile NAME` to remove just one profile instead. Ordinary logout without
+an explicit account continues to remove only the selected connection.
+Deletion cleans the account inventory and preserves other identities. A public removal marker prevents old Git alias mappings in
+other repositories from falling back to another connection; pairing the named
+profile again clears that marker. No signing material is retained by it.
+`--forget` deletes shared credentials machine-wide, even with
+`--local`; other repositories pointing at that credential will need login.
+It does not revoke permissions in the remote signer application.
+
+`logout --forget` without an active login or explicit target fails with
+instructions rather than silently doing nothing. `account whoami` leads with the
+active login and any repository override,
+then lists saved accounts and signer connections. Its concise command guide
+distinguishes removing one named profile from removing an entire npub; identity
+key deletion is never suggested with an automatic `--forget`. The low-level
+`account forget-keys ENTRY` command remains available for direct recovery.
+`account forget-keys <npub>` explicitly deletes all known stored credentials for
+that identity, including its identity key, without another confirmation.
+`account forget-keys signer:<npub>` or `signer-alias:<name>` deletes only that
+exact entry and its dependent bindings. These low-level commands leave Git login
+selections in place; `account logout <npub> --forget` also clears matching login
+selections in the applicable scopes. Neither searches other repositories for
+independent plaintext credentials.
 
 ## Interop convention
 
@@ -271,3 +355,19 @@ the npub. Use `ngit --signer <account> account export-keys` to select a
 non-default stored account.
 
 [`keyring`]: https://crates.io/crates/keyring
+
+### Named signer profiles
+
+`account login --profile NAME` names or reactivates a signer profile. The old
+`--alias` spelling remains accepted for scripts. Existing alias names and
+credential bindings are unchanged; no migration or re-pairing is needed.
+A signer profile is distinct from the account’s public Nostr display name.
+The stored Git-config keys and JSON `aliases` fields retain their existing
+names for compatibility.
+
+Login authenticates and stores the new signer before updating its selected
+scope. Failed authentication or credential storage leaves the previous login
+selection intact. A global login preserves repository-local overrides; use
+`account logout --local` removes the repository override and its credentials,
+then inherits the global selection. Add `--keep-credentials` to retain the
+connection for reuse. Shared credentials may also be used by other repositories.

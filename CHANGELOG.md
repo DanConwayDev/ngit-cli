@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `account logout --all` removes all known saved profiles and credentials and
+  clears current-repository and non-local Git login configuration, including
+  conditional includes and Windows ProgramData configuration. It does not scan
+  other repositories or revoke access at remote signers.
+
+### Changed
+
+- Make `account whoami` lead with the active login and repository override,
+  distinguish saved accounts from active signers, and retain a concise command
+  guide. Removal hints distinguish one profile from an entire account and no
+  longer automatically authorize identity-key deletion. JSON output is unchanged.
+- Name reusable signer configurations with `account login --profile NAME`.
+  The old `--alias` spelling, stored bindings and JSON fields remain compatible.
+- Ordinary logout removes the selected connection and its saved profile instead
+  of retaining credentials. It prefers the repository override, then the default
+  login; `--local` and `--global` explicitly select the scope. Removing an override
+  reports any default account that becomes active, and lists remaining accounts.
+  Removing shared credentials also makes them unavailable to other repositories.
+- Deleting identity keys requires `logout --forget`; `--keep-credentials` signs
+  out while retaining credentials. These safeguards also apply to `--all`, with
+  errors before changes and no interactive prompt. Retention refuses legacy
+  Git-config remote connections that cannot be preserved automatically; export
+  those connections first. Remote session credentials do not need `--forget`.
+- An explicit npub in `account logout` or `account forget-keys` removes all known
+  credentials and profile bindings for that identity, including remote sessions.
+  Logout still requires `--forget` for identity keys; `forget-keys` explicitly
+  authorizes deletion. Named profiles and exact credential-entry targets remain
+  selective. Saved credentials can be removed after logout without contacting
+  the signer.
+
+### Fixed
+
+- Fresh remote-signer login replaces the npub's default session while preserving
+  independent named connections and identity keys. Failed authentication or
+  credential storage leaves the working login selected; global login preserves
+  repository overrides.
+- Incomplete local login configuration blocks signing instead of silently
+  falling back to the global identity. Account inventory reports unavailable
+  selections rather than advertising the global account as active.
+- Logout cleanup follows Git's symlink-relative include paths without modifying
+  unrelated sibling configuration files.
+
 ## [3.0.5] - 2026-10-28
 
 Repair bundled OpenSSL in Unix release archives and avoid unnecessary

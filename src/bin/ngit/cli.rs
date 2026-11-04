@@ -80,8 +80,8 @@ pub struct Cli {
         ]
     )]
     pub nbunksec_file: Option<PathBuf>,
-    /// use a configured signer by npub, alias, or cached profile name for
-    /// this command
+    /// use a configured signer by npub, profile, or cached Nostr display name
+    /// for this command
     #[arg(
         long,
         global = true,
@@ -571,16 +571,16 @@ pub enum AccountCommands {
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
     Connect(sub_commands::login::SubCommandArgs),
-    /// remove nostr account details from git config; keeps the stored
-    /// secret unless --forget is passed
+    /// remove the selected login and credentials; --all removes all known saved
+    /// sessions, while --forget also permits deleting identity keys
     Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
     #[command(
         long_about = "export nostr keys to login to other nostr clients\n\nBy default, opens a menu for printing or displaying the npub and secret as a QR code. Use --secret to print only the nsec or nbunksec.\n\nExamples:\n  ngit account export-keys --secret\n  ngit --signer work account export-keys --secret"
     )]
     ExportKeys(sub_commands::export_keys::SubCommandArgs),
-    /// remove a stored account secret from the OS credential store / ngit
-    /// file store
+    /// delete all stored credentials for an npub, or one exact entry,
+    /// including identity keys without further confirmation
     ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),

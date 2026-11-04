@@ -3,7 +3,6 @@ use clap;
 use ngit::{
     cli_interactor::{Interactor, InteractorPrompt, PromptChoiceParms},
     client::Params,
-    git::{get_git_config_item, remove_git_config_item},
     login::{
         SignerInfo, SignerInfoSource, credential_store,
         existing::{load_existing_login, resolve_selection, selected_alias},
@@ -21,7 +20,7 @@ use crate::{
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
-    /// stored account to activate (full npub, alias, or exact Nostr profile
+    /// stored account to activate (full npub, profile, or exact Nostr display
     /// name)
     #[arg(
         value_name = "ACCOUNT",
@@ -38,7 +37,7 @@ pub struct SubCommandArgs {
     )]
     account: Option<String>,
 
-    /// login to the local git repository only
+    /// set a repository-specific login that overrides the default account
     #[arg(long, action)]
     local: bool,
 
@@ -71,8 +70,8 @@ pub struct SubCommandArgs {
     #[arg(long, value_name = "auto|file|git-config")]
     secret_storage: Option<String>,
 
-    /// save or reactivate a reusable name for an account
-    #[arg(long, value_name = "ALIAS")]
+    /// save or reactivate a named signer profile for an account
+    #[arg(long = "profile", alias = "alias", value_name = "NAME")]
     alias: Option<String>,
 }
 
@@ -128,8 +127,9 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         )))
     };
 
-    let (logged_out, log_in_locally_only) = logout(git_repo.as_ref(), command_args.local).await?;
-    if logged_out || log_in_locally_only {
+    let (proceed, log_in_locally_only) =
+        choose_login_scope(git_repo.as_ref(), command_args.local).await?;
+    if proceed {
         let save_local = log_in_locally_only || command_args.local;
         if let Some(bunker_url) = &command_args.bunker_url {
             login_with_bunker_url(
@@ -168,7 +168,7 @@ fn missing_login_error() -> anyhow::Error {
         &[
             (
                 "ACCOUNT",
-                "reactivate by full npub, alias, or exact Nostr profile name",
+                "reactivate by full npub, profile, or exact Nostr display name",
             ),
             ("--nsec <key>", "provide secret key (nsec or hex)"),
             (
@@ -180,7 +180,7 @@ fn missing_login_error() -> anyhow::Error {
                 "--signer <alias|npub|nostr-display-name>",
                 "reactivate a stored signer",
             ),
-            ("--alias <alias>", "reactivate an existing stored alias"),
+            ("--profile <name>", "reactivate an existing stored profile"),
             ("--interactive", "for interactive nostr connect login"),
         ],
         &[
@@ -188,7 +188,7 @@ fn missing_login_error() -> anyhow::Error {
             "ngit account login --nsec <your-nsec>",
             "ngit account login --nbunksec-file <path>",
             "ngit account login --bunker-url <bunker-url>",
-            "ngit account login --local --alias <stored-alias>",
+            "ngit account login --local --profile <stored-profile>",
             "ngit account create",
         ],
     )
@@ -303,9 +303,10 @@ async fn resolve_login_selection(
     interactive: bool,
 ) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
     // Positional and --signer selectors may fall back to cached profile names;
-    // --alias is strictly the alias namespace. In an explicitly interactive
-    // login it labels the fresh signer instead of reactivating an existing
-    // alias; positional ACCOUNT and --signer remain explicit selectors.
+    // --profile is strictly the named signer namespace. In an explicitly
+    // interactive login it labels the fresh signer instead of reactivating an
+    // existing alias; positional ACCOUNT and --signer remain explicit
+    // selectors.
     let from_explicit_selector = matches!(signer_info, Some(SignerInfo::Selection { .. }));
     let mut requested = signer_info
         .cloned()
@@ -353,67 +354,38 @@ fn implicit_alias_selection(
     })
 }
 
-/// return ( bool - logged out, bool - log in to local git locally)
-#[allow(clippy::too_many_lines)]
-async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
-    for source in if local_only || std::env::var("NGITTEST").is_ok() {
-        vec![SignerInfoSource::GitLocal]
+/// Decide where to save a replacement without clearing the working login.
+/// Authentication and credential storage can fail or be cancelled afterwards.
+async fn choose_login_scope(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool)> {
+    if Interactor::is_non_interactive() {
+        return Ok((true, local_only));
+    }
+    let source = if local_only || std::env::var("NGITTEST").is_ok() {
+        SignerInfoSource::GitLocal
     } else {
-        vec![SignerInfoSource::GitLocal, SignerInfoSource::GitGlobal]
-    } {
-        if let Ok((_, user_ref, source)) = load_existing_login(
-            &git_repo,
-            &None,
-            &None,
-            &Some(source),
-            None,
-            true,
-            false,
-            false,
-        )
-        .await
-        {
-            // In non-interactive mode, automatically logout without prompting
-            // Stored secrets are deliberately kept when switching accounts:
-            // the credential store may hold the only copy of the key, and a
-            // re-login of the same account reuses its entry. `ngit account
-            // forget-keys` removes entries explicitly.
-            if Interactor::is_non_interactive() {
-                for item in [
-                    "nostr.nsec",
-                    "nostr.npub",
-                    "nostr.bunker-uri",
-                    "nostr.bunker-app-key",
-                    "nostr.signer",
-                ] {
-                    if let Err(_error) = remove_git_config_item(
-                        if source == SignerInfoSource::GitLocal {
-                            &git_repo
-                        } else {
-                            &None
-                        },
-                        item,
-                    ) {
-                        use ngit::cli_interactor::cli_error;
-                        return Err(cli_error(
-                            &format!(
-                                "failed to edit {} git config item '{item}'",
-                                if source == SignerInfoSource::GitGlobal {
-                                    "global"
-                                } else {
-                                    "local"
-                                },
-                            ),
-                            &[],
-                            &["ngit account login --local --nsec <your-nsec>"],
-                        ));
-                    }
-                }
-                return Ok((true, local_only));
-            }
-
-            // Interactive mode: prompt user for what to do
-            let alias = selected_alias(&git_repo, &source)?;
+        SignerInfoSource::GitGlobal
+    };
+    if let Ok((_, user_ref, source)) = load_existing_login(
+        &git_repo,
+        &None,
+        &None,
+        &Some(source),
+        None,
+        true,
+        false,
+        false,
+    )
+    .await
+    {
+        let alias = selected_alias(&git_repo, &source)?;
+        let mut choices = vec![
+            "replace this login after signing in".to_string(),
+            "keep this login".to_string(),
+        ];
+        if source == SignerInfoSource::GitGlobal && git_repo.is_some() {
+            choices.push("log into this repository only".to_string());
+        }
+        return Ok(
             match Interactor::default().choice(
                 PromptChoiceParms::default()
                     .with_default(0)
@@ -422,99 +394,15 @@ async fn logout(git_repo: Option<&Repo>, local_only: bool) -> Result<(bool, bool
                         &source,
                         alias.as_deref(),
                     ))
-                    .with_choices(if source == SignerInfoSource::GitGlobal {
-                        vec![
-                            "logout".to_string(),
-                            "remain logged in".to_string(),
-                            "login to local git repo only as another user".to_string(),
-                        ]
-                    } else {
-                        vec![
-                            alias.as_ref().map_or_else(
-                                || format!("logout as \"{}\"", user_ref.metadata.name),
-                                |alias| format!("logout as signer alias '{alias}'"),
-                            ),
-                            "remain logged in".to_string(),
-                        ]
-                    }),
+                    .with_choices(choices),
             )? {
-                0 => {
-                    for item in [
-                        "nostr.nsec",
-                        "nostr.npub",
-                        "nostr.bunker-uri",
-                        "nostr.bunker-app-key",
-                        "nostr.signer",
-                    ] {
-                        if let Err(error) = remove_git_config_item(
-                            if source == SignerInfoSource::GitLocal {
-                                &git_repo
-                            } else {
-                                &None
-                            },
-                            item,
-                        ) {
-                            eprintln!("{error:?}");
-
-                            eprintln!(
-                                "consider manually removing {} git config items: {}",
-                                if source == SignerInfoSource::GitGlobal {
-                                    "global"
-                                } else {
-                                    "local"
-                                },
-                                format_items_as_list(&get_global_login_config_items_set())
-                            );
-                            match Interactor::default().choice(
-                                PromptChoiceParms::default().with_default(0)
-                                .with_prompt("failed to remove the signer configuration from global Git config")
-                                .with_choices(
-                                    vec![
-                                        "continue with global login to reveal what git config items to manually set".to_string(),
-                                        "login to this local repository with a different account".to_string(),
-                                        "cancel".to_string(),
-                                    ]
-                                ),
-                            )? {
-                                0 => return Ok((true, false)),
-                                1 => return Ok((true, true)),
-                                _ => return Ok((false, local_only)),
-                            }
-                        }
-                    }
-                }
-                1 => return Ok((false, local_only)),
-                _ => return Ok((false, true)),
-            }
-        }
+                0 => (true, local_only),
+                1 => (false, local_only),
+                _ => (true, true),
+            },
+        );
     }
     Ok((true, local_only))
-}
-
-pub fn get_global_login_config_items_set() -> Vec<&'static str> {
-    [
-        "nostr.nsec",
-        "nostr.npub",
-        "nostr.bunker-uri",
-        "nostr.bunker-app-key",
-        "nostr.signer",
-    ]
-    .iter()
-    .copied()
-    .filter(|item| get_git_config_item(&None, item).is_ok_and(|item| item.is_some()))
-    .collect::<Vec<&str>>()
-}
-
-pub fn format_items_as_list(items: &[&str]) -> String {
-    match items.len() {
-        0 => String::new(),
-        1 => items[0].to_string(),
-        2 => format!("{} and {}", items[0], items[1]),
-        _ => {
-            let all_but_last = items[..items.len() - 1].join(", ");
-            format!("{}, and {}", all_but_last, items[items.len() - 1])
-        }
-    }
 }
 
 #[cfg(test)]

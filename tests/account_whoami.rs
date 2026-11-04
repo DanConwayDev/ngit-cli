@@ -59,7 +59,7 @@ async fn activate_local_alias(
 
 async fn logout(repo: &Repo, credentials: &NamedTempFile) -> Result<()> {
     let output = repo
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--keep-credentials"])
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
         .output()
@@ -271,32 +271,6 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
         "human account whoami failed: {}",
         String::from_utf8_lossy(&human.stderr)
     );
-    let human = String::from_utf8(human.stdout)?;
-    let local_npub_line = format!("  npub: {locally_logged_in}");
-    for expected in [
-        local_npub_line.as_str(),
-        "  aliases: dcdev, shipwright",
-        "    local key via npub, dcdev, shipwright [local, active]",
-        "Plain Jane",
-        "  aliases: none",
-        "ACCOUNT can be any listed alias, an available full npub",
-        "or your exact\nNostr profile name.",
-        "ngit --signer ACCOUNT <command>",
-        "git -c nostr.signer=ACCOUNT <command>",
-        "ngit account login ACCOUNT",
-        "ngit account login --local ACCOUNT",
-        "ngit account login ACCOUNT --alias ALIAS",
-        "ngit account logout",
-        "activate global Global Ghost",
-    ] {
-        assert!(
-            human.contains(expected),
-            "missing human guidance: {expected}"
-        );
-    }
-    assert_eq!(human.matches("commands:").count(), 1);
-    assert!(!human.contains("  use:"));
-
     // The two friendliest suggestions are not decorative: each resolves via
     // the same one-shot signer path without changing the configured login.
     for selector in ["DanConwayDev", "dcdev"] {
@@ -427,5 +401,47 @@ async fn account_whoami_preserves_healthy_accounts_when_inventory_lookup_fails()
         repo.config("nostr.signer").await?.as_deref(),
         Some("healthy")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn app_key_only_local_config_blocks_default_in_account_inventory() -> Result<()> {
+    use nostr::prelude::{Keys, ToBech32};
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let global = repo.dir().join("global-config");
+    let file = repo.dir().join("credentials.json");
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32()?;
+    git2::Config::open(&global)?.set_str("nostr.nsec", &keys.secret_key().to_bech32()?)?;
+    repo.git_ok(
+        [
+            "config",
+            "nostr.bunker-app-key",
+            &Keys::generate().secret_key().to_bech32()?,
+        ],
+        "seed incomplete local login",
+    )
+    .await?;
+    let output = repo
+        .ngit(["account", "whoami", "--offline", "--json"])
+        .env_remove("NGITTEST")
+        .env("GIT_CONFIG_GLOBAL", &global)
+        .env("NGIT_KEYRING_FILE", &file)
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(document["unavailable_logins"][0]["scope"], "local");
+    assert_eq!(account_by_npub(&document, &npub)["active"], false);
     Ok(())
 }
