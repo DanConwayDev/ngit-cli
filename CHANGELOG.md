@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clarify interactive login choices as changing the global default or repository
+  override. Keeping the current selection explicitly cancels sign-in without
+  saving a new profile; pairing over an existing profile warns about replacing
+  its saved signer connection.
+
 - Make `account whoami` lead with the active login and repository override,
   distinguish saved accounts from active signers, and retain a concise command
   guide. Removal hints distinguish one profile from an entire account and no

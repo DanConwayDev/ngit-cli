@@ -131,6 +131,15 @@ one-shot `--signer <name>` re-resolves on every invocation and writes
 nothing. The older `ngit account login --signer <name>` spelling remains
 available.
 
+When interactive login finds an existing selection, its choices concern the
+global default or repository override. Choosing to keep that selection cancels
+the login before authentication; it does not save a new profile. To save and
+select a newly paired profile, choose to make it the default (or repository
+override). Other credential-store profiles remain saved. Pairing over an existing
+named profile can replace that profile's signer connection, so the prompt warns
+about that separately. These choices do not invoke logout or delete other saved
+profiles.
+
 For a credential-store-backed selection, the selected Git-config scope contains
 `nostr.signer` and `nostr.npub`, plus `nostr.signer-alias.<alias>` when an alias
 is used; it does not keep a redundant `nostr.nsec` or bunker pointer. With

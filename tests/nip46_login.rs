@@ -994,6 +994,64 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
         );
     }
 
+    // The interactive "make global default" choice reaches this same login
+    // path. A newly paired profile changes the selector, not the old session.
+    let global_repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let global_config = global_repo.dir().join("global-config");
+    for (profile, encoded) in [("dcdroid", &first_encoded), ("dcdev", &second_encoded)] {
+        let mut command = global_repo.ngit([
+            "account",
+            "login",
+            "--offline",
+            "--nbunksec",
+            encoded,
+            "--profile",
+            profile,
+            "--secret-storage",
+            "file",
+        ]);
+        command
+            .env_remove("NGITTEST")
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        git2::Config::open(&global_config)?.get_string("nostr.signer")?,
+        "dcdev"
+    );
+    for (profile, expected) in [("dcdroid", &first_encoded), ("dcdev", &second_encoded)] {
+        let mut command =
+            global_repo.ngit(["--signer", profile, "account", "export-keys", "--json"]);
+        command
+            .env_remove("NGITTEST")
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            nbunksec::decode(
+                document["nbunksec"]
+                    .as_str()
+                    .context("missing fixture connection")?
+            )?,
+            nbunksec::decode(expected)?
+        );
+    }
+
     first_task.abort();
     second_task.abort();
     Ok(())
