@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve relative Git includes beside their symlink paths during `logout --all`,
+  and include Windows ProgramData configuration in non-local cleanup.
+
 - Prevent logout from discarding legacy Git-config remote connections when
   credential retention was requested, and protect identity keys even when
   stale remote-app-key configuration references the same stored entry.

@@ -173,6 +173,12 @@ fn config_files(repo: Option<&Repo>) -> Result<Vec<ConfigFile>> {
             pending.push(PathBuf::from(path));
         } else {
             add_config_path(&mut pending, git2::Config::find_system())?;
+            // libgit2 also loads this system-level file on Windows. An
+            // explicit GIT_CONFIG_SYSTEM override bypasses it in ngit.
+            #[cfg(windows)]
+            if let Some(root) = std::env::var_os("PROGRAMDATA").filter(|value| !value.is_empty()) {
+                pending.push(PathBuf::from(root).join("Git").join("config"));
+            }
         }
     }
     if let Some(repo) = repo {
@@ -186,10 +192,22 @@ fn config_files(repo: Option<&Repo>) -> Result<Vec<ConfigFile>> {
         if !path.try_exists()? {
             continue;
         }
-        let path = path
+        // Git resolves relative includes beside the supplied config path,
+        // even when that file is a symlink. Canonicalize only the mutation
+        // target, not the context used to discover its included files.
+        let source = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let path = source
             .canonicalize()
-            .with_context(|| format!("failed to resolve {}", path.display()))?;
-        if !seen.insert(path.clone()) {
+            .with_context(|| format!("failed to resolve {}", source.display()))?;
+        let context = source
+            .parent()
+            .context("Git config has no parent directory")?
+            .canonicalize()?;
+        if !seen.insert((path.clone(), context)) {
             continue;
         }
         let values = read_config(&path)?;
@@ -198,7 +216,7 @@ fn config_files(repo: Option<&Repo>) -> Result<Vec<ConfigFile>> {
                 || (key.starts_with("includeif.") && key.rsplit('.').next() == Some("path"))
             {
                 for value in values {
-                    pending.push(include_path(&path, value)?);
+                    pending.push(include_path(&source, value)?);
                 }
             }
         }

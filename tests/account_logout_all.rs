@@ -206,3 +206,34 @@ async fn keep_credentials_preserves_plaintext_identity_keys_and_lists_saved_prof
     assert_eq!(document["accounts"][0]["active"], false);
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn all_resolves_includes_beside_a_symlink_without_touching_target_siblings() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let file = repo.dir().join("credentials.json");
+    let linked = repo.dir().join("linked");
+    let actual = repo.dir().join("actual");
+    std::fs::create_dir(&linked)?;
+    std::fs::create_dir(&actual)?;
+    let root = actual.join("config");
+    let global = linked.join("config");
+    let included = linked.join("child");
+    let unrelated = actual.join("child");
+    git2::Config::open(&root)?.set_str("include.path", "child")?;
+    git2::Config::open(&included)?.set_str("nostr.signer", "work")?;
+    git2::Config::open(&unrelated)?.set_str("nostr.signer", "unrelated")?;
+    let before = std::fs::read(&unrelated)?;
+    std::os::unix::fs::symlink(&root, &global)?;
+    std::fs::write(&file, b"{}")?;
+    success(&run(&repo, &file, &global, &["account", "logout", "--all"]).await?);
+    assert!(
+        git2::Config::open(&included)?
+            .get_string("nostr.signer")
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&unrelated)?, before);
+    assert!(std::fs::symlink_metadata(&global)?.is_symlink());
+    Ok(())
+}
