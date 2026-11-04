@@ -15,6 +15,19 @@ instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 replacement beside the file before atomically replacing it on Unix and
 Windows, so interruption cannot leave a partially written credential file.
 
+On Unix systems using D-Bus, an unset `DBUS_SESSION_BUS_ADDRESS` and a missing
+session-bus socket (`$XDG_RUNTIME_DIR/bus`, or `/run/user/<uid>/bus`) mean no
+OS backend is configured in that environment. File-backed credentials can be
+removed there, including named profiles. Deletion reports that only file-store
+entries are being removed. This does not delete credentials in
+an OS keyring belonging to another desktop session. A configured but unreachable
+bus, a locked keyring, and backend initialization failures remain errors;
+`NGIT_SECRET_STORAGE=file` does not authorize ignoring those errors on deletion.
+Deletion checks OS access before changing selected credentials or removal
+markers. If an OS deletion fails before file deletion, new removal markers are
+rolled back. Multiple backend operations are not a cross-store transaction;
+failures after a successful deletion can still require cleanup and are reported.
+
 The file store is plaintext by design. The threat this feature counters is
 *incidental* disclosure of git config — which coding agents and other tools
 read routinely — not filesystem compromise by a targeted attacker. A secret

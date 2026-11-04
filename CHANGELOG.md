@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow file-store logout and credential deletion on headless Unix systems
+  without a configured session bus. Keep errors for inaccessible configured OS
+  stores, check access before deletion, and avoid leaving profile-removal
+  markers when the OS deletion fails.
+
 - Fresh remote-signer login replaces the npub's default session while preserving
   independent named connections and identity keys. Failed authentication or
   credential storage leaves the working login selected; global login preserves

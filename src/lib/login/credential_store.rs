@@ -1105,12 +1105,46 @@ pub fn forget(name: &str) -> Result<bool> {
     }
     aliases.sort();
     aliases.dedup();
+    if !os_store_disabled() {
+        match os_store::get_value(name) {
+            Ok(_) | Err(OsError::NoEntry | OsError::Corrupt) => {}
+            Err(error) => {
+                return Err(anyhow!(error)
+                    .context("cannot verify OS credentials before deleting this entry"));
+            }
+        }
+    }
     // Keep only a public guard against stale Git mappings in other repos.
     // Write guards before deletion so a failed write leaves credentials intact.
-    for alias in &aliases {
-        file_store::set_value(&format!("{FORGOTTEN_PROFILE_PREFIX}{alias}"), "removed")?;
-    }
-    let mut deleted = forget_from_backends(name)?;
+    let guards = aliases
+        .iter()
+        .map(|alias| {
+            let name = format!("{FORGOTTEN_PROFILE_PREFIX}{alias}");
+            let previous = file_store::get_value(&name)?;
+            Ok((name, previous))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let deletion = (|| {
+        for (guard, _) in &guards {
+            file_store::set_value(guard, "removed")?;
+        }
+        forget_from_os(name)
+    })();
+    let mut deleted = match deletion {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            for (guard, previous) in guards {
+                match previous {
+                    Some(value) => file_store::set_value(&guard, &value)?,
+                    None => {
+                        file_store::delete(&guard)?;
+                    }
+                }
+            }
+            return Err(error);
+        }
+    };
+    deleted |= file_store::delete(name)?;
     for alias in aliases {
         deleted |= forget_from_backends(&alias_entry_name(&alias)?)?;
         deleted |= forget_from_backends(&alias_credential_entry_name(&alias)?)?;
@@ -1229,6 +1263,19 @@ pub fn all_entries() -> Result<Vec<String>> {
 /// Remove an enumerated collection from both credential backends. Preserve
 /// public removal guards so stale repository selectors fail closed.
 pub fn forget_entries(entries: &[String]) -> Result<usize> {
+    // A readable file fallback is not evidence that a configured OS store is
+    // empty. Detect inaccessible backends before any entry or guard changes.
+    if !os_store_disabled() {
+        for entry in entries {
+            match os_store::get_value(entry) {
+                Ok(_) | Err(OsError::NoEntry | OsError::Corrupt) => {}
+                Err(error) => {
+                    return Err(anyhow!(error)
+                        .context("cannot verify OS credentials before deletion; nothing changed"));
+                }
+            }
+        }
+    }
     let mut removed = 0;
     // Delete credentials before mappings, while the bindings still identify
     // dependent profiles. The low-level mapping entries are removed last.
@@ -1268,7 +1315,14 @@ pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<Str
     Ok(entries)
 }
 
-fn forget_from_backends(name: &str) -> Result<bool> {
+fn forget_from_os(name: &str) -> Result<bool> {
+    if !os_store_disabled() && os_store::session_backend_absent() {
+        static NOTICE: std::sync::Once = std::sync::Once::new();
+        NOTICE.call_once(|| eprintln!(
+            "no session bus configured: removing file-store entries only; OS keyrings in other sessions are not checked"
+        ));
+        return Ok(false);
+    }
     let mut deleted = false;
     if !os_store_disabled() {
         match os_store::delete(name) {
@@ -1279,10 +1333,12 @@ fn forget_from_backends(name: &str) -> Result<bool> {
             }
         }
     }
-    if file_store::delete(name)? {
-        deleted = true;
-    }
     Ok(deleted)
+}
+
+fn forget_from_backends(name: &str) -> Result<bool> {
+    let deleted = forget_from_os(name)?;
+    Ok(file_store::delete(name)? || deleted)
 }
 
 pub fn valid_entry_name(name: &str) -> bool {
@@ -1575,7 +1631,49 @@ mod os_store {
     use super::{KeyringError, OsError};
 
     fn entry(name: &str) -> Result<Entry, OsError> {
-        Entry::new(super::SERVICE, name).map_err(OsError::Store)
+        // No session bus is configured in a headless Unix environment. Do not
+        // confuse this with a configured bus/service that failed or is locked.
+        if session_backend_absent() {
+            return Err(OsError::NoEntry);
+        }
+        Entry::new(super::SERVICE, name).map_err(|error| {
+            if matches!(error, KeyringError::NoDefaultStore) {
+                if let Err(cause) = Entry::store_status() {
+                    return OsError::Store(KeyringError::PlatformFailure(Box::new(
+                        std::io::Error::other(format!(
+                            "credential backend initialization failed: {cause}"
+                        )),
+                    )));
+                }
+            }
+            OsError::Store(error)
+        })
+    }
+
+    pub(super) fn session_backend_absent() -> bool {
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        {
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
+                return false;
+            }
+            let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    // SAFETY: geteuid has no preconditions or memory arguments.
+                    let uid = unsafe { libc::geteuid() };
+                    std::path::PathBuf::from(format!("/run/user/{uid}"))
+                });
+            matches!(std::fs::symlink_metadata(runtime.join("bus")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        }
+        #[cfg(not(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        )))]
+        false
     }
 
     pub fn set(name: &str, keys: &Keys) -> Result<(), OsError> {
