@@ -37,7 +37,7 @@ pub struct SubCommandArgs {
     )]
     account: Option<String>,
 
-    /// login to the local git repository only
+    /// set a repository-specific login that overrides the default account
     #[arg(long, action)]
     local: bool,
 
@@ -303,9 +303,10 @@ async fn resolve_login_selection(
     interactive: bool,
 ) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
     // Positional and --signer selectors may fall back to cached profile names;
-    // --alias is strictly the alias namespace. In an explicitly interactive
-    // login it labels the fresh signer instead of reactivating an existing
-    // alias; positional ACCOUNT and --signer remain explicit selectors.
+    // --profile is strictly the named signer namespace. In an explicitly
+    // interactive login it labels the fresh signer instead of reactivating an
+    // existing alias; positional ACCOUNT and --signer remain explicit
+    // selectors.
     let from_explicit_selector = matches!(signer_info, Some(SignerInfo::Selection { .. }));
     let mut requested = signer_info
         .cloned()

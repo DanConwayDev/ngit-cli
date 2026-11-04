@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clarify logout scope, default-account fallback, and noninteractive identity-key
+  protection in CLI help, the account skill, and credential-storage guidance.
+
 - Name reusable signer configurations with `account login --profile NAME`.
   The old `--alias` spelling, stored bindings and JSON fields remain compatible.
 

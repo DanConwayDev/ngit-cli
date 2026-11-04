@@ -19,20 +19,23 @@ pub struct SubCommandArgs {
     /// exact named signer profile to remove
     #[arg(long, value_name = "NAME", conflicts_with = "signer")]
     pub profile: Option<String>,
-    /// sign out all saved profiles and clear this repo plus non-local Git
-    /// logins
+    /// remove all known saved profiles and current/non-local Git logins;
+    /// do not search other repositories or revoke remote permissions
     #[arg(long, conflicts_with_all = ["local", "global", "profile", "account", "signer"])]
     pub all: bool,
-    /// remove only this repository's login; never fall back to global logout
+    /// remove the repository-specific login and credentials; a remaining
+    /// default account becomes active; never remove the default login
     #[arg(long, conflicts_with = "global")]
     pub local: bool,
-    /// remove only the global login, preserving this repository's login
+    /// remove the default login and credentials; preserve repository-specific
+    /// selections (shared credentials become unavailable)
     #[arg(long)]
     pub global: bool,
-    /// also delete the selected stored credential, including an identity key
+    /// permit deleting identity private keys; otherwise their deletion fails
+    /// without prompting or changing anything
     #[arg(long, conflicts_with = "keep_credentials")]
     pub forget: bool,
-    /// retain saved credentials for later reactivation
+    /// clear the login selection but retain credentials for later reactivation
     #[arg(long)]
     pub keep_credentials: bool,
 }

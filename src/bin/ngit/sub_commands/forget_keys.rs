@@ -3,7 +3,8 @@ use ngit::login::{credential_store, user};
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
-    /// credential entry name printed at logout
+    /// low-level credential entry name (npub, signer:npub, or
+    /// signer-alias:name)
     #[arg(value_name = "ENTRY")]
     pub entry: String,
 }
@@ -11,7 +12,7 @@ pub struct SubCommandArgs {
 pub fn launch(args: &SubCommandArgs) -> Result<()> {
     if !credential_store::valid_entry_name(&args.entry) {
         bail!(
-            "'{}' is not a credential entry name; expected the entry name printed at logout",
+            "'{}' is not a credential entry name; use `account logout --profile NAME` for a named profile, or supply an npub, signer:npub, or signer-alias:name",
             args.entry
         );
     }

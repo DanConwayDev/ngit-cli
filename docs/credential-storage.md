@@ -214,7 +214,8 @@ searches for other repositories: their local plaintext credentials and
 selections may remain. Shared stored sessions removed by `--all` become
 unavailable to those repositories.
 
-If logout would delete an identity nsec, it stops before making changes.
+If logout would delete an identity nsec, it returns an error before making
+changes. There is no interactive confirmation, including with `-i`.
 Choose `--forget` to delete identity keys as well, or
 `--keep-credentials` to clear selections while preserving stored
 credentials. An nbunksec is a remote session, not an identity nsec. Ordinary
@@ -224,7 +225,9 @@ store first. Encrypted Git-config keys must be exported before removal because
 logout cannot preserve them automatically without decrypting them.
 
 Every logout lists saved profiles and remaining selections using the offline
-account inventory (also returned in JSON). Backend or configuration cleanup
+account inventory (also returned in JSON). JSON `unavailable_logins` entries identify a scope
+and error when a remaining selection cannot be used; they do not activate
+a lower-priority account. Backend or configuration cleanup
 failures are errors rather than a claim of complete sign-out. OS credentials
 are discoverable through ngit's public registry; arbitrary entries created by
 other applications outside that registry cannot be enumerated portably.
@@ -349,4 +352,6 @@ names for compatibility.
 Login authenticates and stores the new signer before updating its selected
 scope. Failed authentication or credential storage leaves the previous login
 selection intact. A global login preserves repository-local overrides; use
-`account logout --local` to inherit the global selection in that repository.
+`account logout --local` removes the repository override and its credentials,
+then inherits the global selection. Add `--keep-credentials` to retain the
+connection for reuse. Shared credentials may also be used by other repositories.
