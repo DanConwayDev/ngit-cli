@@ -935,6 +935,65 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
         export_stored_signer(&named_repo, credentials.path()).await?,
         nbunksec::decode(&second_encoded)?
     );
+    // Exercise both a default-slot connection and a dedicated named session.
+    for initial_default in [&first_encoded, &second_encoded] {
+        let credentials = NamedTempFile::new()?;
+        let output = run_nbunksec_login(&repo, initial_default, credentials.path(), None).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Reproduce profile aliasing of an exact remote connection: the Android
+        // session is kept by dcdroid when dcdev is paired to a different signer.
+        let output =
+            run_nbunksec_login(&repo, &first_encoded, credentials.path(), Some("dcdev")).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut alias_command = repo.ngit([
+            "account",
+            "login",
+            "dcdev",
+            "--profile",
+            "dcdroid",
+            "--offline",
+        ]);
+        alias_command
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output =
+            tokio::time::timeout(Duration::from_secs(30), alias_command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output =
+            run_nbunksec_login(&repo, &second_encoded, credentials.path(), Some("dcdev")).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            export_stored_signer(&repo, credentials.path()).await?,
+            nbunksec::decode(&second_encoded)?
+        );
+        repo.git_ok(
+            ["config", "nostr.signer", "dcdroid"],
+            "select preserved fixture profile",
+        )
+        .await?;
+        assert_eq!(
+            export_stored_signer(&repo, credentials.path()).await?,
+            nbunksec::decode(&first_encoded)?
+        );
+    }
+
     first_task.abort();
     second_task.abort();
     Ok(())
