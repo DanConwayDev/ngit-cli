@@ -445,22 +445,24 @@ pub async fn configured_signer_npub(
     git_repo: &Option<&Repo>,
     source: SignerInfoSource,
 ) -> Result<Option<String>> {
-    let has_login = match source {
-        SignerInfoSource::GitLocal => git_repo.is_some_and(|repo| {
-            ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-                .iter()
-                .any(|key| get_git_config_item(&Some(repo), key).is_ok_and(|value| value.is_some()))
-        }),
-        SignerInfoSource::GitGlobal => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-            .iter()
-            .any(|key| {
-                get_git_config_item_global(git_repo, key).is_ok_and(|value| value.is_some())
-            }),
-        SignerInfoSource::GitSystem => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-            .iter()
-            .any(|key| get_git_config_item_system(key).is_ok_and(|value| value.is_some())),
-        SignerInfoSource::CommandLineArguments => false,
-    };
+    let mut has_login = false;
+    for key in [
+        "nostr.signer",
+        "nostr.nsec",
+        "nostr.bunker-uri",
+        "nostr.bunker-app-key",
+    ] {
+        let value = match source {
+            SignerInfoSource::GitLocal => match git_repo {
+                Some(repo) => get_git_config_item(&Some(repo), key)?,
+                None => None,
+            },
+            SignerInfoSource::GitGlobal => get_git_config_item_global(git_repo, key)?,
+            SignerInfoSource::GitSystem => get_git_config_item_system(key)?,
+            SignerInfoSource::CommandLineArguments => None,
+        };
+        has_login |= value.is_some();
+    }
     if !has_login {
         return Ok(None);
     }

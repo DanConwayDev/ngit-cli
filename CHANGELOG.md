@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report incomplete app-key-only login selections in account inventory instead
+  of incorrectly advertising a global account as active.
+
 - Resolve relative Git includes beside their symlink paths during `logout --all`,
   and include Windows ProgramData configuration in non-local cleanup.
 
