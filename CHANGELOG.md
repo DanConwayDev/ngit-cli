@@ -7,62 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- Clarify logout scope, default-account fallback, and noninteractive identity-key
-  protection in CLI help, the account skill, and credential-storage guidance.
+- `account logout --all` removes all known saved profiles and credentials and
+  clears current-repository and non-local Git login configuration, including
+  conditional includes and Windows ProgramData configuration. It does not scan
+  other repositories or revoke access at remote signers.
+
+### Changed
 
 - Name reusable signer configurations with `account login --profile NAME`.
   The old `--alias` spelling, stored bindings and JSON fields remain compatible.
+- Ordinary logout removes the selected connection and its saved profile instead
+  of retaining credentials. It prefers the repository override, then the default
+  login; `--local` and `--global` explicitly select the scope. Removing an override
+  reports any default account that becomes active, and lists remaining accounts.
+  Removing shared credentials also makes them unavailable to other repositories.
+- Deleting identity keys requires `logout --forget`; `--keep-credentials` signs
+  out while retaining credentials. These safeguards also apply to `--all`, with
+  errors before changes and no interactive prompt. Retention refuses legacy
+  Git-config remote connections that cannot be preserved automatically; export
+  those connections first. Remote session credentials do not need `--forget`.
+- An explicit npub in `account logout` or `account forget-keys` removes all known
+  credentials and profile bindings for that identity, including remote sessions.
+  Logout still requires `--forget` for identity keys; `forget-keys` explicitly
+  authorizes deletion. Named profiles and exact credential-entry targets remain
+  selective. Saved credentials can be removed after logout without contacting
+  the signer.
 
 ### Fixed
 
-- Report incomplete app-key-only login selections in account inventory instead
-  of incorrectly advertising a global account as active.
-
-- Resolve relative Git includes beside their symlink paths during `logout --all`,
-  and include Windows ProgramData configuration in non-local cleanup.
-
-- Prevent logout from discarding legacy Git-config remote connections when
-  credential retention was requested, and protect identity keys even when
-  stale remote-app-key configuration references the same stored entry.
-
-- An explicit npub in `account logout` or `account forget-keys` now removes all
-  known stored credentials and profile bindings for that identity, including
-  remote sessions. Logout still requires `--forget` before deleting identity
-  keys; exact credential entries and named-profile targets remain selective.
-
-- Add `account logout --all` to remove known saved sessions across credential
-  backends and clear current-repository and non-local Git login configuration,
-  including conditional includes, without scanning other repositories.
-  Identity keys require `--forget` or `--keep-credentials` before any changes.
-- Ordinary logout forgets the selected account, including named profiles and
-  repository-specific connections, and lists remaining accounts. Plaintext
-  Git-config identity keys can no longer be silently lost:
-  use `--forget` to delete them or `--keep-credentials` to preserve them.
-
-- Remove retained credentials with `account logout ACCOUNT --forget`,
-  `--profile NAME`, or `--signer`, even after logout and without contacting
-  the signer. Clean deleted profile bindings and account inventory entries;
-  ambiguous selections and missing targets now explain how to proceed.
-- Logout discards remote sessions unless `--keep-credentials` is used.
-  Deleting identity keys requires `--forget`; repository logout reports the
-  remaining default selection. Account listings show a removal command for
-  each signer.
-
-- Fresh remote-signer login replaces an npub’s default session instead of
-  forcing users to accumulate profiles. Explicit named profiles keep their
-  own connections, and identity keys are never overwritten.
-
-- Keep the previous login selected while authenticating and storing a new
-  signer. A failed login no longer signs out the working account. Global
-  login also preserves repository-local overrides.
-
-- Keep account operations scoped to the intended login: incomplete local signer
-  configuration now fails instead of letting `ngit init` and other signing
-  commands fall back to a global identity. `ngit account logout --local` never
-  clears the global login, even if no local login remains; `--global` explicitly
-  clears only the global login. Plain logout still prefers the local login.
+- Fresh remote-signer login replaces the npub's default session while preserving
+  independent named connections and identity keys. Failed authentication or
+  credential storage leaves the working login selected; global login preserves
+  repository overrides.
+- Incomplete local login configuration blocks signing instead of silently
+  falling back to the global identity. Account inventory reports unavailable
+  selections rather than advertising the global account as active.
+- Logout cleanup follows Git's symlink-relative include paths without modifying
+  unrelated sibling configuration files.
 
 ## [3.0.5] - 2026-10-28
 
