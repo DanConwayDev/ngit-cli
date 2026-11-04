@@ -399,8 +399,13 @@ async fn choose_login_scope(
                 .map(|names| names.contains(target))
         });
         let current = alias.as_deref().unwrap_or(&user_ref.metadata.name);
+        let current_saved = alias.as_ref().is_some_and(|name| {
+            credential_store::inventory()
+                .is_ok_and(|inventory| inventory.aliases.contains_key(name))
+        });
         let prompt = login_scope_prompt(
             current,
+            current_saved.then_some(current),
             target_profile,
             source == SignerInfoSource::GitLocal,
             source == SignerInfoSource::GitGlobal && git_repo.is_some(),
@@ -430,49 +435,74 @@ fn login_scope_choice(choice: usize, local_only: bool) -> (bool, bool) {
 
 fn login_scope_prompt(
     current: &str,
+    saved_profile: Option<&str>,
     target: Option<&str>,
     local: bool,
     offer_local: bool,
     fresh_sign_in: bool,
     target_exists: Option<bool>,
 ) -> (String, Vec<String>) {
-    let scope = if local {
-        "repository override"
+    let named = saved_profile.is_some() || target.is_some();
+    let mut message = if named {
+        if local {
+            format!("Current login for this repository: {current}")
+        } else {
+            format!("Current global default: {current}")
+        }
+    } else if local {
+        format!("Currently signed in as {current} for this repository.")
     } else {
-        "global default"
+        format!("Currently signed in globally as {current}.")
     };
-    let target_label = target.unwrap_or("the new profile");
-    let mut message = format!("Current {scope}: {current}");
-    message.push_str("\nOther profiles in the credential store are kept.");
+    if let Some(profile) = saved_profile.filter(|profile| target != Some(*profile)) {
+        let _ = write!(message, "\n{profile} will remain saved.");
+    }
     if fresh_sign_in {
         match (target, target_exists) {
             (Some(name), Some(true)) => {
                 let _ = write!(
                     message,
-                    "\nSigning in as {name} may replace that profile's saved signer connection."
+                    "\nSigning in again may replace {name}'s saved connection."
                 );
             }
             (Some(name), None) => {
                 let _ = write!(
                     message,
-                    "\nIf {name} already exists, signing in may replace its saved signer connection."
+                    "\nIf {name} already exists, signing in may replace its saved connection."
                 );
             }
-            (None, _) => message.push_str(
-                "\nA new remote sign-in may replace this account's default remote session.",
-            ),
             _ => {}
         }
     }
-    message.push_str("\nKeeping the current selection cancels sign-in; no new profile is saved.");
-    let mut choices = vec![
-        format!("Make {target_label} the {scope} after signing in"),
-        format!("Keep {current} as the {scope} (cancel sign-in)"),
-    ];
+    let same_profile = target == Some(current) && fresh_sign_in && target_exists == Some(true);
+    let proceed = if same_profile {
+        format!("Sign in again as {current}")
+    } else if let Some(target) = target {
+        if local {
+            format!("Sign in as {target} for this repository")
+        } else {
+            format!("Sign in as {target} and make it the global default")
+        }
+    } else {
+        "Sign in with a different login".to_string()
+    };
+    let cancel = if same_profile {
+        "Keep the current connection (cancel)".to_string()
+    } else if named {
+        if local {
+            format!("Keep {current} for this repository (cancel)")
+        } else {
+            format!("Keep {current} as the global default (cancel)")
+        }
+    } else {
+        format!("Keep {current} signed in (cancel)")
+    };
+    let mut choices = vec![proceed, cancel];
     if offer_local {
-        choices.push(format!(
-            "Use {target_label} in this repository only; keep the global default"
-        ));
+        choices.push(match target {
+            Some(target) => format!("Sign in as {target} for this repository only"),
+            None => "Sign in with a different login for this repository only".to_string(),
+        });
     }
     (message, choices)
 }
@@ -501,54 +531,94 @@ mod tests {
         assert!(implicit_alias_selection(Some("dcdev"), true, false).is_none());
     }
     #[test]
-    fn named_global_switch_explains_selection_and_cancellation() {
-        let (message, choices) =
-            login_scope_prompt("dcdroid", Some("dcdev"), false, true, true, Some(false));
-        assert!(message.contains("Current global default: dcdroid"));
-        assert!(message.contains("Other profiles in the credential store are kept"));
-        assert!(message.contains("no new profile is saved"));
-        assert!(!message.contains("may replace"));
-        assert_eq!(choices[0], "Make dcdev the global default after signing in");
-        assert_eq!(
-            choices[1],
-            "Keep dcdroid as the global default (cancel sign-in)"
+    fn simple_login_avoids_profile_and_session_explanations() {
+        for local in [false, true] {
+            let (message, choices) =
+                login_scope_prompt("Alice", None, None, local, false, true, None);
+            assert_eq!(message.lines().count(), 1);
+            assert!(!message.contains("profile"));
+            assert!(!message.contains("session"));
+            assert_eq!(
+                choices,
+                [
+                    "Sign in with a different login",
+                    "Keep Alice signed in (cancel)"
+                ]
+            );
+            assert_eq!(login_scope_choice(0, local), (true, local));
+            assert_eq!(login_scope_choice(1, local), (false, local));
+        }
+    }
+
+    #[test]
+    fn named_switch_preserves_saved_profile_and_scope_choices() {
+        let (message, choices) = login_scope_prompt(
+            "dcdroid",
+            Some("dcdroid"),
+            Some("dcdev"),
+            false,
+            true,
+            true,
+            Some(false),
         );
-        assert_eq!(choices.len(), 3);
-        assert_eq!(login_scope_choice(0, false), (true, false));
-        assert_eq!(login_scope_choice(1, false), (false, false));
+        assert_eq!(
+            message,
+            "Current global default: dcdroid\ndcdroid will remain saved."
+        );
+        assert_eq!(
+            choices[0],
+            "Sign in as dcdev and make it the global default"
+        );
+        assert_eq!(choices[1], "Keep dcdroid as the global default (cancel)");
+        assert_eq!(choices[2], "Sign in as dcdev for this repository only");
         assert_eq!(login_scope_choice(2, false), (true, true));
-    }
-
-    #[test]
-    fn local_switch_and_existing_profile_pairing_are_explicit() {
-        let (message, choices) =
-            login_scope_prompt("dcagent", Some("dcdev"), true, false, true, Some(true));
-        assert!(message.contains("Current repository override: dcagent"));
-        assert!(
-            message
-                .contains("Signing in as dcdev may replace that profile's saved signer connection")
+        let (message, choices) = login_scope_prompt(
+            "dcdroid",
+            Some("dcdroid"),
+            Some("dcdev"),
+            true,
+            false,
+            true,
+            Some(false),
         );
-        assert_eq!(
-            choices[0],
-            "Make dcdev the repository override after signing in"
-        );
+        assert!(message.contains("for this repository"));
+        assert_eq!(choices[0], "Sign in as dcdev for this repository");
         assert_eq!(choices.len(), 2);
-        assert_eq!(login_scope_choice(0, true), (true, true));
-        assert_eq!(login_scope_choice(1, true), (false, true));
     }
 
     #[test]
-    fn unnamed_and_unknown_targets_do_not_promise_session_retention() {
-        let (message, choices) = login_scope_prompt("dcdroid", None, false, false, true, None);
-        assert!(message.contains("may replace this account's default remote session"));
-        assert_eq!(
-            choices[0],
-            "Make the new profile the global default after signing in"
+    fn existing_profile_pairing_warns_without_promising_retention() {
+        let (message, choices) = login_scope_prompt(
+            "dcdev",
+            Some("dcdev"),
+            Some("dcdev"),
+            false,
+            false,
+            true,
+            Some(true),
         );
-        let (message, _) = login_scope_prompt("dcdroid", Some("dcdev"), false, false, true, None);
-        assert!(message.contains("If dcdev already exists"));
+        assert!(message.contains("Signing in again may replace dcdev's saved connection"));
+        assert!(!message.contains("remain saved"));
+        assert_eq!(
+            choices,
+            [
+                "Sign in again as dcdev",
+                "Keep the current connection (cancel)"
+            ]
+        );
         let (message, _) =
-            login_scope_prompt("dcdroid", Some("dcdev"), false, false, false, Some(true));
-        assert!(!message.contains("may replace"));
+            login_scope_prompt("Alice", None, Some("dcdev"), false, false, true, None);
+        assert!(message.contains("If dcdev already exists"));
+        assert!(!message.contains("remain saved"));
+        let (message, _) = login_scope_prompt(
+            "dcdroid",
+            Some("dcdroid"),
+            Some("dcdev"),
+            false,
+            false,
+            false,
+            Some(true),
+        );
+        assert!(!message.contains("replace"));
     }
 }

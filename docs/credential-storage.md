@@ -131,9 +131,10 @@ one-shot `--signer <name>` re-resolves on every invocation and writes
 nothing. The older `ngit account login --signer <name>` spelling remains
 available.
 
-When interactive login finds an existing selection, its choices concern the
-global default or repository override. Choosing to keep that selection cancels
-the login before authentication; it does not save a new profile. To save and
+When interactive login finds an unnamed login, it offers a simple sign-in or
+cancel choice. When named profiles are involved, it names the global default or
+repository login and identifies the existing saved profile that will be kept.
+Choosing to keep that selection cancels the login before authentication; it does not save a new profile. To save and
 select a newly paired profile, choose to make it the default (or repository
 override). Other credential-store profiles remain saved. Pairing over an existing
 named profile can replace that profile's signer connection, so the prompt warns
