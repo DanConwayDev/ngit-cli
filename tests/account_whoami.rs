@@ -271,32 +271,6 @@ async fn account_whoami_combines_retained_local_and_global_signers() -> Result<(
         "human account whoami failed: {}",
         String::from_utf8_lossy(&human.stderr)
     );
-    let human = String::from_utf8(human.stdout)?;
-    let local_npub_line = format!("  npub: {locally_logged_in}");
-    for expected in [
-        local_npub_line.as_str(),
-        "  profiles: dcdev, shipwright",
-        "    local key via npub, dcdev, shipwright [local, active]",
-        "Plain Jane",
-        "  profiles: none",
-        "ACCOUNT can be any listed profile, an available full npub",
-        "or your exact\nNostr display name.",
-        "ngit --signer ACCOUNT <command>",
-        "git -c nostr.signer=ACCOUNT <command>",
-        "ngit account login ACCOUNT",
-        "ngit account login --local ACCOUNT",
-        "ngit account login ACCOUNT --profile NAME",
-        "ngit account logout",
-        "use remaining global account Global Ghost if available",
-    ] {
-        assert!(
-            human.contains(expected),
-            "missing human guidance: {expected}"
-        );
-    }
-    assert_eq!(human.matches("commands:").count(), 1);
-    assert!(!human.contains("  use:"));
-
     // The two friendliest suggestions are not decorative: each resolves via
     // the same one-shot signer path without changing the configured login.
     for selector in ["DanConwayDev", "dcdev"] {

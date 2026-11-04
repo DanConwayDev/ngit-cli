@@ -250,7 +250,7 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
             unavailable_logins: scopes.unavailable,
         })?;
     } else {
-        print_human(&accounts);
+        print_human(&accounts, &scopes);
         for login in scopes.unavailable {
             eprintln!(
                 "warning: {} login is unavailable: {}",
@@ -447,94 +447,113 @@ fn selector(kind: &'static str, value: &str) -> SelectorJson {
     }
 }
 
-fn print_active_account(accounts: &[Account]) {
-    if let Some(account) = accounts.iter().find(|account| account.active) {
-        if account.scopes.iter().any(|scope| scope == "local") {
-            println!("Using {} for this repository.", account.name);
-            if let Some(default) = accounts
-                .iter()
-                .find(|account| account.scopes.iter().any(|scope| scope == "global"))
-            {
-                println!("Default account: {} (overridden here).", default.name);
-            }
-        } else {
-            println!("Using your default account: {}.", account.name);
-        }
-        println!();
+fn default_account<'a>(accounts: &'a [Account], scopes: &LoginScopes) -> Option<&'a Account> {
+    // An unavailable global selection blocks system fallback, just as signing does.
+    if scopes
+        .unavailable
+        .iter()
+        .any(|login| login.scope == "global")
+    {
+        return None;
+    }
+    let npub = scopes.global.as_ref().or(scopes.system.as_ref())?;
+    accounts.iter().find(|account| &account.npub == npub)
+}
+
+fn scope_label(scope: &str) -> &str {
+    match scope {
+        "local" => "repository override",
+        "global" => "default",
+        "system" => "system default",
+        other => other,
     }
 }
 
-fn print_human(accounts: &[Account]) {
+fn print_active_account(accounts: &[Account], scopes: &LoginScopes) {
+    if let Some(account) = accounts.iter().find(|account| account.active) {
+        if scopes.active_label() == Some("local") {
+            println!("This repository: {} (repository override)", account.name);
+        } else {
+            println!(
+                "Logged in as {} ({})",
+                account.name,
+                scope_label(scopes.active_label().unwrap_or("global"))
+            );
+        }
+    } else if let Some(login) = scopes.unavailable.first() {
+        println!("{} login is unavailable.", scope_label(login.scope));
+    } else if scopes.active().is_some() {
+        println!("The selected account is unavailable.");
+    } else {
+        println!("Not logged in.");
+    }
+    if scopes.local.is_some()
+        || scopes
+            .unavailable
+            .iter()
+            .any(|login| login.scope == "local")
+    {
+        if let Some(default) = default_account(accounts, scopes) {
+            println!("Default elsewhere: {}", default.name);
+        }
+    }
+    println!();
+}
+
+fn print_human(accounts: &[Account], scopes: &LoginScopes) {
+    print_active_account(accounts, scopes);
     if accounts.is_empty() {
-        println!("no accounts available");
-        println!();
-        println!("use `ngit account login` to log in");
+        println!("No usable saved accounts. Log in: ngit account login");
         return;
     }
 
-    print_active_account(accounts);
-    println!("available accounts:");
+    println!("Saved accounts:");
     for (index, account) in accounts.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        let mut badges: Vec<String> = account
-            .scopes
-            .iter()
-            .map(|scope| match scope.as_str() {
-                "local" => "repository-specific".to_string(),
-                "global" => "default".to_string(),
-                other => other.to_string(),
-            })
-            .collect();
-        if account.active {
-            badges.push("active".to_string());
-        }
-        if badges.is_empty() {
-            println!("{}", account.name);
+        let status = if account.active {
+            "active here"
         } else {
-            println!("{} [{}]", account.name, badges.join(", "));
-        }
+            "not active here"
+        };
+        println!("{} [{status}]", account.name);
         println!("  npub: {}", account.npub);
         if let Some(nip05) = &account.nip05 {
             println!("  nip05: {nip05}");
         }
-        if account.aliases.is_empty() {
-            println!("  profiles: none");
-        } else {
-            println!("  profiles: {}", account.aliases.join(", "));
-        }
-        println!("  signers:");
         for signer in &account.signers {
-            let mut selectors = signer.aliases.iter().cloned().collect::<Vec<_>>();
-            if signer.npub_default {
-                selectors.insert(0, "npub".to_string());
+            let mut details: Vec<String> = signer
+                .scopes
+                .iter()
+                .map(|scope| scope_label(scope).to_string())
+                .collect();
+            if !signer.aliases.is_empty() {
+                details.push(format!(
+                    "profiles: {}",
+                    signer
+                        .aliases
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
-            let mut badges = signer.scopes.clone();
             if signer.active {
-                badges.push("active".to_string());
+                details.push("active here".to_string());
             }
-            let badges = if badges.is_empty() {
+            let suffix = if details.is_empty() {
                 String::new()
             } else {
-                format!(" [{}]", badges.join(", "))
+                format!(" · {}", details.join(" · "))
             };
             println!(
-                "    {} via {}{badges}",
+                "  {}{suffix}",
                 match signer.kind {
-                    "local-key" => "local key",
-                    _ => "remote signer session",
-                },
-                selectors.join(", ")
+                    "local-key" => "identity key",
+                    _ => "remote signer",
+                }
             );
-            if let Some(profile) = signer.aliases.iter().next() {
-                println!("      remove: ngit account logout --profile {profile} --forget");
-            } else if signer.npub_default {
-                println!(
-                    "      remove: ngit account logout {} --forget",
-                    account.npub
-                );
-            }
         }
         if account.name != account.npub
             && !account
@@ -542,24 +561,30 @@ fn print_human(accounts: &[Account]) {
                 .iter()
                 .any(|selector| selector.kind == "profile")
         {
-            println!("  account name is ambiguous; use an available npub or profile as ACCOUNT");
+            println!(
+                "  Display name cannot select this account; use a listed profile or selectable npub."
+            );
         }
         if !account.signers.iter().any(|signer| signer.npub_default) {
-            println!("  npub has multiple signer sessions; use a profile as ACCOUNT");
+            println!("  To log in, select a named profile; this npub has no default signer.");
         }
     }
 
     println!();
-    println!("ACCOUNT can be any listed profile, an available full npub, or your exact");
-    println!("Nostr display name.");
+    println!("Switch default:       ngit account login ACCOUNT");
+    println!("Use in this repo:     ngit account login --local ACCOUNT");
+    println!("Use once:             ngit --signer ACCOUNT <command>");
+    println!("Log out:              ngit account logout");
     println!();
-    println!("commands:");
-    println!("  ngit --signer ACCOUNT <command>        one ngit command");
-    println!("  git -c nostr.signer=ACCOUNT <command>  one Git command");
-    println!("  ngit account login ACCOUNT             set global default");
-    println!("  ngit account login --local ACCOUNT     set repository default");
-    println!("  ngit account login ACCOUNT --profile NAME  name profile; set global default");
-    print_logout_guidance(accounts);
+    println!("ACCOUNT: a listed profile name, selectable npub, or unambiguous display name.");
+    print_logout_guidance(accounts, scopes);
+    println!();
+    println!("Remove one profile:   ngit account logout --profile NAME");
+    println!("Remove entire account: ngit account logout NPUB");
+    println!(
+        "Identity-key deletion requires --forget; use --keep-credentials to retain credentials."
+    );
+    println!("More options:         ngit account --help");
 }
 
 impl Account {
@@ -620,35 +645,21 @@ impl Account {
     }
 }
 
-fn print_logout_guidance(accounts: &[Account]) {
-    if !accounts
-        .iter()
-        .any(|account| account.scopes.iter().any(|scope| scope == "local"))
+fn print_logout_guidance(accounts: &[Account], scopes: &LoginScopes) {
+    if scopes.local.is_none()
+        && !scopes
+            .unavailable
+            .iter()
+            .any(|login| login.scope == "local")
     {
         return;
     }
-
-    let fallback = accounts.iter().find_map(|account| {
-        account
-            .scopes
-            .iter()
-            .find(|scope| matches!(scope.as_str(), "global" | "system"))
-            .map(|scope| (account.name.as_str(), scope.as_str()))
-    });
-    match fallback {
-        Some((name, scope)) => {
-            println!(
-                "  ngit account logout                    remove repository login and credentials"
-            );
-            println!(
-                "                                         use remaining {scope} account {name} if available"
-            );
-        }
-        None => {
-            println!(
-                "  ngit account logout                    remove repository login and credentials"
-            );
-        }
+    println!("Logout removes this repository's login and its credentials.");
+    if let Some(default) = default_account(accounts, scopes) {
+        println!(
+            "The remaining default account ({}) becomes active here, if available.",
+            default.name
+        );
     }
 }
 
@@ -674,5 +685,50 @@ impl Account {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    fn account(npub: &str) -> Account {
+        Account {
+            name: npub.to_string(),
+            npub: npub.to_string(),
+            nip05: None,
+            aliases: vec![],
+            scopes: vec![],
+            active: false,
+            selectors: vec![],
+            signers: vec![],
+        }
+    }
+
+    #[test]
+    fn default_guidance_respects_global_precedence_and_unavailable_selections() {
+        // Inventory order must not choose the system account ahead of global.
+        let accounts = vec![account("system"), account("global")];
+        let mut scopes = LoginScopes {
+            unavailable: vec![],
+            local: Some("local".to_string()),
+            global: Some("global".to_string()),
+            system: Some("system".to_string()),
+        };
+        assert_eq!(
+            default_account(&accounts, &scopes).map(|a| a.npub.as_str()),
+            Some("global")
+        );
+        scopes.global = None;
+        scopes.unavailable.push(UnavailableLoginJson {
+            scope: "global",
+            error: "missing credential".to_string(),
+        });
+        assert!(default_account(&accounts, &scopes).is_none());
+        scopes.unavailable.clear();
+        assert_eq!(
+            default_account(&accounts, &scopes).map(|a| a.npub.as_str()),
+            Some("system")
+        );
     }
 }

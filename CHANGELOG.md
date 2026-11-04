@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Make `account whoami` lead with the active login and repository override,
+  distinguish saved accounts from active signers, and retain a concise command
+  guide. Removal hints distinguish one profile from an entire account and no
+  longer automatically authorize identity-key deletion. JSON output is unchanged.
 - Name reusable signer configurations with `account login --profile NAME`.
   The old `--alias` spelling, stored bindings and JSON fields remain compatible.
 - Ordinary logout removes the selected connection and its saved profile instead

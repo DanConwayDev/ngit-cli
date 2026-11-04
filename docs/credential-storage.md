@@ -258,8 +258,11 @@ profile again clears that marker. No signing material is retained by it.
 It does not revoke permissions in the remote signer application.
 
 `logout --forget` without an active login or explicit target fails with
-instructions rather than silently doing nothing. `account whoami` prints a
-removal command for each available signer. The low-level
+instructions rather than silently doing nothing. `account whoami` leads with the
+active login and any repository override,
+then lists saved accounts and signer connections. Its concise command guide
+distinguishes removing one named profile from removing an entire npub; identity
+key deletion is never suggested with an automatic `--forget`. The low-level
 `account forget-keys ENTRY` command remains available for direct recovery.
 `account forget-keys <npub>` explicitly deletes all known stored credentials for
 that identity, including its identity key, without another confirmation.
