@@ -28,6 +28,14 @@ app, check pending approvals and its connections to the listed signer relays,
 then cancel and rerun the command if necessary. ngit does not resume commands
 from an intermediate signing step or automatically repeat signing requests.
 
+Monitored operations for the same signer run one at a time so their progress
+and pending requests cannot be mixed. Each remote operation has a two-minute
+deadline covering queueing, the connection handshake and the requested operation
+together. A timeout exits with recovery
+guidance; a signer refusal keeps its original cause. Pairing failures propagate
+instead of silently restarting the wait or returning to the account menu.
+Cancelling or failing the pairing menu also stops its pending listener.
+
 The instrumented client under `src/lib/remote_signer/` is derived from the
 pinned upstream Nostr Connect client. Its provenance documents the narrow
 adaptation needed to expose request progress. Keep protocol behavior aligned

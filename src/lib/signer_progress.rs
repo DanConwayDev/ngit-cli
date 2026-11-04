@@ -260,6 +260,9 @@ pub async fn run_remote_operation_when_listening<T>(
     operation: impl Future<Output = Result<T>>,
     mut listening: impl FnMut(),
 ) -> Result<T> {
+    let deadline = tokio::time::Instant::now() + SIGNER_TIMEOUT;
+    let _monitor =
+        wait_for_signer_until(deadline, async { Ok(connect.lock_operation().await) }).await?;
     let mut events = connect.progress();
     let term = console::Term::stderr();
     let mut line = Some(TransientLine::write(&term, description)?);
@@ -275,6 +278,7 @@ pub async fn run_remote_operation_when_listening<T>(
     };
     let mut state = Progress::default();
     let delay = tokio::time::sleep(Duration::from_secs(5));
+    let operation = wait_for_signer_until(deadline, operation);
     tokio::pin!(delay, operation);
     let mut expanded = false;
     let mut listened = false;
@@ -325,8 +329,41 @@ pub async fn run_remote_operation_when_listening<T>(
     }
 }
 
+/// Bound the complete operation, including any connection handshake. The SDK's
+/// timeout applies separately to individual requests and cannot bound the sum.
+const SIGNER_TIMEOUT: Duration = Duration::from_secs(120);
+
+const SIGNER_TIMEOUT_GUIDANCE: &str = "remote signer did not respond in time. Open your signing app, check pending approvals and its signer-relay connections, then rerun the command. Requests are ephemeral: reconnecting the signer may not recover an earlier request.";
+
+async fn wait_for_signer_until<T>(
+    deadline: tokio::time::Instant,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout_at(deadline, operation).await {
+        Ok(Err(error))
+            if error
+                .downcast_ref::<nostr_connect::error::Error>()
+                .is_some_and(|error| error.kind() == nostr_connect::error::ErrorKind::Timeout) =>
+        {
+            Err(error.context(SIGNER_TIMEOUT_GUIDANCE))
+        }
+        Ok(result) => result,
+        Err(error) => Err(anyhow::Error::new(error).context(SIGNER_TIMEOUT_GUIDANCE)),
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_signer<T>(operation: impl Future<Output = Result<T>>) -> Result<T> {
+    wait_for_signer_until(tokio::time::Instant::now() + SIGNER_TIMEOUT, operation).await
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use nostr::{nips::nip46::NostrConnectMethod, prelude::RelayUrl};
     use nostr_sdk::client::Output;
 
@@ -494,5 +531,105 @@ mod tests {
         assert!(report.action.contains("network"));
         assert!(report.action.contains("relay addresses"));
         assert!(!report.action.contains("scan"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn operation_waiting_for_another_monitor_remains_bounded() {
+        let keys = nostr::prelude::Keys::generate();
+        let uri = nostr::nips::nip46::NostrConnectUri::client(keys.public_key(), vec![], "test");
+        let connect = NostrConnect::new(uri, keys, SIGNER_TIMEOUT, None).unwrap();
+        let held = connect.lock_operation().await;
+        let started = tokio::time::Instant::now();
+        let error = run_remote_operation(&connect, "queued signer operation", async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert_eq!(started.elapsed(), SIGNER_TIMEOUT);
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        drop(held);
+        assert_eq!(
+            run_remote_operation(&connect, "next operation", async { Ok(42) })
+                .await
+                .unwrap(),
+            42
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_covers_handshake_and_request_and_drops_pending_work() {
+        struct PendingWork(Arc<AtomicBool>);
+        impl Drop for PendingWork {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let pending_work = PendingWork(Arc::clone(&dropped));
+        let keys = nostr::prelude::Keys::generate();
+        let uri = nostr::nips::nip46::NostrConnectUri::client(keys.public_key(), vec![], "test");
+        let connect =
+            crate::remote_signer::NostrConnect::new(uri, keys, SIGNER_TIMEOUT, None).unwrap();
+        let started = tokio::time::Instant::now();
+        let error = run_remote_operation(&connect, "waiting for test signer...", async move {
+            let _pending_work = pending_work;
+            // Passage of time represents the two protocol stages under test.
+            tokio::time::sleep(SIGNER_TIMEOUT / 2).await;
+            std::future::pending::<anyhow::Result<()>>().await
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(started.elapsed(), SIGNER_TIMEOUT);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert!(error.to_string().contains("rerun the command"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signer_result_returns_without_waiting_for_deadline() {
+        let started = tokio::time::Instant::now();
+        assert_eq!(wait_for_signer(async { Ok(42) }).await.unwrap(), 42);
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signer_rejection_preserves_cause_without_retry_advice() {
+        let error = nostr_connect::error::Error::with_static_message(
+            nostr_connect::error::ErrorKind::Rejected,
+            "approval denied",
+        );
+        let error = wait_for_signer(async { Err::<(), _>(anyhow::Error::new(error)) })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<nostr_connect::error::Error>()
+                .unwrap()
+                .kind(),
+            nostr_connect::error::ErrorKind::Rejected
+        );
+        assert!(!error.to_string().contains("rerun"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sdk_timeout_receives_same_recovery_guidance() {
+        let error = nostr_connect::error::Error::simple(nostr_connect::error::ErrorKind::Timeout);
+        let error = wait_for_signer(async { Err::<(), _>(anyhow::Error::new(error)) })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<nostr_connect::error::Error>()
+                .unwrap()
+                .kind(),
+            nostr_connect::error::ErrorKind::Timeout
+        );
+        assert!(error.to_string().contains("rerun the command"));
     }
 }
