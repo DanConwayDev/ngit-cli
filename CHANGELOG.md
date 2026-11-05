@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLI arguments (`--manifest`, `--notes-file`) remain allowed to be absolute as a
   deliberate read primitive.
 
+- Ignore refs that merely start with `refs/tags` (for example `refs/tagsevil`)
+  when reading repository state events, instead of accepting them into the
+  repository state alongside genuine `refs/tags/` entries.
+
 - Allow file-store logout and credential deletion on headless Unix systems
   without a configured session bus. Keep errors for inaccessible configured OS
   stores, check access before deletion, and avoid leaving profile-removal
