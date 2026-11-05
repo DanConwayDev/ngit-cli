@@ -348,6 +348,13 @@ async fn install_cargo_with_command(
     root: &Path,
     version: &str,
 ) -> Result<InstalledUpdate> {
+    // Run from the detected Cargo installation root rather than the caller's
+    // directory. Repo-local .cargo/config.toml files can otherwise provide
+    // build.rustc-wrapper, target.*.linker, or [source] replacements. This
+    // is an existing user-owned directory, not a shared temporary directory.
+    // User-level Cargo config ($CARGO_HOME) deliberately still applies.
+    command.current_dir(root);
+
     let status = command
         .args([
             "install",
@@ -773,6 +780,42 @@ chmod +x "$TEST_BIN_DIR/ngit" "$TEST_BIN_DIR/git-remote-nostr"
             b"Cargo metadata"
         );
         assert!(!bin.join(INSTALL_RECEIPT_FILENAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cargo_updates_run_from_neutral_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cargo root");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(root.join(".crates2.json"), b"Cargo metadata").unwrap();
+        let log = temp.path().join("cwd_log");
+        let script = temp.path().join("cargo.sh");
+        fs::write(
+            &script,
+            r#"
+pwd > "$TEST_LOG"
+printf '#!/usr/bin/env bash\necho "ngit 3.0.1"\n' > "$TEST_BIN_DIR/ngit"
+printf '#!/usr/bin/env bash\necho "v3.0.1"\n' > "$TEST_BIN_DIR/git-remote-nostr"
+chmod +x "$TEST_BIN_DIR/ngit" "$TEST_BIN_DIR/git-remote-nostr"
+"#,
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .arg(script)
+            .env("TEST_LOG", &log)
+            .env("TEST_BIN_DIR", &bin);
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            install_cargo_with_command(command, &root, "3.0.1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let cwd = fs::read_to_string(log).unwrap().trim().to_string();
+        assert_eq!(cwd, root.to_string_lossy().to_string());
     }
 
     #[cfg(unix)]
