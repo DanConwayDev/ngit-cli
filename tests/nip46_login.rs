@@ -1056,3 +1056,151 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
     second_task.abort();
     Ok(())
 }
+
+/// An agent can read the URI while ngit is still running, pair from another
+/// process, and complete login with stdin closed. No connect-message resender
+/// is used: emitting the URI must mean ngit is ready to receive the response.
+#[tokio::test]
+async fn nostrconnect_cli_pairs_without_terminal_input() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true).await
+}
+
+#[tokio::test]
+async fn nostrconnect_cli_rejection_preserves_existing_login() -> Result<()> {
+    assert_nostrconnect_cli_pairing(false).await
+}
+
+async fn assert_nostrconnect_cli_pairing(approve: bool) -> Result<()> {
+    use std::process::Stdio;
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("signer")
+    .build()
+    .await?;
+    let relay_url = harness.relay("signer").url().to_string();
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    std::fs::write(credentials.path(), "{}")?;
+    repo.git_ok(
+        ["config", "nostr.signer", "preserved-profile"],
+        "seed previous login",
+    )
+    .await?;
+    let mut command = repo.ngit([
+        "account",
+        "login",
+        "--nostrconnect",
+        "--local",
+        "--offline",
+        "--profile",
+        "agent",
+        "--signer-relay",
+        relay_url.as_str(),
+        "--json",
+    ]);
+    command
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.env("NGIT_INTERACTIVE_MODE", "1");
+    let mut child = command.spawn()?;
+    let mut stderr = BufReader::new(child.stderr.take().context("missing stderr pipe")?).lines();
+    let mut startup_diagnostics = Vec::new();
+    let uri = tokio::time::timeout(READY_DEADLINE, async {
+        while let Some(line) = stderr.next_line().await? {
+            startup_diagnostics.push(line.clone());
+            if let Some((prefix, value)) = line.split_once(": ") {
+                if prefix.eq_ignore_ascii_case("nostrconnect") {
+                    return NostrConnectUri::parse(value).map_err(anyhow::Error::from);
+                }
+            }
+        }
+        anyhow::bail!("login ended without emitting a pairing URI")
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "pairing URI was not emitted before the deadline:\n{}",
+            startup_diagnostics.join("\n")
+        )
+    })??;
+    let user_keys = Keys::generate();
+    let signer_keys = Keys::generate();
+    let remote = NostrConnectRemoteSigner::from_uri(
+        uri,
+        NostrConnectKeys {
+            signer: signer_keys.clone(),
+            user: user_keys.clone(),
+        },
+        None,
+    )?;
+    struct ApprovePairing(bool);
+    impl NostrConnectSignerActions for ApprovePairing {
+        fn approve(&self, _public_key: &PublicKey, _request: &NostrConnectRequest) -> bool {
+            self.0
+        }
+    }
+    let signer_task = tokio::spawn(async move { remote.serve(ApprovePairing(approve)).await });
+    // Drain stderr concurrently so diagnostics cannot block the child.
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = Vec::new();
+        while let Some(line) = stderr.next_line().await? {
+            lines.push(line);
+        }
+        Ok::<_, std::io::Error>(lines.join("\n"))
+    });
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("noninteractive pairing did not complete")??;
+    signer_task.abort();
+    let diagnostics = stderr_task.await??;
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    if !approve {
+        assert!(
+            !output.status.success(),
+            "rejected identity request must fail"
+        );
+        assert_eq!(document["command_status"], "error");
+        assert!(
+            diagnostics.to_ascii_lowercase().contains("rejected"),
+            "{diagnostics}"
+        );
+        assert_eq!(std::fs::read_to_string(credentials.path())?, "{}");
+        assert_eq!(
+            git2::Repository::open(repo.dir())?
+                .config()?
+                .get_string("nostr.signer")?,
+            "preserved-profile"
+        );
+        return Ok(());
+    }
+    assert!(output.status.success(), "{diagnostics}");
+    assert_eq!(document["command_status"], "ok");
+    let stored = export_stored_signer(&repo, credentials.path()).await?;
+    let NostrConnectUri::Bunker {
+        remote_signer_public_key,
+        ..
+    } = NostrConnectUri::parse(stored.bunker_uri)?
+    else {
+        anyhow::bail!("saved session must be a bunker URI");
+    };
+    assert_eq!(remote_signer_public_key, signer_keys.public_key());
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(
+        stored["nostr/alias:agent"],
+        user_keys.public_key().to_bech32()?
+    );
+    let credential = stored["nostr/alias-credential:agent"]
+        .as_str()
+        .context("paired profile should reference its stored connection")?;
+    assert!(stored.get(format!("nostr/{credential}")).is_some());
+    Ok(())
+}
