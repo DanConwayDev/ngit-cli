@@ -331,6 +331,32 @@ To move an existing plaintext login into a credential store, log in again
 with `ngit account login`. Interactive commands print a once-per-run hint
 to that effect while a plaintext secret is in use.
 
+## Relay authentication
+
+By default, ngit answers a NIP-42 AUTH challenge only after the relay rejects
+an actual read or write with `auth-required:`. After successful authentication,
+the SDK resends the subscription or retries the same signed publication.
+Public reads avoid unnecessary authentication signatures.
+
+For a relay that silently withholds data until authentication, enable
+proactive authentication for that operation:
+
+```bash
+ngit --proactive-auth repo --json
+git -c nostr.proactive-auth=true pull
+```
+
+`nostr.proactive-auth` defaults to `false`. Set it with `git config` for a
+repository or add `--global` for all repositories. `NGIT_PROACTIVE_AUTH=true`
+(or `1`) overrides Git config; `NGIT_PROACTIVE_AUTH=false` disables proactive
+authentication even when Git config enables it. An explicit `--proactive-auth`
+flag takes precedence over the environment for ngit and its child processes.
+
+This changes authentication timing only. An eligible repository or publishing
+relay and an already attached signer are still required; a challenge never
+activates a signer. Known-private repositories still require a selected
+account. GRASP-08's Git HTTP authentication remains separate from NIP-42.
+
 ## One-shot non-interactive use
 
 `--nsec-file PATH` reads one nsec or hex key for the current command without

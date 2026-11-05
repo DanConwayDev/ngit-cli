@@ -73,17 +73,6 @@ unset config uses the new default in both fresh and existing clones.
 To enable automatic PR branches during the initial clone, use
 `git clone --config nostr.auto-pr-branches=true <nostr-url>`.
 
-NIP-42 relay authentication is reactive by default: ngit answers an AUTH
-challenge only after the relay rejects a read or write with `auth-required:`.
-Public reads therefore avoid unnecessary signer requests. Authentication still
-requires an eligible repository or publishing relay and an already attached
-signer; relay challenges never activate a signer themselves. To authenticate
-proactively on challenges, use `ngit --proactive-auth <command>`,
-`git -c nostr.proactive-auth=true pull`, or set `nostr.proactive-auth` to `true`
-in Git config. `NGIT_PROACTIVE_AUTH=true` enables the same behavior, and
-`NGIT_PROACTIVE_AUTH=false` overrides Git config to restore reactive auth.
-Relays that silently withhold data until authentication may need proactive mode.
-
 Set `NGIT_CACHE_DIR` to place ngit's global event cache in a different
 writable directory, for example in a sandbox or ephemeral agent environment.
 If that directory is unavailable, ngit uses an in-memory global cache for the

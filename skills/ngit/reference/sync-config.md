@@ -24,6 +24,7 @@ These accept any command position. `--offline` is per command; check
 | `--signer <ALIAS\|NPUB\|NAME>`          | Use a stored signer for this command                                                           |
 | `--nsec-file`, `--nbunksec-file <PATH>` | One-shot key or bunker session from a private file (`--nsec`, `--nbunksec` take inline values) |
 | `--repo-relay-only`                     | Publish only to repository relays                                                              |
+| `--proactive-auth`                     | Authenticate to eligible relays on challenges instead of waiting for a rejected request         |
 | `-f`, `--force`                         | Bypass safety guards                                                                           |
 
 ## git config
@@ -47,3 +48,16 @@ start.
 
 If the global cache directory is unavailable ngit falls back to an in-memory
 cache; the repository's git common directory must still be writable.
+
+## Relay authentication compatibility
+
+Public reads normally ignore unsolicited NIP-42 challenges. An `auth-required:`
+rejection triggers authentication and retry when the relay is eligible and a
+signer is attached. For relays that silently wait for authentication, use
+`ngit --proactive-auth repo --json` or `git -c nostr.proactive-auth=true pull`.
+
+`nostr.proactive-auth` defaults to `false` and follows Git config precedence.
+`NGIT_PROACTIVE_AUTH=true` (or `1`) enables it; `NGIT_PROACTIVE_AUTH=false`
+overrides Git config to disable it. An explicit `--proactive-auth` flag wins
+over the environment. None of these settings activates a signer or changes
+which relays are eligible for authentication.
