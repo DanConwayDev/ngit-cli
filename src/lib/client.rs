@@ -65,7 +65,7 @@ use crate::{
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
     output_mode::{TransientLine, is_quiet, is_verbose, write_progress_line},
-    relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
+    relay_auth::{DemandAuthTransport, PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
         announcement_author_declines_moderatorship,
@@ -152,12 +152,16 @@ fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
 /// Build nostr-sdk with ngit's session-scoped NIP-42 policy. The client always
 /// has the policy authenticator installed, but it cannot sign until the command
 /// explicitly attaches a signer.
-fn build_nostr_client(auth_policy: Arc<RelayAuthPolicy>) -> nostr_sdk::client::Client {
+fn build_nostr_client(
+    auth_policy: Arc<RelayAuthPolicy>,
+    proactive_auth: bool,
+) -> nostr_sdk::client::Client {
     crate::tls::install_default_crypto_provider();
     apply_onion_proxy(
         ClientBuilder::default()
             .relay_limits(RelayLimits::disable())
             .verify_subscriptions(true)
+            .websocket_transport(DemandAuthTransport::new(proactive_auth))
             .authenticator(PolicyAuthenticator::new(auth_policy)),
     )
     .build()
@@ -468,6 +472,7 @@ pub struct Client {
     grasp_default_set: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
     auth_policy: Arc<RelayAuthPolicy>,
+    proactive_auth: bool,
 }
 
 impl Client {
@@ -561,7 +566,8 @@ impl Connect for Client {
             auth_policy.set_signer(Arc::new(NgitSigner::Keys(keys)));
         }
         Client {
-            client: build_nostr_client(Arc::clone(&auth_policy)),
+            client: build_nostr_client(Arc::clone(&auth_policy), opts.proactive_auth),
+            proactive_auth: opts.proactive_auth,
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,
             blaster_relays: opts.blaster_relays,
@@ -576,7 +582,7 @@ impl Connect for Client {
         self.auth_policy.set_signer(signer);
         // Preserve existing behavior: attaching a signer drops any anonymous
         // connections. Relay classifications survive through the shared policy.
-        self.client = build_nostr_client(Arc::clone(&self.auth_policy));
+        self.client = build_nostr_client(Arc::clone(&self.auth_policy), self.proactive_auth);
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
@@ -1753,6 +1759,8 @@ async fn fetch_complete_events(
 }
 
 pub struct Params {
+    /// Answer unsolicited AUTH challenges instead of waiting for auth-required.
+    pub proactive_auth: bool,
     pub keys: Option<nostr::prelude::Keys>,
     pub relay_default_set: Vec<String>,
     pub announcement_indexer_relays: Vec<String>,
@@ -1818,6 +1826,9 @@ fn env_grasp_server_list(var: &str) -> Option<Vec<String>> {
 impl Default for Params {
     fn default() -> Self {
         Params {
+            proactive_auth: std::env::var("NGIT_PROACTIVE_AUTH")
+                .ok()
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             keys: None,
             relay_default_set: if std::env::var("NGITTEST").is_ok() {
                 env_relay_url_list("NGIT_RELAY_DEFAULT_SET").unwrap_or_else(|| {
@@ -1886,6 +1897,13 @@ impl Params {
 
     pub fn with_git_config_relay_defaults(git_repo: &Option<&Repo>) -> Self {
         let mut params = Params::default();
+        if std::env::var_os("NGIT_PROACTIVE_AUTH").is_none() {
+            params.proactive_auth = get_git_config_item(git_repo, "nostr.proactive-auth")
+                .ok()
+                .flatten()
+                .and_then(|value| git2::Config::parse_bool(&value).ok())
+                .unwrap_or(false);
+        }
         if std::env::var("NGITTEST").is_err() {
             // ignore git config settings under test
             if let Ok(Some(relay_defaults)) =

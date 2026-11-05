@@ -1,6 +1,7 @@
 //! NIP-42 relay authentication policy, end to end.
 //!
-//! ngit answers AUTH challenges from repository relays only after the command
+//! ngit defers AUTH challenges until a request is rejected with auth-required,
+//! then answers challenges from repository relays only after the command
 //! has explicitly attached a signer. Known-private discovery requires that
 //! acquisition; public operations never acquire credentials in response to a
 //! challenge. The user's own inbox/outbox relays authenticate only while

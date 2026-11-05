@@ -2,7 +2,9 @@
 //!
 //! Relay authentication proves the user's identity to the relay, so a relay
 //! challenge alone is never permission to locate or activate a signer. ngit
-//! classifies each relay use before connecting:
+//! defers unsolicited challenges until a request is rejected with auth-required
+//! (unless proactive authentication is explicitly enabled), and classifies each
+//! relay use before connecting:
 //!
 //! - repository relays may authenticate when a signer is already attached;
 //! - relays used for a known-private repository require that the caller has
@@ -20,12 +22,20 @@
 use std::{
     collections::HashMap,
     future::Future,
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, RwLock},
 };
 
-use nostr::prelude::{Event, IntoEventBuilder, RelayUrl, nip42::ClientAuthentication};
-use nostr_sdk::{authenticator::Authenticator, error::Error as NostrSdkError};
+use futures::StreamExt;
+use nostr::prelude::{Event, IntoEventBuilder, RelayUrl, Url, nip42::ClientAuthentication};
+use nostr_sdk::{
+    authenticator::Authenticator,
+    error::Error as NostrSdkError,
+    transport::websocket::{
+        DefaultWebsocketTransport, WebSocketSink, WebSocketStream, WebSocketTransport,
+    },
+};
 
 use crate::signer::NgitSigner;
 
@@ -137,6 +147,131 @@ impl RelayAuthPolicy {
     }
 }
 
+/// Defer unsolicited AUTH challenges until a request actually needs auth.
+/// The SDK authenticates immediately on every challenge and reports failures
+/// to active subscriptions, even when those subscriptions allow public reads.
+/// Keep the latest challenge at the transport boundary instead, then let the
+/// SDK perform its normal authentication and retry after an auth-required
+/// reply.
+#[derive(Debug)]
+pub(crate) struct DemandAuthTransport {
+    proactive: bool,
+}
+
+impl DemandAuthTransport {
+    pub(crate) fn new(proactive: bool) -> Self {
+        Self { proactive }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AuthMessage {
+    Challenge,
+    Required,
+    Other,
+}
+
+fn classify_auth_message(raw: &str) -> AuthMessage {
+    // Decode only the message name before deciding whether to inspect the
+    // full frame. Ordinary events never need a second payload decode. Using
+    // the JSON decoder also handles whitespace and escaped message strings.
+    use serde::Deserialize;
+    let Some(fields) = raw.trim_start().strip_prefix('[') else {
+        return AuthMessage::Other;
+    };
+    let Ok(kind) = String::deserialize(&mut serde_json::Deserializer::from_str(fields)) else {
+        return AuthMessage::Other;
+    };
+    if !matches!(kind.as_str(), "AUTH" | "CLOSED" | "OK") {
+        return AuthMessage::Other;
+    }
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return AuthMessage::Other;
+    };
+    let reason = match message[0].as_str() {
+        Some("AUTH") if message[1].is_string() => return AuthMessage::Challenge,
+        Some("CLOSED") => message[2].as_str(),
+        Some("OK") if message[2].as_bool() == Some(false) => message[3].as_str(),
+        _ => None,
+    };
+    if reason.is_some_and(|reason| reason.starts_with("auth-required:")) {
+        AuthMessage::Required
+    } else {
+        AuthMessage::Other
+    }
+}
+
+#[derive(Debug)]
+struct DeferredAuth<T> {
+    challenge: Option<T>,
+    required: bool,
+}
+
+impl<T> DeferredAuth<T> {
+    fn new() -> Self {
+        Self {
+            challenge: None,
+            required: false,
+        }
+    }
+
+    fn receive(&mut self, message: T, kind: AuthMessage) -> Vec<T> {
+        match kind {
+            AuthMessage::Challenge if !self.required => {
+                // New challenges replace earlier ones on this connection.
+                self.challenge = Some(message);
+                vec![]
+            }
+            AuthMessage::Required => {
+                self.required = true;
+                let mut messages = vec![message];
+                // Forward rejection first so the SDK registers the pending
+                // retry before authentication can complete.
+                messages.extend(self.challenge.take());
+                messages
+            }
+            _ => vec![message],
+        }
+    }
+}
+
+impl WebSocketTransport for DemandAuthTransport {
+    fn support_ping(&self) -> bool {
+        DefaultWebsocketTransport.support_ping()
+    }
+
+    fn connect<'a>(
+        &'a self,
+        url: &'a Url,
+        proxy: Option<SocketAddr>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(WebSocketSink, WebSocketStream), NostrSdkError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let (sink, stream) = DefaultWebsocketTransport.connect(url, proxy).await?;
+            if self.proactive {
+                return Ok((sink, stream));
+            }
+            // Connection-local state is discarded on reconnect. Never carry
+            // an authentication requirement or challenge to another session.
+            let mut deferred = DeferredAuth::new();
+            let stream: WebSocketStream = Box::pin(stream.flat_map(move |message| {
+                let kind = message
+                    .as_ref()
+                    .ok()
+                    .and_then(|message| message.as_text())
+                    .map_or(AuthMessage::Other, classify_auth_message);
+                futures::stream::iter(deferred.receive(message, kind))
+            }));
+            Ok((sink, stream))
+        })
+    }
+}
+
 /// A NIP-42 authenticator that signs only for pre-classified relays and only
 /// with a signer explicitly attached by the command.
 #[derive(Debug)]
@@ -204,6 +339,242 @@ mod tests {
 
     fn attach_keys(policy: &RelayAuthPolicy, keys: &Keys) {
         policy.set_signer(Arc::new(NgitSigner::Keys(keys.clone())));
+    }
+
+    #[test]
+    fn only_request_rejections_require_authentication() {
+        for message in [
+            r#"["CLOSED","sub","auth-required: sign in"]"#,
+            r#"["OK","id",false,"auth-required: sign in"]"#,
+            r#" [ "CLOSED", "sub", "\u0061uth-required: sign in" ] "#,
+        ] {
+            assert_eq!(classify_auth_message(message), AuthMessage::Required);
+        }
+        for message in [
+            r#"["OK","id",true,"auth-required: accepted"]"#,
+            r#"["CLOSED","sub","restricted: not allowed"]"#,
+            r#"["NOTICE","auth-required: unsolicited notice"]"#,
+            r#"["EVENT","sub",{"content":"auth-required:"}]"#,
+            "invalid auth-required: message",
+        ] {
+            assert_eq!(classify_auth_message(message), AuthMessage::Other);
+        }
+    }
+
+    #[test]
+    fn latest_challenge_is_released_after_rejection() {
+        let mut deferred = DeferredAuth::new();
+        assert!(deferred.receive("old", AuthMessage::Challenge).is_empty());
+        assert!(deferred.receive("new", AuthMessage::Challenge).is_empty());
+        assert_eq!(deferred.receive("event", AuthMessage::Other), vec!["event"]);
+        assert_eq!(
+            deferred.receive("closed", AuthMessage::Required),
+            vec!["closed", "new"]
+        );
+        assert_eq!(
+            deferred.receive("another challenge", AuthMessage::Challenge),
+            vec!["another challenge"]
+        );
+        assert_eq!(
+            deferred.receive("another rejection", AuthMessage::Required),
+            vec!["another rejection"]
+        );
+        // A new connection must not inherit the previous auth requirement.
+        assert!(
+            DeferredAuth::new()
+                .receive("challenge", AuthMessage::Challenge)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejection_before_challenge_is_supported() {
+        let mut deferred = DeferredAuth::new();
+        assert_eq!(
+            deferred.receive("closed", AuthMessage::Required),
+            vec!["closed"]
+        );
+        assert_eq!(
+            deferred.receive("challenge", AuthMessage::Challenge),
+            vec!["challenge"]
+        );
+    }
+
+    // A real WebSocket exchange checks SDK retry and authentication-failure
+    // behavior, including the public-read regression, without a user signer.
+    async fn challenging_relay(proactive: bool, read_gate: bool, write_gate: bool, signer: bool) {
+        use std::time::Duration;
+
+        use futures::SinkExt;
+        use nostr::prelude::{EventBuilder, Filter, FinalizeEvent};
+        use nostr_sdk::relay::Relay;
+        use serde_json::{Value, json};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = url(&format!("ws://{}", listener.local_addr().unwrap()));
+        let server_url = relay_url.clone();
+        let keys = Keys::generate();
+        let expected = EventBuilder::new(Kind::RepoState, "test state")
+            .finalize(&keys)
+            .unwrap();
+        let stored = expected.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(socket).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!(["AUTH", "challenge"]).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let mut authenticated = false;
+            let mut auth_count = 0;
+            let mut rejected_read = false;
+            let mut rejected_write = false;
+            let mut pending = None;
+            while let Some(Ok(message)) = socket.next().await {
+                if message.is_close() {
+                    break;
+                }
+                let Ok(raw) = message.to_text() else { continue };
+                let Ok(message) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                match message[0].as_str() {
+                    Some("AUTH") => {
+                        let event: Event = serde_json::from_value(message[1].clone()).unwrap();
+                        assert!(nip42::is_valid_auth_event(&event, &server_url, "challenge"));
+                        assert!(event.verify().is_ok());
+                        authenticated = true;
+                        auth_count += 1;
+                        socket
+                            .send(Message::Text(
+                                json!(["OK", event.id, true, ""]).to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        // Proactive mode must authenticate even though this
+                        // relay never sent an auth-required rejection.
+                        if let Some(id) = pending.take() {
+                            socket
+                                .send(Message::Text(
+                                    json!(["EVENT", id, stored]).to_string().into(),
+                                ))
+                                .await
+                                .unwrap();
+                            socket
+                                .send(Message::Text(json!(["EOSE", id]).to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    Some("REQ") => {
+                        let id = message[1].as_str().unwrap().to_owned();
+                        if read_gate && !authenticated {
+                            rejected_read = true;
+                            socket
+                                .send(Message::Text(
+                                    json!(["CLOSED", id, "auth-required: read"])
+                                        .to_string()
+                                        .into(),
+                                ))
+                                .await
+                                .unwrap();
+                        } else if proactive && !authenticated {
+                            pending = Some(id);
+                        } else {
+                            socket
+                                .send(Message::Text(
+                                    json!(["EVENT", id, stored]).to_string().into(),
+                                ))
+                                .await
+                                .unwrap();
+                            socket
+                                .send(Message::Text(json!(["EOSE", id]).to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    Some("EVENT") => {
+                        let allowed = !write_gate || authenticated;
+                        rejected_write |= !allowed;
+                        socket
+                            .send(Message::Text(
+                                json!([
+                                    "OK",
+                                    message[1]["id"],
+                                    allowed,
+                                    if allowed { "" } else { "auth-required: write" }
+                                ])
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            (auth_count, rejected_read, rejected_write)
+        });
+        let policy = Arc::new(RelayAuthPolicy::default());
+        policy.register_repo_relays([relay_url.clone()]);
+        if signer {
+            attach_keys(&policy, &keys);
+        }
+        let relay = Relay::builder(relay_url)
+            .websocket_transport(DemandAuthTransport::new(proactive))
+            .authenticator(PolicyAuthenticator::new(policy))
+            .build();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            relay.try_connect().await.unwrap();
+            let events = relay
+                .fetch_events(Filter::new().kind(Kind::RepoState))
+                .await
+                .unwrap();
+            assert!(events.iter().any(|event| event.id == expected.id));
+            if write_gate {
+                relay.send_event(&expected).await.unwrap();
+            }
+            relay.disconnect();
+            let (auth_count, rejected_read, rejected_write) = server.await.unwrap();
+            assert_eq!(
+                auth_count,
+                usize::from(proactive || read_gate || write_gate)
+            );
+            assert_eq!(rejected_read, read_gate && !proactive);
+            assert_eq!(rejected_write, write_gate && !proactive);
+        })
+        .await
+        .expect("relay authentication exchange timed out");
+    }
+
+    #[tokio::test]
+    async fn public_reads_do_not_authenticate_even_with_a_signer() {
+        challenging_relay(false, false, false, true).await;
+    }
+
+    #[tokio::test]
+    async fn public_reads_succeed_without_a_signer_despite_auth_challenge() {
+        challenging_relay(false, false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn reads_authenticate_only_after_auth_required() {
+        challenging_relay(false, true, false, true).await;
+    }
+
+    #[tokio::test]
+    async fn writes_authenticate_only_after_auth_required() {
+        challenging_relay(false, false, true, true).await;
+    }
+
+    #[tokio::test]
+    async fn proactive_mode_authenticates_without_request_rejection() {
+        challenging_relay(true, false, false, true).await;
     }
 
     #[test]

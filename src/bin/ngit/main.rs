@@ -96,6 +96,10 @@ async fn main() {
         std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
     }
 
+    if cli.proactive_auth {
+        std::env::set_var("NGIT_PROACTIVE_AUTH", "true");
+    }
+
     if cli.repo_relay_only {
         std::env::set_var("NGIT_REPO_RELAY_ONLY", "1");
     }

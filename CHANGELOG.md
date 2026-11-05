@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Defer relay authentication until a read or write is rejected with
+  `auth-required:`, avoiding unnecessary signer requests for public reads.
+  Gated requests authenticate and retry; `--proactive-auth`,
+  `nostr.proactive-auth`, or `NGIT_PROACTIVE_AUTH` restores immediate
+  authentication for eligible relays.
+
 - Keep unnamed interactive login prompts to a simple sign-in/cancel choice.
   Named-profile prompts explain changing the global default or repository login
   and identify the saved profile being retained. Keeping the current selection

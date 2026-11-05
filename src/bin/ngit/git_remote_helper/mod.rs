@@ -352,7 +352,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     // quiet suppression happens inside print_update_notice_if_available
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
-    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client_params = Params::with_git_config_relay_defaults(&Some(&git_repo));
+    if std::env::var_os("NGIT_PROACTIVE_AUTH").is_none() {
+        if let Some(value) = command_config_value("nostr.proactive-auth")? {
+            client_params.proactive_auth = git2::Config::parse_bool(&value)
+                .context("nostr.proactive-auth must be a boolean")?;
+        }
+    }
+    let mut client = Client::new(client_params);
     if let Some(repo_ref) = cached_repo_ref.as_ref().filter(|repo_ref| repo_ref.private) {
         client.nip42_register_private_repo_relays(repo_ref.relays.clone());
     }
@@ -799,6 +806,21 @@ mod tests {
             command_config_value_from(&mut command, "nostr.signer").unwrap(),
             Some("Dan Conway".to_string())
         );
+    }
+
+    #[test]
+    fn extracts_proactive_auth_from_git_command_config() {
+        for enabled in [false, true] {
+            let mut command = Command::new("git");
+            command.env_remove("GIT_CONFIG_COUNT").env(
+                "GIT_CONFIG_PARAMETERS",
+                format!("'nostr.proactive-auth'='{enabled}'"),
+            );
+            let value = command_config_value_from(&mut command, "nostr.proactive-auth")
+                .unwrap()
+                .unwrap();
+            assert_eq!(git2::Config::parse_bool(&value).unwrap(), enabled);
+        }
     }
 
     #[test]

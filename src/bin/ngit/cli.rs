@@ -124,6 +124,10 @@ pub struct Cli {
     /// relays
     #[arg(long, global = true)]
     pub repo_relay_only: bool,
+    /// Authenticate to eligible relays on AUTH challenges before a request is
+    /// rejected
+    #[arg(long, global = true)]
+    pub proactive_auth: bool,
     /// Target repository for repo-scoped operations. Accepts a configured
     /// nostr:// remote name, an naddr, or a nostr:// URL. Overrides
     /// `nostr.repo`, tracked-upstream, and remote-based auto-detection.
@@ -185,6 +189,12 @@ Values are semicolon-separated URLs without spaces.
     Only publish nostr events to repo relays, skipping user and default relays.
     Useful when you do not want to broadcast to your personal relay set.
     Also available as: {repo_relay_only_flag}
+
+  {proactive_auth}
+    Authenticate on relay AUTH challenges instead of waiting for auth-required
+    request rejections. Defaults to false. Requires an already attached signer
+    and an eligible relay. Also available as --proactive-auth or
+    NGIT_PROACTIVE_AUTH=true. For Git: git -c nostr.proactive-auth=true pull.
 
   {auto_pr_branches}
     Set to true to advertise every open or draft PR as a `pr/*` branch.
@@ -258,6 +268,7 @@ implementation details used for efficiency.
         nostate = key("nostr.nostate true"),
         repo_relay_only = key("nostr.repo-relay-only true"),
         repo_relay_only_flag = cmd("ngit --repo-relay-only send"),
+        proactive_auth = key("nostr.proactive-auth true"),
         auto_pr_branches = key("nostr.auto-pr-branches true"),
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
@@ -1712,6 +1723,22 @@ mod tests {
         PrCommands, ReleaseAppCommands, ReleaseAssetCommands, ReleaseCommands,
         extract_signer_cli_arguments, read_nsec_file,
     };
+
+    #[test]
+    fn proactive_auth_is_opt_in_and_global() {
+        assert!(
+            !super::Cli::try_parse_from(["ngit", "repo"])
+                .unwrap()
+                .proactive_auth
+        );
+        for args in [
+            vec!["ngit", "--proactive-auth", "repo"],
+            vec!["ngit", "repo", "--proactive-auth"],
+            vec!["ngit", "issue", "list", "--proactive-auth"],
+        ] {
+            assert!(super::Cli::try_parse_from(args).unwrap().proactive_auth);
+        }
+    }
 
     #[test]
     fn ci_detail_log_tail_modes_default_to_auto() {
