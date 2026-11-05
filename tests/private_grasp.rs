@@ -62,7 +62,19 @@ async fn publish_member_relay_list(harness: &Harness, keys: &Keys) -> Result<()>
 }
 
 #[tokio::test]
-async fn private_member_can_init_clone_and_push_without_public_repo_events() -> Result<()> {
+async fn private_member_can_init_clone_and_push_with_deferred_auth() -> Result<()> {
+    private_member_workflow(false).await
+}
+
+#[tokio::test]
+async fn private_member_can_init_clone_and_push_with_proactive_auth() -> Result<()> {
+    private_member_workflow(true).await
+}
+
+// Exercise the same real ngit-grasp access boundary in both modes. Deferred
+// auth must recover from auth-required rejections; proactive auth remains a
+// compatibility path. Both must preserve non-member refusal and privacy.
+async fn private_member_workflow(proactive_auth: bool) -> Result<()> {
     let member = Keys::generate();
     let member_nsec = member.secret_key().to_bech32()?;
     let member_pubkey = member.public_key();
@@ -83,6 +95,12 @@ async fn private_member_can_init_clone_and_push_without_public_repo_events() -> 
     .with_private_grasp_server("repo", &member_pubkey)
     .with_private_grasp_server("empty_hint", &member_pubkey)
     .with_child_env("NGIT_SECRET_STORAGE", "file")
+    // Pin the mode for ngit and its Git remote-helper children so a developer's
+    // inherited environment cannot silently bypass the deferred-auth regression.
+    .with_child_env(
+        "NGIT_PROACTIVE_AUTH",
+        if proactive_auth { "true" } else { "false" },
+    )
     .with_child_env(
         "NGIT_KEYRING_FILE",
         credentials
