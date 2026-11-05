@@ -21,6 +21,7 @@ use crate::{
         AvailableUpdate, current_platform, current_variant, latest_update_tag,
         ngit_release_filters, ngit_repo_state_filter, referenced_asset_ids_for_version,
         resolve_update_for_version, state_contains_version, update_relay_urls,
+        verified_update_events,
     },
 };
 
@@ -204,7 +205,7 @@ async fn merge_cached_events(
     filters: Vec<nostr::prelude::Filter>,
 ) {
     if let Ok(cached) = get_event_from_global_cache(git_repo_path, filters).await {
-        events.extend(cached);
+        events.extend(verified_update_events(cached));
     }
     events.sort_by_key(|event| event.id);
     events.dedup_by_key(|event| event.id);

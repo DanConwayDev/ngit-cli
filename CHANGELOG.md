@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when reading repository state events, instead of accepting them into the
   repository state alongside genuine `refs/tags/` entries.
 
+- Verify signatures of cached update metadata before using it, so a tampered
+  local cache cannot direct `ngit update` to an unrelated release.
+
 - Allow file-store logout and credential deletion on headless Unix systems
   without a configured session bus. Keep errors for inaccessible configured OS
   stores, check access before deletion, and avoid leaving profile-removal

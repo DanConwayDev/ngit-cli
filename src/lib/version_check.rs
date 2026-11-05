@@ -118,19 +118,35 @@ pub fn is_update_check_event(event: &Event) -> bool {
         || ngit_asset_from_event(event).is_some()
 }
 
+/// Drop cached update events whose signatures do not match their contents.
+///
+/// Network ingestion verifies events before caching them, but the global cache
+/// is stored at a user-writable path and can therefore contain forged entries.
+/// An event that fails verification is treated as a cache miss so callers can
+/// still refresh from relays.
+#[must_use]
+pub fn verified_update_events(events: Vec<Event>) -> Vec<Event> {
+    events
+        .into_iter()
+        .filter(|event| event.verify().is_ok())
+        .collect()
+}
+
 pub async fn background_update_filters_from_cache(
     git_repo_path: Option<&Path>,
 ) -> Result<Vec<Filter>> {
     let mut filters = vec![ngit_repo_state_filter()];
-    let state_events =
-        get_event_from_global_cache(git_repo_path, vec![ngit_repo_state_filter()]).await?;
+    let state_events = verified_update_events(
+        get_event_from_global_cache(git_repo_path, vec![ngit_repo_state_filter()]).await?,
+    );
     let Some(candidate) = latest_update_tag(&state_events, env!("CARGO_PKG_VERSION")) else {
         return Ok(filters);
     };
 
     let release_filters = ngit_release_filters(&candidate);
-    let release_events =
-        get_event_from_global_cache(git_repo_path, release_filters.clone()).await?;
+    let release_events = verified_update_events(
+        get_event_from_global_cache(git_repo_path, release_filters.clone()).await?,
+    );
     filters.extend(release_filters);
 
     let asset_ids = matching_releases(&release_events, &candidate)
@@ -180,10 +196,12 @@ pub async fn available_update_versions_from_cache(
 pub async fn available_update_from_cache(
     git_repo_path: Option<&Path>,
 ) -> Result<Option<AvailableUpdate>> {
-    let state_events =
-        get_event_from_global_cache(git_repo_path, vec![ngit_repo_state_filter()]).await?;
-    let release_events =
-        get_event_from_global_cache(git_repo_path, vec![ngit_release_cache_filter()]).await?;
+    let state_events = verified_update_events(
+        get_event_from_global_cache(git_repo_path, vec![ngit_repo_state_filter()]).await?,
+    );
+    let release_events = verified_update_events(
+        get_event_from_global_cache(git_repo_path, vec![ngit_release_cache_filter()]).await?,
+    );
     let asset_ids = latest_ngit_releases(&release_events)
         .into_values()
         .flat_map(|release| release.assets.into_iter().map(|asset| asset.event_id))
@@ -191,7 +209,9 @@ pub async fn available_update_from_cache(
     let asset_events = if asset_ids.is_empty() {
         Vec::new()
     } else {
-        get_event_from_global_cache(git_repo_path, vec![Filter::new().ids(asset_ids)]).await?
+        verified_update_events(
+            get_event_from_global_cache(git_repo_path, vec![Filter::new().ids(asset_ids)]).await?,
+        )
     };
     Ok(resolve_available_update(
         env!("CARGO_PKG_VERSION"),
@@ -601,6 +621,39 @@ mod tests {
         .unwrap();
         release.pubkey = ngit_repo_coordinate().public_key;
         (release, asset)
+    }
+
+    #[test]
+    fn cached_update_events_with_forged_author_fields_are_rejected() {
+        let state = state_event(&["v3.0.0"]);
+        let (release, asset) = release_and_asset_events("3.0.0", "main");
+
+        // The pinned-author checks alone accept these events. They were
+        // finalized with a different key before their pubkey fields were
+        // rewritten, so their signatures do not cover the claimed author.
+        assert!(is_ngit_repo_state_event(&state));
+        assert!(ngit_release_from_event(&release).is_some());
+        assert!(ngit_asset_from_event(&asset).is_some());
+
+        assert!(verified_update_events(vec![state, release, asset]).is_empty());
+    }
+
+    #[test]
+    fn cached_update_events_with_authentic_signatures_are_accepted() {
+        let keys = Keys::generate();
+        let signed = EventBuilder::new(STATE_KIND, "")
+            .tag(Tag::parse(["d", "ngit"]).unwrap())
+            .finalize(&keys)
+            .unwrap();
+        assert!(signed.verify().is_ok());
+
+        let verified = verified_update_events(vec![signed.clone()]);
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].id, signed.id);
+
+        // Signature verification is not authorization: the pinned author check
+        // still decides whether the event belongs to ngit's repository.
+        assert!(!is_ngit_repo_state_event(&signed));
     }
 
     #[test]
