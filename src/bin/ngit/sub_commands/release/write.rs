@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
@@ -29,6 +29,7 @@ use ngit::{
         SOFTWARE_APPLICATION_KIND, SoftwareApplication, SoftwareAsset, SoftwareRelease,
         application_event_builder, asset_event_builder, release_event_builder,
     },
+    utils::resolve_repo_relative_path,
 };
 use nostr::prelude::{
     Coordinate, Event, EventId, Filter, FromBech32, PublicKey, Timestamp, nip19::Nip19Coordinate,
@@ -198,6 +199,7 @@ pub(super) async fn release_publish(
                             &application_target,
                             &release_version,
                         ),
+                        false,
                     )
                     .await?;
                     PreparedAsset::File(pending)
@@ -252,6 +254,7 @@ pub(super) async fn release_publish(
                 &release_version,
                 false,
             ),
+            true,
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &pending.input)?;
@@ -267,6 +270,7 @@ pub(super) async fn release_publish(
                 &release_version,
                 true,
             ),
+            true,
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &prepared_assets, &pending.input)?;
@@ -627,6 +631,7 @@ pub(super) async fn asset_add(
                 metadata: asset_add_metadata(args, String::new(), &application, &release),
                 platform_agnostic: args.platform_agnostic,
             },
+            true,
         )
         .await?;
         reject_duplicate_prepared_asset(&assets, &[], &pending.input)?;
@@ -1119,49 +1124,25 @@ async fn apply_manifest_media(
 }
 
 fn tracked_application_media_path(context: &ReleaseContext, declared: &Path) -> Result<PathBuf> {
-    if declared.is_absolute() {
-        return Err(coded_error(
-            "application_media_not_tracked",
-            "local application media must be a repository-relative tracked file",
-        ));
-    }
-    let mut relative = PathBuf::new();
-    for component in declared.components() {
-        match component {
-            Component::Normal(component) => relative.push(component),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(coded_error(
-                    "application_media_not_tracked",
-                    "local application media must remain within the repository",
-                ));
-            }
-        }
-    }
-    if relative.as_os_str().is_empty()
-        || context
-            .git_repo
-            .git_repo
-            .index()
-            .context("failed to read the Git index")?
-            .get_path(&relative, 0)
-            .is_none()
+    let root = fs::canonicalize(context.git_repo_path()?)
+        .context("failed to resolve the repository root")?;
+    let source = resolve_repo_relative_path(&root, declared, false)
+        .map_err(|error| coded_error("application_media_not_tracked", error.to_string()))?;
+    let relative = source
+        .strip_prefix(&root)
+        .context("failed to resolve application media relative to the repository root")?;
+    if context
+        .git_repo
+        .git_repo
+        .index()
+        .context("failed to read the Git index")?
+        .get_path(relative, 0)
+        .is_none()
     {
         return Err(coded_error_with_details(
             "application_media_not_tracked",
             "local application media must be tracked by Git before publication",
             json!({ "path": declared.display().to_string() }),
-        ));
-    }
-    let root = fs::canonicalize(context.git_repo_path()?)
-        .context("failed to resolve the repository root")?;
-    let source = root.join(&relative);
-    let resolved = fs::canonicalize(&source)
-        .with_context(|| format!("failed to resolve application media {}", declared.display()))?;
-    if !resolved.starts_with(&root) {
-        return Err(coded_error(
-            "application_media_not_tracked",
-            "local application media must not resolve outside the repository",
         ));
     }
     Ok(source)
@@ -1725,7 +1706,7 @@ fn release_notes(
         return Ok(notes.clone());
     }
     if let Some(path) = &args.notes_file {
-        let path = repository_relative_path(context.git_repo_path()?, path);
+        let path = resolve_repo_relative_path(context.git_repo_path()?, path, true)?;
         return fs::read_to_string(&path)
             .with_context(|| format!("failed to read release notes {}", path.display()));
     }
@@ -1734,7 +1715,7 @@ fn release_notes(
             return Ok(notes.clone());
         }
         if let Some(path) = &manifest.release_notes {
-            let path = repository_relative_path(context.git_repo_path()?, path);
+            let path = resolve_repo_relative_path(context.git_repo_path()?, path, false)?;
             let changelog = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read release_notes {}", path.display()))?;
             return extract_keep_a_changelog_release_notes(&changelog, release_version)
@@ -1746,14 +1727,6 @@ fn release_notes(
     Ok(existing
         .map(|release| release.notes.clone())
         .unwrap_or_default())
-}
-
-fn repository_relative_path(repository: &Path, path: &Path) -> std::path::PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        repository.join(path)
-    }
 }
 
 async fn require_all_assets(
@@ -2326,8 +2299,13 @@ struct BlossomServerSelection {
 async fn prepare_file_asset(
     context: &mut ReleaseContext,
     mut proposed: NewFileAsset,
+    allow_absolute: bool,
 ) -> Result<PendingFileAsset> {
-    let source_path = repository_relative_path(context.git_repo_path()?, &proposed.source_path);
+    let source_path = resolve_repo_relative_path(
+        context.git_repo_path()?,
+        &proposed.source_path,
+        allow_absolute,
+    )?;
     let mut request = LocalFileRequest::new(&source_path);
     request.filename = proposed.metadata.filename.clone();
     request.mime_type = proposed.metadata.mime.clone();

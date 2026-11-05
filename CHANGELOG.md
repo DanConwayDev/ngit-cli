@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update nostr/nostr-sdk to 0.45.6 — upstream fix for a signature-verification cache issue; ngit ingests relay events through this path, so clients should update
 ### Fixed
 
+- `ngit release publish` now refuses manifest file paths that resolve outside
+  the repository root (`assets[].file`, `release_source`, `release_notes`,
+  application `icon` and `images`). Absolute paths and `..` escapes are rejected
+  at resolution time, before any file is opened or uploaded to Blossom servers.
+  Symlinks that resolve outside the repository are also rejected. User-supplied
+  CLI arguments (`--manifest`, `--notes-file`) remain allowed to be absolute as a
+  deliberate read primitive.
+
 - Allow file-store logout and credential deletion on headless Unix systems
   without a configured session bus. Keep errors for inaccessible configured OS
   stores, check access before deletion, and avoid leaving profile-removal

@@ -1,9 +1,9 @@
 use core::str;
 use std::{
     collections::HashMap,
-    fmt,
+    fmt, fs,
     io::{self, Stdin},
-    path::Path,
+    path::{Component, Path, PathBuf},
     str::FromStr,
 };
 
@@ -528,10 +528,255 @@ pub fn error_might_be_authentication_related(error: &anyhow::Error) -> bool {
     false
 }
 
+/// Resolve a repository-relative path, confining it to the repository root.
+///
+/// This function:
+/// - Rejects absolute paths (unless `allow_absolute` is true)
+/// - Rejects paths with `..` components that would escape the repository
+/// - Canonicalizes the path and ensures it stays within the canonical
+///   repository root
+/// - Rejects symlinks that resolve outside the repository root
+///
+/// This is the single shared helper for all manifest-supplied file paths used
+/// during publication (`assets[].file`, `release_source`, release notes files,
+/// application media). User-supplied CLI arguments may allow absolute paths as
+/// a deliberate read primitive. Such explicit paths retain their former
+/// resolution behavior, including parent components.
+pub fn resolve_repo_relative_path(
+    repository_root: &Path,
+    declared: &Path,
+    allow_absolute: bool,
+) -> Result<PathBuf> {
+    // Explicit CLI inputs retain their original semantics: absolute paths pass
+    // through and relative paths (including .. components) resolve from the
+    // repository root. Only manifest content is confined to the repository.
+    if allow_absolute {
+        return Ok(if declared.is_absolute() {
+            declared.to_path_buf()
+        } else {
+            repository_root.join(declared)
+        });
+    }
+
+    // Reject absolute paths from repository manifests.
+    if declared.is_absolute() {
+        bail!(
+            "path must be repository-relative, not absolute: {}",
+            declared.display()
+        );
+    }
+
+    // Build a relative path while rejecting ParentDir and RootDir components
+    let mut relative = PathBuf::new();
+    for component in declared.components() {
+        match component {
+            Component::Normal(component) => relative.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!(
+                    "path must remain within the repository: {}",
+                    declared.display()
+                );
+            }
+        }
+    }
+
+    // Ensure the relative path is not empty
+    if relative.as_os_str().is_empty() {
+        bail!("path must name a file");
+    }
+
+    // Canonicalize the repository root
+    let root =
+        fs::canonicalize(repository_root).context("failed to resolve the repository root")?;
+
+    // Construct the full source path
+    let source = root.join(&relative);
+
+    // Canonicalize the source path (follows symlinks)
+    let resolved = fs::canonicalize(&source)
+        .with_context(|| format!("failed to resolve path {}", declared.display()))?;
+
+    // Ensure the resolved path is within the repository root
+    if !resolved.starts_with(&root) {
+        bail!(
+            "path must not resolve outside the repository: {}",
+            declared.display()
+        );
+    }
+
+    Ok(source)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
+    mod resolve_repo_relative_path {
+        use super::*;
+
+        #[test]
+        fn accepts_legitimate_nested_relative_path() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+            let file_path = repo_root.join("dist/app.apk");
+            fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+            fs::write(&file_path, b"content").unwrap();
+
+            let result =
+                resolve_repo_relative_path(&repo_root, Path::new("dist/app.apk"), false).unwrap();
+            assert_eq!(result, file_path);
+        }
+
+        #[test]
+        fn rejects_absolute_path() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            let result = resolve_repo_relative_path(&repo_root, Path::new("/etc/passwd"), false);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be repository-relative")
+            );
+        }
+
+        #[test]
+        fn accepts_absolute_path_when_allowed() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+            let absolute_file = root.path().join("outside.txt");
+            fs::write(&absolute_file, b"content").unwrap();
+
+            let result = resolve_repo_relative_path(&repo_root, &absolute_file, true).unwrap();
+            assert_eq!(result, absolute_file);
+        }
+
+        #[test]
+        fn explicit_cli_paths_keep_parent_component_semantics() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            let result =
+                resolve_repo_relative_path(&repo_root, Path::new("../notes.txt"), true).unwrap();
+            assert_eq!(result, repo_root.join("../notes.txt"));
+        }
+
+        #[test]
+        fn rejects_parent_dir_escape() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            let result =
+                resolve_repo_relative_path(&repo_root, Path::new("../.ssh/id_ed25519"), false);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must remain within the repository")
+            );
+        }
+
+        #[test]
+        fn rejects_root_dir_escape() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            let result = resolve_repo_relative_path(&repo_root, Path::new("/etc/passwd"), false);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be repository-relative")
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn rejects_symlink_outside_repo() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            // Create a file outside the repo
+            let outside_file = root.path().join("secret.txt");
+            fs::write(&outside_file, b"secret").unwrap();
+
+            // Create a symlink inside the repo pointing outside
+            let symlink = repo_root.join("link.txt");
+            std::os::unix::fs::symlink(&outside_file, &symlink).unwrap();
+
+            let result = resolve_repo_relative_path(&repo_root, Path::new("link.txt"), false);
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must not resolve outside the repository")
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn accepts_symlink_inside_repo() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            // Create a file inside the repo
+            let inside_file = repo_root.join("real.txt");
+            fs::write(&inside_file, b"real").unwrap();
+
+            // Create a symlink inside the repo pointing to the file
+            let symlink = repo_root.join("link.txt");
+            std::os::unix::fs::symlink(&inside_file, &symlink).unwrap();
+
+            // The function returns the source path (the symlink), not the canonicalized
+            // target
+            let result =
+                resolve_repo_relative_path(&repo_root, Path::new("link.txt"), false).unwrap();
+            assert_eq!(result, symlink);
+        }
+
+        #[test]
+        fn rejects_empty_path() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+
+            let result = resolve_repo_relative_path(&repo_root, Path::new(""), false);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("must name a file"));
+        }
+
+        #[test]
+        fn accepts_curdir_component() {
+            let root = tempdir().unwrap();
+            let repo_root = root.path().join("repo");
+            fs::create_dir_all(&repo_root).unwrap();
+            let file_path = repo_root.join("dist/app.apk");
+            fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+            fs::write(&file_path, b"content").unwrap();
+
+            let result =
+                resolve_repo_relative_path(&repo_root, Path::new("./dist/app.apk"), false).unwrap();
+            assert_eq!(result, file_path);
+        }
+    }
     mod is_libgit2_internal_error {
         use super::*;
 
