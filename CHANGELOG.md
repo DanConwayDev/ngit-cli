@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selective. Saved credentials can be removed after logout without contacting
   the signer.
 
+- Update nostr/nostr-sdk to 0.45.6 — upstream fix for a signature-verification cache issue; ngit ingests relay events through this path, so clients should update
 ### Fixed
 
 - Allow file-store logout and credential deletion on headless Unix systems
