@@ -117,7 +117,7 @@ pub struct Cli {
     /// Suppress progress and other non-essential output
     #[arg(short = 'q', long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
-    /// Enable verbose output
+    /// Show detailed progress immediately and retain diagnostics
     #[arg(short = 'v', long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
     /// Only publish nostr events to repository relays, not user or default
@@ -139,6 +139,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
     /// Output one machine-readable JSON document on stdout
+    ///
+    /// Progress stays on stderr as plain state changes without terminal
+    /// redraws.
     #[arg(long, global = true, conflicts_with = "interactive")]
     pub json: bool,
 }

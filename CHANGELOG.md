@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Changed
+
+- JSON output and redirected progress use append-only stderr messages instead
+  of animations or cursor redraws, including relay, Git-server, signer,
+  Git-transfer and Blossom upload reporting. Verbose mode shows details
+  immediately and retains final diagnostics; normal terminal output keeps its
+  concise, delayed-detail presentation. JSON stdout remains one final document.
+
 ### Added
 
 - Remote signer requests recover automatically with three sends two minutes

@@ -555,11 +555,13 @@ impl Printer {
     }
     pub fn clear_all(&mut self) {
         let term = console::Term::stderr();
-        let _ = term.clear_last_lines(count_lines_per_msg_vec(
-            term.width(),
-            &self.printed_lines,
-            0,
-        ));
+        if crate::output_mode::progress_policy().animate {
+            let _ = term.clear_last_lines(count_lines_per_msg_vec(
+                term.width(),
+                &self.printed_lines,
+                0,
+            ));
+        }
         self.printed_lines.drain(..);
     }
 }

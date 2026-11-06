@@ -82,6 +82,9 @@ async fn main() {
 
     let mut cli = Cli::parse();
     output::set_json_mode(cli.json);
+    if cli.json {
+        console::set_colors_enabled_stderr(false);
+    }
     ngit::output_mode::set_terminal_recovery_enabled(!cli.json);
     set_output_mode(if cli.quiet {
         OutputMode::Quiet

@@ -64,7 +64,7 @@ use crate::{
         get_likely_logged_in_user,
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
-    output_mode::{TransientLine, is_quiet, is_verbose, write_progress_line},
+    output_mode::{ProgressPolicy, TransientLine, progress_policy, write_progress_line},
     relay_auth::{DemandAuthTransport, PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
@@ -196,7 +196,88 @@ struct BarRevealState {
 enum RelayProgressMode {
     Concise,
     Detailed,
+    LogConcise,
+    LogDetailed,
     Hidden,
+}
+
+impl RelayProgressMode {
+    fn from_policy(policy: ProgressPolicy, silent: bool) -> Self {
+        match (silent || policy.quiet, policy.animate, policy.detailed) {
+            (true, _, _) => Self::Hidden,
+            (false, true, false) => Self::Concise,
+            (false, true, true) => Self::Detailed,
+            (false, false, false) => Self::LogConcise,
+            (false, false, true) => Self::LogDetailed,
+        }
+    }
+
+    fn animated(self) -> bool {
+        matches!(self, Self::Concise | Self::Detailed)
+    }
+
+    fn logs(self) -> bool {
+        matches!(self, Self::LogConcise | Self::LogDetailed)
+    }
+}
+
+/// Append-only progress records completed checks, not current relay health.
+#[derive(Default)]
+struct RelayLog {
+    succeeded: usize,
+    failed: usize,
+    emitted: HashSet<String>,
+}
+
+impl RelayLog {
+    fn start(&mut self, prefix: &str) -> Option<String> {
+        self.changed(format!("  {}: started", plain_relay_progress(prefix)))
+    }
+
+    fn finish(
+        &mut self,
+        prefix: &str,
+        message: &str,
+        success: bool,
+        detailed: bool,
+    ) -> Option<String> {
+        if success {
+            self.succeeded += 1;
+        } else {
+            self.failed += 1;
+        }
+        if success && !detailed {
+            return None;
+        }
+        let outcome = if message.is_empty() {
+            if success {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            }
+        } else {
+            plain_relay_progress(message)
+        };
+        self.changed(format!("  {}: {outcome}", plain_relay_progress(prefix)))
+    }
+
+    fn changed(&mut self, line: String) -> Option<String> {
+        self.emitted.insert(line.clone()).then_some(line)
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "Relay checks complete: {} succeeded, {} failed",
+            self.succeeded, self.failed
+        )
+    }
+}
+
+fn plain_relay_progress(text: &str) -> String {
+    console::strip_ansi_codes(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Owns the complete lifecycle of one multi-relay progress report.
@@ -204,11 +285,12 @@ enum RelayProgressMode {
 /// Normal commands start with one concise spinner and reveal per-relay rows
 /// only after the shared delay. Partial failures remain transient once the
 /// operation completes; an unavailable required relay set retains its
-/// diagnostics. Verbose commands always retain details, while silent or test
-/// commands never expose a renderer.
+/// diagnostics. Verbose terminals retain details. JSON and pipes emit plain
+/// transition records, while quiet and explicitly silent reports stay hidden.
 pub struct RelayProgressReporter {
     details: Option<MultiProgress>,
     mode: RelayProgressMode,
+    log: Option<Arc<Mutex<RelayLog>>>,
     _spinner_multi: Option<MultiProgress>,
     spinner: Option<ProgressBar>,
     heading: Option<ProgressBar>,
@@ -230,15 +312,45 @@ struct FetchRelayHealth {
 #[derive(Clone)]
 pub struct RelayProgressHandle {
     details: MultiProgress,
+    mode: RelayProgressMode,
+    log: Option<Arc<Mutex<RelayLog>>>,
     reveal_state: Option<Arc<BarRevealState>>,
 }
 
 impl RelayProgressHandle {
     fn add(&self, progress_bar: ProgressBar) -> ProgressBar {
+        if self.mode == RelayProgressMode::LogDetailed {
+            if let Some(line) = self
+                .log
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .start(&progress_bar.prefix())
+            {
+                eprintln!("{line}");
+            }
+        }
         self.details.add(progress_bar)
     }
 
-    fn finish_bar(&self, progress_bar: &ProgressBar, message: String) {
+    fn enable_tick(&self, progress_bar: &ProgressBar) {
+        if self.mode.animated() {
+            progress_bar.enable_steady_tick(Duration::from_millis(300));
+        }
+    }
+
+    fn finish_bar(&self, progress_bar: &ProgressBar, message: String, success: bool) {
+        if let Some(log) = &self.log {
+            if let Some(line) = log.lock().unwrap().finish(
+                &progress_bar.prefix(),
+                &message,
+                success,
+                self.mode == RelayProgressMode::LogDetailed,
+            ) {
+                eprintln!("{line}");
+            }
+        }
         finish_bar(progress_bar, message, &self.reveal_state);
     }
 }
@@ -246,13 +358,9 @@ impl RelayProgressHandle {
 impl RelayProgressReporter {
     fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
         let heading_message = heading_message.into();
-        let mode = if silent || is_quiet() || std::env::var("NGITTEST").is_ok() {
-            RelayProgressMode::Hidden
-        } else if is_verbose() || !animate {
-            RelayProgressMode::Detailed
-        } else {
-            RelayProgressMode::Concise
-        };
+        let mut policy = progress_policy();
+        policy.animate &= animate;
+        let mode = RelayProgressMode::from_policy(policy, silent);
         Self::with_mode(heading_message, mode)
     }
 
@@ -268,6 +376,9 @@ impl RelayProgressReporter {
     }
 
     fn with_mode(heading_message: String, mode: RelayProgressMode) -> Self {
+        if mode.logs() {
+            eprintln!("{}", plain_relay_progress(&heading_message));
+        }
         let (spinner_multi, spinner) = if mode == RelayProgressMode::Concise {
             let multi = MultiProgress::new();
             let spinner = multi.add(
@@ -290,7 +401,7 @@ impl RelayProgressReporter {
         } else {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
-        let heading = (mode != RelayProgressMode::Hidden).then(|| {
+        let heading = mode.animated().then(|| {
             details
                 .add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()))
         });
@@ -329,6 +440,9 @@ impl RelayProgressReporter {
         Self {
             details: Some(details),
             mode,
+            log: mode
+                .logs()
+                .then(|| Arc::new(Mutex::new(RelayLog::default()))),
             _spinner_multi: spinner_multi,
             spinner,
             heading,
@@ -344,6 +458,8 @@ impl RelayProgressReporter {
     pub fn handle(&self) -> RelayProgressHandle {
         RelayProgressHandle {
             details: self.details.as_ref().unwrap().clone(),
+            mode: self.mode,
+            log: self.log.clone(),
             reveal_state: self.reveal_state.clone(),
         }
     }
@@ -356,6 +472,12 @@ impl RelayProgressReporter {
     ) -> Result<()> {
         if let Some(handle) = self.timer_handle.take() {
             handle.abort();
+        }
+        if let Some(log) = &self.log {
+            let summary = concise_summary.unwrap_or_else(|| log.lock().unwrap().summary());
+            eprintln!("{}", plain_relay_progress(&summary));
+            self.finished = true;
+            return Ok(());
         }
         if self.mode == RelayProgressMode::Concise && show_concise_details {
             reveal_relay_progress(
@@ -371,7 +493,7 @@ impl RelayProgressReporter {
 
         let retain_details = retain_relay_progress_details(self.mode, show_concise_details);
         let details = self.details.take().unwrap();
-        if !retain_details {
+        if self.mode.animated() && !retain_details {
             details.clear()?;
         }
         drop(details);
@@ -406,8 +528,10 @@ impl Drop for RelayProgressReporter {
         if let Some(spinner) = &self.spinner {
             spinner.finish_and_clear();
         }
-        if let Some(details) = &self.details {
-            let _ = details.clear();
+        if self.mode.animated() {
+            if let Some(details) = &self.details {
+                let _ = details.clear();
+            }
         }
     }
 }
@@ -766,17 +890,13 @@ impl Connect for Client {
                 let static_timeout_clone = static_timeout.clone();
                 let progress = progress.clone();
                 async move {
-                    let pb = if std::env::var("NGITTEST").is_err() {
-                        let pb = progress.add(
-                            ProgressBar::new(1)
-                                .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
-                                .with_style(pb_style(static_timeout_clone)?),
-                        );
-                        pb.enable_steady_tick(Duration::from_millis(300));
-                        Some(pb)
-                    } else {
-                        None
-                    };
+                    let pb = progress.add(
+                        ProgressBar::new(1)
+                            .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
+                            .with_style(pb_style(static_timeout_clone)?),
+                    );
+                    progress.enable_tick(&pb);
+                    let pb = Some(pb);
                     fn style_progress_bar_with_error(
                         relay_url: &RelayUrl,
                         pb: &Option<ProgressBar>,
@@ -798,14 +918,14 @@ impl Connect for Client {
                         let message =
                             style_progress_bar_with_error(relay.url(), &pb, &anyhow!("{reason}"));
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message);
+                            progress.finish_bar(pb, message, false);
                         }
                         bail!("{reason}");
                     }
                     if let Err(error) = ensure_onion_url_reachable(relay.url().as_str()) {
                         let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message);
+                            progress.finish_bar(pb, message, false);
                         }
                         return Err(error);
                     }
@@ -818,7 +938,7 @@ impl Connect for Client {
                             }
                             let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                             if let Some(pb) = &pb {
-                                progress.finish_bar(pb, message);
+                                progress.finish_bar(pb, message, false);
                             }
                             Err(error)
                         }
@@ -830,7 +950,7 @@ impl Connect for Client {
                                     format!("{} events", res.len()),
                                     relay.url()
                                 ));
-                                progress.finish_bar(pb, String::new());
+                                progress.finish_bar(pb, String::new(), true);
                             }
                             Ok(res)
                         }
@@ -1019,10 +1139,9 @@ impl Connect for Client {
                             .context("fetch_all_from_relay called without a relay")?;
                         ensure_onion_url_reachable(relay_url.as_str())?;
 
-                        // Always create a real progress bar added to the detail
-                        // multi. In test mode the multi has a hidden draw target
-                        // so nothing is displayed. In concise mode the multi
-                        // starts hidden and the background timer reveals it.
+                        // Bars carry outcomes even for append-only logs. Only
+                        // terminal modes draw them; concise terminals reveal
+                        // their detail view after the shared delay.
                         let pb = progress.add(
                             ProgressBar::new(1)
                                 .with_prefix(
@@ -1034,7 +1153,7 @@ impl Connect for Client {
                                 )
                                 .with_style(pb_style(current_timeout_clone.clone())?),
                         );
-                        pb.enable_steady_tick(Duration::from_millis(300));
+                        progress.enable_tick(&pb);
                         let pb = Some(pb);
 
                         /// Set error styling on a progress bar without finishing
@@ -1072,7 +1191,7 @@ impl Connect for Client {
                                 &anyhow!("{reason}"),
                             );
                             if let Some(ref bar) = pb {
-                                progress.finish_bar(bar, msg);
+                                progress.finish_bar(bar, msg, false);
                             }
                             bail!("{reason}");
                         }
@@ -1150,7 +1269,7 @@ impl Connect for Client {
                                     &error,
                                 );
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, msg);
+                                    progress.finish_bar(bar, msg, false);
                                 }
                                 Err(error)
                             }
@@ -1159,7 +1278,7 @@ impl Connect for Client {
                                 // by fetch_all_from_relay; finish it through
                                 // the deferred mechanism.
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, String::new());
+                                    progress.finish_bar(bar, String::new(), true);
                                 }
                                 Ok(res)
                             }
@@ -1625,7 +1744,7 @@ async fn get_events_of(
 
         // For short delays (< 2s), just show a simple message and sleep
         // For longer delays, show a countdown to provide feedback
-        if retry_delay < Duration::from_secs(2) {
+        if retry_delay < Duration::from_secs(2) || !progress_policy().animate {
             if let Some(pb) = pb {
                 let retry_msg = if attempt_num > 1 {
                     format!("retrying (attempt {attempt_num})")
@@ -5320,7 +5439,7 @@ async fn send_events_with_cache_path(
                     .with_style(pb_style.clone()),
             );
             if animate {
-                pb.enable_steady_tick(Duration::from_millis(300));
+                progress.enable_tick(&pb);
             }
             pb.inc(0); // need to make pb display intially
             let mut error = None;
@@ -5339,7 +5458,7 @@ async fn send_events_with_cache_path(
                             .for_stderr()
                             .red()
                             .to_string();
-                        progress.finish_bar(&pb, msg);
+                        progress.finish_bar(&pb, msg, false);
                         error = Some(reason);
                         break;
                     }
@@ -5347,7 +5466,7 @@ async fn send_events_with_cache_path(
             }
             if error.is_none() {
                 pb.set_style(pb_after_style_succeeded.clone());
-                progress.finish_bar(&pb, String::new());
+                progress.finish_bar(&pb, String::new(), true);
             }
             RelayPublishOutcome {
                 relay: relay_clean.to_string(),
@@ -5725,6 +5844,76 @@ mod tests {
     }
 
     #[test]
+    fn relay_progress_respects_output_policy() {
+        use crate::output_mode::OutputMode;
+        for json in [false, true] {
+            for terminal in [false, true] {
+                for mode in [OutputMode::Normal, OutputMode::Verbose, OutputMode::Quiet] {
+                    let policy = ProgressPolicy::new(mode, json, terminal);
+                    let selected = RelayProgressMode::from_policy(policy, false);
+                    assert_eq!(
+                        selected.animated(),
+                        terminal && !json && mode != OutputMode::Quiet
+                    );
+                    assert_eq!(
+                        selected.logs(),
+                        (!terminal || json) && mode != OutputMode::Quiet
+                    );
+                    assert_eq!(
+                        RelayProgressMode::from_policy(policy, true),
+                        RelayProgressMode::Hidden
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relay_logs_preserve_failures_without_repeating_unchanged_details() {
+        let mut log = RelayLog::default();
+        assert!(log.finish("wss://healthy", "", true, false).is_none());
+        let failure = log
+            .finish(
+                "\x1b[31mwss://offline\x1b[0m",
+                "connection failed",
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(failure.contains("wss://offline"));
+        assert!(failure.contains("connection failed"));
+        assert!(!failure.contains('\x1b'));
+        assert!(
+            log.finish("wss://offline", "connection failed", false, false)
+                .is_none()
+        );
+        assert_eq!((log.succeeded, log.failed), (1, 2));
+        assert!(log.start("wss://healthy").is_some());
+        assert!(log.start("wss://healthy").is_none());
+        assert!(log.finish("wss://healthy", "", true, true).is_some());
+    }
+
+    #[test]
+    fn append_only_relay_reporters_have_no_animation_or_reveal_timer() {
+        for mode in [
+            RelayProgressMode::LogConcise,
+            RelayProgressMode::LogDetailed,
+        ] {
+            let reporter = RelayProgressReporter::with_mode("Checking relays".into(), mode);
+            assert!(reporter.spinner.is_none());
+            assert!(reporter.heading.is_none());
+            assert!(reporter.timer_handle.is_none());
+            assert!(reporter.reveal_state.is_none());
+            assert!(reporter.details.as_ref().unwrap().is_hidden());
+            let handle = reporter.handle();
+            let bar = handle.add(ProgressBar::new(1).with_prefix("wss://relay"));
+            handle.finish_bar(&bar, String::new(), true);
+            assert_eq!(reporter.log.as_ref().unwrap().lock().unwrap().succeeded, 1);
+            reporter.finish(false, false, None).unwrap();
+        }
+    }
+
+    #[test]
     fn partial_relay_failure_is_cleared_in_concise_mode() {
         let clears = Arc::new(AtomicUsize::new(0));
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
@@ -5742,6 +5931,7 @@ mod tests {
         let reporter = RelayProgressReporter {
             details: Some(progress),
             mode: RelayProgressMode::Concise,
+            log: None,
             _spinner_multi: None,
             spinner: None,
             heading: None,

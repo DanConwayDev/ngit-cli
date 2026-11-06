@@ -19,7 +19,7 @@ use crate::{
         utils::check_ssh_keys,
     },
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
-    output_mode::{is_quiet, write_progress_line},
+    output_mode::{ProgressPolicy, is_quiet, progress_policy, write_progress_line},
     repo_ref::{RepoRef, is_grasp_server_in_list},
     signer::NgitSigner,
     utils::{
@@ -385,6 +385,8 @@ fn fetch_from_git_server_url(
 struct FetchReporter<'a> {
     remote_msgs: Vec<String>,
     transfer_progress_msgs: Vec<String>,
+    policy: ProgressPolicy,
+    logged: HashSet<String>,
     term: &'a console::Term,
     start_time: Option<Instant>,
     end_time: Option<Instant>,
@@ -395,11 +397,20 @@ impl<'a> FetchReporter<'a> {
             remote_msgs: vec![],
             transfer_progress_msgs: vec![],
             term,
+            policy: progress_policy(),
+            logged: HashSet::new(),
             start_time: None,
             end_time: None,
         }
     }
-    fn write_all(&self, lines_to_clear: usize) {
+    fn write_all(&mut self, lines_to_clear: usize) {
+        if self.policy.quiet {
+            return;
+        }
+        if !self.policy.animate {
+            self.write_log();
+            return;
+        }
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.remote_msgs {
             let _ = self.term.write_line(format!("remote: {msg}").as_str());
@@ -408,12 +419,33 @@ impl<'a> FetchReporter<'a> {
             let _ = self.term.write_line(msg);
         }
     }
+    fn write_log(&mut self) {
+        if self.policy.detailed {
+            for message in &self.remote_msgs {
+                if !message.contains('%') && self.logged.insert(format!("remote:{message}")) {
+                    let _ = self.term.write_line(&format!("remote: {message}"));
+                }
+            }
+            for message in &self.transfer_progress_msgs {
+                // Keep one completion per phase, not changing byte/speed samples.
+                let phase = message.split('%').next().unwrap_or(message);
+                if message.ends_with(", done.") && self.logged.insert(phase.to_owned()) {
+                    let _ = self.term.write_line(message);
+                }
+            }
+        }
+    }
+
     fn count_all_existing_lines(&self) -> usize {
         let width = self.term.size().1;
         count_lines_per_msg_vec(width, &self.remote_msgs, "remote: ".len())
             + count_lines_per_msg_vec(width, &self.transfer_progress_msgs, 0)
     }
-    fn just_write_transfer_progress(&self, lines_to_clear: usize) {
+    fn just_write_transfer_progress(&mut self, lines_to_clear: usize) {
+        if !self.policy.animate {
+            self.write_log();
+            return;
+        }
         let _ = self.term.clear_last_lines(lines_to_clear);
         for msg in &self.transfer_progress_msgs {
             let _ = self.term.write_line(msg);
@@ -553,6 +585,23 @@ fn report_on_transfer_progress(
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn transfer_logs_coalesce_completion_and_skip_byte_updates() {
+        let term = console::Term::buffered_stderr();
+        let mut reporter = FetchReporter::new(&term);
+        reporter.policy = ProgressPolicy::new(crate::output_mode::OutputMode::Verbose, true, true);
+        reporter.transfer_progress_msgs = vec!["Receiving objects: 50% (1/2)".into()];
+        reporter.write_all(0);
+        assert!(reporter.logged.is_empty());
+        for speed in ["1 MiB/s", "2 MiB/s"] {
+            reporter.transfer_progress_msgs =
+                vec![format!("Receiving objects: 100% (2/2) {speed}, done.")];
+            reporter.write_all(0);
+        }
+        assert_eq!(reporter.logged.len(), 1);
+        assert!(reporter.logged.contains("Receiving objects: 100"));
+    }
 
     #[tokio::test]
     async fn unavailable_commit_retains_each_server_failure_and_handles_no_servers() -> Result<()> {

@@ -72,6 +72,10 @@ async fn issue_json_stdout_is_valid_when_relay_updates_are_reported() -> Result<
         String::from_utf8_lossy(&create.stdout),
         String::from_utf8_lossy(&create.stderr),
     );
+    assert!(
+        !create.stderr.contains(&0x1b),
+        "JSON progress must not emit terminal controls"
+    );
     let create_stderr = String::from_utf8_lossy(&create.stderr);
     assert!(
         create_stderr.contains("updates:") || create_stderr.contains("no updates"),

@@ -977,9 +977,6 @@ async fn get_user_details_with_private_relay_lists<C: Connect + Sync>(
                     )
                     .await?;
                 finish_fetch_progress(&reports, progress_reporter)?;
-                if is_verbose() && !reports.iter().any(|report| report.is_err()) {
-                    term.clear_last_lines(1)?;
-                }
                 return get_user_ref_from_cache(git_repo_path, public_key).await;
             }
         }

@@ -1,22 +1,11 @@
-use std::sync::{
-    LazyLock, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::Result;
+pub use ngit::output_mode::{is_json, set_json_mode};
 use nostr::prelude::{EventId, RelayUrl, ToBech32, nip19::Nip19Event};
 use serde::Serialize;
 
-static JSON_MODE: AtomicBool = AtomicBool::new(false);
 static JSON_OUTPUT: LazyLock<Mutex<Option<serde_json::Value>>> = LazyLock::new(|| Mutex::new(None));
-
-pub fn set_json_mode(enabled: bool) {
-    JSON_MODE.store(enabled, Ordering::Relaxed);
-}
-
-pub fn is_json() -> bool {
-    JSON_MODE.load(Ordering::Relaxed)
-}
 
 pub fn term() -> console::Term {
     if is_json() {
