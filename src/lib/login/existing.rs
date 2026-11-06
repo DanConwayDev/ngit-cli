@@ -25,8 +25,8 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
     client::{fetch_public_key, get_event_from_global_cache},
     git::{
-        Repo, RepoActions, get_git_config_item, get_git_config_item_global,
-        get_git_config_item_system, open_global_configs_for_repo,
+        Repo, get_git_config_item, get_git_config_item_global, get_git_config_item_system,
+        open_global_configs_for_repo,
     },
     output_mode::TransientLine,
 };
@@ -87,11 +87,7 @@ pub async fn load_existing_login(
     let user_ref = get_user_details(
         &public_key,
         client,
-        if let Some(git_repo) = git_repo {
-            Some(git_repo.get_path()?)
-        } else {
-            None
-        },
+        git_repo.as_ref().map(|repo| repo.workdir_or_git_dir()),
         silent,
         fetch_profile_updates,
     )
@@ -602,11 +598,7 @@ async fn resolve_selection_by_profile_name(
     selector: &str,
     password: &Option<String>,
 ) -> Result<ResolvedSelection> {
-    let git_repo_path = if let Some(git_repo) = git_repo {
-        Some(git_repo.get_path()?)
-    } else {
-        None
-    };
+    let git_repo_path = git_repo.as_ref().map(|repo| repo.workdir_or_git_dir());
     let events =
         get_event_from_global_cache(git_repo_path, vec![Filter::default().kind(Kind::Metadata)])
             .await

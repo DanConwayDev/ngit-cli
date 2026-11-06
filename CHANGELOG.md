@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Support bare clone/fetch consumers, including Nix source caches, when loading
+  an existing signer or discovering proposal refs. Keep automatic PR branch
+  visibility opt-in; this does not provide full bare-repository support for
+  ngit commands or publishing workflows.
+
 ## [3.0.5] - 2026-10-28
 
 Repair bundled OpenSSL in Unix release archives and avoid unnecessary

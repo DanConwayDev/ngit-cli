@@ -210,6 +210,37 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
     let pushed_oid = cloned.rev_parse("HEAD").await?;
     cloned.nostr_push(["origin", "main"]).await?;
 
+    // A bare consumer must refresh repository state with an explicitly
+    // selected signer, without requiring a checkout to load its profile.
+    publisher
+        .git_ok(
+            ["--git-dir", bare_path_str, "config", "nostr.nsec", &nsec],
+            "configure bare clone signer",
+        )
+        .await?;
+    let signer_selection = format!("nostr.signer={npub}");
+    publisher
+        .git_ok(
+            [
+                "--git-dir",
+                bare_path_str,
+                "-c",
+                "protocol.ext.allow=always",
+                "-c",
+                signer_selection.as_str(),
+                "fetch",
+                "origin",
+                "refs/heads/main:refs/heads/main",
+            ],
+            "fetch updated main into bare clone with selected signer",
+        )
+        .await?;
+    let bare_repo = git2::Repository::open_bare(&bare_path)?;
+    assert_eq!(
+        bare_repo.refname_to_id("refs/heads/main")?.to_string(),
+        pushed_oid,
+    );
+
     let backing_oid = publisher
         .git([
             "--git-dir",
