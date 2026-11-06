@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nostr.relay-timeout-secs` (default 45 seconds) and
   `nostr.relay-connect-timeout-secs` (default 7 seconds), or override them with
   `NGIT_RELAY_TIMEOUT_SECS` and `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults,
-  deadline placement and retry behavior are unchanged. `ngit --customize`
-  lists precedence and scope. Test-mode budgets remain isolated from production
-  settings.
+  deadline placement and retry behavior are unchanged when unconfigured. With
+  no valid connect override, the short timeout defaults to the smaller of 7
+  seconds and the long timeout. Explicit connect overrides remain independent.
+  `ngit --customize` lists precedence and scope. Test-mode budgets remain isolated
+  from production settings.
 
 - `account logout --all` removes all known saved profiles and credentials and
   clears current-repository and non-local Git login configuration, including

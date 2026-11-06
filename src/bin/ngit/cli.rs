@@ -220,12 +220,13 @@ Values are semicolon-separated URLs without spaces.
 
   {relay_connect_timeout:<39} {relay_connect_timeout_env}
     Fetch connection-attempt timeout and adaptive-fetch quorum grace in seconds.
-    Default: 7. Configured independently of the long relay timeout.
+    Without a valid environment or Git config override, defaults to the smaller
+    of 7 seconds and the long relay timeout. Explicit overrides are independent.
     Example: {relay_connect_timeout_example}
 
   Relay timeouts accept positive whole seconds. Valid environment values override
   Git config (local before global). Invalid environment values fall back to Git
-  config; invalid Git config values fall back to built-in defaults.
+  config; invalid Git config values use the defaults described above.
   These settings do not change Git HTTP or remote-signer timeouts.
 
   {http_connect_timeout:<39} {http_connect_timeout_env:<32}

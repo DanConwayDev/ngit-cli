@@ -52,7 +52,7 @@ impl RelayTimeouts {
             .unwrap_or(45);
         let connect = parse_timeout_secs(connect_env)
             .or_else(|| parse_timeout_secs(connect_config))
-            .unwrap_or(7);
+            .unwrap_or(7.min(overall));
         Self { overall, connect }
     }
 }
@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_precedence_preserves_independent_timeouts() {
+    fn production_precedence_preserves_explicit_timeouts() {
         let resolve = |env, connect_env, config, connect_config| {
             RelayTimeouts::from_sources(false, Some("1"), env, connect_env, config, connect_config)
         };
@@ -106,7 +106,7 @@ mod tests {
                 resolve(Some("3"), Some(invalid), None, None),
                 RelayTimeouts {
                     overall: 3,
-                    connect: 7
+                    connect: 3
                 }
             );
         }
@@ -117,6 +117,33 @@ mod tests {
                 connect: 20
             }
         );
+    }
+
+    #[test]
+    fn conditional_connect_fallback_uses_valid_settings_from_either_source() {
+        for (long_env, connect_env, long_config, connect_config, expected) in [
+            (None, None, None, None, (45, 7)),
+            (Some("3"), None, None, None, (3, 3)),
+            (None, None, Some("3"), None, (3, 3)),
+            (Some("60"), None, None, None, (60, 7)),
+            (None, None, Some("60"), None, (60, 7)),
+            (Some("3"), Some("10"), None, None, (3, 10)),
+            (Some("3"), None, None, Some("10"), (3, 10)),
+            (None, Some("10"), Some("3"), None, (3, 10)),
+            (None, None, Some("3"), Some("10"), (3, 10)),
+            (Some("3"), Some("invalid"), None, Some("10"), (3, 10)),
+            (Some("3"), Some("invalid"), None, Some("0"), (3, 3)),
+        ] {
+            let actual = RelayTimeouts::from_sources(
+                false,
+                None,
+                long_env,
+                connect_env,
+                long_config,
+                connect_config,
+            );
+            assert_eq!((actual.overall, actual.connect), expected);
+        }
     }
 
     #[test]
