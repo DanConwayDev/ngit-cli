@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remote signer pairing keeps public-key approval guidance visible after the
+  detailed report appears, including a reminder to check for a second signer
+  notification.
+
 - JSON output and redirected progress use append-only stderr messages instead
   of animations or cursor redraws, including relay, Git-server, signer,
   Git-transfer and Blossom upload reporting. Verbose mode shows details

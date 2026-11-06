@@ -49,8 +49,11 @@ is not evidence that a later signature request reached a relay.
 
 Pairing and ordinary signer operations use the same reporting boundary.
 Client-initiated pairing first waits for the signer connection response, then
-requests the user's public key. An established session may also need a protocol
-connection handshake before its requested signature or encryption operation.
+requests the user's public key. The pairing report reminds users to approve
+sharing that key and check for another signer notification, even when scanning
+the QR code took longer than five seconds. An established session may also need
+a protocol connection handshake before its requested signature or encryption
+operation.
 These stages should remain distinguishable in the terminal.
 
 NIP-46 events are ephemeral. If the signing app was disconnected when a request
