@@ -1546,14 +1546,25 @@ fn author_announcement_discovery_pending(
     is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
 }
 
-fn relay_timeout(default: u64) -> u64 {
-    relay_timeout_for_mode(
-        default,
-        std::env::var("NGITTEST").is_ok(),
-        std::env::var(crate::test_timeouts::RELAY_TIMEOUT_ENV)
-            .ok()
-            .as_deref(),
-    )
+fn parse_timeout_secs(value: Option<&str>) -> Option<u64> {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(u64::from)
+}
+
+fn relay_timeout(default: u64, env_var: &str) -> u64 {
+    if std::env::var("NGITTEST").is_ok() {
+        relay_timeout_for_mode(
+            default,
+            true,
+            std::env::var(crate::test_timeouts::RELAY_TIMEOUT_ENV)
+                .ok()
+                .as_deref(),
+        )
+    } else {
+        parse_timeout_secs(std::env::var(env_var).ok().as_deref()).unwrap_or(default)
+    }
 }
 
 fn relay_timeout_for_mode(default: u64, test_mode: bool, override_secs: Option<&str>) -> u64 {
@@ -1571,11 +1582,19 @@ fn relay_timeout_for_mode(default: u64, test_mode: bool, override_secs: Option<&
 }
 
 fn long_timeout() -> u64 {
-    relay_timeout(45)
+    relay_timeout(45, crate::test_timeouts::RELAY_TIMEOUT_SECS_ENV)
 }
 
 fn short_timeout() -> u64 {
-    relay_timeout(7)
+    let configured = relay_timeout(7, crate::test_timeouts::RELAY_CONNECT_TIMEOUT_SECS_ENV);
+    // Single-var knob: if the connect-specific var is unset, the overall
+    // NGIT_RELAY_TIMEOUT_SECS budget caps the per-connect attempt too, so a
+    // low overall budget isn't undercut by the 7s default.
+    if std::env::var(crate::test_timeouts::RELAY_CONNECT_TIMEOUT_SECS_ENV).is_err() {
+        configured.min(long_timeout())
+    } else {
+        configured
+    }
 }
 
 async fn get_events_of(
@@ -7477,6 +7496,17 @@ mod fetch_completion_tests {
             );
             assert_eq!(relay_timeout_for_mode(default, true, Some("10")), 10);
         }
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_rejects_zero_and_invalid() {
+        assert_eq!(parse_timeout_secs(Some("4")), Some(4));
+        assert_eq!(parse_timeout_secs(Some(" 4 ")), Some(4));
+        assert_eq!(parse_timeout_secs(Some("0")), None);
+        assert_eq!(parse_timeout_secs(Some("invalid")), None);
+        assert_eq!(parse_timeout_secs(Some("-1")), None);
+        assert_eq!(parse_timeout_secs(None), None);
+        assert_eq!(parse_timeout_secs(Some("")), None);
     }
 
     #[tokio::test]
