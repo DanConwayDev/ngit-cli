@@ -87,10 +87,7 @@ pub async fn fresh_login_or_signup(
             1 => match get_fresh_nip46_signer(client, signer_relays).await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("error getting fresh nip46 signer: {e}");
-                    continue;
-                }
+                Err(e) => return Err(e.context("failed to connect to remote signer")),
             },
             2 => match signup(client).await {
                 Ok(Some(res)) => break res,
@@ -456,10 +453,19 @@ pub async fn get_fresh_nip46_signer(
             // Wait (on a blocking thread so it doesn't stall the listener)
             // for either the signer to connect or the user to pick an option.
             let done_menu = Arc::clone(&done);
-            let choice =
-                tokio::task::spawn_blocking(move || wait_for_signer_or_menu_choice(&done_menu))
-                    .await
-                    .context("connect menu task panicked")??;
+            let choice = match tokio::task::spawn_blocking(move || {
+                wait_for_signer_or_menu_choice(&done_menu)
+            })
+            .await
+            .context("connect menu task panicked")
+            .and_then(|result| result)
+            {
+                Ok(choice) => choice,
+                Err(error) => {
+                    pubkey_handle.abort();
+                    return Err(error);
+                }
+            };
 
             match choice {
                 // Signer connected (or the listener finished) on its own.
@@ -496,11 +502,10 @@ pub async fn get_fresh_nip46_signer(
                             SignerInfoSource::GitGlobal,
                         )));
                     }
-                    _ => {
-                        // Connection failed — redisplay and listen again.
-                        eprintln!("failed to connect to signer, trying again...");
-                        continue;
+                    Ok(Err(error)) => {
+                        return Err(error.context("failed to connect to remote signer"));
                     }
+                    Err(error) => return Err(error).context("remote signer task failed"),
                 },
                 Some(ConnectMenuChoice::EnterBunkerUri) => {
                     pubkey_handle.abort();
@@ -824,22 +829,19 @@ pub async fn listen_for_remote_signer_when_listening(
     let mut printer = printer_clone.lock().await;
     printer.clear_all();
 
-    if let Some(Ok(public_key)) = res {
-        // Get the proper bunker URI from the NostrConnect client
-        // This will contain the correct remote-signer-pubkey that was discovered
-        // during the connection handshake, regardless of whether the original URL
-        // was bunker:// (already had it) or nostrconnect:// (extracted from response
-        // event author)
-        let bunker_url = nostr_connect
-            .bunker_uri()
-            .await
-            .context("failed to get bunker URI from NostrConnect client")?;
+    let public_key = res.context("remote signer connection cancelled")??;
+    // Get the proper bunker URI from the NostrConnect client
+    // This will contain the correct remote-signer-pubkey that was discovered
+    // during the connection handshake, regardless of whether the original URL
+    // was bunker:// (already had it) or nostrconnect:// (extracted from response
+    // event author)
+    let bunker_url = nostr_connect
+        .bunker_uri()
+        .await
+        .context("failed to get bunker URI from NostrConnect client")?;
 
-        let signer = Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect)));
-        Ok((signer, public_key, bunker_url))
-    } else {
-        bail!("failed to get signer")
-    }
+    let signer = Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect)));
+    Ok((signer, public_key, bunker_url))
 }
 
 pub fn generate_qr(data: &str) -> Result<Vec<String>> {

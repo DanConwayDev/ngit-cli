@@ -21,7 +21,7 @@ use nostr::{
 };
 use nostr_connect::error::{Error, ErrorKind};
 use nostr_sdk::prelude::*;
-use tokio::sync::{OnceCell, broadcast};
+use tokio::sync::{Mutex, MutexGuard, OnceCell, broadcast};
 
 /// Progress without sensitive message contents.
 #[derive(Debug, Clone)]
@@ -53,6 +53,7 @@ pub enum ConnectProgress {
 /// <https://github.com/nostr-protocol/nips/blob/master/46.md>
 #[derive(Debug, Clone)]
 pub struct NostrConnect {
+    monitor: Arc<Mutex<()>>,
     progress: broadcast::Sender<ConnectProgress>,
     uri: NostrConnectUri,
     client_keys: Keys,
@@ -83,6 +84,7 @@ impl NostrConnect {
         }
 
         Ok(Self {
+            monitor: Arc::new(Mutex::new(())),
             progress: broadcast::channel(64).0,
             uri,
             client_keys,
@@ -142,6 +144,11 @@ impl NostrConnect {
         T: IntoAuthUrlHandler,
     {
         self.auth_url_handler = Some(handler.into_auth_url_handler());
+    }
+
+    /// Keep each operation's progress stream associated with its own caller.
+    pub(crate) async fn lock_operation(&self) -> MutexGuard<'_, ()> {
+        self.monitor.lock().await
     }
 
     /// Subscribe before starting an operation to observe its progress.

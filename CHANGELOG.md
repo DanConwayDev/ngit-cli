@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify signatures of cached update metadata before using it, so a tampered
   local cache cannot direct `ngit update` to an unrelated release.
 
+- Remote signer operations stop after two minutes with recovery guidance,
+  including time queued behind another operation using the same signer.
+  Concurrent operations no longer mix their pending-request reports.
+  Pairing preserves failure causes instead of silently retrying indefinitely;
+  signer refusals remain distinct from timeouts. Commands do not gain retry
+  prompts or resume from an intermediate signing step.
+
 - Allow file-store logout and credential deletion on headless Unix systems
   without a configured session bus. Keep errors for inaccessible configured OS
   stores, check access before deletion, and avoid leaving profile-removal
