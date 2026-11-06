@@ -217,7 +217,7 @@ pub async fn list_from_remotes(
                     }
                 }
 
-                let git_repo_path = git_repo.get_path().ok().map(|p| p.to_path_buf());
+                let git_repo_path = Some(git_repo.workdir_or_git_dir().to_path_buf());
                 let url_clone = url.clone();
                 let decoded_nostr_url_clone = decoded_nostr_url.clone();
                 let pb_clone = pb.clone();

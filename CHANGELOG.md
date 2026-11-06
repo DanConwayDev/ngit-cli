@@ -101,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update nostr/nostr-sdk to 0.45.6 — upstream fix for a signature-verification cache issue; ngit ingests relay events through this path, so clients should update
 ### Fixed
 
+- Support bare clone/fetch consumers, including Nix source caches, when loading
+  an existing signer or discovering proposal refs. Keep automatic PR branch
+  visibility opt-in; this does not provide full bare-repository support for
+  ngit commands or publishing workflows.
+
 - `ngit release publish` now refuses manifest file paths that resolve outside
   the repository root (`assets[].file`, `release_source`, `release_notes`,
   application `icon` and `images`). Absolute paths and `..` escapes are rejected

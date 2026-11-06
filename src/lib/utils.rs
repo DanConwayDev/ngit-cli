@@ -135,7 +135,7 @@ pub async fn get_open_or_draft_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
-    let git_repo_path = git_repo.get_path()?;
+    let git_repo_path = git_repo.workdir_or_git_dir();
     let proposals_and_revisions: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates()).await?;
     let proposals: Vec<nostr::prelude::Event> = proposals_and_revisions
@@ -198,7 +198,7 @@ pub async fn get_all_proposals(
     git_repo: &Repo,
     repo_ref: &RepoRef,
 ) -> Result<HashMap<EventId, (Event, Vec<Event>, Option<Event>)>> {
-    let git_repo_path = git_repo.get_path()?;
+    let git_repo_path = git_repo.workdir_or_git_dir();
     let proposals: Vec<nostr::prelude::Event> =
         get_proposals_and_revisions_from_cache(git_repo_path, repo_ref.coordinates())
             .await?

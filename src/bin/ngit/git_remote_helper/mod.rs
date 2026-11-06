@@ -19,7 +19,7 @@ use client::{
     Connect, FetchReport, consolidate_fetch_outcome, finish_fetch_progress,
     get_repo_ref_from_cache, save_repository_privacy_to_git_config, warn_if_invited_as_maintainer,
 };
-use git::{RepoActions, nostr_url::NostrUrlDecoded};
+use git::nostr_url::NostrUrlDecoded;
 use ngit::{
     client::{self, Client, Params},
     git::{self, Repo, utils::set_git_timeout},
@@ -325,7 +325,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         return Ok(());
     };
 
-    let git_repo_path = git_repo.get_path()?;
+    let git_repo_path = git_repo.workdir_or_git_dir();
     let cached_repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate)
             .await

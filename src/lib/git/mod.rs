@@ -47,6 +47,15 @@ impl Repo {
             git_repo: git2::Repository::open(path).with_context(|| format!("couldn't open the Git repository at {}.\nCheck the path and access permissions.", path.display()))?,
         })
     }
+
+    /// Git remote helpers may be invoked from a working tree or a bare
+    /// repository. Use the worktree root when present, otherwise use the
+    /// Git directory.
+    pub fn workdir_or_git_dir(&self) -> &Path {
+        self.git_repo
+            .workdir()
+            .unwrap_or_else(|| self.git_repo.path())
+    }
 }
 
 // pub type CommitId = [u8; 7];
@@ -1689,6 +1698,23 @@ mod tests {
 
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event, joe_signature};
+
+    #[test]
+    fn remote_helper_path_supports_worktrees_and_bare_repositories() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let worktree_path = temp.path().join("worktree");
+        let worktree = git2::Repository::init(&worktree_path)?;
+        let worktree_repo = Repo { git_repo: worktree };
+        assert_eq!(worktree_repo.workdir_or_git_dir(), worktree_path.as_path());
+
+        let bare_path = temp.path().join("bare.git");
+        let bare = git2::Repository::init_bare(&bare_path)?;
+        let bare_repo = Repo { git_repo: bare };
+        assert_eq!(bare_repo.workdir_or_git_dir(), bare_path.as_path());
+        assert!(bare_repo.get_path().is_err());
+        assert!(Repo::from_path(&bare_path)?.git_repo.is_bare());
+        Ok(())
+    }
 
     mod normalize_diff_prefix {
         use super::*;

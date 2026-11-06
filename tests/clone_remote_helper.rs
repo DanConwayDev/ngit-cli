@@ -155,6 +155,32 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         contents
     );
 
+    // The helper must also work when Git creates a bare destination with no
+    // worktree.
+    let bare_dir = tempfile::tempdir().context("allocate bare clone directory")?;
+    let bare_path = bare_dir.path().join("clone.git");
+    let bare_path_str = bare_path.to_str().context("bare clone path is not UTF-8")?;
+    let bare_clone = publisher
+        .git([
+            "-c",
+            "protocol.ext.allow=always",
+            "clone",
+            "--bare",
+            nostr_url.as_str(),
+            bare_path_str,
+        ])
+        .output()
+        .await
+        .context("spawn git clone --bare over nostr")?;
+    require_success("git clone --bare over nostr", &bare_clone)?;
+    let bare_main = publisher
+        .git(["--git-dir", bare_path_str, "rev-parse", "refs/heads/main"])
+        .output()
+        .await
+        .context("read cloned bare main ref")?;
+    require_success("read cloned bare main ref", &bare_main)?;
+    assert_eq!(String::from_utf8(bare_main.stdout)?.trim(), main_oid);
+
     cloned
         .git_ok(
             ["config", "--local", "nostr.nsec", &nsec],
@@ -183,6 +209,37 @@ async fn git_clone_and_push_nostr_url_through_external_remote_helper() -> Result
         .await?;
     let pushed_oid = cloned.rev_parse("HEAD").await?;
     cloned.nostr_push(["origin", "main"]).await?;
+
+    // A bare consumer must refresh repository state with an explicitly
+    // selected signer, without requiring a checkout to load its profile.
+    publisher
+        .git_ok(
+            ["--git-dir", bare_path_str, "config", "nostr.nsec", &nsec],
+            "configure bare clone signer",
+        )
+        .await?;
+    let signer_selection = format!("nostr.signer={npub}");
+    publisher
+        .git_ok(
+            [
+                "--git-dir",
+                bare_path_str,
+                "-c",
+                "protocol.ext.allow=always",
+                "-c",
+                signer_selection.as_str(),
+                "fetch",
+                "origin",
+                "refs/heads/main:refs/heads/main",
+            ],
+            "fetch updated main into bare clone with selected signer",
+        )
+        .await?;
+    let bare_repo = git2::Repository::open_bare(&bare_path)?;
+    assert_eq!(
+        bare_repo.refname_to_id("refs/heads/main")?.to_string(),
+        pushed_oid,
+    );
 
     let backing_oid = publisher
         .git([

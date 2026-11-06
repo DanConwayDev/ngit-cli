@@ -40,7 +40,8 @@ pub async fn run_list(
     fetch_report: &FetchReport,
     signer: Option<&Arc<NgitSigner>>,
 ) -> Result<ListResult> {
-    let nostr_state = (get_state_from_cache(Some(git_repo.get_path()?), repo_ref).await).ok();
+    let nostr_state =
+        (get_state_from_cache(Some(git_repo.workdir_or_git_dir()), repo_ref).await).ok();
 
     let term = console::Term::stderr();
 
