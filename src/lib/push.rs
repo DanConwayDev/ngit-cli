@@ -26,7 +26,7 @@ use crate::{
     git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
     login::user::UserRef,
-    output_mode::{is_quiet, write_progress_line},
+    output_mode::{ProgressPolicy, is_quiet, progress_policy, write_progress_line},
     repo_ref::{
         RepoRef, format_grasp_server_url_as_grasp06_prs_url, is_grasp_server_clone_url,
         is_grasp_server_in_list, normalize_grasp_server_url,
@@ -380,6 +380,8 @@ pub struct PushReporter<'a> {
     transfer_progress_msgs: Vec<String>,
     update_reference_errors: Vec<String>,
     ref_updates: HashMap<String, Option<String>>,
+    policy: ProgressPolicy,
+    logged: HashSet<String>,
     term: &'a console::Term,
     start_time: Option<Instant>,
     end_time: Option<Instant>,
@@ -393,12 +395,18 @@ impl<'a> PushReporter<'a> {
             update_reference_errors: vec![],
             ref_updates: HashMap::new(),
             term,
+            policy: progress_policy(),
+            logged: HashSet::new(),
             start_time: None,
             end_time: None,
         }
     }
-    fn write_all(&self, lines_to_clear: usize) {
+    fn write_all(&mut self, lines_to_clear: usize) {
         if is_quiet() {
+            return;
+        }
+        if !self.policy.animate {
+            self.write_log();
             return;
         }
         let _ = self.term.clear_last_lines(lines_to_clear);
@@ -413,6 +421,33 @@ impl<'a> PushReporter<'a> {
         }
         for msg in &self.update_reference_errors {
             let _ = self.term.write_line(msg);
+        }
+    }
+
+    fn write_log(&mut self) {
+        if self.policy.detailed {
+            for message in &self.remote_msgs {
+                if !message.contains('%') && self.logged.insert(format!("remote:{message}")) {
+                    let _ = self.term.write_line(&format!("remote: {message}"));
+                }
+            }
+            for message in &self.transfer_progress_msgs {
+                // Keep one completion per phase, not changing byte/speed samples.
+                let phase = message.split('%').next().unwrap_or(message);
+                if message.ends_with(", done.") && self.logged.insert(phase.to_owned()) {
+                    let _ = self.term.write_line(message);
+                }
+            }
+            for message in &self.negotiation {
+                if self.logged.insert(message.clone()) {
+                    let _ = self.term.write_line(message);
+                }
+            }
+        }
+        for message in &self.update_reference_errors {
+            if self.logged.insert(message.clone()) {
+                let _ = self.term.write_line(message);
+            }
         }
     }
 
@@ -931,6 +966,27 @@ async fn create_close_status_for_original_patch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transfer_logs_preserve_failures_without_repeating_byte_updates() {
+        let term = console::Term::buffered_stderr();
+        let mut reporter = super::PushReporter::new(&term);
+        reporter.policy = crate::output_mode::ProgressPolicy::new(
+            crate::output_mode::OutputMode::Normal,
+            true,
+            true,
+        );
+        reporter.update_reference_errors.push("rejected ref".into());
+        for current in [1, 2, 2] {
+            reporter.process_transfer_progress_update(current, 2, 100);
+        }
+        assert_eq!(reporter.logged.len(), 1);
+        assert!(reporter.logged.contains("rejected ref"));
+        reporter.policy.detailed = true;
+        reporter.process_transfer_progress_update(2, 2, 100);
+        reporter.process_transfer_progress_update(2, 2, 100);
+        assert_eq!(reporter.logged.len(), 2);
+    }
+
     use super::git_server_display_url;
 
     #[test]

@@ -31,7 +31,7 @@ use crate::{
     git::{Repo, RepoActions},
     git_http_auth::refresh_private_git_auth_for_url,
     login::user::{UserRef, publish_private_git_relay_list},
-    output_mode::is_quiet,
+    output_mode::{ProgressPolicy, is_quiet, progress_policy},
     repo_ref::{
         RepoRef, apply_grasp_infrastructure, format_grasp_server_url_as_clone_url,
         latest_event_repo_ref,
@@ -390,6 +390,7 @@ struct ServerRevealState {
 }
 
 struct PollContext {
+    policy: ProgressPolicy,
     timeout_secs: u64,
     total: u64,
     ready_count: Arc<AtomicU64>,
@@ -444,31 +445,27 @@ fn create_server_bars(clone_urls: &[String], detail_multi: &MultiProgress) -> Ve
         .collect()
 }
 
-fn spawn_expand_timer(
-    expand_delay_ms: u64,
-    spinner_pb: ProgressBar,
-    detail_multi: MultiProgress,
-    heading_bar: ProgressBar,
-    reveal_state: Arc<ServerRevealState>,
-    server_bars: Vec<ProgressBar>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(expand_delay_ms)).await;
-        spinner_pb.finish_and_clear();
-        detail_multi.set_draw_target(ProgressDrawTarget::stderr());
-        heading_bar.finish_with_message("waiting for servers to create bare git repo...");
-        let mut deferred = reveal_state.deferred.lock().unwrap();
-        reveal_state.revealed.store(true, Ordering::Release);
-        for df in deferred.drain(..) {
-            df.bar.set_style(df.style);
-            df.bar.finish_with_message(df.message);
+fn reveal_server_bars(
+    spinner_pb: &ProgressBar,
+    detail_multi: &MultiProgress,
+    heading_bar: &ProgressBar,
+    reveal_state: &ServerRevealState,
+    server_bars: &[ProgressBar],
+) {
+    spinner_pb.finish_and_clear();
+    detail_multi.set_draw_target(ProgressDrawTarget::stderr());
+    heading_bar.finish_with_message("waiting for servers to create bare git repo...");
+    let mut deferred = reveal_state.deferred.lock().unwrap();
+    reveal_state.revealed.store(true, Ordering::Release);
+    for df in deferred.drain(..) {
+        df.bar.set_style(df.style);
+        df.bar.finish_with_message(df.message);
+    }
+    for bar in server_bars {
+        if !bar.is_finished() {
+            bar.enable_steady_tick(Duration::from_millis(100));
         }
-        for bar in &server_bars {
-            if !bar.is_finished() {
-                bar.enable_steady_tick(Duration::from_millis(100));
-            }
-        }
-    })
+    }
 }
 
 fn finalize_spinner(all_ready: bool, spinner_pb: &ProgressBar, final_ready: u64, total: u64) {
@@ -563,6 +560,12 @@ async fn poll_single_server(
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .to_string();
+    if !ctx.policy.animate {
+        if ctx.policy.detailed && !ctx.policy.quiet {
+            eprintln!("{name}: {}", if ready { "ready" } else { "timeout" });
+        }
+        return ready;
+    }
     if ready {
         let style = ProgressStyle::with_template(&format!(
             "  {} {{msg}}",
@@ -617,8 +620,8 @@ pub async fn wait_for_grasp_servers(
     let expand_delay_ms: u64 = if is_test { 500 } else { 5000 };
     let total = clone_urls.len() as u64;
 
-    let quiet = is_quiet();
-    let spinner_multi = if quiet {
+    let policy = progress_policy();
+    let spinner_multi = if !policy.animate || policy.detailed {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     } else {
         MultiProgress::new()
@@ -634,7 +637,17 @@ pub async fn wait_for_grasp_servers(
                 "waiting for servers to create bare git repo... (0/{total} - complete)"
             )),
     );
-    spinner_pb.enable_steady_tick(Duration::from_millis(100));
+    if policy.animate && !policy.detailed {
+        spinner_pb.enable_steady_tick(Duration::from_millis(100));
+    }
+    if !policy.animate && !policy.quiet {
+        eprintln!("Waiting for servers to create bare git repo...");
+        if policy.detailed {
+            for url in &clone_urls {
+                eprintln!("{url}: waiting");
+            }
+        }
+    }
 
     let detail_multi = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
     let heading_bar = detail_multi
@@ -648,19 +661,18 @@ pub async fn wait_for_grasp_servers(
 
     let server_bars = create_server_bars(&clone_urls, &detail_multi);
 
-    let timer_handle = (!quiet).then(|| {
-        spawn_expand_timer(
-            expand_delay_ms,
-            spinner_pb.clone(),
-            detail_multi.clone(),
-            heading_bar,
-            reveal_state.clone(),
-            server_bars.clone(),
-        )
-    });
-
+    if policy.animate && policy.detailed {
+        reveal_server_bars(
+            &spinner_pb,
+            &detail_multi,
+            &heading_bar,
+            &reveal_state,
+            &server_bars,
+        );
+    }
     let git_repo_path = git_repo.get_path()?.to_path_buf();
     let poll_ctx = Arc::new(PollContext {
+        policy,
         timeout_secs,
         total,
         ready_count: ready_count.clone(),
@@ -681,25 +693,73 @@ pub async fn wait_for_grasp_servers(
         })
         .collect();
 
-    let results = join_all(futures).await;
+    let work = join_all(futures);
+    tokio::pin!(work);
+    let results = tokio::select! {
+        results = &mut work => results,
+        _ = tokio::time::sleep(Duration::from_millis(expand_delay_ms)), if policy.animate && !policy.detailed => {
+            reveal_server_bars(&spinner_pb, &detail_multi, &heading_bar, &reveal_state, &server_bars);
+            work.await
+        }
+    };
     let final_ready = ready_count.load(Ordering::Relaxed);
 
-    if let Some(timer_handle) = timer_handle {
-        timer_handle.abort();
-    }
-
-    if reveal_state.revealed.load(Ordering::Acquire) {
+    if policy.animate && !policy.detailed && reveal_state.revealed.load(Ordering::Acquire) {
         let _ = detail_multi.clear();
     }
 
     let all_ready = results.iter().all(|&r| r);
-    finalize_spinner(all_ready, &spinner_pb, final_ready, total);
+    if policy.animate && !policy.detailed {
+        finalize_spinner(all_ready, &spinner_pb, final_ready, total);
+    } else if !policy.animate && !policy.quiet {
+        eprintln!(
+            "Git servers ready: {final_ready}/{total}{}.",
+            if all_ready {
+                ""
+            } else {
+                "; timed out, proceeding anyway"
+            }
+        );
+    }
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revealing_server_details_preserves_earlier_completed_results() {
+        let multi =
+            indicatif::MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        let spinner = indicatif::ProgressBar::hidden();
+        let heading = multi.add(indicatif::ProgressBar::hidden());
+        let bars = super::create_server_bars(
+            &[
+                "https://ready.example/repo".to_string(),
+                "https://pending.example/repo".to_string(),
+            ],
+            &multi,
+        );
+        let state = std::sync::Arc::new(super::ServerRevealState {
+            revealed: std::sync::atomic::AtomicBool::new(false),
+            deferred: std::sync::Mutex::new(Vec::new()),
+        });
+        super::finish_server_bar(
+            &bars[0],
+            indicatif::ProgressStyle::with_template("{msg}").unwrap(),
+            "ready.example/repo - ready".to_string(),
+            &state,
+        );
+        assert!(!bars[0].is_finished());
+        assert_eq!(state.deferred.lock().unwrap().len(), 1);
+        super::reveal_server_bars(&spinner, &multi, &heading, &state, &bars);
+        assert!(bars[0].is_finished());
+        assert!(bars[0].message().contains("ready"));
+        assert!(!bars[1].is_finished());
+        assert!(state.deferred.lock().unwrap().is_empty());
+        bars[1].finish();
+    }
+
     use nostr::prelude::Keys;
 
     use super::*;

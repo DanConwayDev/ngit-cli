@@ -402,7 +402,7 @@ impl Progress {
         self.report_lines(
             description,
             &relays,
-            crate::output_mode::is_verbose(),
+            crate::output_mode::progress_policy().detailed,
             resend_available,
         )
     }
@@ -450,7 +450,8 @@ async fn run_remote_operation_inner<T>(
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut events = connect.progress();
     let term = console::Term::stderr();
-    let mut countdown = CountdownLine::new(&term);
+    let policy = crate::output_mode::progress_policy();
+    let mut countdown = CountdownLine::new(&term, policy);
     let mut line = Some(TransientLine::write(&term, description)?);
     let mut clear_line = || -> Result<()> {
         if let Some(line) = line.take() {
@@ -466,7 +467,7 @@ async fn run_remote_operation_inner<T>(
     let observer = connect.observe_subscription_progress();
     tokio::pin!(delay, deadline, operation, observer);
     let mut observing = true;
-    let mut expanded = false;
+    let mut expanded = policy.detailed && !policy.quiet;
     let mut listened = false;
     let mut events_open = true;
     loop {
@@ -481,6 +482,14 @@ async fn run_remote_operation_inner<T>(
                     while let Ok(event) = events.try_recv() { state.update(event); }
                     state.finished = true;
                     let report = state.report(connect, description, false).await;
+                    clear_line()?;
+                    countdown.show_final(report)?;
+                } else if !policy.quiet && (policy.detailed || (expanded && !policy.animate)) {
+                    while let Ok(event) = events.try_recv() { state.update(event); }
+                    state.finished = true;
+                    let mut report = state.report(connect, description, false).await;
+                    report.heading = format!("Signer completed: {description}");
+                    report.action.clear();
                     clear_line()?;
                     countdown.show_final(report)?;
                 } else {
@@ -515,7 +524,7 @@ async fn run_remote_operation_inner<T>(
                         }
                         let request_started = matches!(&event, ConnectProgress::Request { .. });
                         let public_key_request = matches!(&event, ConnectProgress::Request { method: nostr::nips::nip46::NostrConnectMethod::GetPublicKey, .. });
-                        if public_key_request && listening.is_some() && !expanded && !crate::output_mode::is_quiet() {
+                        if public_key_request && listening.is_some() && !expanded && !policy.quiet {
                             clear_line()?;
                             countdown.clear()?;
                             eprintln!("{}", console::Style::new().for_stderr().bold().apply_to(
@@ -524,14 +533,14 @@ async fn run_remote_operation_inner<T>(
                         }
                         let outcomes = matches!(event, ConnectProgress::Sent { .. } | ConnectProgress::Ready { .. } | ConnectProgress::SubscriptionUnavailable { .. });
                         let failed = state.update(event);
-                        if expanded && allow_resend {
+                        if expanded && allow_resend && policy.animate {
                             let pending = state.pending_resend();
                             if input.as_ref().map(ResendInput::event_id) != pending {
                                 drop(input.take());
                                 input = pending.and_then(ResendInput::open);
                             }
                         }
-                        if failed || (expanded && (outcomes || request_started || listener_ready)) {
+                        if !policy.quiet && (failed || (expanded && (outcomes || request_started || listener_ready))) {
                             let report = state.report(connect, description, input.is_some() && state.pending_resend().is_some()).await;
                             clear_line()?;
                             countdown.show(report, state.pending_retry(), deadline_at)?;
@@ -540,7 +549,7 @@ async fn run_remote_operation_inner<T>(
                     Err(RecvError::Lagged(_)) => {
                         let report = state.report(connect, description, false).await;
                         countdown.clear()?;
-                        eprintln!("Signer progress updates were missed; request acceptance may be unknown.");
+                        if !policy.quiet { eprintln!("Signer progress updates were missed; request acceptance may be unknown."); }
                         countdown.show(report, state.pending_retry(), deadline_at)?;
                     }
                     Err(RecvError::Closed) => events_open = false,
@@ -554,16 +563,16 @@ async fn run_remote_operation_inner<T>(
                 countdown.show_final(report)?;
                 return wait_for_signer_until(deadline_at, std::future::pending()).await;
             }
-            _ = &mut delay, if !expanded => {
+            _ = &mut delay, if !expanded && !policy.quiet => {
                 expanded = true;
-                if allow_resend {
+                if allow_resend && policy.animate {
                     input = state.pending_resend().and_then(ResendInput::open);
                 }
                 let report = state.report(connect, description, input.is_some()).await;
                 clear_line()?;
                 countdown.show(report, state.pending_retry(), deadline_at)?;
             }
-            _ = animation.tick(), if expanded && term.is_term() => {
+            _ = animation.tick(), if expanded && policy.animate => {
                 countdown.refresh(state.pending_retry(), deadline_at)?;
             }
             _ = input_poll.tick(), if input.is_some() => {

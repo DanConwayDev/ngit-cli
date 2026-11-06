@@ -823,7 +823,7 @@ fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Ve
         )?;
         proposed_commits = selected.iter().map(|i| last_15_commits[*i]).collect();
 
-        if printed_error_line {
+        if printed_error_line && ngit::output_mode::progress_policy().animate {
             term.clear_last_lines(1)?;
         }
 

@@ -11,7 +11,7 @@ use anyhow::Result;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ngit::{
     blossom::{BlossomPresenceStatus, BlossomProgress, BlossomProgressEvent, BlossomServerStatus},
-    output_mode::{is_quiet, is_verbose},
+    output_mode::{ProgressPolicy, progress_policy},
 };
 use reqwest::Url;
 
@@ -27,6 +27,7 @@ const BLOSSOM_COMPACT_STATIC_ROW_TEMPLATE: &str = "      {wide_msg}";
 const DETAILED_UPLOAD_BLOB_LIMIT: usize = 3;
 
 pub(crate) struct BlossomUploadProgress {
+    log_policy: Option<ProgressPolicy>,
     multi: MultiProgress,
     heading: ProgressBar,
     render_to_stderr: bool,
@@ -284,13 +285,20 @@ impl BlossomActivity {
 
 impl BlossomUploadProgress {
     pub(crate) fn new(json_output: bool) -> Result<Arc<Self>> {
-        let visible = !json_output && !is_quiet();
-        let draw_target = if visible {
+        let mut policy = progress_policy();
+        policy.animate &= !json_output;
+        let draw_target = if policy.animate {
             ProgressDrawTarget::stderr()
         } else {
             ProgressDrawTarget::hidden()
         };
-        Self::with_draw_target(draw_target, visible, visible && is_verbose())
+        let mut progress = Self::with_draw_target(draw_target, policy.animate, policy.detailed)?;
+        if !policy.animate {
+            Arc::get_mut(&mut progress)
+                .ok_or_else(|| anyhow::anyhow!("new progress must have a single owner"))?
+                .log_policy = Some(policy);
+        }
+        Ok(progress)
     }
 
     fn with_draw_target(
@@ -325,6 +333,7 @@ impl BlossomUploadProgress {
             ProgressStyle::with_template(BLOSSOM_COMPACT_STATIC_ROW_TEMPLATE)?;
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
+            log_policy: None,
             multi,
             heading,
             render_to_stderr,
@@ -1073,8 +1082,107 @@ fn blossom_timed_attempt_message(
     }
 }
 
+/// Append only phase changes, never byte counters or timer-driven snapshots.
+fn blossom_log_line(
+    event: &BlossomProgressEvent,
+    policy: ProgressPolicy,
+    scope: Option<&SequentialFileScope>,
+) -> Option<String> {
+    if let BlossomProgressEvent::PlacementFinished {
+        filename,
+        server,
+        status,
+        message,
+    } = event
+    {
+        let failed = matches!(
+            status,
+            BlossomServerStatus::Failed | BlossomServerStatus::Unknown
+        );
+        if failed || (!policy.quiet && policy.detailed) {
+            let detail = message
+                .as_ref()
+                .map_or_else(String::new, |message| format!(": {message}"));
+            return Some(format!(
+                "Blossom: {filename} -> {server}: {}{detail}",
+                blossom_finished_status_label(*status)
+            ));
+        }
+        return None;
+    }
+    if policy.quiet {
+        return None;
+    }
+    let line = match event {
+        BlossomProgressEvent::PresenceChecksStarted { blobs, checks, .. } => {
+            format!("checking {checks} existing copies of {blobs} files")
+        }
+        BlossomProgressEvent::PresenceChecksFinished { missing } => {
+            format!("presence checks complete; {missing} copies need upload")
+        }
+        BlossomProgressEvent::PresenceCheckFinished { server, status, .. } if policy.detailed => {
+            format!("{server}: presence check {status:?}")
+        }
+        BlossomProgressEvent::AuthorizationStarted { blobs, .. } => {
+            format!("authorizing upload of {blobs} files")
+        }
+        BlossomProgressEvent::UploadBatchStarted {
+            batch,
+            batches,
+            blobs,
+            placements,
+            ..
+        } => {
+            let (batch, batches) = scope
+                .filter(|_| *batch == 1 && *batches == 1)
+                .map_or((*batch, *batches), |scope| (scope.index, scope.total));
+            format!("upload group {batch}/{batches}: {blobs} files, {placements} copies")
+        }
+        BlossomProgressEvent::UploadBatchFinished { batch, batches } => {
+            let (batch, batches) = scope
+                .filter(|_| *batch == 1 && *batches == 1)
+                .map_or((*batch, *batches), |scope| (scope.index, scope.total));
+            format!("upload group {batch}/{batches} complete")
+        }
+        BlossomProgressEvent::UploadRequestStarted {
+            filename,
+            server,
+            attempt,
+            max_attempts,
+            ..
+        } if policy.detailed => {
+            format!("{filename} -> {server}: uploading (attempt {attempt}/{max_attempts})")
+        }
+        BlossomProgressEvent::UploadBodyFinished {
+            filename, server, ..
+        } if policy.detailed => format!("{filename} -> {server}: awaiting response"),
+        BlossomProgressEvent::VerificationStarted {
+            filename, server, ..
+        } if policy.detailed => format!("{filename} -> {server}: verifying storage"),
+        BlossomProgressEvent::RetryScheduled {
+            filename,
+            server,
+            next_attempt,
+            max_attempts,
+            ..
+        } => format!(
+            "{filename} -> {server}: retry scheduled (attempt {next_attempt}/{max_attempts})"
+        ),
+        _ => return None,
+    };
+    Some(format!("Blossom: {line}"))
+}
+
 impl BlossomProgress for BlossomUploadProgress {
     fn update(&self, event: &BlossomProgressEvent) {
+        if let Some(policy) = self.log_policy {
+            if let Some(line) =
+                blossom_log_line(event, policy, self.sequential_file_scope().as_ref())
+            {
+                eprintln!("{line}");
+            }
+            return;
+        }
         match event {
             BlossomProgressEvent::PresenceChecksStarted { .. }
             | BlossomProgressEvent::PresenceCheckFinished { .. }
@@ -1181,6 +1289,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn append_only_policy_reports_phases_without_byte_noise() -> Result<()> {
+        use ngit::output_mode::OutputMode;
+        let normal = ProgressPolicy::new(OutputMode::Normal, true, true);
+        let verbose = ProgressPolicy::new(OutputMode::Verbose, false, false);
+        let quiet = ProgressPolicy::new(OutputMode::Quiet, false, false);
+        let server = Url::parse("https://storage.example/")?;
+        let bytes = BlossomProgressEvent::UploadedBytes {
+            batch: 1,
+            filename: "asset".to_string(),
+            server: server.clone(),
+            bytes: 100,
+        };
+        for policy in [normal, verbose, quiet] {
+            assert!(blossom_log_line(&bytes, policy, None).is_none());
+        }
+        let phase = BlossomProgressEvent::VerificationStarted {
+            batch: 1,
+            batches: 1,
+            filename: "asset".to_string(),
+            server: server.clone(),
+            attempt: 1,
+            max_attempts: 3,
+            timeout_secs: 15,
+        };
+        assert!(blossom_log_line(&phase, normal, None).is_none());
+        assert!(blossom_log_line(&phase, verbose, None).is_some());
+        let group = BlossomProgressEvent::UploadBatchFinished {
+            batch: 1,
+            batches: 1,
+        };
+        assert!(blossom_log_line(&group, normal, None).is_some());
+        assert!(blossom_log_line(&group, quiet, None).is_none());
+        let failure = BlossomProgressEvent::PlacementFinished {
+            filename: "asset".to_string(),
+            server,
+            status: BlossomServerStatus::Failed,
+            message: Some("rejected upload".to_string()),
+        };
+        for policy in [normal, verbose, quiet] {
+            assert!(
+                blossom_log_line(&failure, policy, None)
+                    .unwrap()
+                    .contains("rejected upload")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn blossom_batch_rows_reserve_the_spinner_column() {
         let rendered_bracket_column = |template: &str| {
             template
@@ -1219,7 +1376,8 @@ mod tests {
 
     #[test]
     fn sequential_file_scope_preserves_outer_file_numbering() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress =
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false)?;
         progress.set_sequential_file(2, 5, "layer.tar");
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
@@ -1247,7 +1405,8 @@ mod tests {
 
     #[test]
     fn completed_presence_checks_are_transient() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress =
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false)?;
         let server = Url::parse("https://blossom.example/")?;
         progress.update(&BlossomProgressEvent::PresenceChecksStarted {
             blobs: 1,
@@ -1276,7 +1435,8 @@ mod tests {
 
     #[test]
     fn blossom_progress_distinguishes_body_transfer_from_waiting_for_response() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress =
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false)?;
         let server = Url::parse("https://blossom.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
             batch: 1,
@@ -1446,7 +1606,8 @@ mod tests {
 
     #[test]
     fn blossom_progress_combines_concurrent_placement_activity() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress =
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false)?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         progress.update(&BlossomProgressEvent::UploadBatchStarted {
@@ -1549,7 +1710,8 @@ mod tests {
 
     #[test]
     fn compact_progress_keeps_each_server_file_row_until_batch_finishes() -> Result<()> {
-        let progress = BlossomUploadProgress::new(true)?;
+        let progress =
+            BlossomUploadProgress::with_draw_target(ProgressDrawTarget::hidden(), false, false)?;
         let first_server = Url::parse("https://one.example/")?;
         let second_server = Url::parse("https://two.example/")?;
         let filenames = (0..6)

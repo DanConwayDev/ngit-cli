@@ -74,8 +74,10 @@ wait while the user troubleshoots; Ctrl+C exits and restores terminal input.
 commands, JSON output and headless operators still receive automatic retries.
 Pairing menus and `--nostrconnect` do not acquire another keyboard reader, and
 one-time pairing secrets are never resent. The terminal countdown updates in
-place; redirected output reports attempts and outcomes without a line every
-second.
+place; JSON and redirected output report state changes, attempts and outcomes
+without timed refreshes or cursor clearing. Verbose mode reveals details
+immediately and retains completed diagnostics. See [progress output](progress-output.md)
+for the shared rendering policy.
 
 Monitored operations for the same signer run one at a time so their progress
 and pending requests cannot be mixed. Queueing and initial pairing retain their
