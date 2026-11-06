@@ -741,7 +741,7 @@ async fn nbunksec_without_user_pubkey_fetches_identity_before_signing() {
     let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
     wait_until_signer_ready(&relay_url, signer_keys.public_key()).await;
 
-    let connect = nostr_connect::client::NostrConnect::new(
+    let connect = ngit::remote_signer::NostrConnect::new(
         NostrConnectUri::parse(connection.bunker_uri).expect("decoded bunker URI should parse"),
         Keys::parse(&connection.client_key).expect("decoded client key should parse"),
         Duration::from_secs(10),
@@ -794,7 +794,7 @@ async fn sanitized_bunker_uri_reconnects_with_stored_client_key() {
     let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
     wait_until_signer_ready(&relay_url, signer_keys.public_key()).await;
 
-    let connect = nostr_connect::client::NostrConnect::new(
+    let connect = ngit::remote_signer::NostrConnect::new(
         sanitized_uri,
         client_keys,
         Duration::from_secs(10),

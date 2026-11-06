@@ -9,7 +9,6 @@ use anyhow::{Context, Result, bail};
 use nostr::prelude::{
     Event, Filter, Keys, Kind, Metadata, PublicKey, ToBech32, nip46::NostrConnectUri,
 };
-use nostr_connect::client::NostrConnect;
 
 use super::{
     SignerInfo, SignerInfoSource, credential_store,
@@ -29,6 +28,7 @@ use crate::{
         get_git_config_item_system, open_global_configs_for_repo,
     },
     output_mode::TransientLine,
+    remote_signer::NostrConnect,
 };
 
 #[derive(Debug)]
