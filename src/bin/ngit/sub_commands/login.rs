@@ -18,7 +18,7 @@ use crate::{
     cli::SignerParams,
     client::{Client, Connect},
     git::Repo,
-    login::fresh::{fresh_login_or_signup, login_with_bunker_url},
+    login::fresh::{fresh_login_or_signup, login_with_bunker_url, login_with_nostrconnect},
 };
 
 #[derive(clap::Args)]
@@ -68,6 +68,16 @@ pub struct SubCommandArgs {
     )]
     bunker_url: Option<String>,
 
+    /// print a nostrconnect:// URI and wait for pairing without terminal input
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "interactive", "account", "nsec", "nsec_file", "nbunksec",
+            "nbunksec_file", "signer", "bunker_uri", "bunker_app_key", "bunker_url"
+        ]
+    )]
+    nostrconnect: bool,
+
     /// where to store the account secret: auto (OS credential store, falling
     /// back to ngit's file store), file, or git-config (plaintext)
     #[arg(long, value_name = "auto|file|git-config")]
@@ -79,6 +89,11 @@ pub struct SubCommandArgs {
 }
 
 pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
+    if command_args.nostrconnect {
+        // This explicit flow never reads stdin, even through the `connect`
+        // alias or an inherited interactive-mode environment variable.
+        std::env::remove_var("NGIT_INTERACTIVE_MODE");
+    }
     if let Some(value) = &command_args.secret_storage {
         let policy = credential_store::parse_policy(value).with_context(|| {
             format!("invalid --secret-storage value '{value}'; expected auto, file or git-config")
@@ -97,6 +112,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
     if Interactor::is_non_interactive()
         && signer_info.is_none()
         && command_args.bunker_url.is_none()
+        && !command_args.nostrconnect
         && alias.is_none()
     {
         return Err(missing_login_error());
@@ -109,7 +125,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         signer_info,
         signer.password.as_ref(),
         alias.as_deref(),
-        command_args.bunker_url.is_some(),
+        command_args.bunker_url.is_some() || command_args.nostrconnect,
         !Interactor::is_non_interactive(),
     )
     .await?;
@@ -130,16 +146,29 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         )))
     };
 
-    let (proceed, log_in_locally_only) = choose_login_scope(
-        git_repo.as_ref(),
-        command_args.local,
-        login_alias,
-        selected_by.is_none(),
-    )
-    .await?;
+    let (proceed, log_in_locally_only) = if command_args.nostrconnect {
+        (true, command_args.local)
+    } else {
+        choose_login_scope(
+            git_repo.as_ref(),
+            command_args.local,
+            login_alias,
+            selected_by.is_none(),
+        )
+        .await?
+    };
     if proceed {
         let save_local = log_in_locally_only || command_args.local;
-        if let Some(bunker_url) = &command_args.bunker_url {
+        if command_args.nostrconnect {
+            login_with_nostrconnect(
+                &git_repo.as_ref(),
+                client.as_ref(),
+                save_local,
+                &command_args.signer_relays,
+                login_alias,
+            )
+            .await?;
+        } else if let Some(bunker_url) = &command_args.bunker_url {
             login_with_bunker_url(
                 &git_repo.as_ref(),
                 client.as_ref(),
@@ -184,6 +213,10 @@ fn missing_login_error() -> anyhow::Error {
                 "provide an established remote signer connection",
             ),
             ("--bunker-url <url>", "bunker:// URL from signer app"),
+            (
+                "--nostrconnect",
+                "print a pairing URI without terminal prompts",
+            ),
             (
                 "--signer <alias|npub|nostr-display-name>",
                 "reactivate a stored signer",
@@ -307,7 +340,7 @@ async fn resolve_login_selection(
     signer_info: Option<&SignerInfo>,
     password: Option<&String>,
     alias: Option<&str>,
-    has_bunker_url: bool,
+    fresh_remote_login: bool,
     interactive: bool,
 ) -> Result<(Option<SignerInfo>, Option<String>, Option<String>)> {
     // Positional and --signer selectors may fall back to cached profile names;
@@ -318,7 +351,7 @@ async fn resolve_login_selection(
     let from_explicit_selector = matches!(signer_info, Some(SignerInfo::Selection { .. }));
     let mut requested = signer_info
         .cloned()
-        .or_else(|| implicit_alias_selection(alias, has_bunker_url, interactive));
+        .or_else(|| implicit_alias_selection(alias, fresh_remote_login, interactive));
     if let Some(SignerInfo::Nsec {
         password: signer_password,
         ..
@@ -351,10 +384,10 @@ async fn resolve_login_selection(
 
 fn implicit_alias_selection(
     alias: Option<&str>,
-    has_bunker_url: bool,
+    fresh_remote_login: bool,
     interactive: bool,
 ) -> Option<SignerInfo> {
-    if has_bunker_url || interactive {
+    if fresh_remote_login || interactive {
         return None;
     }
     alias.map(|alias| SignerInfo::Selection {
@@ -512,6 +545,50 @@ mod tests {
     use ngit::login::SignerInfo;
 
     use super::{implicit_alias_selection, login_scope_choice, login_scope_prompt};
+
+    #[test]
+    fn nostrconnect_accepts_profiles_and_json_without_interaction() {
+        use clap::Parser;
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "ngit",
+                "account",
+                "login",
+                "--nostrconnect",
+                "--profile",
+                "agent",
+                "--json"
+            ])
+            .is_ok()
+        );
+        for other in [
+            "--interactive",
+            "--bunker-url",
+            "--nsec",
+            "--nsec-file",
+            "--nbunksec",
+            "--nbunksec-file",
+            "--signer",
+            "--bunker-uri",
+            "--bunker-app-key",
+        ] {
+            let mut args = vec!["ngit", "account", "login", "--nostrconnect", other];
+            if other != "--interactive" {
+                args.push("value");
+            }
+            assert!(crate::cli::Cli::try_parse_from(args).is_err(), "{other}");
+        }
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "ngit",
+                "account",
+                "login",
+                "stored-account",
+                "--nostrconnect"
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn interactive_alias_labels_a_fresh_signer() {

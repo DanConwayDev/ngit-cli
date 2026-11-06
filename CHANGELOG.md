@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `account login --nostrconnect` prints a pairing URI on stderr once a signer
+  relay confirms the response subscription, then waits without QR codes or
+  terminal input. It supports named profiles, explicit signer relays and
+  `--json`, whose stdout remains a single final result.
+
 - Remote signer progress distinguishes pairing from public-key approval and
   keeps the waiting operation prominent above one concise line per signer
   relay, ending with recovery guidance based on request delivery. Subscription

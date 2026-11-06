@@ -1,5 +1,27 @@
 # Remote signer progress
 
+## Pair without terminal input
+
+Run `ngit account login --nostrconnect --profile phone` to start a fresh
+connection. Add `--local` for a repository-specific selection and repeat
+`--signer-relay wss://relay.example.com` to choose signer relays. Stored profiles
+are still reactivated with `ngit account login phone`.
+
+The command prints one `nostrconnect: nostrconnect://...` line on stderr after
+at least one relay confirms the response subscription with EOSE. It then waits
+for the signer to pair and provide the user's public key. An agent can read the
+URI while the process is running and hand it to the intended signer without
+writing to stdin. This explicit mode displays no QR code and suppresses terminal
+prompts, including when interactive mode was inherited from the environment.
+
+With `--json`, keep reading stderr for the URI and progress; stdout contains
+only the final JSON result. Keep draining both streams until the process exits.
+The URI contains a pairing secret and should be shared only with the intended
+signer. Failed pairing leaves the previous login selected. A successful pairing
+saves the connection using the normal profile and credential-storage policy.
+
+## Delivery and recovery
+
 Remote signing has two independent connections: ngit's connection to each
 signer relay and the signing application's connection to those relays. A healthy
 ngit connection does not establish that the signer is online. Likewise, a relay

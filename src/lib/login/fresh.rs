@@ -186,7 +186,36 @@ pub async fn login_with_bunker_url(
         .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
 
     let (app_key, _) = generate_nostr_connect_app(client, signer_relays)?;
+    login_with_connect_uri(git_repo, client, &app_key, &url, save_local, alias).await
+}
 
+/// Start client-initiated pairing without reading terminal input or displaying
+/// a QR code. The URI is emitted on stderr before waiting, including in JSON
+/// output mode.
+pub async fn login_with_nostrconnect(
+    git_repo: &Option<&Repo>,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    save_local: bool,
+    signer_relays: &[String],
+    alias: Option<&str>,
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
+    let (app_key, url) = generate_nostr_connect_app(client, signer_relays)?;
+    if url.relays().is_empty() {
+        bail!("no signer relays configured; provide --signer-relay <url>");
+    }
+    login_with_connect_uri(git_repo, client, &app_key, &url, save_local, alias).await
+}
+
+async fn login_with_connect_uri(
+    git_repo: &Option<&Repo>,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    app_key: &Keys,
+    url: &NostrConnectUri,
+    save_local: bool,
+    alias: Option<&str>,
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let printer = Arc::new(Mutex::new(Printer::default()));
     {
         let mut p = printer.lock().await;
@@ -194,7 +223,12 @@ pub async fn login_with_bunker_url(
     }
 
     let (signer, user_public_key, bunker_uri) =
-        listen_for_remote_signer(&app_key, &url, printer).await?;
+        listen_for_remote_signer_when_listening(app_key, url, printer, || {
+            if matches!(url, NostrConnectUri::Client { .. }) {
+                eprintln!("nostrconnect: {url}");
+            }
+        })
+        .await?;
 
     let signer_info = SignerInfo::Bunker {
         bunker_uri: bunker_uri.to_string(),
