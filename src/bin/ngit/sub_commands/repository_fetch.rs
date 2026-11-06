@@ -202,6 +202,7 @@ mod tests {
             blaster_relays: vec![],
             fallback_signer_relays: vec![],
             grasp_default_set: vec![],
+            ..Params::default()
         });
 
         assert_eq!(

@@ -98,7 +98,7 @@ fn git_timeout_ms(
     git_timeout_ms_from_sources(env_value.as_deref(), config_value.as_deref(), default_ms)
 }
 
-fn git_config_value(git_repo: Option<&Repo>, config_key: &str) -> Option<String> {
+pub(crate) fn git_config_value(git_repo: Option<&Repo>, config_key: &str) -> Option<String> {
     if let Some(git_repo) = git_repo {
         git_repo
             .get_git_config_item(config_key, None)

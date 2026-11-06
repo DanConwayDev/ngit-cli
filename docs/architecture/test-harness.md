@@ -86,6 +86,13 @@ ngit's test mode and the harness without a circular crate dependency:
   `repo.set_relay_timeout(...)` for subsequent commands. Command-local overrides
   use the same policy's `seconds()` value and `timeouts::RELAY_TIMEOUT_ENV`.
 
+`NGIT_TEST_RELAY_TIMEOUT_SECS` remains test-only: under `NGITTEST`, it sets both
+relay budgets and ignores the production `NGIT_RELAY_TIMEOUT_SECS` /
+`NGIT_RELAY_CONNECT_TIMEOUT_SECS` variables and `nostr.relay-*-secs` config.
+This preserves the harness's ten-second connection allowance and keeps inherited
+user settings from changing fixture timing. Production settings are tested through
+explicit source values without mutating the test process environment.
+
 Three seconds trades some failure-path runtime for scheduling headroom on busy
 CI workers. Do not shorten a query merely because it expects no matching
 events: a responsive relay can confirm absence with EOSE. A longer allowance
