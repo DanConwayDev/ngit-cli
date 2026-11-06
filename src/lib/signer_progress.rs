@@ -130,6 +130,7 @@ impl SubscriptionStatus {
 
 #[derive(Default)]
 struct Progress {
+    pairing: bool,
     finished: bool,
     requests: BTreeMap<EventId, RequestProgress>,
     current: Option<EventId>,
@@ -365,6 +366,9 @@ impl Progress {
             "No relay accepted the request. Fix the relay errors above.".to_string()
         } else if subscription_failed {
             "Fix the response subscription errors above.".to_string()
+        } else if self.pairing && pending.is_some_and(|request| request.method == "get_public_key")
+        {
+            PUBLIC_KEY_APPROVAL_GUIDANCE.to_string()
         } else if pending.is_some() {
             "Check signer approvals and relay connections.".to_string()
         } else if disconnected {
@@ -461,7 +465,10 @@ async fn run_remote_operation_inner<T>(
         }
         Ok(())
     };
-    let mut state = Progress::default();
+    let mut state = Progress {
+        pairing: listening.is_some(),
+        ..Default::default()
+    };
     let delay = tokio::time::sleep(Duration::from_secs(5));
     let deadline = tokio::time::sleep_until(deadline_at);
     let observer = connect.observe_subscription_progress();
@@ -528,7 +535,7 @@ async fn run_remote_operation_inner<T>(
                             clear_line()?;
                             countdown.clear()?;
                             eprintln!("{}", console::Style::new().for_stderr().bold().apply_to(
-                                "Waiting: public key from signer"
+                                PUBLIC_KEY_APPROVAL_GUIDANCE
                             ));
                         }
                         let outcomes = matches!(event, ConnectProgress::Sent { .. } | ConnectProgress::Ready { .. } | ConnectProgress::SubscriptionUnavailable { .. });
@@ -600,6 +607,9 @@ async fn run_remote_operation_inner<T>(
 /// Bound queueing and phases without an eligible outgoing request. Eligible
 /// requests report their own bounded resend window from the transport.
 const SIGNER_TIMEOUT: Duration = Duration::from_secs(120);
+
+const PUBLIC_KEY_APPROVAL_GUIDANCE: &str =
+    "Approve sharing your public key in your signer; check for another notification.";
 
 const SIGNER_TIMEOUT_GUIDANCE: &str = "remote signer did not respond in time. Open your signing app, check pending approvals and its signer-relay connections, then rerun the command. Requests are ephemeral: reconnecting the signer may not recover an earlier request.";
 
@@ -927,6 +937,80 @@ mod tests {
             progress.report_lines("signing", &[(url, RelayStatus::Disconnected)], false, true);
         assert_eq!(offline.relays[0].indicator, Indicator::Failed);
         assert!(!offline.relays[0].text.contains("awaiting response"));
+    }
+
+    #[test]
+    fn pairing_public_key_approval_remains_actionable_in_expanded_reports() {
+        for verbose in [false, true] {
+            let id = request_id(1);
+            let mut progress = Progress {
+                pairing: true,
+                ..Default::default()
+            };
+            progress.update(ConnectProgress::Request {
+                event_id: id,
+                method: NostrConnectMethod::GetPublicKey,
+                can_resend: true,
+                retry: None,
+            });
+            let report = progress.report_lines("pairing signer", &[], verbose, false);
+            assert_eq!(report.action, PUBLIC_KEY_APPROVAL_GUIDANCE);
+            assert!(report.heading.contains("pairing signer"));
+
+            // Ordinary signing keeps its operation description and generic guidance.
+            progress.pairing = false;
+            let report = progress.report_lines("signing announcement", &[], verbose, false);
+            assert!(!report.action.contains("another notification"));
+            assert!(report.heading.contains("signing announcement"));
+
+            progress.pairing = true;
+            progress.requests.get_mut(&id).unwrap().method = "sign_event".to_string();
+            assert!(
+                !progress
+                    .report_lines("pairing signer", &[], verbose, false)
+                    .action
+                    .contains("another notification")
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_public_key_guidance_does_not_hide_relay_failures() {
+        let url = "wss://signer.example/".to_string();
+        let id = request_id(1);
+        let mut progress = Progress {
+            pairing: true,
+            ..Default::default()
+        };
+        progress.update(ConnectProgress::Request {
+            event_id: id,
+            method: NostrConnectMethod::GetPublicKey,
+            can_resend: true,
+            retry: None,
+        });
+        progress
+            .requests
+            .get_mut(&id)
+            .unwrap()
+            .relays
+            .insert(url.clone(), Delivery::Failed("rejected".to_string()));
+        let relays = [(url.clone(), RelayStatus::Connected)];
+        assert!(
+            progress
+                .report_lines("pairing signer", &relays, false, false)
+                .action
+                .contains("No relay accepted")
+        );
+        progress.requests.get_mut(&id).unwrap().relays.clear();
+        progress
+            .subscriptions
+            .insert(url, SubscriptionStatus::Failed("auth required".to_string()));
+        assert!(
+            progress
+                .report_lines("pairing signer", &relays, false, false)
+                .action
+                .contains("subscription errors")
+        );
     }
 
     #[test]
