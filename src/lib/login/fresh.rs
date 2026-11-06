@@ -469,7 +469,7 @@ pub async fn get_fresh_nip46_signer(
             // after "signer connection established".
             let nc_listener = Arc::clone(&nostr_connect);
             let pubkey_handle = tokio::spawn(async move {
-                let res = crate::signer_progress::run_remote_operation(
+                let res = crate::signer_progress::run_remote_operation_when_listening(
                     &nc_listener,
                     "waiting for remote signer pairing...",
                     async {
@@ -478,6 +478,7 @@ pub async fn get_fresh_nip46_signer(
                             .await
                             .map_err(anyhow::Error::from)
                     },
+                    || {},
                 )
                 .await;
                 done_listener.store(true, Ordering::Relaxed);

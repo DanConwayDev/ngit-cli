@@ -82,6 +82,7 @@ async fn main() {
 
     let mut cli = Cli::parse();
     output::set_json_mode(cli.json);
+    ngit::output_mode::set_terminal_recovery_enabled(!cli.json);
     set_output_mode(if cli.quiet {
         OutputMode::Quiet
     } else if cli.verbose || std::env::var("NGITTEST").is_ok() {
@@ -92,7 +93,11 @@ async fn main() {
 
     // Non-interactive by default; set NGIT_INTERACTIVE_MODE only when -i is
     // specified
-    if cli.interactive {
+    if cli.json {
+        // Machine-readable commands never consume terminal input, including
+        // when the interactive setting was inherited from a parent process.
+        std::env::remove_var("NGIT_INTERACTIVE_MODE");
+    } else if cli.interactive {
         std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
     }
 
@@ -167,8 +172,10 @@ async fn main() {
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Connect(sub_args) => {
-                    // `connect` is an alias for `login -i`: always interactive
-                    std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+                    // JSON output remains non-interactive even through this alias.
+                    if !cli.json {
+                        std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+                    }
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Logout(sub_args) => {
