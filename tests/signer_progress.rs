@@ -40,7 +40,7 @@ async fn reports_mixed_relay_outcomes_without_claiming_a_signer_response() -> Re
             tokio::select! {
                 result = &mut operation => bail!("absent signer unexpectedly completed: {result:?}"),
                 event = progress.recv() => match event? {
-                    ConnectProgress::Request { event_id, method } => {
+                    ConnectProgress::Request { event_id, method, .. } => {
                         assert_eq!(method, NostrConnectMethod::Connect);
                         request = Some(event_id);
                     }
@@ -54,7 +54,7 @@ async fn reports_mixed_relay_outcomes_without_claiming_a_signer_response() -> Re
                     ConnectProgress::Response { .. } | ConnectProgress::Paired => {
                         bail!("relay acceptance was mistaken for a signer response");
                     }
-                    ConnectProgress::Listening { .. } | ConnectProgress::Ready { .. } => {}
+                    ConnectProgress::Listening { .. } | ConnectProgress::Ready { .. } | ConnectProgress::SubscriptionUnavailable { .. } => {}
                 }
             }
         }

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Remote signer requests recover automatically with three sends two minutes
+  apart, then time out two minutes after the last send. Direct terminal users
+  can press `r` or `R` to resend immediately and restart the six-minute window.
+  Git's remote helper never reads recovery keys or advertises that shortcut;
+  JSON and headless runs keep automatic recovery. Terminals show a countdown,
+  while logs report attempt transitions. Reports refresh in place on resends,
+  show slow per-relay waiting spinners and explicit connection failures, and
+  keep recovery controls concise. The countdown counts delivery attempts for
+  the current request rather than suggesting a count of events. The initial signing line remains visible
+  until the detailed report replaces it; its heading preserves what is being
+  signed throughout the wait.
+  Signer refusals stop immediately.
+
 - `account login --nostrconnect` prints a pairing URI on stderr once a signer
   relay confirms the response subscription, then waits without QR codes or
   terminal input. It supports named profiles, explicit signer relays and
@@ -80,12 +93,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify signatures of cached update metadata before using it, so a tampered
   local cache cannot direct `ngit update` to an unrelated release.
 
-- Remote signer operations stop after two minutes with recovery guidance,
-  including time queued behind another operation using the same signer.
+- Initial pairing and time queued behind another operation using the same
+  signer stop after two minutes with recovery guidance.
   Concurrent operations no longer mix their pending-request reports.
   Pairing preserves failure causes instead of silently retrying indefinitely;
-  signer refusals remain distinct from timeouts. Commands do not gain retry
-  prompts or resume from an intermediate signing step.
+  signer refusals remain distinct from timeouts. Commands do not resume from
+  an intermediate signing step.
 
 - Allow file-store logout and credential deletion on headless Unix systems
   without a configured session bus. Keep errors for inaccessible configured OS

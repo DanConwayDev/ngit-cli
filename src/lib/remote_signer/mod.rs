@@ -4,6 +4,8 @@
 
 //! Nostr Connect client
 
+mod retry;
+mod subscription;
 use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use async_utility::time;
@@ -21,6 +23,8 @@ use nostr::{
 };
 use nostr_connect::error::{Error, ErrorKind};
 use nostr_sdk::prelude::*;
+use retry::RETRY_INTERVAL;
+pub use retry::RetryStatus;
 use tokio::sync::{Mutex, MutexGuard, OnceCell, broadcast};
 
 /// Progress without sensitive message contents.
@@ -32,12 +36,21 @@ pub enum ConnectProgress {
     },
     /// A relay processed the response subscription (matching EOSE).
     Ready { relay_url: RelayUrl },
+    /// The response subscription is no longer confirmed on this relay.
+    SubscriptionUnavailable {
+        relay_url: RelayUrl,
+        reason: Option<String>,
+    },
     /// The connection handshake succeeded.
     Paired,
     /// A request is about to be sent to the signer relays.
     Request {
         event_id: EventId,
         method: NostrConnectMethod,
+        /// Whether this request can be resent without reusing a pairing secret.
+        can_resend: bool,
+        /// Schedule for automatic deliveries of this same logical request.
+        retry: Option<RetryStatus>,
     },
     /// The SDK finished sending the request, including each relay's outcome.
     Sent {
@@ -54,7 +67,10 @@ pub enum ConnectProgress {
 #[derive(Debug, Clone)]
 pub struct NostrConnect {
     monitor: Arc<Mutex<()>>,
+    subscription: Arc<Mutex<subscription::SubscriptionProgress>>,
+    subscription_id: SubscriptionId,
     progress: broadcast::Sender<ConnectProgress>,
+    resend: broadcast::Sender<EventId>,
     uri: NostrConnectUri,
     client_keys: Keys,
     remote_signer_public_key: OnceCell<PublicKey>,
@@ -83,9 +99,14 @@ impl NostrConnect {
             }
         }
 
+        let client = Client::default();
+        let subscription = subscription::SubscriptionProgress::new(client.notifications());
         Ok(Self {
+            subscription: Arc::new(Mutex::new(subscription)),
+            subscription_id: SubscriptionId::generate(),
             monitor: Arc::new(Mutex::new(())),
             progress: broadcast::channel(64).0,
+            resend: broadcast::channel(8).0,
             uri,
             client_keys,
             // NOT set the remote_signer_public_key, also if bunker URI!
@@ -94,7 +115,7 @@ impl NostrConnect {
             // remote_signer_public_key is set in the bootstrap method.
             remote_signer_public_key: OnceCell::new(),
             user_public_key: OnceCell::new(),
-            client: Client::default(),
+            client,
             timeout,
             opts: opts.unwrap_or_default(),
             auth_url_handler: None,
@@ -154,6 +175,12 @@ impl NostrConnect {
     /// Subscribe before starting an operation to observe its progress.
     pub fn progress(&self) -> broadcast::Receiver<ConnectProgress> {
         self.progress.subscribe()
+    }
+
+    /// Resend the pending request identified by its latest transport event.
+    /// Stale requests and one-time pairing handshakes are ignored.
+    pub fn resend_request(&self, event_id: EventId) {
+        let _ = self.resend.send(event_id);
     }
 
     /// Get relays status
@@ -217,7 +244,11 @@ impl NostrConnect {
         let notifications = self.client.notifications();
 
         // Subscribe
-        let output = self.client.subscribe(filter).await?;
+        let output = self
+            .client
+            .subscribe(filter)
+            .with_id(self.subscription_id.clone())
+            .await?;
         let subscription_id = output.value.clone();
         let _ = self.progress.send(ConnectProgress::Listening { output });
 
@@ -285,81 +316,128 @@ impl NostrConnect {
     ) -> Result<ResponseResult, Error> {
         let secret_key: &SecretKey = self.client_keys.secret_key();
 
-        // Convert request to event
+        // Preserve the logical request ID and parameters across explicit resends.
+        // Re-encryption gives each delivery a fresh nonce and transport event ID.
         let msg = NostrConnectMessage::request(&req);
-        tracing::debug!("Sending '{msg}' NIP46 message");
-
         let req_id = msg.id().to_string();
-        let event: Event = NostrConnectEventBuilder::new(remote_signer_public_key, msg)
-            .finalize(&self.client_keys)?;
-
+        let can_resend = !matches!(
+            &req,
+            NostrConnectRequest::Connect {
+                secret: Some(_),
+                ..
+            }
+        );
         let mut notifications = self.client.notifications();
+        let mut resend = self.resend.subscribe();
+        let mut retry = can_resend.then(|| RetryStatus::fresh(tokio::time::Instant::now()));
+        let mut request_event_id = self
+            .publish_request(&msg, remote_signer_public_key, req.method(), retry)
+            .await?;
+        let next_action = retry.map_or_else(
+            || tokio::time::Instant::now() + self.timeout.min(RETRY_INTERVAL),
+            |retry| retry.next_action_at,
+        );
+        let timer = tokio::time::sleep_until(next_action);
+        tokio::pin!(timer);
 
-        // Send request
-        let request_event_id = event.id;
+        loop {
+            let notification = tokio::select! {
+                // A final response wins over a button press already in the queue.
+                biased;
+                notification = notifications.next() => match notification {
+                    Some(notification) => notification,
+                    None => break,
+                },
+                attempt = resend.recv() => {
+                    if can_resend && attempt.is_ok_and(|id| id == request_event_id) {
+                        retry = Some(RetryStatus::fresh(tokio::time::Instant::now()));
+                        request_event_id = self.publish_request(
+                            &msg, remote_signer_public_key, req.method(), retry,
+                        ).await?;
+                        timer.as_mut().reset(retry.expect("manual resend has a budget").next_action_at);
+                    }
+                    continue;
+                }
+                _ = &mut timer => {
+                    let Some(budget) = retry.as_mut().filter(|budget| budget.sends_remaining > 0) else {
+                        return Err(Error::simple(ErrorKind::Timeout));
+                    };
+                    budget.automatic(tokio::time::Instant::now());
+                    request_event_id = self.publish_request(
+                        &msg, remote_signer_public_key, req.method(), retry,
+                    ).await?;
+                    timer.as_mut().reset(retry.expect("automatic resend has a budget").next_action_at);
+                    continue;
+                }
+            };
+            if let ClientNotification::Event { event, .. } = notification {
+                if event.kind == Kind::NostrConnect && event.pubkey == remote_signer_public_key {
+                    let msg: String =
+                        nip44::decrypt(secret_key, &event.pubkey, event.content.as_str())?;
+                    let msg: NostrConnectMessage = NostrConnectMessage::from_json(msg)?;
+
+                    tracing::debug!("Received NIP46 message: '{msg}'");
+
+                    if req_id == msg.id() && msg.is_response() {
+                        let response: NostrConnectResponse = msg.to_response(req.method())?;
+
+                        if response.is_auth_url() {
+                            if let (Some(auth_url), Some(handler)) =
+                                (response.error, &self.auth_url_handler)
+                            {
+                                match Url::parse(&auth_url) {
+                                    Ok(url) => {
+                                        if let Err(e) = handler.on_auth_url(url).await {
+                                            tracing::error!("Impossible to handle `auth_url`: {e}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Can't parse `auth_url`: {e}")
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = self.progress.send(ConnectProgress::Response {
+                                event_id: request_event_id,
+                            });
+                            if let Some(error) = response.error {
+                                return Err(Error::new(ErrorKind::Rejected, error));
+                            }
+
+                            if let Some(result) = response.result {
+                                return Ok(result);
+                            }
+
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Err(Error::simple(ErrorKind::Timeout))
+    }
+
+    async fn publish_request(
+        &self,
+        message: &NostrConnectMessage,
+        remote_signer_public_key: PublicKey,
+        method: NostrConnectMethod,
+        retry: Option<RetryStatus>,
+    ) -> Result<EventId, Error> {
+        let event = NostrConnectEventBuilder::new(remote_signer_public_key, message.clone())
+            .finalize(&self.client_keys)?;
         let _ = self.progress.send(ConnectProgress::Request {
             event_id: event.id,
-            method: req.method(),
+            method,
+            can_resend: retry.is_some(),
+            retry,
         });
         let output = self.client.send_event(&event).await?;
         let _ = self.progress.send(ConnectProgress::Sent {
             event_id: event.id,
             output,
         });
-
-        time::timeout(Some(self.timeout), async {
-            while let Some(notification) = notifications.next().await {
-                if let ClientNotification::Event { event, .. } = notification {
-                    if event.kind == Kind::NostrConnect {
-                        let msg: String =
-                            nip44::decrypt(secret_key, &event.pubkey, event.content.as_str())?;
-                        let msg: NostrConnectMessage = NostrConnectMessage::from_json(msg)?;
-
-                        tracing::debug!("Received NIP46 message: '{msg}'");
-
-                        if req_id == msg.id() && msg.is_response() {
-                            let response: NostrConnectResponse = msg.to_response(req.method())?;
-
-                            if response.is_auth_url() {
-                                if let (Some(auth_url), Some(handler)) =
-                                    (response.error, &self.auth_url_handler)
-                                {
-                                    match Url::parse(&auth_url) {
-                                        Ok(url) => {
-                                            if let Err(e) = handler.on_auth_url(url).await {
-                                                tracing::error!(
-                                                    "Impossible to handle `auth_url`: {e}"
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Can't parse `auth_url`: {e}")
-                                        }
-                                    }
-                                }
-                            } else {
-                                let _ = self.progress.send(ConnectProgress::Response {
-                                    event_id: request_event_id,
-                                });
-                                if let Some(error) = response.error {
-                                    return Err(Error::new(ErrorKind::Rejected, error));
-                                }
-
-                                if let Some(result) = response.result {
-                                    return Ok(result);
-                                }
-
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Err(Error::simple(ErrorKind::Timeout))
-        })
-        .await
-        .ok_or_else(|| Error::simple(ErrorKind::Timeout))?
+        Ok(event.id)
     }
 
     /// Connect bunker
@@ -627,6 +705,67 @@ impl AsyncNip44 for NostrConnect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn monitor_preserves_the_full_automatic_delivery_window() {
+        assert_monitored_retry_window(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn monitor_extends_only_when_a_manual_send_reports_a_fresh_window() {
+        assert_monitored_retry_window(true).await;
+    }
+
+    async fn assert_monitored_retry_window(manual: bool) {
+        let keys = Keys::generate();
+        let connect = NostrConnect::new(
+            NostrConnectUri::client(keys.public_key(), vec![], "test"),
+            keys,
+            Duration::from_secs(600),
+            None,
+        )
+        .unwrap();
+        let start = tokio::time::Instant::now();
+        let operation = async {
+            connect
+                .progress
+                .send(ConnectProgress::Request {
+                    event_id: EventId::from_byte_array([1; 32]),
+                    method: NostrConnectMethod::SignEvent,
+                    can_resend: true,
+                    retry: Some(RetryStatus::fresh(start)),
+                })
+                .unwrap();
+            if manual {
+                // Passage of time is the behavior under test: a manual send
+                // near the old deadline must give the signer a fresh budget.
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                connect
+                    .progress
+                    .send(ConnectProgress::Request {
+                        event_id: EventId::from_byte_array([2; 32]),
+                        method: NostrConnectMethod::SignEvent,
+                        can_resend: true,
+                        retry: Some(RetryStatus::fresh(tokio::time::Instant::now())),
+                    })
+                    .unwrap();
+            }
+            std::future::pending::<anyhow::Result<()>>().await
+        };
+        let error =
+            crate::signer_progress::run_remote_operation(&connect, "test request", operation)
+                .await
+                .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(if manual { 660 } else { 360 })
+        );
+    }
 
     #[test]
     fn test_is_valid_connect_response() {

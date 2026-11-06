@@ -279,6 +279,7 @@ pub(crate) mod push;
 /// corrupt git's remote-helper protocol.
 #[allow(clippy::too_many_lines)]
 pub async fn run(args: &[String]) -> Result<()> {
+    ngit::output_mode::set_terminal_recovery_enabled(false);
     // Capture this before any libgit2-backed operation. libgit2 does not read
     // the command-config environment that Git forwards to remote helpers.
     let command_signer =

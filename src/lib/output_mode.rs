@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::Result;
 use console::Term;
@@ -22,6 +22,19 @@ impl OutputMode {
 }
 
 static OUTPUT_MODE: AtomicU8 = AtomicU8::new(OutputMode::Normal as u8);
+
+// Disabled until a direct, non-JSON CLI invocation explicitly enables it.
+// Git remote helpers must never consume terminal input for signer recovery.
+static TERMINAL_RECOVERY_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_terminal_recovery_enabled(enabled: bool) {
+    TERMINAL_RECOVERY_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn terminal_recovery_enabled() -> bool {
+    TERMINAL_RECOVERY_ENABLED.load(Ordering::Relaxed)
+}
 
 pub fn set_output_mode(mode: OutputMode) {
     OUTPUT_MODE.store(mode as u8, Ordering::Relaxed);
