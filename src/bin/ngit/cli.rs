@@ -212,6 +212,22 @@ Values are semicolon-separated URLs without spaces.
     Set to false to disable repository skill setup and update reminders.
     For one repository, run: {skill_opt_out}
 
+  {relay_timeout:<39} {relay_timeout_env}
+    Long Nostr relay timeout in seconds. Used for standalone connections,
+    connection retry budgets, event reads and adaptive fetch rounds. Default: 45.
+    Each existing phase retains its own budget; this is not a whole-command limit.
+    Example: {relay_timeout_example}
+
+  {relay_connect_timeout:<39} {relay_connect_timeout_env}
+    Fetch connection-attempt timeout and adaptive-fetch quorum grace in seconds.
+    Default: 7. Configured independently of the long relay timeout.
+    Example: {relay_connect_timeout_example}
+
+  Relay timeouts accept positive whole seconds. Valid environment values override
+  Git config (local before global). Invalid environment values fall back to Git
+  config; invalid Git config values fall back to built-in defaults.
+  These settings do not change Git HTTP or remote-signer timeouts.
+
   {http_connect_timeout:<39} {http_connect_timeout_env:<32}
     HTTP connect timeout for libgit2 fetch/push operations in milliseconds.
     Default: {http_connect_timeout_default}. Example: {http_connect_timeout_example}
@@ -275,6 +291,12 @@ implementation details used for efficiency.
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
         skill_reminders = key("nostr.skill-reminders true"),
         skill_opt_out = cmd("ngit skill opt-out --local"),
+        relay_timeout = key("nostr.relay-timeout-secs"),
+        relay_timeout_env = env("NGIT_RELAY_TIMEOUT_SECS"),
+        relay_timeout_example = cmd("git config nostr.relay-timeout-secs 10"),
+        relay_connect_timeout = key("nostr.relay-connect-timeout-secs"),
+        relay_connect_timeout_env = env("NGIT_RELAY_CONNECT_TIMEOUT_SECS"),
+        relay_connect_timeout_example = cmd("git config nostr.relay-connect-timeout-secs 3"),
         http_connect_timeout = key("nostr.http-connect-timeout-ms"),
         http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
         http_connect_timeout_default = key("3000"),

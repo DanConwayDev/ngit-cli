@@ -464,6 +464,7 @@ fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarR
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
+    relay_timeouts: crate::relay_timeouts::RelayTimeouts,
     client: nostr_sdk::client::Client,
     relay_default_set: Vec<String>,
     announcement_indexer_relays: Vec<String>,
@@ -566,6 +567,7 @@ impl Connect for Client {
             auth_policy.set_signer(Arc::new(NgitSigner::Keys(keys)));
         }
         Client {
+            relay_timeouts: opts.relay_timeouts,
             client: build_nostr_client(Arc::clone(&auth_policy), opts.proactive_auth),
             proactive_auth: opts.proactive_auth,
             relay_default_set: opts.relay_default_set,
@@ -605,7 +607,7 @@ impl Connect for Client {
             #[allow(clippy::large_futures)]
             relay
                 .try_connect()
-                .timeout(std::time::Duration::from_secs(long_timeout()))
+                .timeout(std::time::Duration::from_secs(self.relay_timeouts.overall))
                 .await?;
         }
 
@@ -754,7 +756,7 @@ impl Connect for Client {
         let relays_map = self.client.relays().await;
 
         // Static timeout for get_events_per_relay (no adaptive timeout here)
-        let static_timeout = Arc::new(AtomicU64::new(long_timeout()));
+        let static_timeout = Arc::new(AtomicU64::new(self.relay_timeouts.overall));
 
         let futures: Vec<_> = relays
             .clone()
@@ -810,7 +812,7 @@ impl Connect for Client {
                         return Err(error);
                     }
                     #[allow(clippy::large_futures)]
-                    match get_events_of(relay, filters, &pb).await {
+                    match get_events_of(relay, filters, &pb, self.relay_timeouts).await {
                         Err(error) => {
                             // Check error for timeout/connection issues and add to skip list
                             if error.to_string().contains("connection timeout") {
@@ -1000,7 +1002,7 @@ impl Connect for Client {
                     let scope = request.scope;
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
-                    let current_timeout_clone = Arc::new(AtomicU64::new(long_timeout()));
+                    let current_timeout_clone = Arc::new(AtomicU64::new(self.relay_timeouts.overall));
                     let announcement_resolved_clone = announcement_resolved_for_loop.clone();
                     let announcement_resolution_coordinate =
                         announcement_resolution_coordinate.clone();
@@ -1082,8 +1084,8 @@ impl Connect for Client {
                         tokio::pin!(fetch_future);
 
                         let mut deadline = FetchDeadline::new(
-                            Duration::from_secs(long_timeout()),
-                            Duration::from_secs(short_timeout()),
+                            Duration::from_secs(self.relay_timeouts.overall),
+                            Duration::from_secs(self.relay_timeouts.connect),
                         );
                         let timeout_future = async {
                             loop {
@@ -1371,7 +1373,7 @@ impl Connect for Client {
                 .await?
                 .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
             let events: Vec<nostr::prelude::Event> =
-                get_events_of(&relay, filters.clone(), pb).await?;
+                get_events_of(&relay, filters.clone(), pb, self.relay_timeouts).await?;
             // Preserve the completed selected-repository query even if a later
             // discovery round or cache write fails. get_events_of requires EOSE.
             if let Some(search) = &request.announcement_search {
@@ -1546,67 +1548,17 @@ fn author_announcement_discovery_pending(
     is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
 }
 
-fn parse_timeout_secs(value: Option<&str>) -> Option<u64> {
-    value
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(u64::from)
-}
-
-fn relay_timeout(default: u64, env_var: &str) -> u64 {
-    if std::env::var("NGITTEST").is_ok() {
-        relay_timeout_for_mode(
-            default,
-            true,
-            std::env::var(crate::test_timeouts::RELAY_TIMEOUT_ENV)
-                .ok()
-                .as_deref(),
-        )
-    } else {
-        parse_timeout_secs(std::env::var(env_var).ok().as_deref()).unwrap_or(default)
-    }
-}
-
-fn relay_timeout_for_mode(default: u64, test_mode: bool, override_secs: Option<&str>) -> u64 {
-    if test_mode {
-        override_secs
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|seconds| *seconds > 0)
-            .map_or(
-                crate::test_timeouts::RelayTimeout::Normal.seconds(),
-                u64::from,
-            )
-    } else {
-        default
-    }
-}
-
-fn long_timeout() -> u64 {
-    relay_timeout(45, crate::test_timeouts::RELAY_TIMEOUT_SECS_ENV)
-}
-
-fn short_timeout() -> u64 {
-    let configured = relay_timeout(7, crate::test_timeouts::RELAY_CONNECT_TIMEOUT_SECS_ENV);
-    // Single-var knob: if the connect-specific var is unset, the overall
-    // NGIT_RELAY_TIMEOUT_SECS budget caps the per-connect attempt too, so a
-    // low overall budget isn't undercut by the 7s default.
-    if std::env::var(crate::test_timeouts::RELAY_CONNECT_TIMEOUT_SECS_ENV).is_err() {
-        configured.min(long_timeout())
-    } else {
-        configured
-    }
-}
-
 async fn get_events_of(
     relay: &nostr_sdk::relay::Relay,
     filters: Vec<nostr::prelude::Filter>,
     pb: &Option<ProgressBar>,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
 ) -> Result<Vec<Event>> {
     // relay.reconcile(filter, opts).await?;
 
     let mut retry_delay = Duration::from_secs(2);
     let start_time = std::time::Instant::now();
-    let max_timeout = Duration::from_secs(long_timeout());
+    let max_timeout = Duration::from_secs(timeouts.overall);
     let mut last_error = None;
     let mut attempt_num = 0;
     let dim = Style::new().color256(247);
@@ -1625,7 +1577,7 @@ async fn get_events_of(
         #[allow(clippy::large_futures)]
         match relay
             .try_connect()
-            .timeout(Duration::from_secs(short_timeout()))
+            .timeout(Duration::from_secs(timeouts.connect))
             .await
         {
             Ok(_) => {
@@ -1722,7 +1674,7 @@ async fn get_events_of(
         return Ok(Vec::new());
     }
 
-    fetch_complete_events(relay, filters, Duration::from_secs(long_timeout())).await
+    fetch_complete_events(relay, filters, Duration::from_secs(timeouts.overall)).await
 }
 
 async fn fetch_complete_events(
@@ -1778,6 +1730,7 @@ async fn fetch_complete_events(
 }
 
 pub struct Params {
+    pub relay_timeouts: crate::relay_timeouts::RelayTimeouts,
     /// Answer unsolicited AUTH challenges instead of waiting for auth-required.
     pub proactive_auth: bool,
     pub keys: Option<nostr::prelude::Keys>,
@@ -1845,6 +1798,7 @@ fn env_grasp_server_list(var: &str) -> Option<Vec<String>> {
 impl Default for Params {
     fn default() -> Self {
         Params {
+            relay_timeouts: crate::relay_timeouts::RelayTimeouts::load(None),
             proactive_auth: std::env::var("NGIT_PROACTIVE_AUTH")
                 .ok()
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
@@ -1915,7 +1869,10 @@ impl Params {
     }
 
     pub fn with_git_config_relay_defaults(git_repo: &Option<&Repo>) -> Self {
-        let mut params = Params::default();
+        let mut params = Params {
+            relay_timeouts: crate::relay_timeouts::RelayTimeouts::load(*git_repo),
+            ..Params::default()
+        };
         if std::env::var_os("NGIT_PROACTIVE_AUTH").is_none() {
             params.proactive_auth = get_git_config_item(git_repo, "nostr.proactive-auth")
                 .ok()
@@ -7473,41 +7430,6 @@ mod fetch_completion_tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
-
-    #[test]
-    fn test_relay_budget_preserves_production_and_failure_test_defaults() {
-        for default in [7, 45] {
-            for override_secs in [None, Some("5"), Some("0"), Some("invalid")] {
-                assert_eq!(
-                    relay_timeout_for_mode(default, false, override_secs),
-                    default
-                );
-            }
-            for override_secs in [None, Some("0"), Some("invalid"), Some("-1")] {
-                assert_eq!(
-                    relay_timeout_for_mode(default, true, override_secs),
-                    crate::test_timeouts::RelayTimeout::Normal.seconds()
-                );
-            }
-            let failure = crate::test_timeouts::RelayTimeout::ExpectedFailure.seconds();
-            assert_eq!(
-                relay_timeout_for_mode(default, true, Some(&failure.to_string())),
-                failure
-            );
-            assert_eq!(relay_timeout_for_mode(default, true, Some("10")), 10);
-        }
-    }
-
-    #[test]
-    fn test_parse_timeout_secs_rejects_zero_and_invalid() {
-        assert_eq!(parse_timeout_secs(Some("4")), Some(4));
-        assert_eq!(parse_timeout_secs(Some(" 4 ")), Some(4));
-        assert_eq!(parse_timeout_secs(Some("0")), None);
-        assert_eq!(parse_timeout_secs(Some("invalid")), None);
-        assert_eq!(parse_timeout_secs(Some("-1")), None);
-        assert_eq!(parse_timeout_secs(None), None);
-        assert_eq!(parse_timeout_secs(Some("")), None);
-    }
 
     #[tokio::test]
     async fn fetch_requires_eose_instead_of_accepting_partial_history() {

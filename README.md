@@ -58,6 +58,8 @@ Run `ngit --customize` to list supported git config keys and their environment-v
 ```sh
 git config nostr.repo-relay-only true       # only publish nostr events to repo relays
 git config nostr.auto-pr-branches true      # fetch every open and draft PR branch
+git config nostr.relay-timeout-secs 10     # long Nostr relay timeout (default: 45 seconds)
+git config nostr.relay-connect-timeout-secs 3  # fetch connect attempts and quorum grace (default: 7 seconds)
 git config nostr.http-io-timeout-ms 600000  # allow large GRASP pushes up to 10 minutes of socket silence
 ```
 
