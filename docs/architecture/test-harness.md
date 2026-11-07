@@ -85,6 +85,13 @@ ngit's test mode and the harness without a circular crate dependency:
   `.with_relay_timeout(RelayTimeout::ExpectedFailure)` on a harness builder or
   `repo.set_relay_timeout(...)` for subsequent commands. Command-local overrides
   use the same policy's `seconds()` value and `timeouts::RELAY_TIMEOUT_ENV`.
+- `RelayTimeout::Long`: sixty seconds for an explicitly identified healthy
+  long-running fixture whose sequential relay/Git operations exceed the normal
+  budget under full-workspace scheduling contention. Select it only on that
+  fixture's builder (or narrowly scoped repository commands), with the healthy
+  operation and any intentionally unavailable endpoint identified in a comment.
+  It is not a default and not a substitute for `ExpectedFailure` on a negative
+  test; functional checks and intentional endpoint failures remain unchanged.
 
 `NGIT_TEST_RELAY_TIMEOUT_SECS` remains test-only: under `NGITTEST`, it sets both
 relay budgets and ignores the production `NGIT_RELAY_TIMEOUT_SECS` /

@@ -776,6 +776,10 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // This fixture performs several real event-first staging operations. Give
+    // healthy ACKs headroom under full-workspace scheduling contention without
+    // changing production timeouts or masking a deliberately broken relay.
+    .with_relay_timeout(test_harness::RelayTimeout::Long)
     .with_relay("default")
     .with_grasp_server("repo")
     .build()
