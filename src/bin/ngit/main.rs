@@ -546,6 +546,21 @@ async fn main() {
                     )
                     .await
                 }
+                CiCommands::Rerun {
+                    coordinator,
+                    result,
+                    job,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_rerun(
+                        coordinator,
+                        result,
+                        job.as_deref(),
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
                 CiCommands::Trigger {
                     coordinator,
                     commit_ish,

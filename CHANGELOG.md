@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt
+  from a completed result while retaining external dependency bindings.
+
 - Rerun results retain exact original job identities and expose reuse; quoted
   instances of the same job are not silently collapsed.
 

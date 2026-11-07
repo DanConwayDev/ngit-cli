@@ -1532,6 +1532,15 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// Rerun a completed native workflow, retaining external dependencies
+    Rerun {
+        coordinator: String,
+        result: String,
+        #[arg(long)]
+        job: Option<String>,
+        #[arg(long)]
+        offline: bool,
+    },
     /// ask a coordinator to run one workflow once
     #[command(
         long_about = "ask a coordinator to run one workflow once (kind-9840 Manual Trigger)\n\n\

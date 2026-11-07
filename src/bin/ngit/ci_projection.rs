@@ -615,6 +615,8 @@ impl RunReport {
             .collect::<Vec<Value>>();
         json!({
             "workflow": self.run.workflow_path,
+            "event": crate::output::event_id_to_nevent(self.run.container_event_id(), None),
+            "result": self.run.result.as_ref().map(|r| crate::output::event_id_to_nevent(r.event_id, None)),
             "trigger": self.run.trigger.as_str(),
             "details": self.run.result.as_ref().map(|r| &r.details).or_else(|| self.run.progress.as_ref().map(|p| &p.details)),
             "context": self.run.common().context,

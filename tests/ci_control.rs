@@ -806,3 +806,88 @@ async fn a_run_quoting_a_published_trigger_is_maintainer_directed() -> Result<()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
+    let arranged = arrange("ci-restart-selection").await?;
+    let path = ".ngit/nix/workflows/ci.yaml";
+    let yaml = "version: 1\non: push\njobs:\n  build:\n    run: apps.x86_64-linux.build\n  test:\n    run: apps.x86_64-linux.test\n";
+    std::fs::create_dir_all(arranged.publisher.dir().join(".ngit/nix/workflows"))?;
+    std::fs::write(arranged.publisher.dir().join(path), yaml)?;
+    arranged
+        .publisher
+        .git_ok(["add", path], "stage workflow")
+        .await?;
+    arranged
+        .publisher
+        .git_ok(
+            ["commit", "-m", "native workflow", "--no-gpg-sign"],
+            "commit workflow",
+        )
+        .await?;
+    arranged.publisher.nostr_push(["origin", "main"]).await?;
+    let head = arranged.publisher.rev_parse("HEAD").await?;
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "completed-source",
+        head.clone(),
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow(path, workflow_hash(yaml));
+    let source = arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+        .await?
+        .result
+        .context("source result")?;
+    let coordinator = arranged.coordinator_npub()?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--job",
+            "build",
+        ],
+    )
+    .await?;
+    assert_eq!(json["action"], "rerun-requested");
+    let request = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
+    request.verify()?;
+    let parsed = validate_manual_trigger(&request)?;
+    assert_eq!(parsed.restart.unwrap().job.as_deref(), Some("build"));
+    assert_eq!(tag_values(&request, "U"), vec![source.id.to_hex()]);
+    assert_eq!(tag_values(&request, "c"), vec![head]);
+    assert_eq!(tag_values(&request, "r"), vec!["refs/heads/main"]);
+    let whole = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "rerun", &coordinator, &source.id.to_hex()],
+    )
+    .await?;
+    assert!(whole["job"].is_null());
+    for event in arranged.published_events(KIND_MANUAL_TRIGGER).await? {
+        if event.id != request.id {
+            assert_eq!(tag_slices(&event, "U")[0].len(), 2);
+        }
+    }
+    let before = arranged.published_events(KIND_MANUAL_TRIGGER).await?.len();
+    for args in [vec![
+        "ci",
+        "rerun",
+        &coordinator,
+        &source.id.to_hex(),
+        "--job",
+        "missing",
+    ]] {
+        let (output, _) = ngit_json(&arranged.publisher, &args).await?;
+        assert!(!output.status.success());
+    }
+    assert_eq!(
+        arranged.published_events(KIND_MANUAL_TRIGGER).await?.len(),
+        before
+    );
+    Ok(())
+}

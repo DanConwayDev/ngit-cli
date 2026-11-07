@@ -1058,3 +1058,11 @@ A rerun can retain original job results. ngit checks exact source/new quotes,
 coordinator, repository, commit, workflow and context. `reused` and
 `execution_run_id` identify retained executions. Missing source evidence
 does not authorize reuse; multiple quoted instances of one job stay distinct.
+
+### rerun a completed workflow or selected job
+
+`ngit ci rerun COORDINATOR RESULT [--job JOB]` accepts a completed native
+Nix result ID or nevent. It creates a new attempt, preserving external
+dependency bindings; `--job` reruns that job and its dependants. It does not
+cancel an active run. Confirmed maintainership is required, and publication
+is not coordinator acceptance. Use status `result` nevents as inputs.

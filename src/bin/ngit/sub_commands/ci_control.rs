@@ -642,3 +642,178 @@ fn short(id: &str) -> &str {
 fn malformed(kind: u16, reason: &str) -> anyhow::Error {
     anyhow::anyhow!("ngit built a malformed kind-{kind} event: {reason}")
 }
+
+fn workflow_jobs(
+    repo: &Repo,
+    resolved: &ResolvedCommit,
+    workflow: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let repository = git2::Repository::open(repo.get_path()?)?;
+    let commit = repository.find_commit(git2::Oid::from_str(&resolved.commit)?)?;
+    let tree = commit.tree()?;
+    let entry = tree
+        .get_path(Path::new(workflow))
+        .context("workflow missing at source commit")?;
+    let blob = repository.find_blob(entry.id())?;
+    let yaml: serde_json::Value = serde_saphyr::from_str(std::str::from_utf8(blob.content())?)
+        .context("invalid native workflow YAML")?;
+    let jobs = yaml
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .context("native workflow requires a jobs mapping")?;
+    Ok(jobs.keys().cloned().collect())
+}
+
+/// Publish a restart of an exact signed completed result, preserving its
+/// inputs.
+pub async fn launch_rerun(
+    coordinator: &str,
+    result: &str,
+    job: Option<&str>,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    use ngit::client::get_events_from_local_cache;
+    use nostr::prelude::{EventId, Filter};
+    let id = EventId::parse(result)
+        .context("restart requires a full Workflow Result event id or nevent")?;
+    let coordinator = parse_coordinator(coordinator)?;
+    let mut prepared = Prepared::new(Repo::discover()?, offline, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!("workflow restart requires a confirmed repository maintainer");
+    }
+    let filter = Filter::default()
+        .id(id)
+        .kind(ngit::ci::kinds::KIND_CI_WORKFLOW_RESULT)
+        .author(coordinator);
+    let mut events =
+        get_events_from_local_cache(prepared.git_repo.get_path()?, vec![filter.clone()]).await?;
+    if events.is_empty() && !offline {
+        events = prepared
+            .client
+            .get_events(
+                prepared
+                    .repo_ref
+                    .relays
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                vec![filter],
+            )
+            .await?;
+    }
+    let source = events
+        .into_iter()
+        .find(|e| e.id == id && e.pubkey == coordinator)
+        .context(
+            "source Workflow Result unavailable; refresh CI status or retry without --offline",
+        )?;
+    source
+        .verify()
+        .context("invalid source Workflow Result signature")?;
+    let parsed = ngit::ci::kinds::validate_workflow_result(&source)
+        .context("invalid source Workflow Result")?;
+    if !parsed
+        .common
+        .workflow
+        .path
+        .starts_with(".ngit/nix/workflows/")
+    {
+        bail!("current ngit-ci supports rerun only for native Nix workflows");
+    }
+    let resolved = validate_restart_source(&prepared, &parsed, job)?;
+    let workflow = &parsed.common.workflow.path;
+    let tags = restart_context_tags(&source, coordinator, id, job)?;
+    let event = prepared
+        .sign(
+            EventBuilder::new(KIND_CI_MANUAL_TRIGGER, "").tags(tags),
+            "CI workflow restart",
+        )
+        .await?;
+    validate_manual_trigger(&event).context("invalid workflow rerun request")?;
+    let event_id = event.id;
+    prepared.publish(vec![event], coordinator, offline).await?;
+    if crate::output::is_json() {
+        crate::output::set_value(
+            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "rerun-requested", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "source": crate::output::event_id_to_nevent(id, prepared.repo_ref.relays.first()), "job": job, "workflow": workflow, "commit": resolved.commit, "coordinator": coordinator.to_bech32()?}),
+        );
+    }
+    println!(
+        "Rerun requested; the coordinator validates retained evidence and admission. Use ci status to observe the new attempt."
+    );
+    Ok(())
+}
+
+fn validate_restart_source(
+    prepared: &Prepared,
+    parsed: &ngit::ci::kinds::WorkflowResult,
+    job: Option<&str>,
+) -> Result<ResolvedCommit> {
+    let coordinates = prepared.repo_ref.coordinates();
+    if !parsed
+        .common
+        .repositories
+        .iter()
+        .any(|r| coordinates.iter().any(|c| c.coordinate == r.coordinate))
+    {
+        bail!("source Workflow Result belongs to a different repository");
+    }
+    let resolved = resolve_commit_ish_strict(&prepared.git_repo, parsed.common.commit())?;
+    for oid in &parsed.common.commits {
+        if resolve_commit_ish_strict(&prepared.git_repo, oid)?.commit != resolved.commit {
+            bail!("source commit objects do not peel to the same commit");
+        }
+    }
+    let workflow = &parsed.common.workflow.path;
+    if workflow_blob_sha256(&prepared.git_repo, &resolved, workflow)?
+        != parsed.common.workflow.sha256
+    {
+        bail!("source workflow hash does not match the source commit");
+    }
+    if let Some(job) = job {
+        if !workflow_jobs(&prepared.git_repo, &resolved, workflow)?.contains(job) {
+            bail!("restart job is absent from the source workflow");
+        }
+    }
+    Ok(resolved)
+}
+
+fn restart_context_tags(
+    source: &Event,
+    coordinator: PublicKey,
+    id: nostr::prelude::EventId,
+    job: Option<&str>,
+) -> Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = source
+        .tags
+        .iter()
+        .filter(|t| {
+            let t = t.as_slice();
+            matches!(
+                t[0].as_str(),
+                "a" | "c"
+                    | "w"
+                    | "E"
+                    | "K"
+                    | "P"
+                    | "e"
+                    | "k"
+                    | "issue"
+                    | "release"
+                    | "release-asset"
+            ) || t[0] == "r" && t.get(1).is_some_and(|r| r.starts_with("refs/"))
+        })
+        .cloned()
+        .collect();
+    tags.push(Tag::public_key(coordinator));
+    let mut restart = vec!["U".to_owned(), id.to_hex()];
+    if let Some(job) = job {
+        restart.push(job.into());
+    }
+    tags.push(Tag::parse(restart)?);
+    Ok(tags)
+}
