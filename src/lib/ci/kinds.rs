@@ -5,9 +5,10 @@
 //! whose shape does not match the NIP is surfaced as a [`ShapeReason`] and
 //! skipped by the caller, never reinterpreted as a weaker or different claim.
 //!
-//! Only the consumed subset is modelled here. Coordinator Advertisement
-//! (19843), Request-Readiness (19844), Coordinator Repository Status (39844)
-//! and Repository Secret Update (29846) are out of scope.
+//! The consumed subset and emitted workflow cancellation are modelled here.
+//! Coordinator Advertisement (19843), Request-Readiness (19844), Coordinator
+//! Repository Status (39844) and Repository Secret Update (29846) are out of
+//! scope.
 
 use std::fmt;
 
@@ -15,6 +16,63 @@ use nostr::prelude::{Event, EventId, Kind, PublicKey, Tag, Timestamp, nip01::Coo
 
 /// Kind 9840 — Manual Trigger, signed by a repository maintainer.
 pub const KIND_CI_MANUAL_TRIGGER: Kind = Kind::Custom(9840);
+/// Kind 9846 — exact workflow cancellation requested by a maintainer.
+pub const KIND_CI_WORKFLOW_CANCELLATION: Kind = Kind::Custom(9846);
+/// Kind 9848 — immediate workflow cancellation, bypassing job grace periods.
+pub const KIND_CI_WORKFLOW_FORCED_CANCELLATION: Kind = Kind::Custom(9848);
+
+/// Exact run identity carried by a cancellation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowCancellation {
+    pub repository: RepoReference,
+    pub coordinator: PublicKey,
+    pub run_id: String,
+    /// Stop active tasks without waiting for their cancellation grace periods.
+    pub forced: bool,
+}
+
+/// Validate an exact-run cancellation; acceptance still requires maintainer
+/// authority.
+///
+/// # Errors
+/// Returns the malformed kind, content or identity tag.
+pub fn validate_workflow_cancellation(event: &Event) -> Result<WorkflowCancellation, ShapeReason> {
+    let forced = event.kind == KIND_CI_WORKFLOW_FORCED_CANCELLATION;
+    if !forced {
+        require_kind(event, KIND_CI_WORKFLOW_CANCELLATION)?;
+    }
+    require_empty_content(event)?;
+    let view = TagView::new(event);
+    for name in ["a", "p", "r"] {
+        let tag = view.required_tag(name)?;
+        if tag.len() != 2 {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: name,
+                value: tag.join(":"),
+            });
+        }
+    }
+    view.forbid("expiration")?;
+    view.forbid("d")?;
+    let run_id = view.required_value("r")?;
+    if run_id.len() != 64
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(ShapeReason::InvalidTagValue {
+            tag: "r",
+            value: run_id.into(),
+        });
+    }
+    Ok(WorkflowCancellation {
+        repository: parse_repository(view.required_tag("a")?)?,
+        coordinator: parse_public_key("p", view.required_value("p")?)?,
+        run_id: run_id.into(),
+        forced,
+    })
+}
+
 /// Kind 9841 — Job Result, signed by the compute provider.
 pub const KIND_CI_JOB_RESULT: Kind = Kind::Custom(9841);
 /// Kind 9842 — Workflow Result, signed by the coordinator.
@@ -1279,6 +1337,53 @@ pub(crate) mod test_events {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancellation_requires_one_exact_identity_and_empty_content() {
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::custom("a", [format!("30617:{}:repo", keys.public_key())]),
+            Tag::public_key(keys.public_key()),
+            Tag::custom("r", ["ab".repeat(32)]),
+        ];
+        for (kind, forced) in [
+            (KIND_CI_WORKFLOW_CANCELLATION, false),
+            (KIND_CI_WORKFLOW_FORCED_CANCELLATION, true),
+        ] {
+            let make = |tags: Vec<Tag>, content: &str| {
+                EventBuilder::new(kind, content)
+                    .tags(tags)
+                    .finalize(&keys)
+                    .unwrap()
+            };
+            assert_eq!(
+                super::validate_workflow_cancellation(&make(tags.clone(), ""))
+                    .unwrap()
+                    .forced,
+                forced
+            );
+            assert!(super::validate_workflow_cancellation(&make(tags.clone(), "reason")).is_err());
+            for index in 0..3 {
+                let mut duplicate = tags.clone();
+                duplicate.push(tags[index].clone());
+                assert!(super::validate_workflow_cancellation(&make(duplicate, "")).is_err());
+                let mut missing = tags.clone();
+                missing.remove(index);
+                assert!(super::validate_workflow_cancellation(&make(missing, "")).is_err());
+            }
+        }
+        for kind in [
+            Kind::Custom(9847),
+            Kind::Custom(9849),
+            KIND_CI_MANUAL_TRIGGER,
+        ] {
+            let event = EventBuilder::new(kind, "")
+                .tags(tags.clone())
+                .finalize(&keys)
+                .unwrap();
+            assert!(validate_workflow_cancellation(&event).is_err());
+        }
+    }
+
     use nostr::prelude::{EventBuilder, Keys, event::FinalizeEvent};
 
     use super::{test_events::*, *};

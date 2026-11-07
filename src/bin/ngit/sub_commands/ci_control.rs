@@ -1,5 +1,5 @@
-//! `ngit ci request|stop|trigger` — the maintainer controls that publish the
-//! Level 1 evidence `ngit ci status` consumes.
+//! `ngit ci request|stop|trigger|cancel` — the maintainer controls that publish
+//! the Level 1 evidence `ngit ci status` consumes.
 //!
 //! A Service Request (9843) and a Service Stop (9844) are standing controls
 //! over one repository perspective; a Manual Trigger (9840) is a one-shot
@@ -12,7 +12,8 @@
 //! acceptance policy is the coordinator's. ngit warns when the signer is not
 //! a confirmed maintainer — the default policy accepts only those — but the
 //! NIP lets an operator accept other requesters, so it is a warning and never
-//! a refusal.
+//! a refusal for those controls. Exact-run cancellation requires confirmed
+//! maintainership and is refused locally when that authority is unavailable.
 
 use std::path::Path;
 
@@ -21,7 +22,8 @@ use bitcoin_hashes::sha256;
 use ngit::{
     ci::kinds::{
         KIND_CI_MANUAL_TRIGGER, KIND_CI_SERVICE_REQUEST, KIND_CI_SERVICE_STOP,
-        validate_manual_trigger, validate_service_control,
+        KIND_CI_WORKFLOW_CANCELLATION, KIND_CI_WORKFLOW_FORCED_CANCELLATION,
+        validate_manual_trigger, validate_service_control, validate_workflow_cancellation,
     },
     client::{Params, get_state_from_cache, send_events_with_results, sign_event},
     login::user::get_user_details,
@@ -137,6 +139,80 @@ async fn launch_service_control(
         coordinator
             .to_bech32()
             .unwrap_or_else(|_| coordinator.to_hex()),
+    );
+    Ok(())
+}
+
+/// Publish an exact-run cancellation from a confirmed repository maintainer.
+///
+/// # Errors
+/// Returns an error for malformed identity, unavailable repository, unconfirmed
+/// maintainer, signing failure or unsuccessful publication.
+pub async fn launch_cancel(
+    coordinator: &str,
+    run_id: &str,
+    force: bool,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    let coordinator = parse_coordinator(coordinator)?;
+    if run_id.len() != 64
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!(
+            "invalid workflow run id; pass the exact 64-character lowercase hexadecimal run id from `ngit ci status`"
+        );
+    }
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
+    let mut prepared = Prepared::new(git_repo, offline, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!(
+            "workflow cancellation requires a confirmed repository maintainer; select an authorized signer with --signer"
+        );
+    }
+    // A run belongs to an exact perspective. Unlike standing service requests,
+    // cancellation must not substitute the signer's own announcement.
+    let perspective = Coordinate {
+        kind: Kind::GitRepoAnnouncement,
+        public_key: prepared.repo_ref.selected_maintainer,
+        identifier: prepared.repo_ref.identifier.clone(),
+    };
+    let kind = if force {
+        KIND_CI_WORKFLOW_FORCED_CANCELLATION
+    } else {
+        KIND_CI_WORKFLOW_CANCELLATION
+    };
+    let event = prepared
+        .sign(
+            EventBuilder::new(kind, "").tags([
+                Tag::coordinate(perspective.clone(), None),
+                Tag::public_key(coordinator),
+                Tag::custom("r", [run_id]),
+            ]),
+            "CI workflow cancellation",
+        )
+        .await?;
+    validate_workflow_cancellation(&event)
+        .map_err(|reason| malformed(kind.as_u16(), &reason.to_string()))?;
+    let event_id = event.id;
+    prepared.publish(vec![event], coordinator, offline).await?;
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "command_status": "ok", "action": "cancellation-requested", "entity": "ci",
+            "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()),
+            "coordinator": coordinator.to_bech32().unwrap_or_else(|_| coordinator.to_hex()),
+            "repository": naddr(&perspective, prepared.relay_hint()), "run_id": run_id,
+            "forced": force,
+        }));
+    }
+    println!(
+        "Cancellation requested for run {run_id}; use `ngit ci status` to observe confirmed completion."
     );
     Ok(())
 }

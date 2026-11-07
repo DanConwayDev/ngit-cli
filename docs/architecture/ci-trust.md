@@ -995,3 +995,24 @@ PTY/interactive prompts (drive via flags), no `std::env::set_var`, no exact
 stdout assertions (assert on JSON output, exit codes, and events on relays),
 push via `Repo::nostr_push`, and no wall-clock sleeps — CI fixture events are
 published directly to the harness relay, so results are queryable immediately.
+
+### Exact workflow cancellation
+
+`ngit ci cancel <COORDINATOR> <RUN-ID> [--force] [--offline]` publishes a signed
+kind-9846 request by default for one exact run. Use the coordinator and 64-character run id from
+`ngit ci status`, and select the run's repository perspective with `--repo`.
+The command requires confirmed maintainership and preserves the selected
+repository coordinate even when the signer has their own announcement.
+
+Ordinary cancellation lets running jobs follow their configured cancellation
+grace periods. Add `--force` to publish kind 9848 and request an immediate stop
+of all active tasks in that run, bypassing their grace periods. A forced request
+can escalate an earlier ordinary cancellation; a later ordinary request cannot
+downgrade it. This requires a coordinator/provider version supporting forced
+cancellation.
+
+JSON reports `action: cancellation-requested`, the request event, coordinator,
+repository, run id and `forced` boolean. Publication is not cleanup
+confirmation: inspect CI status for the resulting job and workflow conclusions. Completed jobs remain completed;
+cancellation cannot undo effects that were already published. Standing service
+request/stop policy is unchanged, and cancellation does not delete prior events.

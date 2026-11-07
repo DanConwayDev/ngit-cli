@@ -1516,6 +1516,22 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// request cancellation of one exact workflow run
+    #[command(
+        long_about = "Request cancellation of one exact workflow run (kind 9846). By default, running jobs follow their cancellation grace periods. Use --force (kind 9848) to stop all active tasks in that run immediately, bypassing those grace periods; this also escalates an earlier ordinary cancellation. Requires a confirmed repository maintainer. Pass the coordinator and 64-character run id reported by ci status, and select the repository perspective used by that run with --repo. A successful command means the request was published; use ci status to observe confirmed completion. Cancellation cannot roll back effects already published."
+    )]
+    Cancel {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Exact workflow run id from ci status (64 lowercase hexadecimal
+        /// characters)
+        #[arg(value_name = "RUN-ID")]
+        run_id: String,
+        /// Use the local repository and maintainer cache without refreshing it
+        #[arg(long)]
+        offline: bool,
+    },
     /// ask a coordinator to run one workflow once
     #[command(
         long_about = "ask a coordinator to run one workflow once (kind-9840 Manual Trigger)\n\n\

@@ -532,6 +532,20 @@ async fn main() {
                     sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
                         .await
                 }
+                CiCommands::Cancel {
+                    coordinator,
+                    run_id,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_cancel(
+                        coordinator,
+                        run_id,
+                        cli.force,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
                 CiCommands::Trigger {
                     coordinator,
                     commit_ish,

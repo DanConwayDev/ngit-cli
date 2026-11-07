@@ -168,6 +168,96 @@ fn runs(json: &Value) -> &Vec<Value> {
 }
 
 #[tokio::test]
+async fn cancel_publishes_exact_run_and_reports_request_not_completion() -> Result<()> {
+    let arranged = arrange("ci-cancel").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let run = "ab".repeat(32);
+    for (kind, forced) in [(9846, false), (9848, true)] {
+        let mut args = vec!["ci", "cancel", &coordinator, &run];
+        if forced {
+            args.push("--force");
+        }
+        let json = ngit_json_ok(&arranged.publisher, &args).await?;
+        assert_eq!(json["action"], "cancellation-requested");
+        assert_eq!(json["run_id"], run);
+        assert_eq!(json["forced"], forced);
+        assert!(json.get("conclusion").is_none());
+        let event = arranged.only_published(Kind::Custom(kind)).await?;
+        assert_eq!(event_id_of(&json["event"]), event.id);
+        event.verify()?;
+        let parsed = ngit::ci::kinds::validate_workflow_cancellation(&event)
+            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        assert_eq!(
+            parsed.repository.coordinate.to_string(),
+            repo_coordinate(&arranged.published)
+        );
+        assert_eq!(parsed.coordinator, arranged.coordinator.public_key());
+        assert_eq!(parsed.run_id, run);
+        assert_eq!(parsed.forced, forced);
+        assert!(event.content.is_empty());
+        assert_eq!(event.tags.len(), 3);
+        assert!(
+            arranged
+                .published_events(KIND_SERVICE_STOP)
+                .await?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_rejects_unconfirmed_maintainer_and_malformed_run_without_publication() -> Result<()>
+{
+    let arranged = arrange("ci-cancel-rejected").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let contributor = arranged
+        .harness
+        .clone_published_repo(
+            &arranged.published,
+            CloneLogin::AsContributor {
+                display_name: "cancel requester".into(),
+            },
+        )
+        .await?;
+    let run = "cd".repeat(32);
+    for forced in [false, true] {
+        let mut args = vec!["ci", "cancel", &coordinator, &run];
+        if forced {
+            args.push("--force");
+        }
+        let (output, json) = ngit_json(&contributor, &args).await?;
+        assert!(!output.status.success());
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("requires a confirmed repository maintainer")
+        );
+        for invalid in ["refs/heads/main", "short", &"AB".repeat(32)] {
+            args[3] = invalid;
+            let (output, json) = ngit_json(&arranged.publisher, &args).await?;
+            assert!(!output.status.success());
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid workflow run id")
+            );
+        }
+    }
+    for kind in [9846, 9848] {
+        assert!(
+            arranged
+                .published_events(Kind::Custom(kind))
+                .await?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_publishes_one_service_request_for_the_repository_and_coordinator() -> Result<()> {
     let arranged = arrange("ci-request").await?;
     let coordinator = arranged.coordinator_npub()?;

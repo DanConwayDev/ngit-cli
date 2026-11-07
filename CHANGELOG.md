@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit ci cancel <COORDINATOR> <RUN-ID>` lets confirmed maintainers request
+  cancellation of one exact workflow attempt. `--force` bypasses job grace
+  periods or escalates an earlier request. JSON reports request publication,
+  not confirmed termination; inspect CI status for completion.
+
 - Remote signer requests recover automatically with three sends two minutes
   apart, then time out two minutes after the last send. Direct terminal users
   can press `r` or `R` to resend immediately and restart the six-minute window.
