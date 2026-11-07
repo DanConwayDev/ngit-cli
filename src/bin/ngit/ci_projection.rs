@@ -830,6 +830,19 @@ pub async fn build_report(
     client: &Client,
     request: &ProjectionRequest<'_>,
 ) -> Result<CiReport> {
+    build_event_report(git_repo, git_repo_path, repo_ref, client, request, None).await
+}
+
+/// Inspect an exact aggregate or job without silently selecting a newer
+/// attempt.
+pub async fn build_event_report(
+    git_repo: &Repo,
+    git_repo_path: &Path,
+    repo_ref: &RepoRef,
+    client: &Client,
+    request: &ProjectionRequest<'_>,
+    exact: Option<EventId>,
+) -> Result<CiReport> {
     let now = Timestamp::now();
     let repository = RepositoryContext::from_repo_ref(repo_ref);
 
@@ -843,7 +856,7 @@ pub async fn build_report(
         .collect();
 
     let selection = request.target.select(&grouped.runs);
-    let current = latest_attempts_with_positions(&selection.current);
+    let current = selected_attempts(&selection.current, exact);
     // Evidence assembly sees every run known for the target, whether or not
     // this surface reports the superseded ones: an earlier revision's run is
     // legitimate identity-level evidence about its signer, and a signer must
@@ -1552,6 +1565,25 @@ pub fn relay_coverage(
         Coverage::Complete
     } else {
         Coverage::Partial
+    }
+}
+
+fn selected_attempts(runs: &[WorkflowRun], exact: Option<EventId>) -> Vec<Attempt> {
+    if let Some(id) = exact {
+        runs.iter()
+            .filter(|run| {
+                run.container_event_id() == id
+                    || run.progress.as_ref().is_some_and(|p| p.event_id == id)
+                    || run.jobs.iter().any(|job| job.event_id == id)
+                    || run.live_jobs.iter().any(|job| job.event_id == id)
+            })
+            .map(|run| Attempt {
+                run: run.clone(),
+                attempt_of: 1,
+            })
+            .collect()
+    } else {
+        latest_attempts_with_positions(runs)
     }
 }
 

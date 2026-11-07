@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ci inspect` provides decoded or raw evidence and exact quoted results;
+  `--artifacts` explicitly retrieves and verifies manifests, not their files.
+
 - Status shows step durations and artifact counts/links, with expected jobs
   from verified workflow blobs and bounded listings for large outputs.
 

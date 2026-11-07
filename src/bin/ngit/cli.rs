@@ -1470,8 +1470,43 @@ pub struct CiExecutionSelection {
     pub rerun_dependencies: bool,
 }
 
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches.
+pub struct CiInspectArgs {
+    /// Exact workflow, job or service event ID (hex or nevent)
+    pub id: Option<String>,
+    /// Include the original signed event instead of decoding its tags
+    #[arg(long)]
+    pub raw: bool,
+    /// Fetch and verify artifact manifests referenced by the selected event
+    #[arg(long, requires = "id", conflicts_with = "offline")]
+    pub artifacts: bool,
+    /// Event kinds; default: coordinator/provider advertisements and service
+    /// status
+    #[arg(long = "kind", value_delimiter = ',')]
+    pub kinds: Vec<u16>,
+    /// Restrict the signing author (npub or hex)
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Inspect an exact event id or nevent
+    #[arg(long, conflicts_with = "id")]
+    pub event: Option<String>,
+    /// Include expired metadata and snapshots
+    #[arg(long)]
+    pub include_expired: bool,
+    /// Maximum cached results per kind
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub limit: u16,
+    /// Read cached events only
+    #[arg(long)]
+    pub offline: bool,
+}
+
 #[derive(Subcommand)]
 pub enum CiCommands {
+    /// Inspect signed service, provider, allocation or execution event
+    /// envelopes
+    Inspect(CiInspectArgs),
     /// show CI results, with the trust context of every signer behind them
     #[command(
         long_about = "show CI results, with the trust context of every signer behind them\n\n\

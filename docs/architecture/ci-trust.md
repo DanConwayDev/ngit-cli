@@ -45,9 +45,8 @@ kind-1619 update that supplied the commit, `c` = commit id. Push/tag-triggered
 events carry an `r` Git-ref tag instead. Attaching CI to a PR is therefore a
 `#E` filter; to a commit, a `#c` filter.
 
-Out of scope for now: Repository Secret Updates (29846), Coordinator
-Advertisement/Readiness/Status (19843/19844/39844) beyond what provenance
-validation needs, and NIP-11 operator-key strengthening.
+Additional CI event inspection and controls are described in the sections
+below. NIP-11 operator-key strengthening remains outside the trust model.
 
 ## Trust model — port requirements
 
@@ -1097,3 +1096,32 @@ can initially describe planned, untimed steps as `skipped`; text distinguishes
 these from a timed skip. Unavailable or mismatched YAML falls back to reported
 execution evidence. Native explicit-step jobs publish live progress; current
 act and simple native run/build jobs do not promise equivalent live steps.
+
+### inspect execution evidence and artifact manifests
+
+`ci inspect --json` discovers coordinator/provider/service metadata; filter
+with --kind, --author or --event.
+
+`ci inspect <ID>` accepts an exact workflow, job or service event ID or
+nevent, including an expired event when explicitly selected. It follows exact
+quoted result/request/allocation references one hop and includes the status
+trust context when the event can be associated with a known execution.
+Missing evidence is not replaced by another attempt.
+
+The default JSON event is decoded: `id`, `kind`, `type`, `author`, `created_at`,
+`content`, and an ordered `tags` array. Each tag has its original `tag`, a
+readable `name`, and its complete `values` array. Repeated tags, empty values,
+unknown tags and extension slots survive unchanged. The signature is verified
+before decoding; `--raw --json` includes the original signed event instead.
+Signature verification is not coordinator admission or provider authorization.
+
+`--include-expired` exposes stale metadata during discovery; exact-ID inspection
+always reports its lifetime. `--limit` bounds results per kind (default 100,
+maximum 1000). `--offline` reads the cache. Relay failures remain visible in
+JSON. Ephemeral secret updates are not expected in retained-event queries.
+
+`ci inspect <ID> --artifacts` explicitly retrieves the selected event's artifact
+manifests. Downloads are bounded to 16 MiB each, verified against the Blossom
+SHA-256, and checked for schema version and declared file count. No archive is
+extracted and no listed file is downloaded. Status and watch never expand a
+manifest automatically.
