@@ -648,6 +648,11 @@ impl RunReport {
                 "workflow_hash_matches": self.integrity.workflow_hash_matches,
             },
             "jobs": jobs,
+            "live_jobs": self.run.live_jobs.iter().filter(|j| j.is_live(Timestamp::now())).map(|j| json!({
+                "job": j.job_id, "provider": npub(j.author), "state": "in_progress", "expiration": j.expiration.as_secs(),
+                "execution": j.details, "logs": j.logs,
+                "log_tail": if matches!(log_tail, LogTailMode::None) { None } else { Some(&j.log_tail) },
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -679,6 +684,15 @@ impl RunReport {
                 None => "unknown",
             },
         );
+        for job in &self.run.live_jobs {
+            if !job.is_live(Timestamp::now()) {
+                continue;
+            }
+            println!("    job {} in_progress [{}]", job.job_id, npub(job.author));
+            for step in &job.details.steps {
+                println!("      step {}: {}", step.id, step.outcome);
+            }
+        }
         for job in &self.jobs {
             println!("{}", job.human_lines(log_tail));
         }

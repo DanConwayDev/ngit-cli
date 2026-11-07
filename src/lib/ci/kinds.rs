@@ -85,8 +85,11 @@ pub const KIND_CI_SERVICE_STOP: Kind = Kind::Custom(9844);
 pub const KIND_CI_WORKFLOW_PROGRESS: Kind = Kind::Custom(39842);
 
 /// Every CI kind ngit consumes.
-pub const CONSUMED_CI_KINDS: [Kind; 6] = [
+pub const KIND_CI_JOB_PROGRESS: Kind = Kind::Custom(39846);
+
+pub const CONSUMED_CI_KINDS: [Kind; 7] = [
     KIND_CI_MANUAL_TRIGGER,
+    KIND_CI_JOB_PROGRESS,
     KIND_CI_JOB_RESULT,
     KIND_CI_WORKFLOW_RESULT,
     KIND_CI_SERVICE_REQUEST,
@@ -487,12 +490,110 @@ impl WorkflowProgress {
     }
 }
 
+/// Provider-signed live snapshot. It carries no terminal job conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobProgress {
+    pub event_id: EventId,
+    pub author: PublicKey,
+    pub created_at: Timestamp,
+    pub expiration: Timestamp,
+    pub run: WorkflowRunAddress,
+    pub job_id: String,
+    pub common: CommonTags,
+    pub details: super::details::JobDetails,
+    pub log_tail: String,
+    pub logs: Option<String>,
+}
+
+impl JobProgress {
+    #[must_use]
+    pub fn is_live(&self, now: Timestamp) -> bool {
+        self.created_at <= now && self.expiration > now
+    }
+}
+
+/// Validate an allocated provider's cumulative snapshot.
+pub fn validate_job_progress(event: &Event) -> Result<JobProgress, ShapeReason> {
+    require_kind(event, KIND_CI_JOB_PROGRESS)?;
+    let view = TagView::new(event);
+    view.forbid("conclusion")?;
+    let common = parse_common_tags(&view, CommonProfile::ResultLike)?;
+    let details = super::details::job(event, true)?;
+    let allocation = details
+        .allocation
+        .ok_or(ShapeReason::MissingTag("job-allocation"))?;
+    if parse_event_id("d", view.required_value("d")?)? != allocation {
+        return Err(ShapeReason::InvalidQuote(
+            "snapshot allocation differs from d".into(),
+        ));
+    }
+    let expiration = parse_timestamp("expiration", view.required_value("expiration")?)?;
+    if expiration <= event.created_at
+        || expiration
+            .as_secs()
+            .saturating_sub(event.created_at.as_secs())
+            > MAX_PROGRESS_EXPIRATION_SECS
+    {
+        return Err(ShapeReason::InvalidTagValue {
+            tag: "expiration",
+            value: "invalid snapshot lifetime".into(),
+        });
+    }
+    let quotes = parse_quotes(&view)?;
+    if quotes
+        .provenance
+        .as_ref()
+        .is_some_and(|q| q.kind == ProvenanceKind::ServiceRequest)
+    {
+        return Err(ShapeReason::InvalidQuote(
+            "provider snapshot quotes standing service".into(),
+        ));
+    }
+    let addresses: Vec<_> = quotes
+        .addresses
+        .into_iter()
+        .filter(|(a, _)| a.kind == KIND_CI_WORKFLOW_PROGRESS)
+        .collect();
+    if addresses.len() != 1 || addresses[0].0.identifier.is_empty() {
+        return Err(ShapeReason::InvalidQuote(
+            "snapshot requires one workflow address".into(),
+        ));
+    }
+    let address = &addresses[0].0;
+    for q in view
+        .matching("q")
+        .filter(|q| q.get(4).is_some_and(|m| m == "job-allocation"))
+    {
+        if parse_public_key("q", &q[3])? != address.public_key {
+            return Err(ShapeReason::InvalidQuote(
+                "allocation coordinator differs from run".into(),
+            ));
+        }
+    }
+    Ok(JobProgress {
+        event_id: event.id,
+        author: event.pubkey,
+        created_at: event.created_at,
+        expiration,
+        run: WorkflowRunAddress {
+            coordinator: address.public_key,
+            run_id: address.identifier.clone(),
+        },
+        job_id: view.required_value("job")?.into(),
+        common,
+        details,
+        log_tail: event.content.clone(),
+        logs: view.optional_value("logs")?.map(ToOwned::to_owned),
+    })
+}
+
 /// Any validated CI event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CiEvent {
     ManualTrigger(ManualTrigger),
     ServiceControl(ServiceControl),
     JobResult(JobResult),
+    JobProgress(JobProgress),
     WorkflowResult(WorkflowResult),
     WorkflowProgress(WorkflowProgress),
 }
@@ -577,6 +678,8 @@ pub fn validate(event: &Event) -> Result<CiEvent, ShapeReason> {
         Ok(CiEvent::ManualTrigger(validate_manual_trigger(event)?))
     } else if kind == KIND_CI_SERVICE_REQUEST || kind == KIND_CI_SERVICE_STOP {
         Ok(CiEvent::ServiceControl(validate_service_control(event)?))
+    } else if kind == KIND_CI_JOB_PROGRESS {
+        Ok(CiEvent::JobProgress(validate_job_progress(event)?))
     } else if kind == KIND_CI_JOB_RESULT {
         Ok(CiEvent::JobResult(validate_job_result(event)?))
     } else if kind == KIND_CI_WORKFLOW_RESULT {

@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Status reads live provider progress and completed jobs before aggregate
+  completion, matching exact allocation references and respecting expiry.
+
 - Native trigger and rerun controls accept per-job environment and resource
   overrides, validating the pinned workflow before publication.
 

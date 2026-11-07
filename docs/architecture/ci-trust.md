@@ -1073,3 +1073,9 @@ Both `trigger` and `rerun` accept repeatable `--environment JOB=SHA256[,URL]`
 and `--require JOB=PATH:OP:JSON`. Overrides require native jobs that exist
 in the pinned workflow. Environment URLs must match the digest.
 `--rerun-dependencies` conflicts with rerun; use trigger for a fresh graph.
+
+### show provider progress before workflow completion
+
+Job progress (39846) is matched to exact provider/allocation/job references.
+Completed job results appear before the workflow finishes. Terminal evidence
+wins over live snapshots; expired or future snapshots are not current progress.

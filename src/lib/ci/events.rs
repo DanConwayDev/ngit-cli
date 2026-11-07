@@ -49,6 +49,7 @@ pub struct WorkflowRun {
     pub result: Option<WorkflowResult>,
     /// Latest Job Result per job id, sorted by job id.
     pub jobs: Vec<JobResult>,
+    pub live_jobs: Vec<super::kinds::JobProgress>,
 }
 
 /// Whether a run is executing, finished, or abandoned.
@@ -63,15 +64,6 @@ pub enum RunState {
 }
 
 impl WorkflowRun {
-    pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
-        self.common().context.as_ref().filter(|context| {
-            matches!(
-                context,
-                super::kinds::TriggerContext::Issue { .. }
-                    | super::kinds::TriggerContext::Release { .. }
-            )
-        })
-    }
     /// The commit the workflow ran against.
     #[must_use]
     pub fn commit(&self) -> &str {
@@ -86,6 +78,19 @@ impl WorkflowRun {
             .map(|r| &r.common)
             .or_else(|| self.progress.as_ref().map(|p| &p.common))
             .expect("a run has an aggregate")
+    }
+
+    /// Issue activity and release revisions are independent attempts even at
+    /// one commit.
+    #[must_use]
+    pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
+        self.common().context.as_ref().filter(|context| {
+            matches!(
+                context,
+                super::kinds::TriggerContext::Issue { .. }
+                    | super::kinds::TriggerContext::Release { .. }
+            )
+        })
     }
 
     /// The event id of the run's container, preferring the immutable result.
@@ -261,6 +266,7 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
     let mut jobs: HashMap<RunKey, HashMap<(String, PublicKey), JobResult>> = HashMap::new();
 
     let mut all_jobs = HashMap::new();
+    let mut snapshots = HashMap::new();
     for event in events {
         if !kinds::CONSUMED_CI_KINDS.contains(&event.kind) {
             continue;
@@ -293,6 +299,15 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
                 };
                 keep_later(progress.entry(key), marker, |marker| {
                     total_order_position(marker.created_at, marker.event_id)
+                });
+            }
+            CiEvent::JobProgress(job) => {
+                let identity = (
+                    job.author,
+                    job.details.allocation.expect("validated allocation"),
+                );
+                keep_later(snapshots.entry(identity), job, |j| {
+                    total_order_position(j.created_at, j.event_id)
                 });
             }
             CiEvent::JobResult(job) => {
@@ -346,7 +361,6 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
                     }
                 }
             }
-
             if let Some(source) = details
                 .restart
                 .as_ref()
@@ -374,7 +388,38 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
             candidates.retain(|job| same_execution_context(common, &job.common));
         }
         let run_jobs = select_jobs(result.as_ref(), candidates);
-        runs.push(build_run(key, result, marker, run_jobs));
+        let live_jobs = if result.is_none() {
+            marker
+                .as_ref()
+                .filter(|marker| marker.is_pending())
+                .map(|marker| {
+                    marker
+                        .details
+                        .job_progress
+                        .iter()
+                        .filter_map(|quote| {
+                            snapshots
+                                .get(&(quote.provider, quote.allocation))
+                                .filter(|job| {
+                                    job.run.coordinator == key.coordinator
+                                        && job.run.run_id == key.run_id
+                                        && job.job_id == quote.job
+                                        && same_execution_context(&job.common, &marker.common)
+                                        && !run_jobs
+                                            .iter()
+                                            .any(|terminal| terminal.job_id == job.job_id)
+                                })
+                                .cloned()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut run = build_run(key, result, marker, run_jobs);
+        run.live_jobs = live_jobs;
+        runs.push(run);
     }
 
     // Every remaining job names a run with no container.
@@ -536,6 +581,7 @@ fn build_run(
         progress,
         result,
         jobs,
+        live_jobs: Vec::new(),
     }
 }
 
@@ -969,6 +1015,101 @@ mod restart_tests {
                 .find(|r| r.run_id == "resumed")
                 .unwrap()
                 .jobs
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod job_progress_tests {
+    use nostr::prelude::Keys;
+
+    use super::{
+        super::kinds::{KIND_CI_JOB_PROGRESS, ProgressStatus, test_events::*},
+        *,
+    };
+
+    #[test]
+    fn snapshots_require_exact_provider_allocation_and_are_superseded_by_results() {
+        let coordinator = Keys::generate();
+        let provider = Keys::generate();
+        let outsider = Keys::generate();
+        let allocation = "ab".repeat(32);
+        let mut tags = common_tags(&coordinator);
+        tags.extend([
+            tag(&["d", &allocation]),
+            tag(&["expiration", "1000"]),
+            tag(&["job", "build"]),
+            tag(&["q", &format!("39842:{}:run", coordinator.public_key())]),
+            tag(&[
+                "q",
+                &allocation,
+                "",
+                &coordinator.public_key().to_hex(),
+                "job-allocation",
+            ]),
+            tag(&[
+                "step",
+                "compile",
+                "Compile",
+                "0",
+                "10",
+                "success",
+                "artifacts-uploading",
+            ]),
+        ]);
+        let snapshot = event(&provider, KIND_CI_JOB_PROGRESS, 100, tags.clone());
+        let marker = with_tags(
+            &coordinator,
+            &workflow_progress(
+                &coordinator,
+                &coordinator,
+                "run",
+                ProgressStatus::InProgress,
+                100,
+                1000,
+            ),
+            |tags| {
+                tags.push(tag(&[
+                    "q",
+                    &format!("39846:{}:{allocation}", provider.public_key()),
+                    "",
+                    &provider.public_key().to_hex(),
+                    "build",
+                ]))
+            },
+        );
+        let runs = group_workflow_runs([&snapshot, &marker]);
+        assert_eq!(runs.runs[0].live_jobs.len(), 1);
+        assert_eq!(
+            runs.runs[0].state(Timestamp::from_secs(200)),
+            RunState::Running
+        );
+        let concluded = with_tags(&coordinator, &marker, |tags| {
+            tags.retain(|tag| tag.as_slice()[0] != "status");
+            tags.push(tag(&["status", "concluded"]));
+            tags.push(tag(&["conclusion", "success"]));
+        });
+        assert!(
+            group_workflow_runs([&snapshot, &concluded]).runs[0]
+                .live_jobs
+                .is_empty()
+        );
+        let spoof = event(&outsider, KIND_CI_JOB_PROGRESS, 101, tags.clone());
+        assert!(
+            group_workflow_runs([&spoof, &marker]).runs[0]
+                .live_jobs
+                .is_empty()
+        );
+        tags.push(tag(&["conclusion", "success"]));
+        assert!(
+            kinds::validate_job_progress(&event(&provider, KIND_CI_JOB_PROGRESS, 100, tags))
+                .is_err()
+        );
+        let result = workflow_result(&coordinator, &coordinator, "run", 200);
+        assert!(
+            group_workflow_runs([&snapshot, &marker, &result]).runs[0]
+                .live_jobs
                 .is_empty()
         );
     }
