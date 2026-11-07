@@ -609,6 +609,8 @@ impl RunReport {
             .collect::<Vec<Value>>();
         json!({
             "workflow": self.run.workflow_path,
+            "trigger": self.run.trigger.as_str(),
+            "context": self.run.common().context,
             "state": match self.state {
                 RunState::Running => "running",
                 RunState::Concluded(_) => "concluded",
@@ -1061,17 +1063,25 @@ struct Attempt {
 /// The latest attempt per `(coordinator, workflow)`, each with the number of
 /// attempts it is the latest of.
 fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
-    let mut counts: HashMap<(PublicKey, &str), usize> = HashMap::new();
+    let mut counts = HashMap::<_, usize>::new();
     for run in runs {
         *counts
-            .entry((run.coordinator, run.workflow_path.as_str()))
+            .entry((
+                run.coordinator,
+                run.workflow_path.as_str(),
+                run.activity_context(),
+            ))
             .or_insert(0) += 1;
     }
     latest_attempts(runs)
         .into_iter()
         .map(|run| Attempt {
             attempt_of: counts
-                .get(&(run.coordinator, run.workflow_path.as_str()))
+                .get(&(
+                    run.coordinator,
+                    run.workflow_path.as_str(),
+                    run.activity_context(),
+                ))
                 .copied()
                 .unwrap_or(1),
             run: run.clone(),

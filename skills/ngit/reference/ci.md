@@ -65,3 +65,14 @@ CI did not run.
 Trust floors are `maintainer-directed` and `operationally-associated`.
 `ngit pr merge --require-ci-trust <LEVEL>` applies the same gate to a merge when
 the caller wants one.
+
+## Extended CI support
+
+CI status recognises workflows triggered by opening, reopening or closing
+an issue, or by publishing a release. Each result identifies the exact issue
+action or signed release publication (including version, channel and asset
+references). Distinct actions/publications remain separate at the same Git
+commit; a retry replaces only an attempt for the same context. Release
+revision means the signed publication event, not a different Git commit.
+This reads CI evidence; it does not create issues, publish releases or
+independently verify release assets.

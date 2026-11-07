@@ -1031,3 +1031,16 @@ repository, run id and `forced` boolean. Publication is not cleanup
 confirmation: inspect CI status for the resulting job and workflow conclusions. Completed jobs remain completed;
 cancellation cannot undo effects that were already published. Standing service
 request/stop policy is unchanged, and cancellation does not delete prior events.
+
+## Current CI controls and observation
+
+### support issue- and release-triggered workflow results
+
+CI status recognises workflows triggered by opening, reopening or closing
+an issue, or by publishing a release. Each result identifies the exact issue
+action or signed release publication (including version, channel and asset
+references). Distinct actions/publications remain separate at the same Git
+commit; a retry replaces only an attempt for the same context. Release
+revision means the signed publication event, not a different Git commit.
+This reads CI evidence; it does not create issues, publish releases or
+independently verify release assets.

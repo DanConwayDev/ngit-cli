@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI status supports workflows triggered by issue opening, reopening or
+  closing, and by release publication. Results for distinct issue actions or
+  release publications remain separate even at the same Git commit.
+
+
 - Accept `ngit ci trigger --rerun-dependencies` for native Nix workflows.
   Current ngit-ci reruns the entire dependency graph on ordinary manual
   triggers too. The flag is a compatibility alias and emits no obsolete

@@ -163,6 +163,8 @@ impl fmt::Display for Conclusion {
 pub enum Trigger {
     Push,
     PullRequest,
+    Issues,
+    Release,
     Schedule,
     Manual,
 }
@@ -173,6 +175,8 @@ impl Trigger {
         match value {
             "push" => Some(Self::Push),
             "pull_request" => Some(Self::PullRequest),
+            "issues" => Some(Self::Issues),
+            "release" => Some(Self::Release),
             "schedule" => Some(Self::Schedule),
             "manual" => Some(Self::Manual),
             _ => None,
@@ -184,6 +188,8 @@ impl Trigger {
         match self {
             Self::Push => "push",
             Self::PullRequest => "pull_request",
+            Self::Issues => "issues",
+            Self::Release => "release",
             Self::Schedule => "schedule",
             Self::Manual => "manual",
         }
@@ -247,7 +253,7 @@ pub struct WorkflowFile {
 }
 
 /// NIP-22 pull-request context (`E`/`K`/`P` root, `e`/`k`/`p` parent).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct PullRequestContext {
     /// The kind-1618 pull request the run belongs to.
     pub root: EventId,
@@ -259,9 +265,27 @@ pub struct PullRequestContext {
 }
 
 /// Trigger context: a Git ref for push/tag runs, NIP-22 tags for PR runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TriggerContext {
-    Push { git_ref: String },
+    Issue {
+        git_ref: String,
+        root: EventId,
+        activity: EventId,
+        action: String,
+        reason: String,
+    },
+    Release {
+        coordinate: Coordinate,
+        revision: EventId,
+        application: Coordinate,
+        version: String,
+        channel: String,
+        assets: Vec<EventId>,
+    },
+    Push {
+        git_ref: String,
+    },
     PullRequest(PullRequestContext),
 }
 
@@ -307,7 +331,9 @@ impl CommonTags {
     #[must_use]
     pub fn git_ref(&self) -> Option<&str> {
         match &self.context {
-            Some(TriggerContext::Push { git_ref }) => Some(git_ref.as_str()),
+            Some(TriggerContext::Push { git_ref } | TriggerContext::Issue { git_ref, .. }) => {
+                Some(git_ref.as_str())
+            }
             _ => None,
         }
     }
@@ -979,6 +1005,7 @@ fn parse_common_tags(
 ) -> Result<CommonTags, ShapeReason> {
     let repositories = view
         .matching("a")
+        .filter(|tag| !tag.get(1).is_some_and(|v| v.starts_with("30063:")))
         .map(parse_repository)
         .collect::<Result<Vec<_>, _>>()?;
     let first = repositories.first().ok_or(ShapeReason::MissingTag("a"))?;
@@ -1029,10 +1056,35 @@ fn parse_common_tags(
     };
 
     let context = parse_trigger_context(view, profile)?;
+    let extended = matches!(
+        context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    );
+    if extended
+        && !matches!(
+            trigger,
+            None | Some(Trigger::Manual | Trigger::Issues | Trigger::Release)
+        )
+    {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
+    if matches!(context, Some(TriggerContext::Issue { .. })) && commits.len() != 1 {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
     match (trigger, &context) {
         (Some(Trigger::Push), Some(TriggerContext::Push { .. }))
-        | (Some(Trigger::PullRequest), Some(TriggerContext::PullRequest(_))) => {}
-        (Some(trigger @ (Trigger::Push | Trigger::PullRequest)), _) => {
+        | (Some(Trigger::PullRequest), Some(TriggerContext::PullRequest(_)))
+        | (Some(Trigger::Issues), Some(TriggerContext::Issue { .. }))
+        | (Some(Trigger::Release), Some(TriggerContext::Release { .. })) => {}
+        (
+            Some(
+                trigger @ (Trigger::Push
+                | Trigger::PullRequest
+                | Trigger::Issues
+                | Trigger::Release),
+            ),
+            _,
+        ) => {
             return Err(ShapeReason::MissingTriggerContext(trigger));
         }
         _ => {}
@@ -1063,6 +1115,105 @@ fn parse_trigger_context(
     }
     if git_refs.len() > 1 {
         return Err(ShapeReason::RepeatedTag("r"));
+    }
+    let issue = view.optional_tag("issue")?;
+    let release = view.optional_tag("release")?;
+    let release_refs: Vec<_> = view
+        .matching("a")
+        .filter(|t| t.get(1).is_some_and(|v| v.starts_with("30063:")))
+        .collect();
+    if issue.is_some()
+        && (release.is_some()
+            || !release_refs.is_empty()
+            || root.is_some()
+            || ["e", "k", "K", "P"].iter().any(|name| view.count(name) > 0))
+    {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
+    if let Some(tag) = issue {
+        if tag.len() != 5 || git_refs.len() != 1 || !git_refs[0].starts_with("refs/heads/") {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "issue",
+                value: "expected issue activity and branch context".into(),
+            });
+        }
+        let root = parse_event_id("issue", &tag[1])?;
+        let activity = parse_event_id("issue", &tag[2])?;
+        if !matches!(
+            (tag[3].as_str(), tag[4].as_str()),
+            ("opened" | "reopened", "") | ("closed", "completed" | "not_planned")
+        ) || (tag[3] == "opened" && root != activity)
+        {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "issue",
+                value: "invalid activity or reason".into(),
+            });
+        }
+        return Ok(Some(TriggerContext::Issue {
+            git_ref: git_refs[0].into(),
+            root,
+            activity,
+            action: tag[3].clone(),
+            reason: tag[4].clone(),
+        }));
+    }
+    if release.is_some() || !release_refs.is_empty() || view.count("release-asset") > 0 {
+        if root.is_some() || !git_refs.is_empty() || release_refs.len() != 1 {
+            return Err(ShapeReason::ConflictingTriggerContext);
+        }
+        let metadata = release.ok_or(ShapeReason::MissingTag("release"))?;
+        let reference = release_refs[0];
+        if metadata.len() != 4 || reference.len() != 4 || metadata[2].is_empty() {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "release",
+                value: "invalid release reference".into(),
+            });
+        }
+        let coordinate = Coordinate::from_kpi_format(&reference[1]).map_err(|_| {
+            ShapeReason::InvalidTagValue {
+                tag: "a",
+                value: "invalid release coordinate".into(),
+            }
+        })?;
+        let application = Coordinate::from_kpi_format(&metadata[1]).map_err(|_| {
+            ShapeReason::InvalidTagValue {
+                tag: "release",
+                value: "invalid application coordinate".into(),
+            }
+        })?;
+        if application.identifier.is_empty()
+            || application.kind != Kind::Custom(32267)
+            || application.public_key != coordinate.public_key
+            || coordinate.identifier != format!("{}@{}", application.identifier, metadata[2])
+        {
+            return Err(ShapeReason::ConflictingTriggerContext);
+        }
+        let revision = parse_event_id("a", &reference[3])?;
+        let mut assets = Vec::new();
+        for asset in view.matching("release-asset") {
+            if asset.len() != 2 {
+                return Err(ShapeReason::InvalidTagValue {
+                    tag: "release-asset",
+                    value: "expected exact event id".into(),
+                });
+            }
+            let id = parse_event_id("release-asset", &asset[1])?;
+            if assets.contains(&id) {
+                return Err(ShapeReason::RepeatedTag("release-asset"));
+            }
+            assets.push(id);
+        }
+        if assets.is_empty() {
+            return Err(ShapeReason::MissingTag("release-asset"));
+        }
+        return Ok(Some(TriggerContext::Release {
+            coordinate,
+            revision,
+            application,
+            version: metadata[2].clone(),
+            channel: metadata[3].clone(),
+            assets,
+        }));
     }
     if let Some(git_ref) = git_refs.first() {
         return Ok(Some(TriggerContext::Push {
@@ -1913,5 +2064,70 @@ mod tests {
             validate_workflow_result(&event),
             Err(ShapeReason::MismatchedRepositories)
         );
+    }
+}
+
+#[cfg(test)]
+mod extended_context_tests {
+    use nostr::prelude::Keys;
+
+    use super::{test_events::*, *};
+
+    #[test]
+    fn issue_activity_requires_exact_context_and_no_annotated_tag() {
+        let keys = Keys::generate();
+        let root = "ab".repeat(32);
+        let mut tags = common_tags(&keys);
+        tags.retain(|t| t.as_slice()[0] != "o");
+        tags.extend([
+            tag(&["o", "issues"]),
+            tag(&["r", "run"]),
+            tag(&["conclusion", "success"]),
+            tag(&["issue", &root, &root, "opened", ""]),
+        ]);
+        let make = |tags| event(&keys, KIND_CI_WORKFLOW_RESULT, 100, tags);
+        let result = validate_workflow_result(&make(tags.clone())).unwrap();
+        assert!(matches!(
+            result.common.context,
+            Some(TriggerContext::Issue { .. })
+        ));
+        let mut bad = tags.clone();
+        bad.push(tag(&["c", COMMIT]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        let mut bad = tags.clone();
+        bad.push(tag(&["issue", &root, &root, "opened", ""]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        tags.retain(|t| t.as_slice()[0] != "issue");
+        tags.push(tag(&["issue", &root, &root, "closed", ""]));
+        assert!(validate_workflow_result(&make(tags)).is_err());
+    }
+
+    #[test]
+    fn release_context_separates_repository_and_immutable_release_revision() {
+        let keys = Keys::generate();
+        let mut tags = common_tags(&keys);
+        tags.retain(|t| !matches!(t.as_slice()[0].as_str(), "o" | "r"));
+        let address = format!("30063:{}:app@1.0", keys.public_key());
+        let app = format!("32267:{}:app", keys.public_key());
+        tags.extend([
+            tag(&["o", "release"]),
+            tag(&["r", "run"]),
+            tag(&["conclusion", "success"]),
+            tag(&["a", &address, "", &"ab".repeat(32)]),
+            tag(&["release", &app, "1.0", "stable"]),
+            tag(&["release-asset", &"cd".repeat(32)]),
+        ]);
+        let make = |tags| event(&keys, KIND_CI_WORKFLOW_RESULT, 100, tags);
+        let result = validate_workflow_result(&make(tags.clone())).unwrap();
+        assert_eq!(result.common.repositories.len(), 1);
+        assert!(matches!(
+            result.common.context,
+            Some(TriggerContext::Release { .. })
+        ));
+        let mut bad = tags.clone();
+        bad.push(tag(&["r", "refs/tags/v1.0"]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        tags.retain(|t| t.as_slice()[0] != "release-asset");
+        assert!(validate_workflow_result(&make(tags)).is_err());
     }
 }

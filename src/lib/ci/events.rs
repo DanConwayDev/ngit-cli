@@ -63,10 +63,29 @@ pub enum RunState {
 }
 
 impl WorkflowRun {
+    pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
+        self.common().context.as_ref().filter(|context| {
+            matches!(
+                context,
+                super::kinds::TriggerContext::Issue { .. }
+                    | super::kinds::TriggerContext::Release { .. }
+            )
+        })
+    }
     /// The commit the workflow ran against.
     #[must_use]
     pub fn commit(&self) -> &str {
         self.commits.first().map_or("", String::as_str)
+    }
+
+    /// Signed context of the authoritative aggregate.
+    #[must_use]
+    pub fn common(&self) -> &super::kinds::CommonTags {
+        self.result
+            .as_ref()
+            .map(|r| &r.common)
+            .or_else(|| self.progress.as_ref().map(|p| &p.common))
+            .expect("a run has an aggregate")
     }
 
     /// The event id of the run's container, preferring the immutable result.
@@ -366,9 +385,13 @@ fn select_jobs(result: Option<&WorkflowResult>, candidates: Vec<JobResult>) -> V
 /// selected as current.
 #[must_use]
 pub fn latest_attempts(runs: &[WorkflowRun]) -> Vec<&WorkflowRun> {
-    let mut latest: HashMap<(PublicKey, &str), &WorkflowRun> = HashMap::new();
+    let mut latest = HashMap::<_, &WorkflowRun>::new();
     for run in runs {
-        let key = (run.coordinator, run.workflow_path.as_str());
+        let key = (
+            run.coordinator,
+            run.workflow_path.as_str(),
+            run.activity_context(),
+        );
         latest
             .entry(key)
             .and_modify(|current| {
@@ -790,5 +813,38 @@ mod tests {
 
         let quoted = group_workflow_runs(&[job, quoting]);
         assert!(quoted.runs[0].result_accepts_job(&quoted.runs[0].jobs[0]));
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use nostr::prelude::Keys;
+
+    use super::{super::kinds::test_events::*, *};
+
+    #[test]
+    fn independent_issue_activity_at_one_commit_is_not_a_retry() {
+        let coordinator = Keys::generate();
+        let make = |root: &str, run: &str, time| {
+            with_tags(
+                &coordinator,
+                &workflow_result(&coordinator, &coordinator, run, time),
+                |tags| {
+                    tags.retain(|t| t.as_slice()[0] != "o");
+                    tags.extend([
+                        tag(&["o", "issues"]),
+                        tag(&["issue", root, root, "opened", ""]),
+                    ]);
+                },
+            )
+        };
+        let first = make(&"ab".repeat(32), "first", 100);
+        let second = make(&"cd".repeat(32), "second", 200);
+        let retry = make(&"ab".repeat(32), "retry", 300);
+        let grouped = group_workflow_runs([&first, &second, &retry]);
+        let latest = latest_attempts(&grouped.runs);
+        assert_eq!(latest.len(), 2);
+        assert!(latest.iter().any(|r| r.run_id == "second"));
+        assert!(latest.iter().any(|r| r.run_id == "retry"));
     }
 }
