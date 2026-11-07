@@ -45,7 +45,8 @@ it. Explanation: https://ngit.dev/how-it-works
 - **PR branches MUST start with `pr/`** (e.g. `pr/my-feature`). Any other branch
   name is a plain push and never creates a PR.
 - **Read ngit output with `--json`.** It is a global option and works at any
-  position. Stdout is exactly one JSON document; progress and diagnostics go to
+  position. Stdout is one JSON document, except `ci status --watch --json` streams one
+  decoded workflow/job event per line until interrupted. Progress and diagnostics go to
   stderr. `git` commands have no `--json`. Top-level `command_status` is `ok`
   for exit 0 and `error` otherwise; it never describes a nested domain result
   (`ngit ci status --json` reports `ok` with `ci.conclusion: "failure"` unless a
@@ -71,8 +72,8 @@ it. Explanation: https://ngit.dev/how-it-works
   does the same for one git command. Neither changes the configured login. Never
   export or pass an nsec merely to switch between configured accounts.
 - **CI.** A successful push says nothing about CI. Nostr CI runs workflows from
-  `.ngit/act/workflows/`; another provider's directory is not evidence. When CI
-  matters, query the exact commit or PR with `ngit ci status <target> --json`
+  `.ngit/act/workflows/` or `.ngit/nix/workflows/`; another provider's directory
+  is not evidence. When CI matters, query the exact commit or PR with `ngit ci status <target> --json`
   and read `ci.state` and `ci.conclusion`, not `command_status`.
 - **Target repository.** With several `nostr://` remotes, pass global
   `--repo <REMOTE|NADDR|NOSTR-URL>`; a configured remote name, an naddr, and a

@@ -1125,3 +1125,26 @@ manifests. Downloads are bounded to 16 MiB each, verified against the Blossom
 SHA-256, and checked for schema version and declared file count. No archive is
 extracted and no listed file is downloaded. Status and watch never expand a
 manifest automatically.
+
+### stream workflow and job updates until interrupted
+
+`ci status <target> --watch` first shows the current tree, then one compact line
+per distinct workflow/job event received. It has no timeout and remains open
+across completed attempts until interrupted. Ctrl-C stops observation without
+cancelling execution. A PR target is pinned to the revision resolved at startup;
+restart observation to follow a new revision. Ordinary network/cleanup bounds
+still apply. `--offline` and `--require-ci-trust` cannot be combined with watch.
+
+With `--watch --json`, stdout is JSON Lines: each record contains `event` in the
+same decoded representation as inspect, plus `signature_verified`. There is no
+synthetic per-artifact event, aggregate summary document, or trailing success
+document. Every distinct received update is emitted, including late updates and
+renewals; identical relay copies are deduplicated by event ID. This stream is
+observations, not the latest-status reducer or an authorization verdict.
+
+Subscription starts before the cache snapshot. Events are observed after SDK
+signature/filter checks but before duplicate/replacement reduction, using a
+bounded channel with backpressure. Connection diagnostics and failures use
+stderr; fatal errors exit nonzero. The stream cannot reconstruct intermediate
+replaceable snapshots already lost before connection or during disconnection.
+Ordinary `status --json` retains its single-document summary contract.

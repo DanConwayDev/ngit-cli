@@ -155,10 +155,12 @@ fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
 fn build_nostr_client(
     auth_policy: Arc<RelayAuthPolicy>,
     proactive_auth: bool,
+    observer: crate::ci::watch::Observer,
 ) -> nostr_sdk::client::Client {
     crate::tls::install_default_crypto_provider();
     apply_onion_proxy(
         ClientBuilder::default()
+            .admit_policy(observer)
             .relay_limits(RelayLimits::disable())
             .verify_subscriptions(true)
             .websocket_transport(DemandAuthTransport::new(proactive_auth))
@@ -588,6 +590,7 @@ fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarR
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
+    ci_observer: crate::ci::watch::Observer,
     relay_timeouts: crate::relay_timeouts::RelayTimeouts,
     client: nostr_sdk::client::Client,
     relay_default_set: Vec<String>,
@@ -690,9 +693,11 @@ impl Connect for Client {
         if let Some(keys) = opts.keys {
             auth_policy.set_signer(Arc::new(NgitSigner::Keys(keys)));
         }
+        let ci_observer = crate::ci::watch::Observer::default();
         Client {
+            ci_observer: ci_observer.clone(),
             relay_timeouts: opts.relay_timeouts,
-            client: build_nostr_client(Arc::clone(&auth_policy), opts.proactive_auth),
+            client: build_nostr_client(Arc::clone(&auth_policy), opts.proactive_auth, ci_observer),
             proactive_auth: opts.proactive_auth,
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,
@@ -708,7 +713,11 @@ impl Connect for Client {
         self.auth_policy.set_signer(signer);
         // Preserve existing behavior: attaching a signer drops any anonymous
         // connections. Relay classifications survive through the shared policy.
-        self.client = build_nostr_client(Arc::clone(&self.auth_policy), self.proactive_auth);
+        self.client = build_nostr_client(
+            Arc::clone(&self.auth_policy),
+            self.proactive_auth,
+            self.ci_observer.clone(),
+        );
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
@@ -7844,5 +7853,90 @@ mod announcement_search_diagnostic_tests {
         ] {
             assert_eq!(announcement_search_failure(&anyhow!(error)), expected);
         }
+    }
+}
+
+impl Client {
+    /// Subscribe after account setup using the command's existing auth/proxy
+    /// policy. The passive admission tap applies backpressure before any
+    /// latest-event reduction; notifications carry connection diagnostics only.
+    pub async fn watch_ci(
+        &self,
+        relays: &[RelayUrl],
+        filter: Filter,
+    ) -> Result<crate::ci::watch::Subscription> {
+        use nostr::prelude::{RelayMessage, SubscriptionId};
+
+        use crate::ci::watch::{Subscription, Update};
+        let id = SubscriptionId::generate();
+        let mut streams = Vec::new();
+        for url in relays {
+            if let Err(error) = self.connect(url).await {
+                eprintln!("CI watch: cannot connect to {url}: {error:#}");
+                continue;
+            }
+            if let Some(relay) = self.client.relay(url).await? {
+                let url = url.clone();
+                streams.push(
+                    relay
+                        .notifications()
+                        .map(move |notice| (url.clone(), notice)),
+                );
+            }
+        }
+        anyhow::ensure!(
+            !streams.is_empty(),
+            "no repository relay available for CI watch"
+        );
+        let mut notifications = futures::stream::select_all(streams);
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        self.ci_observer.insert(id.clone(), sender.clone());
+        let expected = id.clone();
+        let pump = tokio::spawn(async move {
+            while let Some((relay, notice)) = notifications.next().await {
+                let update = match notice {
+                    RelayNotification::Message { message } => match *message {
+                        RelayMessage::Closed {
+                            subscription_id,
+                            message,
+                        } if subscription_id.as_ref() == &expected => Some(Update::Notice(
+                            format!("{relay} closed the subscription: {message}"),
+                        )),
+                        _ => None,
+                    },
+                    RelayNotification::RelayStatus { status } => {
+                        Some(Update::Notice(format!("{relay}: {status:?}")))
+                    }
+                    RelayNotification::AuthenticationFailed => {
+                        Some(Update::Notice(format!("{relay}: authentication failed")))
+                    }
+                    _ => None,
+                };
+                if let Some(update) = update {
+                    if sender.send(Ok(update)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let subscription = Subscription {
+            id: id.clone(),
+            observer: self.ci_observer.clone(),
+            client: self.client.clone(),
+            receiver,
+            pump,
+        };
+        let target = nostr_sdk::client::ReqTarget::manual(
+            relays.iter().map(|url| (url, vec![filter.clone()])),
+        );
+        let result = self.client.subscribe(target).with_id(id).await?;
+        for (relay, reason) in &result.failed {
+            eprintln!("CI watch: {relay}: {reason}");
+        }
+        anyhow::ensure!(
+            !result.success.is_empty(),
+            "no relay accepted the CI subscription"
+        );
+        Ok(subscription)
     }
 }

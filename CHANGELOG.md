@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of animations or cursor redraws, including relay, Git-server, signer,
   Git-transfer and Blossom upload reporting. Verbose mode shows details
   immediately and retains final diagnostics; normal terminal output keeps its
-  concise, delayed-detail presentation. JSON stdout remains one final document.
+  concise, delayed-detail presentation. JSON stdout remains one final document,
+  except for the event stream from `ci status --watch --json`.
 
 ### Added
+
+- `ci status --watch` streams distinct workflow/job updates without a timeout.
+  JSON Lines preserve event fields; Ctrl-C stops observation without cancelling CI.
 
 - `ci inspect` provides decoded or raw evidence and exact quoted results;
   `--artifacts` explicitly retrieves and verifies manifests, not their files.

@@ -45,3 +45,5 @@ pub fn total_order_position(
 ) -> (Timestamp, Reverse<EventId>) {
     (created_at, Reverse(event_id))
 }
+
+pub mod watch;

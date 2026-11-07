@@ -138,7 +138,10 @@ pub struct Cli {
     ///   `ngit issue create --repo upstream`
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
-    /// Output one machine-readable JSON document on stdout
+    /// Output machine-readable JSON on stdout
+    ///
+    /// Most commands emit one document. `ci status --watch` emits one decoded
+    /// workflow/job event per line until interrupted.
     ///
     /// Progress stays on stderr as plain state changes without terminal
     /// redraws.
@@ -1520,6 +1523,10 @@ pub enum CiCommands {
         Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
     )]
     Status {
+        /// Stream every distinct workflow/job update until interrupted (JSON
+        /// Lines with --json)
+        #[arg(long, conflicts_with_all = ["offline", "require_ci_trust"])]
+        watch: bool,
         /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
         /// HEAD
         #[arg(value_name = "TARGET")]

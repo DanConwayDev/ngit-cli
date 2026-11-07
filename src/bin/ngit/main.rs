@@ -505,6 +505,7 @@ async fn main() {
             },
             Commands::Ci(args) => match &args.ci_command {
                 CiCommands::Status {
+                    watch,
                     target,
                     require_ci_trust,
                     log_tail,
@@ -512,6 +513,7 @@ async fn main() {
                 } => {
                     sub_commands::ci_status::launch(
                         target.as_deref(),
+                        *watch,
                         *offline,
                         *require_ci_trust,
                         *log_tail,

@@ -44,12 +44,16 @@ use crate::{
 /// document is emitted in full and the process exits non-zero.
 pub async fn launch(
     target: Option<&str>,
+    watch: bool,
     offline: bool,
     require_ci_trust: Option<CiTrustFloor>,
     log_tail: LogTailMode,
     json: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
+    if watch && json {
+        crate::output::start_stream();
+    }
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
@@ -82,6 +86,17 @@ pub async fn launch(
         relay_coverage(&repo_ref.relays, &report.state_per_relay)
     });
     let target = resolve_target(&git_repo, git_repo_path, &repo_ref, target).await?;
+    if watch {
+        return super::ci_watch::launch(
+            &git_repo,
+            git_repo_path,
+            &repo_ref,
+            &client,
+            &target,
+            json,
+        )
+        .await;
+    }
     let report = build_report(
         &git_repo,
         git_repo_path,

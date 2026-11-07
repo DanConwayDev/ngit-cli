@@ -32,3 +32,5 @@ pub mod set_subject;
 pub mod skill;
 pub mod sync;
 pub mod whoami;
+
+pub mod ci_watch;
