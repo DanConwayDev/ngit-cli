@@ -311,6 +311,7 @@ pub struct Integrity {
 }
 
 pub struct JobReport {
+    pub details: ngit::ci::details::JobDetails,
     pub job_id: String,
     pub conclusion: Conclusion,
     pub provider: PublicKey,
@@ -596,6 +597,7 @@ impl RunReport {
             .map(|job| {
                 let mut value = json!({
                     "job": job.job_id,
+                    "execution": job.details,
                     "conclusion": job.conclusion.as_str(),
                     "provider": npub(job.provider),
                     "logs": job.logs,
@@ -610,6 +612,7 @@ impl RunReport {
         json!({
             "workflow": self.run.workflow_path,
             "trigger": self.run.trigger.as_str(),
+            "details": self.run.result.as_ref().map(|r| &r.details).or_else(|| self.run.progress.as_ref().map(|p| &p.details)),
             "context": self.run.common().context,
             "state": match self.state {
                 RunState::Running => "running",
@@ -1044,6 +1047,7 @@ impl TargetRuns {
 
 fn job_report(context: &CiTrustContext, run: &WorkflowRun, job: &JobResult) -> JobReport {
     JobReport {
+        details: job.details.clone(),
         job_id: job.job_id.clone(),
         conclusion: job.conclusion,
         provider: job.author,

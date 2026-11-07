@@ -363,6 +363,7 @@ pub struct ProvenanceQuote {
 /// A Workflow Result / Progress quote of one Job Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobQuote {
+    pub conclusion: Option<Conclusion>,
     pub event_id: EventId,
     pub relay: Option<String>,
     pub publisher: Option<PublicKey>,
@@ -383,6 +384,7 @@ pub struct WorkflowRunAddress {
 /// A validated kind-9840 Manual Trigger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualTrigger {
+    pub restart: Option<super::details::Restart>,
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
@@ -409,6 +411,7 @@ pub struct ServiceControl {
 /// A validated kind-9841 Job Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobResult {
+    pub details: super::details::JobDetails,
     pub event_id: EventId,
     /// The compute provider that executed the job.
     pub author: PublicKey,
@@ -433,6 +436,7 @@ pub struct JobResult {
 /// A validated kind-9842 Workflow Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowResult {
+    pub details: super::details::WorkflowDetails,
     pub event_id: EventId,
     /// The coordinator that accepted the run.
     pub author: PublicKey,
@@ -449,6 +453,7 @@ pub struct WorkflowResult {
 /// A validated kind-39842 Workflow Progress marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowProgress {
+    pub details: super::details::WorkflowDetails,
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
@@ -603,7 +608,16 @@ pub fn validate_manual_trigger(event: &Event) -> Result<ManualTrigger, ShapeReas
     // never addressed pass provenance validation.
     let coordinator = parse_public_key("p", view.required_value("p")?)?;
 
+    super::details::manual(event, &common.workflow.path)?;
+    if matches!(
+        common.context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    ) && super::details::restart(event)?.is_none()
+    {
+        return Err(ShapeReason::MissingTag("U"));
+    }
     Ok(ManualTrigger {
+        restart: super::details::restart(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -681,7 +695,24 @@ pub fn validate_job_result(event: &Event) -> Result<JobResult, ShapeReason> {
         ));
     }
 
+    let details = super::details::job(event, false)?;
+    if details.skip_reason.is_some() && event.pubkey != coordinate.public_key {
+        return Err(ShapeReason::InvalidQuote(
+            "conditional skip must be coordinator-authored".into(),
+        ));
+    }
+    for q in view
+        .matching("q")
+        .filter(|q| q.get(4).is_some_and(|m| m == "job-allocation"))
+    {
+        if parse_public_key("q", &q[3])? != coordinate.public_key {
+            return Err(ShapeReason::InvalidQuote(
+                "allocation coordinator differs from run".into(),
+            ));
+        }
+    }
     Ok(JobResult {
+        details,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -733,6 +764,7 @@ pub fn validate_workflow_result(event: &Event) -> Result<WorkflowResult, ShapeRe
     }
 
     Ok(WorkflowResult {
+        details: super::details::workflow(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -805,6 +837,7 @@ pub fn validate_workflow_progress(event: &Event) -> Result<WorkflowProgress, Sha
     }
 
     Ok(WorkflowProgress {
+        details: super::details::workflow(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -1312,8 +1345,9 @@ fn parse_quotes(view: &TagView<'_>) -> Result<Quotes, ShapeReason> {
                 relay,
                 requester,
             });
-        } else {
+        } else if marker != "job-allocation" {
             quotes.jobs.push(JobQuote {
+                conclusion: tag.get(5).map(|v| parse_conclusion(v)).transpose()?,
                 event_id,
                 relay,
                 publisher,

@@ -469,6 +469,18 @@ fn validate_manual_trigger(
             found: trigger.common.commit().to_owned(),
         });
     }
+    let restart = run
+        .result
+        .as_ref()
+        .and_then(|r| r.details.restart.as_ref())
+        .or_else(|| {
+            run.progress
+                .as_ref()
+                .and_then(|p| p.details.restart.as_ref())
+        });
+    if restart != trigger.restart.as_ref() {
+        return Err(ProvenanceRejection::ExtendedContextMismatch);
+    }
     use super::kinds::TriggerContext;
     if (matches!(
         trigger.common.context,

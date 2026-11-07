@@ -76,3 +76,8 @@ commit; a retry replaces only an attempt for the same context. Release
 revision means the signed publication event, not a different Git commit.
 This reads CI evidence; it does not create issues, publish releases or
 independently verify release assets.
+
+Status JSON exposes workflow `details` and job `execution`: dependency and
+rerun bindings, steps, outputs, artifacts, allocation/environment selection,
+skip reasons and termination/cancellation evidence. Empty and omitted outputs
+remain distinct. Aggregate success does not assert that every job succeeded.

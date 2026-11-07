@@ -20,6 +20,7 @@
 //! See `docs/architecture/ci-trust.md`.
 
 pub mod controls;
+pub mod details;
 pub mod domain;
 pub mod events;
 pub mod kinds;
