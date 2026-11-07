@@ -1051,3 +1051,10 @@ Status JSON exposes workflow `details` and job `execution`: dependency and
 rerun bindings, steps, outputs, artifacts, allocation/environment selection,
 skip reasons and termination/cancellation evidence. Empty and omitted outputs
 remain distinct. Aggregate success does not assert that every job succeeded.
+
+### preserve exact job results across workflow reruns
+
+A rerun can retain original job results. ngit checks exact source/new quotes,
+coordinator, repository, commit, workflow and context. `reused` and
+`execution_run_id` identify retained executions. Missing source evidence
+does not authorize reuse; multiple quoted instances of one job stay distinct.

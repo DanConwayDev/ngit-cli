@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rerun results retain exact original job identities and expose reuse; quoted
+  instances of the same job are not silently collapsed.
+
 - Status JSON includes workflow dependencies and detailed job execution
   evidence, with strict validation of conflicting claims and pinned URLs.
 

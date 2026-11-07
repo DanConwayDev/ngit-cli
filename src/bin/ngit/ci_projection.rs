@@ -312,6 +312,8 @@ pub struct Integrity {
 
 pub struct JobReport {
     pub details: ngit::ci::details::JobDetails,
+    pub execution_run_id: String,
+    pub reused: bool,
     pub job_id: String,
     pub conclusion: Conclusion,
     pub provider: PublicKey,
@@ -598,6 +600,8 @@ impl RunReport {
                 let mut value = json!({
                     "job": job.job_id,
                     "execution": job.details,
+                    "execution_run_id": job.execution_run_id,
+                    "reused": job.reused,
                     "conclusion": job.conclusion.as_str(),
                     "provider": npub(job.provider),
                     "logs": job.logs,
@@ -1048,6 +1052,8 @@ impl TargetRuns {
 fn job_report(context: &CiTrustContext, run: &WorkflowRun, job: &JobResult) -> JobReport {
     JobReport {
         details: job.details.clone(),
+        execution_run_id: job.run.run_id.clone(),
+        reused: job.run.run_id != run.run_id,
         job_id: job.job_id.clone(),
         conclusion: job.conclusion,
         provider: job.author,
