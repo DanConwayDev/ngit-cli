@@ -550,6 +550,9 @@ async fn main() {
                     )
                     .await
                 }
+                CiCommands::Secrets(args) => {
+                    sub_commands::ci_control::launch_secrets(args, signer_params).await
+                }
                 CiCommands::Inspect(args) => {
                     sub_commands::ci_inspect::launch(args, signer_params).await
                 }

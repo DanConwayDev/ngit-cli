@@ -165,3 +165,23 @@ bounded channel with backpressure. Connection diagnostics and failures use
 stderr; fatal errors exit nonzero. The stream cannot reconstruct intermediate
 replaceable snapshots already lost before connection or during disconnection.
 Ordinary `status --json` retains its single-document summary contract.
+
+`ngit ci secrets COORDINATOR --set-file secrets.json` reads a JSON map of
+unique secret names to string values. Alternatively use repeatable
+`--set-from-env NAME` to read each value from that environment variable.
+`--remove NAME` removes names; set and remove can be one atomic update.
+Values are never accepted on argv or printed. Names, reserved namespaces,
+overlap, value lengths and total payload size are validated.
+
+The signer must be a confirmed maintainer with their own repository
+announcement. The command refreshes the coordinator's signed kind-19843
+advertisement, validates its live secret key and inboxes, encrypts with a fresh
+sender key using NIP-44 v2, and binds plaintext author/timestamp to the signed
+kind-29846 event. Publication requires acknowledgement from an advertised inbox;
+repository relays also receive the encrypted event. An expired key during
+signing is rejected. No secret values are written to ngit's cache.
+
+JSON reports `secret-update-published` with names only. Relay acceptance is not
+coordinator acceptance: inspect kind-39844 status for names, origin and accepted
+update times. `WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
+same channel; pairing, sanitizing and sealing remain coordinator responsibilities.

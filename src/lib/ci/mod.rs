@@ -26,6 +26,7 @@ pub mod events;
 pub mod kinds;
 pub mod provenance;
 pub mod resolve;
+pub mod secrets;
 pub mod trust;
 
 use std::cmp::Reverse;

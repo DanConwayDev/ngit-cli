@@ -1505,8 +1505,26 @@ pub struct CiInspectArgs {
     pub offline: bool,
 }
 
+#[derive(clap::Args)]
+pub struct CiSecretsArgs {
+    /// Coordinator public key (npub or hex)
+    pub coordinator: String,
+    /// JSON file mapping secret names to values; values are never accepted on
+    /// argv
+    #[arg(long, value_name = "PATH")]
+    pub set_file: Option<std::path::PathBuf>,
+    /// Set NAME from the environment variable NAME (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub set_from_env: Vec<String>,
+    /// Remove a secret name (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub remove: Vec<String>,
+}
+
 #[derive(Subcommand)]
 pub enum CiCommands {
+    /// Publish an encrypted atomic secret update to a live coordinator inbox
+    Secrets(CiSecretsArgs),
     /// Inspect signed service, provider, allocation or execution event
     /// envelopes
     Inspect(CiInspectArgs),

@@ -834,6 +834,110 @@ fn validate_restart_source(
     Ok(resolved)
 }
 
+/// Provision encrypted secret values without placing them on argv or in output.
+pub async fn launch_secrets(
+    args: &crate::cli::CiSecretsArgs,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    use ngit::ci::secrets::{inbox, update};
+    use nostr::prelude::{Filter, Timestamp};
+    let values = read_secret_values(args)?;
+    let coordinator = parse_coordinator(&args.coordinator)?;
+    let mut prepared = Prepared::new(Repo::discover()?, false, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!("secret updates require a confirmed repository maintainer");
+    }
+    let mut advertisements = prepared
+        .client
+        .get_events(
+            prepared
+                .repo_ref
+                .relays
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            vec![Filter::new().kind(Kind::Custom(19843)).author(coordinator)],
+        )
+        .await?;
+    advertisements
+        .retain(|e| e.kind == Kind::Custom(19843) && e.pubkey == coordinator && e.verify().is_ok());
+    let advertisement = advertisements.into_iter().max_by_key(|e| ngit::ci::total_order_position(e.created_at, e.id)).context("no signed coordinator advertisement found on repository relays; inspect ci inspect before retrying")?;
+    let inbox = inbox(&advertisement, coordinator, Timestamp::now())?;
+    let repository = Coordinate {
+        kind: Kind::GitRepoAnnouncement,
+        public_key: prepared.user_pubkey,
+        identifier: prepared.repo_ref.identifier.clone(),
+    };
+    if !prepared
+        .repo_ref
+        .coordinates()
+        .iter()
+        .any(|c| c.coordinate == repository)
+    {
+        bail!("secret provisioning requires the signer's own confirmed repository announcement");
+    }
+    let relay_hint = prepared
+        .repo_ref
+        .relays
+        .first()
+        .map_or("", RelayUrl::as_str);
+    let builder = update(
+        prepared.user_pubkey,
+        repository.clone(),
+        relay_hint,
+        &inbox,
+        &values,
+        &args.remove,
+        Timestamp::now(),
+    )?;
+    let event = prepared.sign(builder, "encrypted CI secret update").await?;
+    if Timestamp::now() >= inbox.expiration {
+        bail!("coordinator secret key expired while signing; retry with a fresh advertisement");
+    }
+    let event_id = event.id;
+    let mut relays = inbox.relays.clone();
+    for relay in &prepared.repo_ref.relays {
+        if !relays.contains(relay) {
+            relays.push(relay.clone());
+        }
+    }
+    prepared.client.set_signer(prepared.signer.clone()).await;
+    let outcomes = send_events_with_results(
+        &prepared.client,
+        Some(prepared.git_repo.get_path()?),
+        vec![event],
+        Vec::new(),
+        relays,
+        true,
+        false,
+    )
+    .await?;
+    if !outcomes.iter().any(|(relay, accepted)| {
+        *accepted
+            && inbox
+                .relays
+                .iter()
+                .any(|inbox| inbox.as_str() == relay.as_str())
+    }) {
+        bail!(
+            "no advertised secret inbox accepted the update; retry after checking coordinator connectivity"
+        );
+    }
+    if crate::output::is_json() {
+        crate::output::set_value(
+            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "secret-update-published", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "coordinator": coordinator.to_bech32()?, "repository": naddr(&repository, prepared.relay_hint()), "set": values.0.keys().collect::<Vec<_>>(), "remove": args.remove}),
+        );
+    }
+    println!(
+        "Encrypted secret update published; inspect coordinator repository status (kind 39844) for accepted names and update times."
+    );
+    Ok(())
+}
+
 fn restart_context_tags(
     source: &Event,
     coordinator: PublicKey,
@@ -868,4 +972,38 @@ fn restart_context_tags(
     }
     tags.push(Tag::parse(restart)?);
     Ok(tags)
+}
+
+fn read_secret_values(args: &crate::cli::CiSecretsArgs) -> Result<ngit::ci::secrets::SecretValues> {
+    use ngit::ci::secrets::SecretValues;
+    use zeroize::Zeroizing;
+    let mut values = if let Some(path) = &args.set_file {
+        use std::io::Read;
+        let file = std::fs::File::open(path).context("failed to open secret values file")?;
+        if !file.metadata()?.is_file() {
+            bail!("secret values path must be a regular file");
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(65_536)
+            .read_to_end(&mut bytes)
+            .context("failed to read secret values file")?;
+        if bytes.len() > 65_535 {
+            bail!("secret values file exceeds the payload size limit");
+        }
+        serde_json::from_slice::<SecretValues>(&bytes).map_err(|_| {
+            anyhow::anyhow!("secret values file must contain unique names and string values")
+        })?
+    } else {
+        SecretValues::default()
+    };
+    for name in &args.set_from_env {
+        if values.0.contains_key(name) {
+            bail!("secret name supplied more than once");
+        }
+        let value = std::env::var(name).map_err(|_| {
+            anyhow::anyhow!("a requested secret environment variable is missing or not UTF-8")
+        })?;
+        values.0.insert(name.clone(), value);
+    }
+    Ok(values)
 }

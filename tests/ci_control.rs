@@ -907,3 +907,87 @@ async fn restart_preserves_source_and_publishes_job_selection_overrides() -> Res
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn secrets_use_advertised_inbox_without_exposing_values() -> Result<()> {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use nostr::prelude::{EventBuilder, PublicKey, RelayMessage, Tag, event::FinalizeEvent, nip44};
+    use nostr_sdk::client::{Client, ClientNotification};
+    let arranged = arrange("ci-secret-inbox").await?;
+    let recipient = Keys::generate();
+    let ad = EventBuilder::new(Kind::Custom(19843), "")
+        .custom_created_at(Timestamp::from_secs(arranged.now))
+        .tags([
+            Tag::custom("M", ["maintainer-request"]),
+            Tag::custom("X", ["request-required"]),
+            Tag::custom("expiration", [(arranged.now + 1200).to_string()]),
+            Tag::custom(
+                "secrets-key",
+                [
+                    "nip44-v2".into(),
+                    recipient.public_key().to_hex(),
+                    arranged.ci_relay.clone(),
+                ],
+            ),
+        ])
+        .finalize(&arranged.coordinator)?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&ad))
+        .await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let wire = Client::default();
+    wire.add_relay(arranged.ci_relay.clone()).await?;
+    wire.connect().await;
+    let mut notifications = wire.notifications();
+    let subscription = wire
+        .subscribe(Filter::new().kind(Kind::Custom(29846)).limit(0))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Message { message, .. } = notification {
+                if matches!(message.as_ref(), RelayMessage::EndOfStoredEvents(id) if id.as_ref() == &subscription.value) { return Ok::<_, anyhow::Error>(()); }
+            }
+        }
+        bail!("secret inbox subscription did not become ready")
+    }).await??;
+    let file = arranged.publisher.dir().join("secret-values.json");
+    std::fs::write(&file, r#"{"DEPLOY_TOKEN":"synthetic-secret-value"}"#)?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "secrets",
+            &coordinator,
+            "--set-file",
+            file.to_str().context("fixture path")?,
+        ],
+    )
+    .await?;
+    assert_eq!(json["action"], "secret-update-published");
+    assert!(!json.to_string().contains("synthetic-secret-value"));
+    let update = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                if event.kind == Kind::Custom(29846) {
+                    return Ok::<_, anyhow::Error>(event);
+                }
+            }
+        }
+        bail!("secret update did not arrive")
+    })
+    .await??;
+    update.verify()?;
+    let sender = PublicKey::from_hex(&tag_values(&update, "sender")[0])?;
+    let plaintext = nip44::decrypt(recipient.secret_key(), &sender, &update.content)?;
+    let payload: Value = serde_json::from_str(&plaintext)?;
+    assert_eq!(payload["set"]["DEPLOY_TOKEN"], "synthetic-secret-value");
+    assert_eq!(payload["author"], update.pubkey.to_hex());
+    assert_eq!(payload["created_at"], update.created_at.as_secs());
+    assert_eq!(tag_values(&update, "e"), vec![ad.id.to_hex()]);
+    assert_ne!(sender, update.pubkey);
+    wire.disconnect().await;
+    Ok(())
+}

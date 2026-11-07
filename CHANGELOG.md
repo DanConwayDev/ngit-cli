@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ci secrets` publishes encrypted atomic set/remove updates using an
+  advertised coordinator inbox, without exposing values or claiming acceptance.
+
 - `ci status --watch` streams distinct workflow/job updates without a timeout.
   JSON Lines preserve event fields; Ctrl-C stops observation without cancelling CI.
 
