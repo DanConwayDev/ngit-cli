@@ -230,11 +230,11 @@ pub async fn launch_trigger(
     commit_ish: Option<&str>,
     workflow: &str,
     git_ref: Option<&str>,
-    rerun_dependencies: bool,
+    selection: &crate::cli::CiExecutionSelection,
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    if rerun_dependencies && !workflow.starts_with(".ngit/nix/workflows/") {
+    if selection.rerun_dependencies && !workflow.starts_with(".ngit/nix/workflows/") {
         bail!(
             "--rerun-dependencies requires a native Nix workflow under .ngit/nix/workflows/; omit the flag for other workflows"
         );
@@ -263,11 +263,7 @@ pub async fn launch_trigger(
     let perspective = prepared.perspective();
     let mut tags = vec![Tag::public_key(coordinator)];
     for coordinate in prepared.announcement_coordinates(&perspective) {
-        // No relay hint: the NIP grants one to a Service Request's `a` tag,
-        // not to the common tags, and a coordinator that parses the common
-        // tags strictly drops a Manual Trigger whose `a` has a third
-        // element. A hint here would buy nothing anyway — the coordinator
-        // already watches the repository it serves.
+        // Emit minimal addresses; current coordinators also accept relay hints.
         tags.push(Tag::coordinate(coordinate, None));
     }
     for commit in &resolved.ids {
@@ -277,6 +273,13 @@ pub async fn launch_trigger(
     if let Some(git_ref) = git_ref {
         tags.push(Tag::parse(["r", git_ref])?);
     }
+
+    tags.extend(selection_tags(
+        &prepared.git_repo,
+        &resolved,
+        workflow,
+        selection,
+    )?);
 
     let event = prepared
         .sign(
@@ -306,7 +309,9 @@ pub async fn launch_trigger(
             "workflow": workflow,
             "workflow_hash": workflow_hash,
             "ref": git_ref,
-            "rerun_dependencies": rerun_dependencies,
+            "rerun_dependencies": selection.rerun_dependencies,
+            "environments": selection.environment,
+            "requirements": selection.requirements,
             "warning": warning,
         }));
     }
@@ -643,6 +648,43 @@ fn malformed(kind: u16, reason: &str) -> anyhow::Error {
     anyhow::anyhow!("ngit built a malformed kind-{kind} event: {reason}")
 }
 
+fn selection_tags(
+    repo: &Repo,
+    resolved: &ResolvedCommit,
+    workflow: &str,
+    selection: &crate::cli::CiExecutionSelection,
+) -> Result<Vec<Tag>> {
+    if selection.environment.is_empty() && selection.requirements.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !workflow.starts_with(".ngit/nix/workflows/") {
+        bail!("environment and resource overrides require a native Nix workflow");
+    }
+    let jobs = workflow_jobs(repo, resolved, workflow)?;
+    let mut tags = Vec::new();
+    for raw in &selection.environment {
+        let (job, value) = raw
+            .split_once('=')
+            .context("use --environment JOB=SHA256[,URL]")?;
+        if !jobs.contains(job) {
+            bail!("environment override names an unknown workflow job");
+        }
+        let (hash, url) = value.split_once(',').unwrap_or((value, ""));
+        tags.push(Tag::parse(["x", hash, url, job])?);
+    }
+    for raw in &selection.requirements {
+        let (job, expression) = raw
+            .split_once('=')
+            .context("use --require JOB=PATH:OP:JSON")?;
+        if !jobs.contains(job) {
+            bail!("resource override names an unknown workflow job");
+        }
+        ngit::ci::details::requirement(expression).context("invalid manual resource predicate")?;
+        tags.push(Tag::parse(["f", expression, job])?);
+    }
+    Ok(tags)
+}
+
 fn workflow_jobs(
     repo: &Repo,
     resolved: &ResolvedCommit,
@@ -670,11 +712,15 @@ pub async fn launch_rerun(
     coordinator: &str,
     result: &str,
     job: Option<&str>,
+    selection: &crate::cli::CiExecutionSelection,
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
     use ngit::client::get_events_from_local_cache;
     use nostr::prelude::{EventId, Filter};
+    if selection.rerun_dependencies {
+        bail!("restart retains external dependencies; use ci trigger for a fresh dependency graph");
+    }
     let id = EventId::parse(result)
         .context("restart requires a full Workflow Result event id or nevent")?;
     let coordinator = parse_coordinator(coordinator)?;
@@ -727,7 +773,13 @@ pub async fn launch_rerun(
     }
     let resolved = validate_restart_source(&prepared, &parsed, job)?;
     let workflow = &parsed.common.workflow.path;
-    let tags = restart_context_tags(&source, coordinator, id, job)?;
+    let mut tags = restart_context_tags(&source, coordinator, id, job)?;
+    tags.extend(selection_tags(
+        &prepared.git_repo,
+        &resolved,
+        workflow,
+        selection,
+    )?);
     let event = prepared
         .sign(
             EventBuilder::new(KIND_CI_MANUAL_TRIGGER, "").tags(tags),
@@ -739,7 +791,7 @@ pub async fn launch_rerun(
     prepared.publish(vec![event], coordinator, offline).await?;
     if crate::output::is_json() {
         crate::output::set_value(
-            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "rerun-requested", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "source": crate::output::event_id_to_nevent(id, prepared.repo_ref.relays.first()), "job": job, "workflow": workflow, "commit": resolved.commit, "coordinator": coordinator.to_bech32()?}),
+            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "rerun-requested", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "source": crate::output::event_id_to_nevent(id, prepared.repo_ref.relays.first()), "job": job, "workflow": workflow, "commit": resolved.commit, "coordinator": coordinator.to_bech32()?, "environments": selection.environment, "requirements": selection.requirements}),
         );
     }
     println!(

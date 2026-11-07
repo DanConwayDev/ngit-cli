@@ -550,12 +550,14 @@ async fn main() {
                     coordinator,
                     result,
                     job,
+                    selection,
                     offline,
                 } => {
                     sub_commands::ci_control::launch_rerun(
                         coordinator,
                         result,
                         job.as_deref(),
+                        selection,
                         *offline,
                         signer_params,
                     )
@@ -566,7 +568,7 @@ async fn main() {
                     commit_ish,
                     workflow,
                     git_ref,
-                    rerun_dependencies,
+                    selection,
                     offline,
                 } => {
                     sub_commands::ci_control::launch_trigger(
@@ -574,7 +576,7 @@ async fn main() {
                         commit_ish.as_deref(),
                         workflow,
                         git_ref.as_deref(),
-                        *rerun_dependencies,
+                        selection,
                         *offline,
                         signer_params,
                     )

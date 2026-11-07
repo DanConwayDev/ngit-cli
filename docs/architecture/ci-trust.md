@@ -1066,3 +1066,10 @@ Nix result ID or nevent. It creates a new attempt, preserving external
 dependency bindings; `--job` reruns that job and its dependants. It does not
 cancel an active run. Confirmed maintainership is required, and publication
 is not coordinator acceptance. Use status `result` nevents as inputs.
+
+### override native environment and resource selection
+
+Both `trigger` and `rerun` accept repeatable `--environment JOB=SHA256[,URL]`
+and `--require JOB=PATH:OP:JSON`. Overrides require native jobs that exist
+in the pinned workflow. Environment URLs must match the digest.
+`--rerun-dependencies` conflicts with rerun; use trigger for a fresh graph.

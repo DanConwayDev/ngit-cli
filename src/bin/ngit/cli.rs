@@ -1457,6 +1457,19 @@ pub enum LogTailMode {
     None,
 }
 
+#[derive(clap::Args, Default)]
+pub struct CiExecutionSelection {
+    /// Pin a native job's environment: JOB=SHA256[,MANIFEST-URL] (repeatable)
+    #[arg(long, value_name = "JOB=SHA256[,URL]")]
+    pub environment: Vec<String>,
+    /// Replace a native job's resource predicate: JOB=PATH:OP:JSON (repeatable)
+    #[arg(long = "require", value_name = "JOB=PATH:OP:JSON")]
+    pub requirements: Vec<String>,
+    /// Compatibility flag; fresh manual triggers already rerun dependencies
+    #[arg(long)]
+    pub rerun_dependencies: bool,
+}
+
 #[derive(Subcommand)]
 pub enum CiCommands {
     /// show CI results, with the trust context of every signer behind them
@@ -1532,12 +1545,18 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// Rerun a completed native workflow, retaining external dependencies
+    /// Rerun a completed native workflow, retaining its dependency bindings
     Rerun {
+        /// Coordinator public key (npub or hex)
         coordinator: String,
+        /// Exact completed Workflow Result event id or nevent
         result: String,
+        /// Rerun this job and its dependants; omit to restart every job
         #[arg(long)]
         job: Option<String>,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
+        /// Use cached source result and repository authority only
         #[arg(long)]
         offline: bool,
     },
@@ -1561,10 +1580,8 @@ pub enum CiCommands {
         /// Git ref published as the run's context, e.g. refs/heads/main
         #[arg(long = "ref", value_name = "GIT-REF")]
         git_ref: Option<String>,
-        /// Compatibility flag: native manual triggers already rerun the full
-        /// dependency graph (requires a current ngit-ci coordinator)
-        #[arg(long)]
-        rerun_dependencies: bool,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

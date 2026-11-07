@@ -808,7 +808,7 @@ async fn a_run_quoting_a_published_trigger_is_maintainer_directed() -> Result<()
 }
 
 #[tokio::test]
-async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
+async fn restart_preserves_source_and_publishes_job_selection_overrides() -> Result<()> {
     let arranged = arrange("ci-restart-selection").await?;
     let path = ".ngit/nix/workflows/ci.yaml";
     let yaml = "version: 1\non: push\njobs:\n  build:\n    run: apps.x86_64-linux.build\n  test:\n    run: apps.x86_64-linux.test\n";
@@ -842,6 +842,7 @@ async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
         .result
         .context("source result")?;
     let coordinator = arranged.coordinator_npub()?;
+    let env = format!("build={}", "ab".repeat(32));
     let json = ngit_json_ok(
         &arranged.publisher,
         &[
@@ -851,6 +852,10 @@ async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
             &source.id.to_hex(),
             "--job",
             "build",
+            "--environment",
+            &env,
+            "--require",
+            "build=memory-mib:gte:2048",
         ],
     )
     .await?;
@@ -862,6 +867,8 @@ async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
     assert_eq!(tag_values(&request, "U"), vec![source.id.to_hex()]);
     assert_eq!(tag_values(&request, "c"), vec![head]);
     assert_eq!(tag_values(&request, "r"), vec!["refs/heads/main"]);
+    assert_eq!(tag_slices(&request, "x")[0][3], "build");
+    assert_eq!(tag_values(&request, "f"), vec!["memory-mib:gte:2048"]);
     let whole = ngit_json_ok(
         &arranged.publisher,
         &["ci", "rerun", &coordinator, &source.id.to_hex()],
@@ -874,14 +881,23 @@ async fn rerun_preserves_source_and_selects_jobs() -> Result<()> {
         }
     }
     let before = arranged.published_events(KIND_MANUAL_TRIGGER).await?.len();
-    for args in [vec![
-        "ci",
-        "rerun",
-        &coordinator,
-        &source.id.to_hex(),
-        "--job",
-        "missing",
-    ]] {
+    for args in [
+        vec![
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--job",
+            "missing",
+        ],
+        vec![
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--rerun-dependencies",
+        ],
+    ] {
         let (output, _) = ngit_json(&arranged.publisher, &args).await?;
         assert!(!output.status.success());
     }
