@@ -1076,3 +1076,134 @@ async fn a_validated_manual_trigger_is_maintainer_direction_for_its_run() -> Res
 
     Ok(())
 }
+
+#[tokio::test]
+async fn expected_steps_come_only_from_the_hash_verified_commit_blob() -> Result<()> {
+    let arranged = arrange("ci-declared-plan").await?;
+    let yaml = "on: push\njobs:\n  test:\n    steps:\n      - id: unit\n        name: Unit tests\n        run: tests\n  deploy:\n    if: false\n    steps:\n      - id: publish\n        run: publish\n";
+    let head = commit_file(&arranged.publisher, "ci.yml", yaml).await?;
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "planned",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", workflow_hash(yaml))
+    .conclusion(None)
+    .progress(CiProgress::running(arranged.now));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+        .await?;
+    // A dirty working copy must not change the committed plan.
+    std::fs::write(
+        arranged.publisher.dir().join("ci.yml"),
+        "jobs: {wrong: {steps: []}}",
+    )?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    let declared = runs(&json)[0]["declared_jobs"]
+        .as_array()
+        .context("declared jobs")?;
+    assert_eq!(declared.len(), 2);
+    assert!(
+        declared
+            .iter()
+            .any(|j| j["id"] == "test" && j["steps"][0]["label"] == "Unit tests")
+    );
+    assert!(
+        runs(&json)[0]["jobs"]
+            .as_array()
+            .context("jobs")?
+            .is_empty(),
+        "YAML never fabricates observed skips"
+    );
+    let other = Keys::generate();
+    let mismatched = CiRunSpec::new(
+        &arranged.published,
+        "bad-hash",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", "ff".repeat(32));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &other, &mismatched)
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    let bad = runs(&json)
+        .iter()
+        .find(|r| r["run_id"] == "bad-hash")
+        .context("mismatched run")?;
+    assert!(
+        bad["declared_jobs"]
+            .as_array()
+            .context("declarations")?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn workflow_reports_queue_and_running_jobs_without_provider_snapshots() -> Result<()> {
+    use nostr::prelude::{EventBuilder, Tag, event::FinalizeEvent};
+    let arranged = arrange("ci-running-jobs").await?;
+    let head = arranged.publisher.rev_parse("HEAD").await?;
+    let mut progress = CiProgress::running(arranged.now);
+    progress.status = "queued".into();
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "queued-run",
+        head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(progress);
+    let events = build_ci_run(&arranged.coordinator, &spec)?;
+    let queued = events.progress.context("queued marker")?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&queued))
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    assert_eq!(runs(&json)[0]["status"], "queued");
+    assert!(
+        runs(&json)[0]["in_progress_jobs"]
+            .as_array()
+            .context("active jobs")?
+            .is_empty()
+    );
+
+    let mut tags: Vec<_> = queued
+        .tags
+        .iter()
+        .filter(|t| t.as_slice()[0] != "status")
+        .cloned()
+        .collect();
+    tags.push(Tag::custom("status", ["in_progress"]));
+    tags.push(Tag::custom("in-progress", ["test"]));
+    let running = EventBuilder::new(queued.kind, "")
+        .custom_created_at(Timestamp::from(queued.created_at.as_secs() + 1))
+        .tags(tags)
+        .finalize(&arranged.coordinator)?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, &[running])
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    assert_eq!(runs(&json)[0]["status"], "in_progress");
+    assert_eq!(
+        runs(&json)[0]["in_progress_jobs"],
+        serde_json::json!(["test"])
+    );
+    assert!(
+        runs(&json)[0]["live_jobs"]
+            .as_array()
+            .context("snapshots")?
+            .is_empty()
+    );
+    Ok(())
+}

@@ -101,3 +101,19 @@ in the pinned workflow. Environment URLs must match the digest.
 Job progress (39846) is matched to exact provider/allocation/job references.
 Completed job results appear before the workflow finishes. Terminal evidence
 wins over live snapshots; expired or future snapshots are not current progress.
+
+`ci status` shows workflows, jobs and steps, including reported outcomes,
+step durations, artifact publication state, counts and output links. Small
+direct-artifact lists and manifest links are shown at the owning job; long
+lists are summarized with a pointer to inspection. Signed durations are
+milliseconds; step start offsets are job-relative, never wall-clock timestamps.
+
+When the exact local workflow blob matches the event's hash, `declared_jobs`
+provides expected jobs and stable step IDs. Native step keys and explicit act
+IDs can be matched; generated/nested act IDs and matrix expansion remain runtime
+information. Missing entries are `not reported`, not inferred as queued,
+skipped or failed. Conditions are not evaluated locally. Native live snapshots
+can initially describe planned, untimed steps as `skipped`; text distinguishes
+these from a timed skip. Unavailable or mismatched YAML falls back to reported
+execution evidence. Native explicit-step jobs publish live progress; current
+act and simple native run/build jobs do not promise equivalent live steps.

@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Status shows step durations and artifact counts/links, with expected jobs
+  from verified workflow blobs and bounded listings for large outputs.
+
 - Status reads live provider progress and completed jobs before aggregate
   completion, matching exact allocation references and respecting expiry.
 

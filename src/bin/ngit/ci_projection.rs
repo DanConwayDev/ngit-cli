@@ -18,6 +18,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     path::Path,
 };
 
@@ -311,6 +312,8 @@ pub struct Integrity {
 }
 
 pub struct JobReport {
+    pub name: Option<String>,
+    pub event_id: EventId,
     pub details: ngit::ci::details::JobDetails,
     pub execution_run_id: String,
     pub reused: bool,
@@ -334,7 +337,14 @@ impl JobReport {
             .map_or(String::new(), |logs| format!("  {logs}"));
         format!(
             "    job {} {} [{label}]{logs}",
-            self.job_id, self.conclusion
+            self.name
+                .as_ref()
+                .filter(|name| **name != self.job_id)
+                .map_or(self.job_id.clone(), |name| format!(
+                    "{name} ({})",
+                    self.job_id
+                )),
+            self.conclusion
         )
     }
 
@@ -349,8 +359,17 @@ impl JobReport {
             .filter(|tail| !tail.is_empty())
     }
 
-    fn human_lines(&self, mode: LogTailMode) -> String {
+    fn human_lines(&self, mode: LogTailMode, plan: Option<&crate::ci_plan::JobPlan>) -> String {
         let mut output = self.human_line();
+        if self.reused {
+            let _ = write!(output, "\n      reused from run {}", self.execution_run_id);
+        }
+        output.push_str(&crate::ci_plan::steps(&self.details, plan, false));
+        output.push_str(&crate::ci_plan::artifact_links(&self.details));
+        if let Some(reason) = &self.details.skip_reason {
+            let _ = write!(output, "\n      skip reason: {reason}");
+        }
+
         if let Some(tail) = self.included_log_tail(mode) {
             output.push_str("\n      log tail:");
             for line in tail.lines() {
@@ -364,6 +383,7 @@ impl JobReport {
 
 pub struct RunReport {
     pub run: WorkflowRun,
+    pub plan: Vec<crate::ci_plan::JobPlan>,
     pub state: RunState,
     /// 1-based position of this attempt among the attempts seen for the same
     /// coordinator and workflow on this target's revision.
@@ -586,7 +606,12 @@ impl RunReport {
     fn state_label(&self) -> String {
         match self.state {
             RunState::Concluded(conclusion) => conclusion.to_string(),
-            RunState::Running => "running".to_owned(),
+            RunState::Running => self
+                .run
+                .progress
+                .as_ref()
+                .map_or("running", |p| p.status.as_str())
+                .to_owned(),
             RunState::Stale => "stale".to_owned(),
         }
     }
@@ -599,6 +624,8 @@ impl RunReport {
             .map(|job| {
                 let mut value = json!({
                     "job": job.job_id,
+                    "name": job.name,
+                    "event": crate::output::event_id_to_nevent(job.event_id, None),
                     "execution": job.details,
                     "execution_run_id": job.execution_run_id,
                     "reused": job.reused,
@@ -647,6 +674,9 @@ impl RunReport {
                 "commit_present": self.integrity.commit_present,
                 "workflow_hash_matches": self.integrity.workflow_hash_matches,
             },
+            "status": self.state_label(),
+            "in_progress_jobs": self.running_jobs(),
+            "declared_jobs": self.plan,
             "jobs": jobs,
             "live_jobs": self.run.live_jobs.iter().filter(|j| j.is_live(Timestamp::now())).map(|j| json!({
                 "job": j.job_id, "provider": npub(j.author), "state": "in_progress", "expiration": j.expiration.as_secs(),
@@ -654,6 +684,22 @@ impl RunReport {
                 "log_tail": if matches!(log_tail, LogTailMode::None) { None } else { Some(&j.log_tail) },
             })).collect::<Vec<_>>(),
         })
+    }
+
+    fn running_jobs(&self) -> Vec<&str> {
+        self.run
+            .progress
+            .as_ref()
+            .filter(|p| {
+                self.run.result.is_none()
+                    && p.is_pending()
+                    && p.is_live(Timestamp::now())
+                    && p.created_at <= Timestamp::now()
+            })
+            .into_iter()
+            .flat_map(|p| p.in_progress_jobs.iter().map(String::as_str))
+            .filter(|id| !self.jobs.iter().any(|job| job.job_id == *id))
+            .collect()
     }
 
     pub fn print(&self, log_tail: LogTailMode) {
@@ -689,12 +735,71 @@ impl RunReport {
                 continue;
             }
             println!("    job {} in_progress [{}]", job.job_id, npub(job.author));
-            for step in &job.details.steps {
-                println!("      step {}: {}", step.id, step.outcome);
+            println!(
+                "{}{}",
+                crate::ci_plan::steps(
+                    &job.details,
+                    self.plan.iter().find(|p| p.id == job.job_id),
+                    true
+                ),
+                crate::ci_plan::artifact_links(&job.details)
+            );
+            if let Some(logs) = &job.logs {
+                println!("      logs: {logs}");
+            }
+        }
+        let running = self.running_jobs();
+        for id in &running {
+            if !self
+                .run
+                .live_jobs
+                .iter()
+                .any(|job| job.job_id == *id && job.is_live(Timestamp::now()))
+            {
+                println!("    job {id}: in_progress (reported by coordinator)");
+                println!(
+                    "{}",
+                    crate::ci_plan::steps(
+                        &ngit::ci::details::JobDetails::default(),
+                        self.plan.iter().find(|p| p.id == *id),
+                        true
+                    )
+                );
+            }
+        }
+        for expected in &self.plan {
+            if !running.contains(&expected.id.as_str())
+                && !self.jobs.iter().any(|j| j.job_id == expected.id)
+                && !self
+                    .run
+                    .live_jobs
+                    .iter()
+                    .any(|j| j.job_id == expected.id && j.is_live(Timestamp::now()))
+            {
+                println!(
+                    "    job {}: not reported{}",
+                    expected.label,
+                    if expected.dynamic {
+                        " (runtime expansion)"
+                    } else {
+                        ""
+                    }
+                );
+                println!(
+                    "{}",
+                    crate::ci_plan::steps(
+                        &ngit::ci::details::JobDetails::default(),
+                        Some(expected),
+                        false
+                    )
+                );
             }
         }
         for job in &self.jobs {
-            println!("{}", job.human_lines(log_tail));
+            println!(
+                "{}",
+                job.human_lines(log_tail, self.plan.iter().find(|p| p.id == job.job_id))
+            );
         }
     }
 }
@@ -800,6 +905,7 @@ pub async fn build_report(
     };
 
     let report = |attempt: &Attempt| RunReport {
+        plan: crate::ci_plan::load(git_repo, &attempt.run),
         state: attempt.run.state(now),
         attempt_of: attempt.attempt_of,
         resolution: context.run_resolution(&attempt.run),
@@ -1067,6 +1173,8 @@ impl TargetRuns {
 
 fn job_report(context: &CiTrustContext, run: &WorkflowRun, job: &JobResult) -> JobReport {
     JobReport {
+        name: job.name.clone(),
+        event_id: job.event_id,
         details: job.details.clone(),
         execution_run_id: job.run.run_id.clone(),
         reused: job.run.run_id != run.run_id,
@@ -1086,8 +1194,8 @@ struct Attempt {
     attempt_of: usize,
 }
 
-/// The latest attempt per `(coordinator, workflow)`, each with the number of
-/// attempts it is the latest of.
+/// The latest attempt per coordinator, workflow and issue/release activity,
+/// each with the number of attempts it is the latest of.
 fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
     let mut counts = HashMap::<_, usize>::new();
     for run in runs {
@@ -1734,6 +1842,7 @@ mod tests {
         let context = CiTrustContext::loading();
         let job = job_report(&context, &run, &run.jobs[0]);
         RunReport {
+            plan: Vec::new(),
             state: run.state(Timestamp::from_secs(300)),
             attempt_of: 1,
             resolution: context.run_resolution(&run),
@@ -1785,7 +1894,7 @@ mod tests {
             tail
         );
         assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::Auto),
+            report.jobs[0].human_lines(LogTailMode::Auto, None),
             "    job build failure [Checking]\n      log tail:\n        [log-tail omitted=42]\n        assertion failed"
         );
     }
@@ -1801,7 +1910,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::Auto),
+            report.jobs[0].human_lines(LogTailMode::Auto, None),
             "    job build success [Checking]"
         );
         assert_eq!(
@@ -1809,7 +1918,7 @@ mod tests {
             tail
         );
         assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::All),
+            report.jobs[0].human_lines(LogTailMode::All, None),
             "    job build success [Checking]\n      log tail:\n        build completed"
         );
     }
@@ -1825,7 +1934,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            failed.jobs[0].human_lines(LogTailMode::None),
+            failed.jobs[0].human_lines(LogTailMode::None, None),
             "    job build failure [Checking]"
         );
         assert!(
@@ -1926,6 +2035,7 @@ mod tests {
             },
             runs: Vec::new(),
             outdated: Some(vec![RunReport {
+                plan: Vec::new(),
                 state: run.state(Timestamp::now()),
                 attempt_of: 1,
                 resolution: TrustResolution::Settled {

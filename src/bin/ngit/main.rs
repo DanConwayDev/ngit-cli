@@ -28,6 +28,7 @@ mod git_remote_helper;
 mod output;
 // Declared after `output` so the stdout-guarding `println!` macro is in
 // scope for it.
+mod ci_plan;
 mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;
