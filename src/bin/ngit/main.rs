@@ -551,6 +551,7 @@ async fn main() {
                     commit_ish,
                     workflow,
                     git_ref,
+                    rerun_dependencies,
                     offline,
                 } => {
                     sub_commands::ci_control::launch_trigger(
@@ -558,6 +559,7 @@ async fn main() {
                         commit_ish.as_deref(),
                         workflow,
                         git_ref.as_deref(),
+                        *rerun_dependencies,
                         *offline,
                         signer_params,
                     )

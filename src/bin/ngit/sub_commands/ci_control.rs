@@ -230,9 +230,15 @@ pub async fn launch_trigger(
     commit_ish: Option<&str>,
     workflow: &str,
     git_ref: Option<&str>,
+    rerun_dependencies: bool,
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
+    if rerun_dependencies && !workflow.starts_with(".ngit/nix/workflows/") {
+        bail!(
+            "--rerun-dependencies requires a native Nix workflow under .ngit/nix/workflows/; omit the flag for other workflows"
+        );
+    }
     let coordinator = parse_coordinator(coordinator)?;
     if let Some(git_ref) = git_ref {
         if !git_ref.starts_with("refs/") {
@@ -300,6 +306,7 @@ pub async fn launch_trigger(
             "workflow": workflow,
             "workflow_hash": workflow_hash,
             "ref": git_ref,
+            "rerun_dependencies": rerun_dependencies,
             "warning": warning,
         }));
     }

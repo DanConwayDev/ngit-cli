@@ -1552,6 +1552,10 @@ pub enum CiCommands {
         /// Git ref published as the run's context, e.g. refs/heads/main
         #[arg(long = "ref", value_name = "GIT-REF")]
         git_ref: Option<String>,
+        /// Compatibility flag: native manual triggers already rerun the full
+        /// dependency graph (requires a current ngit-ci coordinator)
+        #[arg(long)]
+        rerun_dependencies: bool,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

@@ -727,9 +727,24 @@ own — and its cost is one extra filter per repository relay.
   `service-requested`, `service-stopped`, `triggered`. The published event is
   an `nevent`, the coordinator an `npub` and the perspective an `naddr`, as
   everywhere else in ngit's JSON; a trigger adds `commit` and `commits` as
-  hex object ids, `workflow`, `workflow_hash` and `ref`. There is no `id`
-  field: the entity these commands act on is the repository, which
-  `repository` already names.
+  hex object ids, `workflow`, `workflow_hash`, `ref` and the boolean
+  `rerun_dependencies`. There is no `id` field: the entity these commands act
+  on is the repository, which `repository` already names.
+
+### Native workflow dependency reruns
+
+`ngit ci trigger` requests a fresh target attempt. Current ngit-ci coordinators
+also run fresh attempts for its entire native Nix dependency graph, including
+successful or active prerequisites. `--rerun-dependencies` remains accepted for
+workflows under `.ngit/nix/workflows/` as a compatibility alias; it does not
+change the signed event. The obsolete `["rerun", "dependencies"]` marker is
+never emitted because current coordinators reject it. The JSON boolean
+`rerun_dependencies` records whether the flag was supplied, not whether the
+coordinator has executed dependencies. Older coordinators may retain their
+previous reuse policy; upgrade them for the current manual-trigger semantics.
+
+The coordinator resolves and authorizes the graph at the requested commit;
+ngit does not schedule jobs or expand trust classification.
 
 ## Per-PR CI state machine
 
@@ -785,7 +800,7 @@ The maintainer controls, all non-interactive and driven by flags alone:
 ```
 ngit ci request <COORDINATOR> [--offline]
 ngit ci stop    <COORDINATOR> [--offline]
-ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH>
+ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH> [--rerun-dependencies]
                 [--ref <GIT-REF>] [--offline]
 ```
 

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Accept `ngit ci trigger --rerun-dependencies` for native Nix workflows.
+  Current ngit-ci reruns the entire dependency graph on ordinary manual
+  triggers too. The flag is a compatibility alias and emits no obsolete
+  `rerun` tag, which current coordinators reject.
+
 - `ngit ci cancel <COORDINATOR> <RUN-ID>` lets confirmed maintainers request
   cancellation of one exact workflow attempt. `--force` bypasses job grace
   periods or escalates an earlier request. JSON reports request publication,

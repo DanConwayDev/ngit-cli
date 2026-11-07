@@ -377,6 +377,82 @@ async fn a_non_maintainer_request_warns_and_still_publishes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn trigger_can_request_a_fresh_native_dependency_chain() -> Result<()> {
+    let path = ".ngit/nix/workflows/release.yaml";
+    let yaml = "version: 1\non: push\nneeds-workflows: {ci: ci.yaml}\njobs:\n  release:\n    run: apps.x86_64-linux.release\n";
+    let arranged = arrange("ci-rerun-dependencies").await?;
+    let workflows = arranged.publisher.dir().join(".ngit/nix/workflows");
+    std::fs::create_dir_all(&workflows)?;
+    std::fs::write(workflows.join("release.yaml"), yaml)?;
+    std::fs::write(
+        workflows.join("ci.yaml"),
+        "version: 1\non: push\njobs:\n  test:\n    run: apps.x86_64-linux.test\n",
+    )?;
+    arranged
+        .publisher
+        .git_ok(["add", ".ngit"], "add native workflows")
+        .await?;
+    arranged
+        .publisher
+        .git_ok(
+            ["commit", "-m", "native workflows", "--no-gpg-sign"],
+            "commit native workflows",
+        )
+        .await?;
+    arranged.publisher.nostr_push(["origin", "main"]).await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "trigger",
+            &coordinator,
+            "--workflow",
+            path,
+            "--rerun-dependencies",
+        ],
+    )
+    .await?;
+    assert_eq!(json["rerun_dependencies"], true);
+    let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
+    assert!(
+        tag_slices(&event, "rerun").is_empty(),
+        "current coordinators reject the obsolete rerun marker"
+    );
+    let parsed = validate_manual_trigger(&event).map_err(|reason| anyhow::anyhow!("{reason}"))?;
+    assert_eq!(parsed.common.workflow.path, path);
+    assert_eq!(parsed.common.workflow.sha256, workflow_hash(yaml));
+    Ok(())
+}
+
+#[tokio::test]
+async fn trigger_rejects_dependency_rerun_for_non_native_workflow_without_publishing() -> Result<()>
+{
+    let arranged = arrange("ci-rerun-invalid").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let (out, _) = ngit_json(
+        &arranged.publisher,
+        &[
+            "ci",
+            "trigger",
+            &coordinator,
+            "--workflow",
+            "ci.yml",
+            "--rerun-dependencies",
+        ],
+    )
+    .await?;
+    assert!(!out.status.success());
+    assert!(
+        arranged
+            .published_events(KIND_MANUAL_TRIGGER)
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Result<()> {
     let arranged = arrange("ci-trigger").await?;
     let coordinator = arranged.coordinator_npub()?;
@@ -399,10 +475,12 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
     assert_eq!(json["commit"], head);
     assert_eq!(json["workflow"], "ci.yml");
     assert_eq!(json["ref"], "refs/heads/main");
+    assert_eq!(json["rerun_dependencies"], false);
 
     let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
     assert_eq!(event_id_of(&json["event"]), event.id);
 
+    assert!(tag_values(&event, "rerun").is_empty());
     let trigger = validate_manual_trigger(&event)
         .map_err(|reason| anyhow::anyhow!("published 9840 is malformed: {reason}"))?;
     assert_eq!(trigger.coordinator, arranged.coordinator.public_key());
@@ -423,9 +501,8 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
     );
 
     // The common tags are pinned against the NIP rather than against ngit's
-    // own reader, which tolerates more than a coordinator does. In
-    // particular a third element on `a` — a relay hint the NIP grants only
-    // to a Service Request — makes a strict coordinator drop the request.
+    // own reader. Current coordinators permit trailing relay hints on `a`
+    // and `p`; ngit emits the minimal addressing form without those hints.
     let a_tags = tag_slices(&event, "a");
     assert!(
         a_tags.iter().all(|tag| tag.len() == 2),
