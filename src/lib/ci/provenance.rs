@@ -49,17 +49,27 @@ pub fn quoted_kind(kind: ProvenanceKind) -> Kind {
 pub enum ProvenanceRejection {
     /// The run carries no frozen provenance quote at all.
     NoQuote,
+    ExtendedContextMismatch,
     /// The supplied event is not the one the quote names.
-    EventIdMismatch { quoted: EventId, supplied: EventId },
+    EventIdMismatch {
+        quoted: EventId,
+        supplied: EventId,
+    },
     /// The quoted event's kind does not match the quote's marker.
-    KindMismatch { expected: Kind, found: Kind },
+    KindMismatch {
+        expected: Kind,
+        found: Kind,
+    },
     /// The quoted event's id or signature does not verify, so its tags are
     /// not the requester's statement whatever they say.
     InvalidSignature,
     /// The quoted event does not match the shape its kind requires.
     Shape(ShapeReason),
     /// The quote's requester pubkey hint is not the quoted event's author.
-    RequesterHintMismatch { hint: PublicKey, author: PublicKey },
+    RequesterHintMismatch {
+        hint: PublicKey,
+        author: PublicKey,
+    },
     /// The request's author is not a confirmed repository maintainer.
     AuthorNotConfirmedMaintainer(PublicKey),
     /// None of the request's `a` coordinates names a confirmed member.
@@ -67,9 +77,15 @@ pub enum ProvenanceRejection {
     /// The request does not `p` tag the run's coordinator.
     CoordinatorNotAddressed(PublicKey),
     /// The Manual Trigger authorized a different workflow file or content.
-    WorkflowMismatch { expected: String, found: String },
+    WorkflowMismatch {
+        expected: String,
+        found: String,
+    },
     /// The Manual Trigger authorized a different commit.
-    CommitMismatch { expected: String, found: String },
+    CommitMismatch {
+        expected: String,
+        found: String,
+    },
     /// The Manual Trigger's pull-request context is not the run's.
     PullRequestContextMismatch {
         expected: Option<EventId>,
@@ -80,6 +96,9 @@ pub enum ProvenanceRejection {
 impl fmt::Display for ProvenanceRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ExtendedContextMismatch => {
+                write!(f, "the request issue/release context differs from the run")
+            }
             Self::NoQuote => write!(f, "the run carries no request-provenance quote"),
             Self::EventIdMismatch { quoted, supplied } => {
                 write!(f, "quote names {quoted} but {supplied} was supplied")
@@ -449,6 +468,29 @@ fn validate_manual_trigger(
             expected: run.commit().to_owned(),
             found: trigger.common.commit().to_owned(),
         });
+    }
+    let restart = run
+        .result
+        .as_ref()
+        .and_then(|r| r.details.restart.as_ref())
+        .or_else(|| {
+            run.progress
+                .as_ref()
+                .and_then(|p| p.details.restart.as_ref())
+        });
+    if restart != trigger.restart.as_ref() {
+        return Err(ProvenanceRejection::ExtendedContextMismatch);
+    }
+    use super::kinds::TriggerContext;
+    if (matches!(
+        trigger.common.context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    ) || matches!(
+        run.common().context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    )) && trigger.common.context != run.common().context
+    {
+        return Err(ProvenanceRejection::ExtendedContextMismatch);
     }
     if trigger.common.pr_root() != run.pr_root {
         return Err(ProvenanceRejection::PullRequestContextMismatch {

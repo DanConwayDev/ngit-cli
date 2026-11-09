@@ -160,7 +160,7 @@ pub fn run_requester(run: &WorkflowRun) -> Option<PublicKey> {
 
 /// Reduce the control history for one perspective and return the Requests
 /// still open at `at`.
-fn open_requests<'a>(
+pub(crate) fn open_requests<'a>(
     controls: &'a [ServiceControl],
     coordinator: &PublicKey,
     perspective: &Coordinate,

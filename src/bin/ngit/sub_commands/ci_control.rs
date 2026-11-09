@@ -1,5 +1,5 @@
-//! `ngit ci request|stop|trigger` — the maintainer controls that publish the
-//! Level 1 evidence `ngit ci status` consumes.
+//! `ngit ci request|stop|trigger|cancel` — the maintainer controls that publish
+//! the Level 1 evidence `ngit ci status` consumes.
 //!
 //! A Service Request (9843) and a Service Stop (9844) are standing controls
 //! over one repository perspective; a Manual Trigger (9840) is a one-shot
@@ -12,7 +12,8 @@
 //! acceptance policy is the coordinator's. ngit warns when the signer is not
 //! a confirmed maintainer — the default policy accepts only those — but the
 //! NIP lets an operator accept other requesters, so it is a warning and never
-//! a refusal.
+//! a refusal for those controls. Exact-run cancellation requires confirmed
+//! maintainership and is refused locally when that authority is unavailable.
 
 use std::path::Path;
 
@@ -21,7 +22,8 @@ use bitcoin_hashes::sha256;
 use ngit::{
     ci::kinds::{
         KIND_CI_MANUAL_TRIGGER, KIND_CI_SERVICE_REQUEST, KIND_CI_SERVICE_STOP,
-        validate_manual_trigger, validate_service_control,
+        KIND_CI_WORKFLOW_CANCELLATION, KIND_CI_WORKFLOW_FORCED_CANCELLATION,
+        validate_manual_trigger, validate_service_control, validate_workflow_cancellation,
     },
     client::{Params, get_state_from_cache, send_events_with_results, sign_event},
     login::user::get_user_details,
@@ -141,6 +143,80 @@ async fn launch_service_control(
     Ok(())
 }
 
+/// Publish an exact-run cancellation from a confirmed repository maintainer.
+///
+/// # Errors
+/// Returns an error for malformed identity, unavailable repository, unconfirmed
+/// maintainer, signing failure or unsuccessful publication.
+pub async fn launch_cancel(
+    coordinator: &str,
+    run_id: &str,
+    force: bool,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    let coordinator = parse_coordinator(coordinator)?;
+    if run_id.len() != 64
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!(
+            "invalid workflow run id; pass the exact 64-character lowercase hexadecimal run id from `ngit ci status`"
+        );
+    }
+    let git_repo = Repo::discover().context("failed to find a git repository")?;
+    let mut prepared = Prepared::new(git_repo, offline, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!(
+            "workflow cancellation requires a confirmed repository maintainer; select an authorized signer with --signer"
+        );
+    }
+    // A run belongs to an exact perspective. Unlike standing service requests,
+    // cancellation must not substitute the signer's own announcement.
+    let perspective = Coordinate {
+        kind: Kind::GitRepoAnnouncement,
+        public_key: prepared.repo_ref.selected_maintainer,
+        identifier: prepared.repo_ref.identifier.clone(),
+    };
+    let kind = if force {
+        KIND_CI_WORKFLOW_FORCED_CANCELLATION
+    } else {
+        KIND_CI_WORKFLOW_CANCELLATION
+    };
+    let event = prepared
+        .sign(
+            EventBuilder::new(kind, "").tags([
+                Tag::coordinate(perspective.clone(), None),
+                Tag::public_key(coordinator),
+                Tag::custom("r", [run_id]),
+            ]),
+            "CI workflow cancellation",
+        )
+        .await?;
+    validate_workflow_cancellation(&event)
+        .map_err(|reason| malformed(kind.as_u16(), &reason.to_string()))?;
+    let event_id = event.id;
+    prepared.publish(vec![event], coordinator, offline).await?;
+    if crate::output::is_json() {
+        crate::output::set_value(serde_json::json!({
+            "command_status": "ok", "action": "cancellation-requested", "entity": "ci",
+            "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()),
+            "coordinator": coordinator.to_bech32().unwrap_or_else(|_| coordinator.to_hex()),
+            "repository": naddr(&perspective, prepared.relay_hint()), "run_id": run_id,
+            "forced": force,
+        }));
+    }
+    println!(
+        "Cancellation requested for run {run_id}; use `ngit ci status` to observe confirmed completion."
+    );
+    Ok(())
+}
+
 /// Publish a kind-9840 Manual Trigger.
 ///
 /// # Errors
@@ -154,9 +230,15 @@ pub async fn launch_trigger(
     commit_ish: Option<&str>,
     workflow: &str,
     git_ref: Option<&str>,
+    selection: &crate::cli::CiExecutionSelection,
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
+    if selection.rerun_dependencies && !workflow.starts_with(".ngit/nix/workflows/") {
+        bail!(
+            "--rerun-dependencies requires a native Nix workflow under .ngit/nix/workflows/; omit the flag for other workflows"
+        );
+    }
     let coordinator = parse_coordinator(coordinator)?;
     if let Some(git_ref) = git_ref {
         if !git_ref.starts_with("refs/") {
@@ -181,11 +263,7 @@ pub async fn launch_trigger(
     let perspective = prepared.perspective();
     let mut tags = vec![Tag::public_key(coordinator)];
     for coordinate in prepared.announcement_coordinates(&perspective) {
-        // No relay hint: the NIP grants one to a Service Request's `a` tag,
-        // not to the common tags, and a coordinator that parses the common
-        // tags strictly drops a Manual Trigger whose `a` has a third
-        // element. A hint here would buy nothing anyway — the coordinator
-        // already watches the repository it serves.
+        // Emit minimal addresses; current coordinators also accept relay hints.
         tags.push(Tag::coordinate(coordinate, None));
     }
     for commit in &resolved.ids {
@@ -195,6 +273,13 @@ pub async fn launch_trigger(
     if let Some(git_ref) = git_ref {
         tags.push(Tag::parse(["r", git_ref])?);
     }
+
+    tags.extend(selection_tags(
+        &prepared.git_repo,
+        &resolved,
+        workflow,
+        selection,
+    )?);
 
     let event = prepared
         .sign(
@@ -224,6 +309,9 @@ pub async fn launch_trigger(
             "workflow": workflow,
             "workflow_hash": workflow_hash,
             "ref": git_ref,
+            "rerun_dependencies": selection.rerun_dependencies,
+            "environments": selection.environment,
+            "requirements": selection.requirements,
             "warning": warning,
         }));
     }
@@ -558,4 +646,364 @@ fn short(id: &str) -> &str {
 /// something to publish and let a coordinator puzzle over.
 fn malformed(kind: u16, reason: &str) -> anyhow::Error {
     anyhow::anyhow!("ngit built a malformed kind-{kind} event: {reason}")
+}
+
+fn selection_tags(
+    repo: &Repo,
+    resolved: &ResolvedCommit,
+    workflow: &str,
+    selection: &crate::cli::CiExecutionSelection,
+) -> Result<Vec<Tag>> {
+    if selection.environment.is_empty() && selection.requirements.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !workflow.starts_with(".ngit/nix/workflows/") {
+        bail!("environment and resource overrides require a native Nix workflow");
+    }
+    let jobs = workflow_jobs(repo, resolved, workflow)?;
+    let mut tags = Vec::new();
+    for raw in &selection.environment {
+        let (job, value) = raw
+            .split_once('=')
+            .context("use --environment JOB=SHA256[,URL]")?;
+        if !jobs.contains(job) {
+            bail!("environment override names an unknown workflow job");
+        }
+        let (hash, url) = value.split_once(',').unwrap_or((value, ""));
+        tags.push(Tag::parse(["x", hash, url, job])?);
+    }
+    for raw in &selection.requirements {
+        let (job, expression) = raw
+            .split_once('=')
+            .context("use --require JOB=PATH:OP:JSON")?;
+        if !jobs.contains(job) {
+            bail!("resource override names an unknown workflow job");
+        }
+        ngit::ci::details::requirement(expression).context("invalid manual resource predicate")?;
+        tags.push(Tag::parse(["f", expression, job])?);
+    }
+    Ok(tags)
+}
+
+fn workflow_jobs(
+    repo: &Repo,
+    resolved: &ResolvedCommit,
+    workflow: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let repository = git2::Repository::open(repo.get_path()?)?;
+    let commit = repository.find_commit(git2::Oid::from_str(&resolved.commit)?)?;
+    let tree = commit.tree()?;
+    let entry = tree
+        .get_path(Path::new(workflow))
+        .context("workflow missing at source commit")?;
+    let blob = repository.find_blob(entry.id())?;
+    let yaml: serde_json::Value = serde_saphyr::from_str(std::str::from_utf8(blob.content())?)
+        .context("invalid native workflow YAML")?;
+    let jobs = yaml
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .context("native workflow requires a jobs mapping")?;
+    Ok(jobs.keys().cloned().collect())
+}
+
+/// Publish a restart of an exact signed completed result, preserving its
+/// inputs.
+pub async fn launch_rerun(
+    coordinator: &str,
+    result: &str,
+    job: Option<&str>,
+    selection: &crate::cli::CiExecutionSelection,
+    offline: bool,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    use ngit::client::get_events_from_local_cache;
+    use nostr::prelude::{EventId, Filter};
+    if selection.rerun_dependencies {
+        bail!("restart retains external dependencies; use ci trigger for a fresh dependency graph");
+    }
+    let id = EventId::parse(result)
+        .context("restart requires a full Workflow Result event id or nevent")?;
+    let coordinator = parse_coordinator(coordinator)?;
+    let mut prepared = Prepared::new(Repo::discover()?, offline, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!("workflow restart requires a confirmed repository maintainer");
+    }
+    let filter = Filter::default()
+        .id(id)
+        .kind(ngit::ci::kinds::KIND_CI_WORKFLOW_RESULT)
+        .author(coordinator);
+    let mut events =
+        get_events_from_local_cache(prepared.git_repo.get_path()?, vec![filter.clone()]).await?;
+    if events.is_empty() && !offline {
+        events = prepared
+            .client
+            .get_events(
+                prepared
+                    .repo_ref
+                    .relays
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                vec![filter],
+            )
+            .await?;
+    }
+    let source = events
+        .into_iter()
+        .find(|e| e.id == id && e.pubkey == coordinator)
+        .context(
+            "source Workflow Result unavailable; refresh CI status or retry without --offline",
+        )?;
+    source
+        .verify()
+        .context("invalid source Workflow Result signature")?;
+    let parsed = ngit::ci::kinds::validate_workflow_result(&source)
+        .context("invalid source Workflow Result")?;
+    if !parsed
+        .common
+        .workflow
+        .path
+        .starts_with(".ngit/nix/workflows/")
+    {
+        bail!("current ngit-ci supports rerun only for native Nix workflows");
+    }
+    let resolved = validate_restart_source(&prepared, &parsed, job)?;
+    let workflow = &parsed.common.workflow.path;
+    let mut tags = restart_context_tags(&source, coordinator, id, job)?;
+    tags.extend(selection_tags(
+        &prepared.git_repo,
+        &resolved,
+        workflow,
+        selection,
+    )?);
+    let event = prepared
+        .sign(
+            EventBuilder::new(KIND_CI_MANUAL_TRIGGER, "").tags(tags),
+            "CI workflow restart",
+        )
+        .await?;
+    validate_manual_trigger(&event).context("invalid workflow rerun request")?;
+    let event_id = event.id;
+    prepared.publish(vec![event], coordinator, offline).await?;
+    if crate::output::is_json() {
+        crate::output::set_value(
+            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "rerun-requested", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "source": crate::output::event_id_to_nevent(id, prepared.repo_ref.relays.first()), "job": job, "workflow": workflow, "commit": resolved.commit, "coordinator": coordinator.to_bech32()?, "environments": selection.environment, "requirements": selection.requirements}),
+        );
+    }
+    println!(
+        "Rerun requested; the coordinator validates retained evidence and admission. Use ci status to observe the new attempt."
+    );
+    Ok(())
+}
+
+fn validate_restart_source(
+    prepared: &Prepared,
+    parsed: &ngit::ci::kinds::WorkflowResult,
+    job: Option<&str>,
+) -> Result<ResolvedCommit> {
+    let coordinates = prepared.repo_ref.coordinates();
+    if !parsed
+        .common
+        .repositories
+        .iter()
+        .any(|r| coordinates.iter().any(|c| c.coordinate == r.coordinate))
+    {
+        bail!("source Workflow Result belongs to a different repository");
+    }
+    let resolved = resolve_commit_ish_strict(&prepared.git_repo, parsed.common.commit())?;
+    for oid in &parsed.common.commits {
+        if resolve_commit_ish_strict(&prepared.git_repo, oid)?.commit != resolved.commit {
+            bail!("source commit objects do not peel to the same commit");
+        }
+    }
+    let workflow = &parsed.common.workflow.path;
+    if workflow_blob_sha256(&prepared.git_repo, &resolved, workflow)?
+        != parsed.common.workflow.sha256
+    {
+        bail!("source workflow hash does not match the source commit");
+    }
+    if let Some(job) = job {
+        if !workflow_jobs(&prepared.git_repo, &resolved, workflow)?.contains(job) {
+            bail!("restart job is absent from the source workflow");
+        }
+    }
+    Ok(resolved)
+}
+
+/// Provision encrypted secret values without placing them on argv or in output.
+pub async fn launch_secrets(
+    args: &crate::cli::CiSecretsArgs,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    use ngit::ci::secrets::{inbox, update};
+    use nostr::prelude::{Filter, Timestamp};
+    let values = read_secret_values(args)?;
+    let coordinator = parse_coordinator(&args.coordinator)?;
+    let mut prepared = Prepared::new(Repo::discover()?, false, auth).await?;
+    if !prepared
+        .repo_ref
+        .confirmed_maintainers()
+        .contains(&prepared.user_pubkey)
+    {
+        bail!("secret updates require a confirmed repository maintainer");
+    }
+    let mut advertisements = prepared
+        .client
+        .get_events(
+            prepared
+                .repo_ref
+                .relays
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            vec![Filter::new().kind(Kind::Custom(19843)).author(coordinator)],
+        )
+        .await?;
+    advertisements
+        .retain(|e| e.kind == Kind::Custom(19843) && e.pubkey == coordinator && e.verify().is_ok());
+    let advertisement = advertisements.into_iter().max_by_key(|e| ngit::ci::total_order_position(e.created_at, e.id)).context("no signed coordinator advertisement found on repository relays; inspect ci inspect before retrying")?;
+    let inbox = inbox(&advertisement, coordinator, Timestamp::now())?;
+    let repository = Coordinate {
+        kind: Kind::GitRepoAnnouncement,
+        public_key: prepared.user_pubkey,
+        identifier: prepared.repo_ref.identifier.clone(),
+    };
+    if !prepared
+        .repo_ref
+        .coordinates()
+        .iter()
+        .any(|c| c.coordinate == repository)
+    {
+        bail!("secret provisioning requires the signer's own confirmed repository announcement");
+    }
+    let relay_hint = prepared
+        .repo_ref
+        .relays
+        .first()
+        .map_or("", RelayUrl::as_str);
+    let builder = update(
+        prepared.user_pubkey,
+        repository.clone(),
+        relay_hint,
+        &inbox,
+        &values,
+        &args.remove,
+        Timestamp::now(),
+    )?;
+    let event = prepared.sign(builder, "encrypted CI secret update").await?;
+    if Timestamp::now() >= inbox.expiration {
+        bail!("coordinator secret key expired while signing; retry with a fresh advertisement");
+    }
+    let event_id = event.id;
+    let mut relays = inbox.relays.clone();
+    for relay in &prepared.repo_ref.relays {
+        if !relays.contains(relay) {
+            relays.push(relay.clone());
+        }
+    }
+    prepared.client.set_signer(prepared.signer.clone()).await;
+    let outcomes = send_events_with_results(
+        &prepared.client,
+        Some(prepared.git_repo.get_path()?),
+        vec![event],
+        Vec::new(),
+        relays,
+        true,
+        false,
+    )
+    .await?;
+    if !outcomes.iter().any(|(relay, accepted)| {
+        *accepted
+            && inbox
+                .relays
+                .iter()
+                .any(|inbox| inbox.as_str() == relay.as_str())
+    }) {
+        bail!(
+            "no advertised secret inbox accepted the update; retry after checking coordinator connectivity"
+        );
+    }
+    if crate::output::is_json() {
+        crate::output::set_value(
+            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "secret-update-published", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "coordinator": coordinator.to_bech32()?, "repository": naddr(&repository, prepared.relay_hint()), "set": values.0.keys().collect::<Vec<_>>(), "remove": args.remove}),
+        );
+    }
+    println!(
+        "Encrypted secret update published; inspect coordinator repository status (kind 39844) for accepted names and update times."
+    );
+    Ok(())
+}
+
+fn restart_context_tags(
+    source: &Event,
+    coordinator: PublicKey,
+    id: nostr::prelude::EventId,
+    job: Option<&str>,
+) -> Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = source
+        .tags
+        .iter()
+        .filter(|t| {
+            let t = t.as_slice();
+            matches!(
+                t[0].as_str(),
+                "a" | "c"
+                    | "w"
+                    | "E"
+                    | "K"
+                    | "P"
+                    | "e"
+                    | "k"
+                    | "issue"
+                    | "release"
+                    | "release-asset"
+            ) || t[0] == "r" && t.get(1).is_some_and(|r| r.starts_with("refs/"))
+        })
+        .cloned()
+        .collect();
+    tags.push(Tag::public_key(coordinator));
+    let mut restart = vec!["U".to_owned(), id.to_hex()];
+    if let Some(job) = job {
+        restart.push(job.into());
+    }
+    tags.push(Tag::parse(restart)?);
+    Ok(tags)
+}
+
+fn read_secret_values(args: &crate::cli::CiSecretsArgs) -> Result<ngit::ci::secrets::SecretValues> {
+    use ngit::ci::secrets::SecretValues;
+    use zeroize::Zeroizing;
+    let mut values = if let Some(path) = &args.set_file {
+        use std::io::Read;
+        let file = std::fs::File::open(path).context("failed to open secret values file")?;
+        if !file.metadata()?.is_file() {
+            bail!("secret values path must be a regular file");
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(65_536)
+            .read_to_end(&mut bytes)
+            .context("failed to read secret values file")?;
+        if bytes.len() > 65_535 {
+            bail!("secret values file exceeds the payload size limit");
+        }
+        serde_json::from_slice::<SecretValues>(&bytes).map_err(|_| {
+            anyhow::anyhow!("secret values file must contain unique names and string values")
+        })?
+    } else {
+        SecretValues::default()
+    };
+    for name in &args.set_from_env {
+        if values.0.contains_key(name) {
+            bail!("secret name supplied more than once");
+        }
+        let value = std::env::var(name).map_err(|_| {
+            anyhow::anyhow!("a requested secret environment variable is missing or not UTF-8")
+        })?;
+        values.0.insert(name.clone(), value);
+    }
+    Ok(values)
 }

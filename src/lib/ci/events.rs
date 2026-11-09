@@ -49,6 +49,7 @@ pub struct WorkflowRun {
     pub result: Option<WorkflowResult>,
     /// Latest Job Result per job id, sorted by job id.
     pub jobs: Vec<JobResult>,
+    pub live_jobs: Vec<super::kinds::JobProgress>,
 }
 
 /// Whether a run is executing, finished, or abandoned.
@@ -67,6 +68,23 @@ impl WorkflowRun {
     #[must_use]
     pub fn commit(&self) -> &str {
         self.commits.first().map_or("", String::as_str)
+    }
+
+    /// Signed context of the authoritative aggregate.
+    #[must_use]
+    pub fn common(&self) -> &super::kinds::CommonTags {
+        self.result
+            .as_ref()
+            .map(|r| &r.common)
+            .or_else(|| self.progress.as_ref().map(|p| &p.common))
+            .expect("a run has an aggregate")
+    }
+
+    /// Distinct branch, PR, issue and release contexts are independent even
+    /// at one commit.
+    #[must_use]
+    pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
+        self.common().context.as_ref()
     }
 
     /// The event id of the run's container, preferring the immutable result.
@@ -172,12 +190,9 @@ impl WorkflowRun {
     /// that accepts the job.
     #[must_use]
     pub fn result_accepts_job(&self, job: &JobResult) -> bool {
-        self.result.as_ref().is_some_and(|result| {
-            result
-                .jobs
-                .iter()
-                .any(|quote| quote.event_id == job.event_id)
-        })
+        self.result
+            .as_ref()
+            .is_some_and(|result| result.jobs.iter().any(|quote| quote_matches(quote, job)))
     }
 }
 
@@ -244,6 +259,8 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
     // execution claim, so one signer's event must never replace another's.
     let mut jobs: HashMap<RunKey, HashMap<(String, PublicKey), JobResult>> = HashMap::new();
 
+    let mut all_jobs = HashMap::new();
+    let mut snapshots = HashMap::new();
     for event in events {
         if !kinds::CONSUMED_CI_KINDS.contains(&event.kind) {
             continue;
@@ -278,7 +295,17 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
                     total_order_position(marker.created_at, marker.event_id)
                 });
             }
+            CiEvent::JobProgress(job) => {
+                let identity = (
+                    job.author,
+                    job.details.allocation.expect("validated allocation"),
+                );
+                keep_later(snapshots.entry(identity), job, |j| {
+                    total_order_position(j.created_at, j.event_id)
+                });
+            }
             CiEvent::JobResult(job) => {
+                all_jobs.insert(job.event_id, job.clone());
                 let key = RunKey {
                     coordinator: job.run.coordinator,
                     run_id: job.run.run_id.clone(),
@@ -292,6 +319,8 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
         }
     }
 
+    let all_results: HashMap<EventId, WorkflowResult> =
+        results.values().map(|r| (r.event_id, r.clone())).collect();
     let mut runs: Vec<WorkflowRun> = Vec::new();
     let mut keys: Vec<RunKey> = results.keys().cloned().collect();
     keys.extend(
@@ -303,12 +332,88 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
     for key in keys {
         let result = results.remove(&key);
         let marker = progress.remove(&key);
-        let candidates: Vec<JobResult> = jobs
+        let mut candidates: Vec<JobResult> = jobs
             .remove(&key)
             .map(|by_key| by_key.into_values().collect())
             .unwrap_or_default();
+        let container = result
+            .as_ref()
+            .map(|r| (&r.common, &r.details, &r.jobs))
+            .or_else(|| marker.as_ref().map(|p| (&p.common, &p.details, &p.jobs)));
+        if let Some((common, details, quotes)) = container {
+            // A workflow can quote several executions with the same job key
+            // (for example act matrix instances). Retain each exact result.
+            for quote in quotes {
+                if let Some(job) = all_jobs.get(&quote.event_id) {
+                    if job.run.coordinator == key.coordinator
+                        && job.run.run_id == key.run_id
+                        && same_execution_context(common, &job.common)
+                        && quote_matches(quote, job)
+                        && !candidates.iter().any(|j| j.event_id == job.event_id)
+                    {
+                        candidates.push(job.clone());
+                    }
+                }
+            }
+            if let Some(source) = details
+                .restart
+                .as_ref()
+                .and_then(|u| all_results.get(&u.result))
+            {
+                if source.author == key.coordinator
+                    && same_execution_context(common, &source.common)
+                {
+                    for quote in quotes {
+                        if let Some(job) = all_jobs.get(&quote.event_id) {
+                            if job.run.coordinator == key.coordinator
+                                && same_execution_context(common, &job.common)
+                                && quote_matches(quote, job)
+                                && source.jobs.iter().any(|q| quote_matches(q, job))
+                                && !candidates.iter().any(|j| j.event_id == job.event_id)
+                            {
+                                candidates.push(job.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((common, _, _)) = container {
+            candidates.retain(|job| same_execution_context(common, &job.common));
+        }
         let run_jobs = select_jobs(result.as_ref(), candidates);
-        runs.push(build_run(key, result, marker, run_jobs));
+        let live_jobs = if result.is_none() {
+            marker
+                .as_ref()
+                .filter(|marker| marker.is_pending())
+                .map(|marker| {
+                    marker
+                        .details
+                        .job_progress
+                        .iter()
+                        .filter_map(|quote| {
+                            snapshots
+                                .get(&(quote.provider, quote.allocation))
+                                .filter(|job| {
+                                    job.run.coordinator == key.coordinator
+                                        && job.run.run_id == key.run_id
+                                        && job.job_id == quote.job
+                                        && same_execution_context(&job.common, &marker.common)
+                                        && !run_jobs
+                                            .iter()
+                                            .any(|terminal| terminal.job_id == job.job_id)
+                                })
+                                .cloned()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut run = build_run(key, result, marker, run_jobs);
+        run.live_jobs = live_jobs;
+        runs.push(run);
     }
 
     // Every remaining job names a run with no container.
@@ -332,9 +437,32 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
 /// another signer cannot displace or shadow it. Where nothing was accepted
 /// for a job id, every signer's latest claim is surfaced so the caller can
 /// see the competing claims rather than one silently winning.
+fn same_execution_context(a: &super::kinds::CommonTags, b: &super::kinds::CommonTags) -> bool {
+    a.commits == b.commits
+        && a.workflow == b.workflow
+        && a.context == b.context
+        && a.repositories
+            .iter()
+            .any(|r| b.repositories.iter().any(|s| s.coordinate == r.coordinate))
+}
+
+fn quote_matches(quote: &super::kinds::JobQuote, job: &JobResult) -> bool {
+    quote.event_id == job.event_id
+        && quote.job_id == job.job_id
+        && quote.publisher.is_none_or(|p| p == job.author)
+        && quote.conclusion.is_none_or(|c| c == job.conclusion)
+}
+
 fn select_jobs(result: Option<&WorkflowResult>, candidates: Vec<JobResult>) -> Vec<JobResult> {
     let accepted: HashSet<EventId> = result
-        .map(|result| result.jobs.iter().map(|quote| quote.event_id).collect())
+        .map(|result| {
+            result
+                .jobs
+                .iter()
+                .filter(|q| candidates.iter().any(|j| quote_matches(q, j)))
+                .map(|quote| quote.event_id)
+                .collect()
+        })
         .unwrap_or_default();
     let accepted_job_ids: HashSet<String> = candidates
         .iter()
@@ -366,9 +494,13 @@ fn select_jobs(result: Option<&WorkflowResult>, candidates: Vec<JobResult>) -> V
 /// selected as current.
 #[must_use]
 pub fn latest_attempts(runs: &[WorkflowRun]) -> Vec<&WorkflowRun> {
-    let mut latest: HashMap<(PublicKey, &str), &WorkflowRun> = HashMap::new();
+    let mut latest = HashMap::<_, &WorkflowRun>::new();
     for run in runs {
-        let key = (run.coordinator, run.workflow_path.as_str());
+        let key = (
+            run.coordinator,
+            run.workflow_path.as_str(),
+            run.activity_context(),
+        );
         latest
             .entry(key)
             .and_modify(|current| {
@@ -443,6 +575,7 @@ fn build_run(
         progress,
         result,
         jobs,
+        live_jobs: Vec::new(),
     }
 }
 
@@ -494,6 +627,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["build", "test"]
         );
+    }
+
+    #[test]
+    fn exact_quotes_preserve_multiple_instances_of_one_job() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let provider = Keys::generate();
+        let a = job_result(&provider, &coordinator, &owner, "run", "test", 100);
+        let b = job_result(&provider, &coordinator, &owner, "run", "test", 101);
+        let result = with_tags(
+            &coordinator,
+            &workflow_result(&coordinator, &owner, "run", 102),
+            |tags| {
+                for event in [&a, &b] {
+                    tags.push(tag(&[
+                        "q",
+                        &event.id.to_hex(),
+                        "",
+                        &provider.public_key().to_hex(),
+                        "test",
+                        "success",
+                    ]));
+                }
+            },
+        );
+        let grouped = group_workflow_runs([&a, &b, &result]);
+        assert_eq!(grouped.runs[0].jobs.len(), 2);
     }
 
     #[test]
@@ -790,5 +950,194 @@ mod tests {
 
         let quoted = group_workflow_runs(&[job, quoting]);
         assert!(quoted.runs[0].result_accepts_job(&quoted.runs[0].jobs[0]));
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use nostr::prelude::Keys;
+
+    use super::{super::kinds::test_events::*, *};
+
+    #[test]
+    fn restart_retains_exact_original_job_only_with_matching_source() {
+        let coordinator = Keys::generate();
+        let owner = Keys::generate();
+        let provider = Keys::generate();
+        let job = job_result(&provider, &coordinator, &owner, "original", "build", 90);
+        let quote = tag(&[
+            "q",
+            &job.id.to_hex(),
+            "",
+            &provider.public_key().to_hex(),
+            "build",
+            "success",
+        ]);
+        let source = with_tags(
+            &coordinator,
+            &workflow_result(&coordinator, &owner, "original", 100),
+            |tags| tags.push(quote.clone()),
+        );
+        let resumed = with_tags(
+            &coordinator,
+            &workflow_result(&coordinator, &owner, "resumed", 200),
+            |tags| tags.extend([quote.clone(), tag(&["U", &source.id.to_hex()])]),
+        );
+        let events = [&job, &source, &resumed];
+        let runs = group_workflow_runs(events);
+        let run = runs.runs.iter().find(|r| r.run_id == "resumed").unwrap();
+        assert_eq!(run.jobs[0].event_id, job.id);
+        assert_eq!(run.jobs[0].run.run_id, "original");
+        assert!(run.result_accepts_job(&run.jobs[0]));
+        let runs = group_workflow_runs([&job, &resumed]);
+        assert!(
+            runs.runs
+                .iter()
+                .find(|r| r.run_id == "resumed")
+                .unwrap()
+                .jobs
+                .is_empty()
+        );
+        let wrong = with_tags(&coordinator, &resumed, |tags| {
+            tags.retain(|t| t.as_slice()[0] != "c");
+            tags.push(tag(&["c", &"ab".repeat(20)]));
+        });
+        let runs = group_workflow_runs([&job, &source, &wrong]);
+        assert!(
+            runs.runs
+                .iter()
+                .find(|r| r.run_id == "resumed")
+                .unwrap()
+                .jobs
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod job_progress_tests {
+    use nostr::prelude::Keys;
+
+    use super::{
+        super::kinds::{KIND_CI_JOB_PROGRESS, ProgressStatus, test_events::*},
+        *,
+    };
+
+    #[test]
+    fn snapshots_require_exact_provider_allocation_and_are_superseded_by_results() {
+        let coordinator = Keys::generate();
+        let provider = Keys::generate();
+        let outsider = Keys::generate();
+        let allocation = "ab".repeat(32);
+        let mut tags = common_tags(&coordinator);
+        tags.extend([
+            tag(&["d", &allocation]),
+            tag(&["expiration", "1000"]),
+            tag(&["job", "build"]),
+            tag(&["q", &format!("39842:{}:run", coordinator.public_key())]),
+            tag(&[
+                "q",
+                &allocation,
+                "",
+                &coordinator.public_key().to_hex(),
+                "job-allocation",
+            ]),
+            tag(&[
+                "step",
+                "compile",
+                "Compile",
+                "0",
+                "10",
+                "success",
+                "artifacts-uploading",
+            ]),
+        ]);
+        let snapshot = event(&provider, KIND_CI_JOB_PROGRESS, 100, tags.clone());
+        let marker = with_tags(
+            &coordinator,
+            &workflow_progress(
+                &coordinator,
+                &coordinator,
+                "run",
+                ProgressStatus::InProgress,
+                100,
+                1000,
+            ),
+            |tags| {
+                tags.push(tag(&[
+                    "q",
+                    &format!("39846:{}:{allocation}", provider.public_key()),
+                    "",
+                    &provider.public_key().to_hex(),
+                    "build",
+                ]))
+            },
+        );
+        let runs = group_workflow_runs([&snapshot, &marker]);
+        assert_eq!(runs.runs[0].live_jobs.len(), 1);
+        assert_eq!(
+            runs.runs[0].state(Timestamp::from_secs(200)),
+            RunState::Running
+        );
+        let concluded = with_tags(&coordinator, &marker, |tags| {
+            tags.retain(|tag| tag.as_slice()[0] != "status");
+            tags.push(tag(&["status", "concluded"]));
+            tags.push(tag(&["conclusion", "success"]));
+        });
+        assert!(
+            group_workflow_runs([&snapshot, &concluded]).runs[0]
+                .live_jobs
+                .is_empty()
+        );
+        let spoof = event(&outsider, KIND_CI_JOB_PROGRESS, 101, tags.clone());
+        assert!(
+            group_workflow_runs([&spoof, &marker]).runs[0]
+                .live_jobs
+                .is_empty()
+        );
+        tags.push(tag(&["conclusion", "success"]));
+        assert!(
+            kinds::validate_job_progress(&event(&provider, KIND_CI_JOB_PROGRESS, 100, tags))
+                .is_err()
+        );
+        let result = workflow_result(&coordinator, &coordinator, "run", 200);
+        assert!(
+            group_workflow_runs([&snapshot, &marker, &result]).runs[0]
+                .live_jobs
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use nostr::prelude::Keys;
+
+    use super::{super::kinds::test_events::*, *};
+
+    #[test]
+    fn independent_issue_activity_at_one_commit_is_not_a_retry() {
+        let coordinator = Keys::generate();
+        let make = |root: &str, run: &str, time| {
+            with_tags(
+                &coordinator,
+                &workflow_result(&coordinator, &coordinator, run, time),
+                |tags| {
+                    tags.retain(|t| t.as_slice()[0] != "o");
+                    tags.extend([
+                        tag(&["o", "issues"]),
+                        tag(&["issue", root, root, "opened", ""]),
+                    ]);
+                },
+            )
+        };
+        let first = make(&"ab".repeat(32), "first", 100);
+        let second = make(&"cd".repeat(32), "second", 200);
+        let retry = make(&"ab".repeat(32), "retry", 300);
+        let grouped = group_workflow_runs([&first, &second, &retry]);
+        let latest = latest_attempts(&grouped.runs);
+        assert_eq!(latest.len(), 2);
+        assert!(latest.iter().any(|r| r.run_id == "second"));
+        assert!(latest.iter().any(|r| r.run_id == "retry"));
     }
 }

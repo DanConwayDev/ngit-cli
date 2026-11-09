@@ -28,6 +28,11 @@ mod git_remote_helper;
 mod output;
 // Declared after `output` so the stdout-guarding `println!` macro is in
 // scope for it.
+mod ci_display;
+mod ci_event_view;
+mod ci_history;
+mod ci_plan;
+mod ci_previous;
 mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;
@@ -503,6 +508,7 @@ async fn main() {
             },
             Commands::Ci(args) => match &args.ci_command {
                 CiCommands::Status {
+                    watch,
                     target,
                     require_ci_trust,
                     log_tail,
@@ -510,18 +516,46 @@ async fn main() {
                 } => {
                     sub_commands::ci_status::launch(
                         target.as_deref(),
+                        *watch,
                         *offline,
                         *require_ci_trust,
-                        *log_tail,
+                        sub_commands::ci_status::View {
+                            detailed: false,
+                            log_tail: *log_tail,
+                        },
                         cli.json,
                         signer_params,
                     )
                     .await
                 }
+                CiCommands::Service { command } => match command {
+                    cli::CiServiceCommands::Status { offline } => {
+                        sub_commands::ci_service::launch(*offline, signer_params).await
+                    }
+                    cli::CiServiceCommands::Request {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_request(
+                            coordinator,
+                            *offline,
+                            signer_params,
+                        )
+                        .await
+                    }
+                    cli::CiServiceCommands::Stop {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
+                            .await
+                    }
+                },
                 CiCommands::Request {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci request` is deprecated; use `ci service request`");
                     sub_commands::ci_control::launch_request(coordinator, *offline, signer_params)
                         .await
                 }
@@ -529,14 +563,53 @@ async fn main() {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci stop` is deprecated; use `ci service stop`");
                     sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
                         .await
+                }
+                CiCommands::Cancel {
+                    coordinator,
+                    run_id,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_cancel(
+                        coordinator,
+                        run_id,
+                        cli.force,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
+                CiCommands::Secrets(args) => {
+                    sub_commands::ci_control::launch_secrets(args, signer_params).await
+                }
+                CiCommands::Inspect(args) => {
+                    sub_commands::ci_inspect::launch(args, signer_params).await
+                }
+                CiCommands::Rerun {
+                    coordinator,
+                    result,
+                    job,
+                    selection,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_rerun(
+                        coordinator,
+                        result,
+                        job.as_deref(),
+                        selection,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
                 CiCommands::Trigger {
                     coordinator,
                     commit_ish,
                     workflow,
                     git_ref,
+                    selection,
                     offline,
                 } => {
                     sub_commands::ci_control::launch_trigger(
@@ -544,6 +617,7 @@ async fn main() {
                         commit_ish.as_deref(),
                         workflow,
                         git_ref.as_deref(),
+                        selection,
                         *offline,
                         signer_params,
                     )

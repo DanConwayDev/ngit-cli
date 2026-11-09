@@ -1,4 +1,25 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+static JSON_STREAM: AtomicBool = AtomicBool::new(false);
+pub fn start_stream() {
+    JSON_STREAM.store(true, Ordering::Relaxed);
+}
+pub fn is_stream() -> bool {
+    JSON_STREAM.load(Ordering::Relaxed)
+}
+
+pub async fn write_json_line(value: &serde_json::Value) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(&bytes).await?;
+    stdout.flush().await?;
+    Ok(())
+}
 
 use anyhow::Result;
 pub use ngit::output_mode::{is_json, set_json_mode};
@@ -47,6 +68,9 @@ pub fn set_event(action: &str, entity: &str, event_id: EventId, relay: Option<&R
 }
 
 pub fn finish_success() {
+    if is_stream() {
+        return;
+    }
     let value = JSON_OUTPUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -80,6 +104,10 @@ pub fn error_document(error: &anyhow::Error) -> serde_json::Value {
 }
 
 pub fn finish_error(error: &anyhow::Error) {
+    if is_stream() {
+        eprintln!("CI watch stopped: {error:#}");
+        return;
+    }
     let mut value = JSON_OUTPUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

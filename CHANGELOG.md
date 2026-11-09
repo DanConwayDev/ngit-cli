@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ci status` summarizes workflow and job progress, expanding failed jobs into
+  steps and a boxed three-line log preview. `ci inspect` details the same HEAD
+  or an explicit `--target`, with coloured outcomes, artifacts, output links and trust
+  evidence. Bold workflows start with status; plain job/step rows start with
+  right-aligned durations (seconds below an hour, hours/minutes thereafter).
+  Workflow rows show short run labels and ages. Job timings are approximate; JSON preserves precise signed values.
+  Coordinator trust is separate from execution outcomes; provider evidence stays
+  in JSON. Inspection separates workflows with blank lines, labels full-log links,
+  and shows muted, copyable log content between start/end markers
+  (`--no-logs` hides them, `--logs` includes successful jobs too).
+  Exact-event inspection remains available by ID. Reported steps retain signed
+  execution order, including provider-added preparation and cleanup. Verified
+  workflow definitions supply missing jobs, steps and dependencies without
+  predicting conditional outcomes. JSON retains execution evidence, outputs
+  and dependency bindings. Coverage diagnostics distinguish incomplete relay
+  reads, unavailable requests and skipped or failed identity checks from
+  verified maintainer direction. Optional NIP-05 lookups are skipped when signed
+  evidence already establishes the signer relationship, avoiding unrelated
+  Git-server identity failures for maintainer-authorized CI. Optional identity
+  diagnostics remain available in verbose output and JSON.
+  Earlier attempts are listed separately with relative times and exact-event
+  inspection commands; they never contribute to the current result. While current
+  CI is unresolved, a clearly labelled workflow-only summary can show the newest
+  related previous tip, with a command to inspect that exact commit. PR history
+  requires a branch association; shared commits alone do not establish one.
+  Missing PR history is reported independently of current-commit CI evidence.
+
+- Standing CI controls are now `ci service request` and `ci service stop`.
+  The old commands remain compatible and warn on stderr that they are deprecated.
+
 - Remote signer pairing keeps public-key approval guidance visible after the
   detailed report appears, including a reminder to check for a second signer
   notification.
@@ -17,9 +47,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of animations or cursor redraws, including relay, Git-server, signer,
   Git-transfer and Blossom upload reporting. Verbose mode shows details
   immediately and retains final diagnostics; normal terminal output keeps its
-  concise, delayed-detail presentation. JSON stdout remains one final document.
+  concise, delayed-detail presentation. JSON stdout remains one final document,
+  except for the event stream from `ci status --watch --json`.
 
 ### Added
+
+- `ci service status` shows coordinators with observed workflow runs in the last
+  30 days, their latest outcome and age, and dated maintainer relationships.
+  Requested coordinators with no recent observed runs remain visible. Standing requests,
+  authorization of individual runs, service claims and advertised readiness
+  remain distinct, with evidence and observation bounds available in JSON.
+  Verified NIP-05 domains or addresses label coordinators alongside their npubs;
+  profile display names and unverified identity claims are not used. Relationship
+  and acting claims precede activity, with an inspection tip last. A single start
+  uses a simple request age; repeated starts or stops show the latest three
+  maintainer requests newest first, with full observed history in JSON. Advertised
+  availability stays in JSON when an acting claim already communicates service.
+
+- `ci status --watch` streams workflow and job updates until interrupted, without
+  a timeout. `--json` emits decoded events as JSON Lines; stopping observation
+  does not cancel CI.
+
+- `ci inspect <ID>` provides detailed workflow, job and service evidence, with
+  decoded or raw signed JSON and explicit filters for protocol diagnosis.
+  `--artifacts` retrieves and verifies artifact manifests without downloading
+  their listed files.
+
+- `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt from a
+  completed result, retaining external dependency bindings. Status identifies
+  reused job results and preserves distinct executions such as matrix instances.
+  Native trigger and rerun requests also support per-job environment pins and
+  resource requirements.
+
+- `ci secrets` publishes encrypted atomic set/remove updates to an advertised
+  coordinator inbox without exposing secret values. Publication does not imply
+  coordinator acceptance.
+
+- CI status supports workflows triggered by issue opening, reopening or
+  closing, and by release publication. Results for distinct issue actions or
+  release publications remain separate even at the same Git commit.
+
+- Accept `ngit ci trigger --rerun-dependencies` for native Nix workflows.
+  Current ngit-ci reruns the entire dependency graph on ordinary manual
+  triggers too. The flag is a compatibility alias and emits no obsolete
+  `rerun` tag, which current coordinators reject.
+
+- `ngit ci cancel <COORDINATOR> <RUN-ID>` lets confirmed maintainers request
+  cancellation of one exact workflow attempt. `--force` bypasses job grace
+  periods or escalates an earlier request. JSON reports request publication,
+  not confirmed termination; inspect CI status for completion.
 
 - Remote signer requests recover automatically with three sends two minutes
   apart, then time out two minutes after the last send. Direct terminal users

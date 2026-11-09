@@ -168,11 +168,105 @@ fn runs(json: &Value) -> &Vec<Value> {
 }
 
 #[tokio::test]
+async fn cancel_publishes_exact_run_and_reports_request_not_completion() -> Result<()> {
+    let arranged = arrange("ci-cancel").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let run = "ab".repeat(32);
+    for (kind, forced) in [(9846, false), (9848, true)] {
+        let mut args = vec!["ci", "cancel", &coordinator, &run];
+        if forced {
+            args.push("--force");
+        }
+        let json = ngit_json_ok(&arranged.publisher, &args).await?;
+        assert_eq!(json["action"], "cancellation-requested");
+        assert_eq!(json["run_id"], run);
+        assert_eq!(json["forced"], forced);
+        assert!(json.get("conclusion").is_none());
+        let event = arranged.only_published(Kind::Custom(kind)).await?;
+        assert_eq!(event_id_of(&json["event"]), event.id);
+        event.verify()?;
+        let parsed = ngit::ci::kinds::validate_workflow_cancellation(&event)
+            .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+        assert_eq!(
+            parsed.repository.coordinate.to_string(),
+            repo_coordinate(&arranged.published)
+        );
+        assert_eq!(parsed.coordinator, arranged.coordinator.public_key());
+        assert_eq!(parsed.run_id, run);
+        assert_eq!(parsed.forced, forced);
+        assert!(event.content.is_empty());
+        assert_eq!(event.tags.len(), 3);
+        assert!(
+            arranged
+                .published_events(KIND_SERVICE_STOP)
+                .await?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_rejects_unconfirmed_maintainer_and_malformed_run_without_publication() -> Result<()>
+{
+    let arranged = arrange("ci-cancel-rejected").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let contributor = arranged
+        .harness
+        .clone_published_repo(
+            &arranged.published,
+            CloneLogin::AsContributor {
+                display_name: "cancel requester".into(),
+            },
+        )
+        .await?;
+    let run = "cd".repeat(32);
+    for forced in [false, true] {
+        let mut args = vec!["ci", "cancel", &coordinator, &run];
+        if forced {
+            args.push("--force");
+        }
+        let (output, json) = ngit_json(&contributor, &args).await?;
+        assert!(!output.status.success());
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("requires a confirmed repository maintainer")
+        );
+        for invalid in ["refs/heads/main", "short", &"AB".repeat(32)] {
+            args[3] = invalid;
+            let (output, json) = ngit_json(&arranged.publisher, &args).await?;
+            assert!(!output.status.success());
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid workflow run id")
+            );
+        }
+    }
+    for kind in [9846, 9848] {
+        assert!(
+            arranged
+                .published_events(Kind::Custom(kind))
+                .await?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_publishes_one_service_request_for_the_repository_and_coordinator() -> Result<()> {
     let arranged = arrange("ci-request").await?;
     let coordinator = arranged.coordinator_npub()?;
 
-    let json = ngit_json_ok(&arranged.publisher, &["ci", "request", &coordinator]).await?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "service", "request", &coordinator],
+    )
+    .await?;
     assert_eq!(json["command_status"], "ok");
     assert_eq!(json["action"], "service-requested");
     assert_eq!(json["entity"], "ci");
@@ -223,7 +317,11 @@ async fn stop_publishes_a_service_stop_with_the_same_shape() -> Result<()> {
     let arranged = arrange("ci-stop").await?;
     let coordinator = arranged.coordinator_npub()?;
 
-    let json = ngit_json_ok(&arranged.publisher, &["ci", "stop", &coordinator]).await?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "service", "stop", &coordinator],
+    )
+    .await?;
     assert_eq!(json["action"], "service-stopped");
 
     let event = arranged.only_published(KIND_SERVICE_STOP).await?;
@@ -287,6 +385,82 @@ async fn a_non_maintainer_request_warns_and_still_publishes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn trigger_can_request_a_fresh_native_dependency_chain() -> Result<()> {
+    let path = ".ngit/nix/workflows/release.yaml";
+    let yaml = "version: 1\non: push\nneeds-workflows: {ci: ci.yaml}\njobs:\n  release:\n    run: apps.x86_64-linux.release\n";
+    let arranged = arrange("ci-rerun-dependencies").await?;
+    let workflows = arranged.publisher.dir().join(".ngit/nix/workflows");
+    std::fs::create_dir_all(&workflows)?;
+    std::fs::write(workflows.join("release.yaml"), yaml)?;
+    std::fs::write(
+        workflows.join("ci.yaml"),
+        "version: 1\non: push\njobs:\n  test:\n    run: apps.x86_64-linux.test\n",
+    )?;
+    arranged
+        .publisher
+        .git_ok(["add", ".ngit"], "add native workflows")
+        .await?;
+    arranged
+        .publisher
+        .git_ok(
+            ["commit", "-m", "native workflows", "--no-gpg-sign"],
+            "commit native workflows",
+        )
+        .await?;
+    arranged.publisher.nostr_push(["origin", "main"]).await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "trigger",
+            &coordinator,
+            "--workflow",
+            path,
+            "--rerun-dependencies",
+        ],
+    )
+    .await?;
+    assert_eq!(json["rerun_dependencies"], true);
+    let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
+    assert!(
+        tag_slices(&event, "rerun").is_empty(),
+        "current coordinators reject the obsolete rerun marker"
+    );
+    let parsed = validate_manual_trigger(&event).map_err(|reason| anyhow::anyhow!("{reason}"))?;
+    assert_eq!(parsed.common.workflow.path, path);
+    assert_eq!(parsed.common.workflow.sha256, workflow_hash(yaml));
+    Ok(())
+}
+
+#[tokio::test]
+async fn trigger_rejects_dependency_rerun_for_non_native_workflow_without_publishing() -> Result<()>
+{
+    let arranged = arrange("ci-rerun-invalid").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let (out, _) = ngit_json(
+        &arranged.publisher,
+        &[
+            "ci",
+            "trigger",
+            &coordinator,
+            "--workflow",
+            "ci.yml",
+            "--rerun-dependencies",
+        ],
+    )
+    .await?;
+    assert!(!out.status.success());
+    assert!(
+        arranged
+            .published_events(KIND_MANUAL_TRIGGER)
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Result<()> {
     let arranged = arrange("ci-trigger").await?;
     let coordinator = arranged.coordinator_npub()?;
@@ -309,10 +483,12 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
     assert_eq!(json["commit"], head);
     assert_eq!(json["workflow"], "ci.yml");
     assert_eq!(json["ref"], "refs/heads/main");
+    assert_eq!(json["rerun_dependencies"], false);
 
     let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
     assert_eq!(event_id_of(&json["event"]), event.id);
 
+    assert!(tag_values(&event, "rerun").is_empty());
     let trigger = validate_manual_trigger(&event)
         .map_err(|reason| anyhow::anyhow!("published 9840 is malformed: {reason}"))?;
     assert_eq!(trigger.coordinator, arranged.coordinator.public_key());
@@ -333,9 +509,8 @@ async fn trigger_publishes_the_hash_of_the_workflow_blob_at_the_commit() -> Resu
     );
 
     // The common tags are pinned against the NIP rather than against ngit's
-    // own reader, which tolerates more than a coordinator does. In
-    // particular a third element on `a` — a relay hint the NIP grants only
-    // to a Service Request — makes a strict coordinator drop the request.
+    // own reader. Current coordinators permit trailing relay hints on `a`
+    // and `p`; ngit emits the minimal addressing form without those hints.
     let a_tags = tag_slices(&event, "a");
     assert!(
         a_tags.iter().all(|tag| tag.len() == 2),
@@ -637,5 +812,190 @@ async fn a_run_quoting_a_published_trigger_is_maintainer_directed() -> Result<()
         workflow.get(2).map(String::as_str),
         Some(workflow_hash(WORKFLOW).as_str())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_preserves_source_and_publishes_job_selection_overrides() -> Result<()> {
+    let arranged = arrange("ci-restart-selection").await?;
+    let path = ".ngit/nix/workflows/ci.yaml";
+    let yaml = "version: 1\non: push\njobs:\n  build:\n    run: apps.x86_64-linux.build\n  test:\n    run: apps.x86_64-linux.test\n";
+    std::fs::create_dir_all(arranged.publisher.dir().join(".ngit/nix/workflows"))?;
+    std::fs::write(arranged.publisher.dir().join(path), yaml)?;
+    arranged
+        .publisher
+        .git_ok(["add", path], "stage workflow")
+        .await?;
+    arranged
+        .publisher
+        .git_ok(
+            ["commit", "-m", "native workflow", "--no-gpg-sign"],
+            "commit workflow",
+        )
+        .await?;
+    arranged.publisher.nostr_push(["origin", "main"]).await?;
+    let head = arranged.publisher.rev_parse("HEAD").await?;
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "completed-source",
+        head.clone(),
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow(path, workflow_hash(yaml));
+    let source = arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+        .await?
+        .result
+        .context("source result")?;
+    let coordinator = arranged.coordinator_npub()?;
+    let env = format!("build={}", "ab".repeat(32));
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--job",
+            "build",
+            "--environment",
+            &env,
+            "--require",
+            "build=memory-mib:gte:2048",
+        ],
+    )
+    .await?;
+    assert_eq!(json["action"], "rerun-requested");
+    let request = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
+    request.verify()?;
+    let parsed = validate_manual_trigger(&request)?;
+    assert_eq!(parsed.restart.unwrap().job.as_deref(), Some("build"));
+    assert_eq!(tag_values(&request, "U"), vec![source.id.to_hex()]);
+    assert_eq!(tag_values(&request, "c"), vec![head]);
+    assert_eq!(tag_values(&request, "r"), vec!["refs/heads/main"]);
+    assert_eq!(tag_slices(&request, "x")[0][3], "build");
+    assert_eq!(tag_values(&request, "f"), vec!["memory-mib:gte:2048"]);
+    let whole = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "rerun", &coordinator, &source.id.to_hex()],
+    )
+    .await?;
+    assert!(whole["job"].is_null());
+    for event in arranged.published_events(KIND_MANUAL_TRIGGER).await? {
+        if event.id != request.id {
+            assert_eq!(tag_slices(&event, "U")[0].len(), 2);
+        }
+    }
+    let before = arranged.published_events(KIND_MANUAL_TRIGGER).await?.len();
+    for args in [
+        vec![
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--job",
+            "missing",
+        ],
+        vec![
+            "ci",
+            "rerun",
+            &coordinator,
+            &source.id.to_hex(),
+            "--rerun-dependencies",
+        ],
+    ] {
+        let (output, _) = ngit_json(&arranged.publisher, &args).await?;
+        assert!(!output.status.success());
+    }
+    assert_eq!(
+        arranged.published_events(KIND_MANUAL_TRIGGER).await?.len(),
+        before
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn secrets_use_advertised_inbox_without_exposing_values() -> Result<()> {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use nostr::prelude::{EventBuilder, PublicKey, RelayMessage, Tag, event::FinalizeEvent, nip44};
+    use nostr_sdk::client::{Client, ClientNotification};
+    let arranged = arrange("ci-secret-inbox").await?;
+    let recipient = Keys::generate();
+    let ad = EventBuilder::new(Kind::Custom(19843), "")
+        .custom_created_at(Timestamp::from_secs(arranged.now))
+        .tags([
+            Tag::custom("M", ["maintainer-request"]),
+            Tag::custom("X", ["request-required"]),
+            Tag::custom("expiration", [(arranged.now + 1200).to_string()]),
+            Tag::custom(
+                "secrets-key",
+                [
+                    "nip44-v2".into(),
+                    recipient.public_key().to_hex(),
+                    arranged.ci_relay.clone(),
+                ],
+            ),
+        ])
+        .finalize(&arranged.coordinator)?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&ad))
+        .await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let wire = Client::default();
+    wire.add_relay(arranged.ci_relay.clone()).await?;
+    wire.connect().await;
+    let mut notifications = wire.notifications();
+    let subscription = wire
+        .subscribe(Filter::new().kind(Kind::Custom(29846)).limit(0))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Message { message, .. } = notification {
+                if matches!(message.as_ref(), RelayMessage::EndOfStoredEvents(id) if id.as_ref() == &subscription.value) { return Ok::<_, anyhow::Error>(()); }
+            }
+        }
+        bail!("secret inbox subscription did not become ready")
+    }).await??;
+    let file = arranged.publisher.dir().join("secret-values.json");
+    std::fs::write(&file, r#"{"DEPLOY_TOKEN":"synthetic-secret-value"}"#)?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "secrets",
+            &coordinator,
+            "--set-file",
+            file.to_str().context("fixture path")?,
+        ],
+    )
+    .await?;
+    assert_eq!(json["action"], "secret-update-published");
+    assert!(!json.to_string().contains("synthetic-secret-value"));
+    let update = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                if event.kind == Kind::Custom(29846) {
+                    return Ok::<_, anyhow::Error>(event);
+                }
+            }
+        }
+        bail!("secret update did not arrive")
+    })
+    .await??;
+    update.verify()?;
+    let sender = PublicKey::from_hex(&tag_values(&update, "sender")[0])?;
+    let plaintext = nip44::decrypt(recipient.secret_key(), &sender, &update.content)?;
+    let payload: Value = serde_json::from_str(&plaintext)?;
+    assert_eq!(payload["set"]["DEPLOY_TOKEN"], "synthetic-secret-value");
+    assert_eq!(payload["author"], update.pubkey.to_hex());
+    assert_eq!(payload["created_at"], update.created_at.as_secs());
+    assert_eq!(tag_values(&update, "e"), vec![ad.id.to_hex()]);
+    assert_ne!(sender, update.pubkey);
+    wire.disconnect().await;
     Ok(())
 }

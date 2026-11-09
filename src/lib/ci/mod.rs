@@ -20,11 +20,13 @@
 //! See `docs/architecture/ci-trust.md`.
 
 pub mod controls;
+pub mod details;
 pub mod domain;
 pub mod events;
 pub mod kinds;
 pub mod provenance;
 pub mod resolve;
+pub mod secrets;
 pub mod trust;
 
 use std::cmp::Reverse;
@@ -44,3 +46,6 @@ pub fn total_order_position(
 ) -> (Timestamp, Reverse<EventId>) {
     (created_at, Reverse(event_id))
 }
+
+pub mod service;
+pub mod watch;

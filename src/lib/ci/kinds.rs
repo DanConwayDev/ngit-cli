@@ -5,9 +5,10 @@
 //! whose shape does not match the NIP is surfaced as a [`ShapeReason`] and
 //! skipped by the caller, never reinterpreted as a weaker or different claim.
 //!
-//! Only the consumed subset is modelled here. Coordinator Advertisement
-//! (19843), Request-Readiness (19844), Coordinator Repository Status (39844)
-//! and Repository Secret Update (29846) are out of scope.
+//! The consumed subset and emitted workflow cancellation are modelled here.
+//! Coordinator Advertisement (19843), Request-Readiness (19844), Coordinator
+//! Repository Status (39844) and Repository Secret Update (29846) are out of
+//! scope.
 
 use std::fmt;
 
@@ -15,6 +16,63 @@ use nostr::prelude::{Event, EventId, Kind, PublicKey, Tag, Timestamp, nip01::Coo
 
 /// Kind 9840 — Manual Trigger, signed by a repository maintainer.
 pub const KIND_CI_MANUAL_TRIGGER: Kind = Kind::Custom(9840);
+/// Kind 9846 — exact workflow cancellation requested by a maintainer.
+pub const KIND_CI_WORKFLOW_CANCELLATION: Kind = Kind::Custom(9846);
+/// Kind 9848 — immediate workflow cancellation, bypassing job grace periods.
+pub const KIND_CI_WORKFLOW_FORCED_CANCELLATION: Kind = Kind::Custom(9848);
+
+/// Exact run identity carried by a cancellation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowCancellation {
+    pub repository: RepoReference,
+    pub coordinator: PublicKey,
+    pub run_id: String,
+    /// Stop active tasks without waiting for their cancellation grace periods.
+    pub forced: bool,
+}
+
+/// Validate an exact-run cancellation; acceptance still requires maintainer
+/// authority.
+///
+/// # Errors
+/// Returns the malformed kind, content or identity tag.
+pub fn validate_workflow_cancellation(event: &Event) -> Result<WorkflowCancellation, ShapeReason> {
+    let forced = event.kind == KIND_CI_WORKFLOW_FORCED_CANCELLATION;
+    if !forced {
+        require_kind(event, KIND_CI_WORKFLOW_CANCELLATION)?;
+    }
+    require_empty_content(event)?;
+    let view = TagView::new(event);
+    for name in ["a", "p", "r"] {
+        let tag = view.required_tag(name)?;
+        if tag.len() != 2 {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: name,
+                value: tag.join(":"),
+            });
+        }
+    }
+    view.forbid("expiration")?;
+    view.forbid("d")?;
+    let run_id = view.required_value("r")?;
+    if run_id.len() != 64
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(ShapeReason::InvalidTagValue {
+            tag: "r",
+            value: run_id.into(),
+        });
+    }
+    Ok(WorkflowCancellation {
+        repository: parse_repository(view.required_tag("a")?)?,
+        coordinator: parse_public_key("p", view.required_value("p")?)?,
+        run_id: run_id.into(),
+        forced,
+    })
+}
+
 /// Kind 9841 — Job Result, signed by the compute provider.
 pub const KIND_CI_JOB_RESULT: Kind = Kind::Custom(9841);
 /// Kind 9842 — Workflow Result, signed by the coordinator.
@@ -27,8 +85,11 @@ pub const KIND_CI_SERVICE_STOP: Kind = Kind::Custom(9844);
 pub const KIND_CI_WORKFLOW_PROGRESS: Kind = Kind::Custom(39842);
 
 /// Every CI kind ngit consumes.
-pub const CONSUMED_CI_KINDS: [Kind; 6] = [
+pub const KIND_CI_JOB_PROGRESS: Kind = Kind::Custom(39846);
+
+pub const CONSUMED_CI_KINDS: [Kind; 7] = [
     KIND_CI_MANUAL_TRIGGER,
+    KIND_CI_JOB_PROGRESS,
     KIND_CI_JOB_RESULT,
     KIND_CI_WORKFLOW_RESULT,
     KIND_CI_SERVICE_REQUEST,
@@ -105,6 +166,8 @@ impl fmt::Display for Conclusion {
 pub enum Trigger {
     Push,
     PullRequest,
+    Issues,
+    Release,
     Schedule,
     Manual,
 }
@@ -115,6 +178,8 @@ impl Trigger {
         match value {
             "push" => Some(Self::Push),
             "pull_request" => Some(Self::PullRequest),
+            "issues" => Some(Self::Issues),
+            "release" => Some(Self::Release),
             "schedule" => Some(Self::Schedule),
             "manual" => Some(Self::Manual),
             _ => None,
@@ -126,6 +191,8 @@ impl Trigger {
         match self {
             Self::Push => "push",
             Self::PullRequest => "pull_request",
+            Self::Issues => "issues",
+            Self::Release => "release",
             Self::Schedule => "schedule",
             Self::Manual => "manual",
         }
@@ -189,7 +256,7 @@ pub struct WorkflowFile {
 }
 
 /// NIP-22 pull-request context (`E`/`K`/`P` root, `e`/`k`/`p` parent).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct PullRequestContext {
     /// The kind-1618 pull request the run belongs to.
     pub root: EventId,
@@ -201,9 +268,27 @@ pub struct PullRequestContext {
 }
 
 /// Trigger context: a Git ref for push/tag runs, NIP-22 tags for PR runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TriggerContext {
-    Push { git_ref: String },
+    Issue {
+        git_ref: String,
+        root: EventId,
+        activity: EventId,
+        action: String,
+        reason: String,
+    },
+    Release {
+        coordinate: Coordinate,
+        revision: EventId,
+        application: Coordinate,
+        version: String,
+        channel: String,
+        assets: Vec<EventId>,
+    },
+    Push {
+        git_ref: String,
+    },
     PullRequest(PullRequestContext),
 }
 
@@ -249,7 +334,9 @@ impl CommonTags {
     #[must_use]
     pub fn git_ref(&self) -> Option<&str> {
         match &self.context {
-            Some(TriggerContext::Push { git_ref }) => Some(git_ref.as_str()),
+            Some(TriggerContext::Push { git_ref } | TriggerContext::Issue { git_ref, .. }) => {
+                Some(git_ref.as_str())
+            }
             _ => None,
         }
     }
@@ -279,6 +366,7 @@ pub struct ProvenanceQuote {
 /// A Workflow Result / Progress quote of one Job Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobQuote {
+    pub conclusion: Option<Conclusion>,
     pub event_id: EventId,
     pub relay: Option<String>,
     pub publisher: Option<PublicKey>,
@@ -299,6 +387,7 @@ pub struct WorkflowRunAddress {
 /// A validated kind-9840 Manual Trigger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualTrigger {
+    pub restart: Option<super::details::Restart>,
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
@@ -325,6 +414,7 @@ pub struct ServiceControl {
 /// A validated kind-9841 Job Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobResult {
+    pub details: super::details::JobDetails,
     pub event_id: EventId,
     /// The compute provider that executed the job.
     pub author: PublicKey,
@@ -349,6 +439,7 @@ pub struct JobResult {
 /// A validated kind-9842 Workflow Result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowResult {
+    pub details: super::details::WorkflowDetails,
     pub event_id: EventId,
     /// The coordinator that accepted the run.
     pub author: PublicKey,
@@ -365,6 +456,7 @@ pub struct WorkflowResult {
 /// A validated kind-39842 Workflow Progress marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowProgress {
+    pub details: super::details::WorkflowDetails,
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
@@ -398,12 +490,110 @@ impl WorkflowProgress {
     }
 }
 
+/// Provider-signed live snapshot. It carries no terminal job conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobProgress {
+    pub event_id: EventId,
+    pub author: PublicKey,
+    pub created_at: Timestamp,
+    pub expiration: Timestamp,
+    pub run: WorkflowRunAddress,
+    pub job_id: String,
+    pub common: CommonTags,
+    pub details: super::details::JobDetails,
+    pub log_tail: String,
+    pub logs: Option<String>,
+}
+
+impl JobProgress {
+    #[must_use]
+    pub fn is_live(&self, now: Timestamp) -> bool {
+        self.created_at <= now && self.expiration > now
+    }
+}
+
+/// Validate an allocated provider's cumulative snapshot.
+pub fn validate_job_progress(event: &Event) -> Result<JobProgress, ShapeReason> {
+    require_kind(event, KIND_CI_JOB_PROGRESS)?;
+    let view = TagView::new(event);
+    view.forbid("conclusion")?;
+    let common = parse_common_tags(&view, CommonProfile::ResultLike)?;
+    let details = super::details::job(event, true)?;
+    let allocation = details
+        .allocation
+        .ok_or(ShapeReason::MissingTag("job-allocation"))?;
+    if parse_event_id("d", view.required_value("d")?)? != allocation {
+        return Err(ShapeReason::InvalidQuote(
+            "snapshot allocation differs from d".into(),
+        ));
+    }
+    let expiration = parse_timestamp("expiration", view.required_value("expiration")?)?;
+    if expiration <= event.created_at
+        || expiration
+            .as_secs()
+            .saturating_sub(event.created_at.as_secs())
+            > MAX_PROGRESS_EXPIRATION_SECS
+    {
+        return Err(ShapeReason::InvalidTagValue {
+            tag: "expiration",
+            value: "invalid snapshot lifetime".into(),
+        });
+    }
+    let quotes = parse_quotes(&view)?;
+    if quotes
+        .provenance
+        .as_ref()
+        .is_some_and(|q| q.kind == ProvenanceKind::ServiceRequest)
+    {
+        return Err(ShapeReason::InvalidQuote(
+            "provider snapshot quotes standing service".into(),
+        ));
+    }
+    let addresses: Vec<_> = quotes
+        .addresses
+        .into_iter()
+        .filter(|(a, _)| a.kind == KIND_CI_WORKFLOW_PROGRESS)
+        .collect();
+    if addresses.len() != 1 || addresses[0].0.identifier.is_empty() {
+        return Err(ShapeReason::InvalidQuote(
+            "snapshot requires one workflow address".into(),
+        ));
+    }
+    let address = &addresses[0].0;
+    for q in view
+        .matching("q")
+        .filter(|q| q.get(4).is_some_and(|m| m == "job-allocation"))
+    {
+        if parse_public_key("q", &q[3])? != address.public_key {
+            return Err(ShapeReason::InvalidQuote(
+                "allocation coordinator differs from run".into(),
+            ));
+        }
+    }
+    Ok(JobProgress {
+        event_id: event.id,
+        author: event.pubkey,
+        created_at: event.created_at,
+        expiration,
+        run: WorkflowRunAddress {
+            coordinator: address.public_key,
+            run_id: address.identifier.clone(),
+        },
+        job_id: view.required_value("job")?.into(),
+        common,
+        details,
+        log_tail: event.content.clone(),
+        logs: view.optional_value("logs")?.map(ToOwned::to_owned),
+    })
+}
+
 /// Any validated CI event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CiEvent {
     ManualTrigger(ManualTrigger),
     ServiceControl(ServiceControl),
     JobResult(JobResult),
+    JobProgress(JobProgress),
     WorkflowResult(WorkflowResult),
     WorkflowProgress(WorkflowProgress),
 }
@@ -488,6 +678,8 @@ pub fn validate(event: &Event) -> Result<CiEvent, ShapeReason> {
         Ok(CiEvent::ManualTrigger(validate_manual_trigger(event)?))
     } else if kind == KIND_CI_SERVICE_REQUEST || kind == KIND_CI_SERVICE_STOP {
         Ok(CiEvent::ServiceControl(validate_service_control(event)?))
+    } else if kind == KIND_CI_JOB_PROGRESS {
+        Ok(CiEvent::JobProgress(validate_job_progress(event)?))
     } else if kind == KIND_CI_JOB_RESULT {
         Ok(CiEvent::JobResult(validate_job_result(event)?))
     } else if kind == KIND_CI_WORKFLOW_RESULT {
@@ -519,7 +711,16 @@ pub fn validate_manual_trigger(event: &Event) -> Result<ManualTrigger, ShapeReas
     // never addressed pass provenance validation.
     let coordinator = parse_public_key("p", view.required_value("p")?)?;
 
+    super::details::manual(event, &common.workflow.path)?;
+    if matches!(
+        common.context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    ) && super::details::restart(event)?.is_none()
+    {
+        return Err(ShapeReason::MissingTag("U"));
+    }
     Ok(ManualTrigger {
+        restart: super::details::restart(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -597,7 +798,24 @@ pub fn validate_job_result(event: &Event) -> Result<JobResult, ShapeReason> {
         ));
     }
 
+    let details = super::details::job(event, false)?;
+    if details.skip_reason.is_some() && event.pubkey != coordinate.public_key {
+        return Err(ShapeReason::InvalidQuote(
+            "conditional skip must be coordinator-authored".into(),
+        ));
+    }
+    for q in view
+        .matching("q")
+        .filter(|q| q.get(4).is_some_and(|m| m == "job-allocation"))
+    {
+        if parse_public_key("q", &q[3])? != coordinate.public_key {
+            return Err(ShapeReason::InvalidQuote(
+                "allocation coordinator differs from run".into(),
+            ));
+        }
+    }
     Ok(JobResult {
+        details,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -649,6 +867,7 @@ pub fn validate_workflow_result(event: &Event) -> Result<WorkflowResult, ShapeRe
     }
 
     Ok(WorkflowResult {
+        details: super::details::workflow(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -721,6 +940,7 @@ pub fn validate_workflow_progress(event: &Event) -> Result<WorkflowProgress, Sha
     }
 
     Ok(WorkflowProgress {
+        details: super::details::workflow(event)?,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,
@@ -921,6 +1141,7 @@ fn parse_common_tags(
 ) -> Result<CommonTags, ShapeReason> {
     let repositories = view
         .matching("a")
+        .filter(|tag| !tag.get(1).is_some_and(|v| v.starts_with("30063:")))
         .map(parse_repository)
         .collect::<Result<Vec<_>, _>>()?;
     let first = repositories.first().ok_or(ShapeReason::MissingTag("a"))?;
@@ -971,10 +1192,35 @@ fn parse_common_tags(
     };
 
     let context = parse_trigger_context(view, profile)?;
+    let extended = matches!(
+        context,
+        Some(TriggerContext::Issue { .. } | TriggerContext::Release { .. })
+    );
+    if extended
+        && !matches!(
+            trigger,
+            None | Some(Trigger::Manual | Trigger::Issues | Trigger::Release)
+        )
+    {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
+    if matches!(context, Some(TriggerContext::Issue { .. })) && commits.len() != 1 {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
     match (trigger, &context) {
         (Some(Trigger::Push), Some(TriggerContext::Push { .. }))
-        | (Some(Trigger::PullRequest), Some(TriggerContext::PullRequest(_))) => {}
-        (Some(trigger @ (Trigger::Push | Trigger::PullRequest)), _) => {
+        | (Some(Trigger::PullRequest), Some(TriggerContext::PullRequest(_)))
+        | (Some(Trigger::Issues), Some(TriggerContext::Issue { .. }))
+        | (Some(Trigger::Release), Some(TriggerContext::Release { .. })) => {}
+        (
+            Some(
+                trigger @ (Trigger::Push
+                | Trigger::PullRequest
+                | Trigger::Issues
+                | Trigger::Release),
+            ),
+            _,
+        ) => {
             return Err(ShapeReason::MissingTriggerContext(trigger));
         }
         _ => {}
@@ -1005,6 +1251,105 @@ fn parse_trigger_context(
     }
     if git_refs.len() > 1 {
         return Err(ShapeReason::RepeatedTag("r"));
+    }
+    let issue = view.optional_tag("issue")?;
+    let release = view.optional_tag("release")?;
+    let release_refs: Vec<_> = view
+        .matching("a")
+        .filter(|t| t.get(1).is_some_and(|v| v.starts_with("30063:")))
+        .collect();
+    if issue.is_some()
+        && (release.is_some()
+            || !release_refs.is_empty()
+            || root.is_some()
+            || ["e", "k", "K", "P"].iter().any(|name| view.count(name) > 0))
+    {
+        return Err(ShapeReason::ConflictingTriggerContext);
+    }
+    if let Some(tag) = issue {
+        if tag.len() != 5 || git_refs.len() != 1 || !git_refs[0].starts_with("refs/heads/") {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "issue",
+                value: "expected issue activity and branch context".into(),
+            });
+        }
+        let root = parse_event_id("issue", &tag[1])?;
+        let activity = parse_event_id("issue", &tag[2])?;
+        if !matches!(
+            (tag[3].as_str(), tag[4].as_str()),
+            ("opened" | "reopened", "") | ("closed", "completed" | "not_planned")
+        ) || (tag[3] == "opened" && root != activity)
+        {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "issue",
+                value: "invalid activity or reason".into(),
+            });
+        }
+        return Ok(Some(TriggerContext::Issue {
+            git_ref: git_refs[0].into(),
+            root,
+            activity,
+            action: tag[3].clone(),
+            reason: tag[4].clone(),
+        }));
+    }
+    if release.is_some() || !release_refs.is_empty() || view.count("release-asset") > 0 {
+        if root.is_some() || !git_refs.is_empty() || release_refs.len() != 1 {
+            return Err(ShapeReason::ConflictingTriggerContext);
+        }
+        let metadata = release.ok_or(ShapeReason::MissingTag("release"))?;
+        let reference = release_refs[0];
+        if metadata.len() != 4 || reference.len() != 4 || metadata[2].is_empty() {
+            return Err(ShapeReason::InvalidTagValue {
+                tag: "release",
+                value: "invalid release reference".into(),
+            });
+        }
+        let coordinate = Coordinate::from_kpi_format(&reference[1]).map_err(|_| {
+            ShapeReason::InvalidTagValue {
+                tag: "a",
+                value: "invalid release coordinate".into(),
+            }
+        })?;
+        let application = Coordinate::from_kpi_format(&metadata[1]).map_err(|_| {
+            ShapeReason::InvalidTagValue {
+                tag: "release",
+                value: "invalid application coordinate".into(),
+            }
+        })?;
+        if application.identifier.is_empty()
+            || application.kind != Kind::Custom(32267)
+            || application.public_key != coordinate.public_key
+            || coordinate.identifier != format!("{}@{}", application.identifier, metadata[2])
+        {
+            return Err(ShapeReason::ConflictingTriggerContext);
+        }
+        let revision = parse_event_id("a", &reference[3])?;
+        let mut assets = Vec::new();
+        for asset in view.matching("release-asset") {
+            if asset.len() != 2 {
+                return Err(ShapeReason::InvalidTagValue {
+                    tag: "release-asset",
+                    value: "expected exact event id".into(),
+                });
+            }
+            let id = parse_event_id("release-asset", &asset[1])?;
+            if assets.contains(&id) {
+                return Err(ShapeReason::RepeatedTag("release-asset"));
+            }
+            assets.push(id);
+        }
+        if assets.is_empty() {
+            return Err(ShapeReason::MissingTag("release-asset"));
+        }
+        return Ok(Some(TriggerContext::Release {
+            coordinate,
+            revision,
+            application,
+            version: metadata[2].clone(),
+            channel: metadata[3].clone(),
+            assets,
+        }));
     }
     if let Some(git_ref) = git_refs.first() {
         return Ok(Some(TriggerContext::Push {
@@ -1103,8 +1448,9 @@ fn parse_quotes(view: &TagView<'_>) -> Result<Quotes, ShapeReason> {
                 relay,
                 requester,
             });
-        } else {
+        } else if marker != "job-allocation" {
             quotes.jobs.push(JobQuote {
+                conclusion: tag.get(5).map(|v| parse_conclusion(v)).transpose()?,
                 event_id,
                 relay,
                 publisher,
@@ -1279,6 +1625,53 @@ pub(crate) mod test_events {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancellation_requires_one_exact_identity_and_empty_content() {
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::custom("a", [format!("30617:{}:repo", keys.public_key())]),
+            Tag::public_key(keys.public_key()),
+            Tag::custom("r", ["ab".repeat(32)]),
+        ];
+        for (kind, forced) in [
+            (KIND_CI_WORKFLOW_CANCELLATION, false),
+            (KIND_CI_WORKFLOW_FORCED_CANCELLATION, true),
+        ] {
+            let make = |tags: Vec<Tag>, content: &str| {
+                EventBuilder::new(kind, content)
+                    .tags(tags)
+                    .finalize(&keys)
+                    .unwrap()
+            };
+            assert_eq!(
+                super::validate_workflow_cancellation(&make(tags.clone(), ""))
+                    .unwrap()
+                    .forced,
+                forced
+            );
+            assert!(super::validate_workflow_cancellation(&make(tags.clone(), "reason")).is_err());
+            for index in 0..3 {
+                let mut duplicate = tags.clone();
+                duplicate.push(tags[index].clone());
+                assert!(super::validate_workflow_cancellation(&make(duplicate, "")).is_err());
+                let mut missing = tags.clone();
+                missing.remove(index);
+                assert!(super::validate_workflow_cancellation(&make(missing, "")).is_err());
+            }
+        }
+        for kind in [
+            Kind::Custom(9847),
+            Kind::Custom(9849),
+            KIND_CI_MANUAL_TRIGGER,
+        ] {
+            let event = EventBuilder::new(kind, "")
+                .tags(tags.clone())
+                .finalize(&keys)
+                .unwrap();
+            assert!(validate_workflow_cancellation(&event).is_err());
+        }
+    }
+
     use nostr::prelude::{EventBuilder, Keys, event::FinalizeEvent};
 
     use super::{test_events::*, *};
@@ -1808,5 +2201,70 @@ mod tests {
             validate_workflow_result(&event),
             Err(ShapeReason::MismatchedRepositories)
         );
+    }
+}
+
+#[cfg(test)]
+mod extended_context_tests {
+    use nostr::prelude::Keys;
+
+    use super::{test_events::*, *};
+
+    #[test]
+    fn issue_activity_requires_exact_context_and_no_annotated_tag() {
+        let keys = Keys::generate();
+        let root = "ab".repeat(32);
+        let mut tags = common_tags(&keys);
+        tags.retain(|t| t.as_slice()[0] != "o");
+        tags.extend([
+            tag(&["o", "issues"]),
+            tag(&["r", "run"]),
+            tag(&["conclusion", "success"]),
+            tag(&["issue", &root, &root, "opened", ""]),
+        ]);
+        let make = |tags| event(&keys, KIND_CI_WORKFLOW_RESULT, 100, tags);
+        let result = validate_workflow_result(&make(tags.clone())).unwrap();
+        assert!(matches!(
+            result.common.context,
+            Some(TriggerContext::Issue { .. })
+        ));
+        let mut bad = tags.clone();
+        bad.push(tag(&["c", COMMIT]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        let mut bad = tags.clone();
+        bad.push(tag(&["issue", &root, &root, "opened", ""]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        tags.retain(|t| t.as_slice()[0] != "issue");
+        tags.push(tag(&["issue", &root, &root, "closed", ""]));
+        assert!(validate_workflow_result(&make(tags)).is_err());
+    }
+
+    #[test]
+    fn release_context_separates_repository_and_immutable_release_revision() {
+        let keys = Keys::generate();
+        let mut tags = common_tags(&keys);
+        tags.retain(|t| !matches!(t.as_slice()[0].as_str(), "o" | "r"));
+        let address = format!("30063:{}:app@1.0", keys.public_key());
+        let app = format!("32267:{}:app", keys.public_key());
+        tags.extend([
+            tag(&["o", "release"]),
+            tag(&["r", "run"]),
+            tag(&["conclusion", "success"]),
+            tag(&["a", &address, "", &"ab".repeat(32)]),
+            tag(&["release", &app, "1.0", "stable"]),
+            tag(&["release-asset", &"cd".repeat(32)]),
+        ]);
+        let make = |tags| event(&keys, KIND_CI_WORKFLOW_RESULT, 100, tags);
+        let result = validate_workflow_result(&make(tags.clone())).unwrap();
+        assert_eq!(result.common.repositories.len(), 1);
+        assert!(matches!(
+            result.common.context,
+            Some(TriggerContext::Release { .. })
+        ));
+        let mut bad = tags.clone();
+        bad.push(tag(&["r", "refs/tags/v1.0"]));
+        assert!(validate_workflow_result(&make(bad)).is_err());
+        tags.retain(|t| t.as_slice()[0] != "release-asset");
+        assert!(validate_workflow_result(&make(tags)).is_err());
     }
 }

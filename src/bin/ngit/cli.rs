@@ -138,7 +138,10 @@ pub struct Cli {
     ///   `ngit issue create --repo upstream`
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
-    /// Output one machine-readable JSON document on stdout
+    /// Output machine-readable JSON on stdout
+    ///
+    /// Most commands emit one document. `ci status --watch` emits one decoded
+    /// workflow/job event per line until interrupted.
     ///
     /// Progress stays on stderr as plain state changes without terminal
     /// redraws.
@@ -1457,41 +1460,110 @@ pub enum LogTailMode {
     None,
 }
 
+#[derive(clap::Args, Default)]
+pub struct CiExecutionSelection {
+    /// Pin a native job's installed environment: JOB=SHA256[,MANIFEST-URL]
+    ///
+    /// JOB is its YAML key. SHA256 is the lowercase environment manifest hash,
+    /// obtained from a provider offering or job evidence using ci inspect.
+    /// Repeat for other jobs. The optional URL must name the same digest.
+    /// This selects an installed environment; it does not install an image
+    /// or remove resource requirements. Omitted jobs keep their normal pins.
+    #[arg(long, value_name = "JOB=SHA256[,URL]")]
+    pub environment: Vec<String>,
+    /// Override a native job's resource/environment requirement (repeatable)
+    ///
+    /// JOB is its YAML key. PATH is a resource name or env/JSON-pointer.
+    /// OP is eq, gte, lte or contains. JSON is an integer, boolean or quoted
+    /// string; gte/lte require integers. Each path replaces its whole inherited
+    /// constraint for that job; other paths and jobs are unchanged.
+    ///
+    /// Examples: --require 'build=memory-mib:gte:8192' (8 GiB RAM),
+    /// --require 'build=vcpus:gte:4',
+    /// --require 'build=env/configuration/guest/job-uid:eq:0'.
+    /// Repeat gte/lte to set both bounds. Preserve JSON string quotes, e.g.
+    /// --require 'build=some-resource:eq:"value"'. Duplicate job/path/operator
+    /// triples are rejected. Requirements select offerings, not guest settings.
+    #[arg(long = "require", value_name = "JOB=PATH:OP:JSON")]
+    pub requirements: Vec<String>,
+    /// Compatibility flag; fresh manual triggers already rerun dependencies
+    #[arg(long)]
+    pub rerun_dependencies: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches.
+pub struct CiInspectArgs {
+    /// Commit-ish or PR to inspect; defaults to HEAD when no event/filter is
+    /// given
+    #[arg(long, conflicts_with_all = ["id", "event", "kinds", "author", "raw", "include_expired"])]
+    pub target: Option<String>,
+    /// Include log tails for successful jobs too (human output shows failed-job
+    /// logs by default)
+    #[arg(long, conflicts_with = "no_logs")]
+    pub logs: bool,
+    /// Hide embedded log tails; retain log links
+    #[arg(long)]
+    pub no_logs: bool,
+    /// Exact workflow, job or service event ID (hex or nevent)
+    pub id: Option<String>,
+    /// Include the original signed event instead of decoding its tags
+    #[arg(long)]
+    pub raw: bool,
+    /// Fetch and verify artifact manifests referenced by the selected event
+    #[arg(long, requires = "id", conflicts_with = "offline")]
+    pub artifacts: bool,
+    /// Event kinds; default: coordinator/provider advertisements and service
+    /// status
+    #[arg(long = "kind", value_delimiter = ',')]
+    pub kinds: Vec<u16>,
+    /// Restrict the signing author (npub or hex)
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Inspect an exact event id or nevent
+    #[arg(long, conflicts_with = "id")]
+    pub event: Option<String>,
+    /// Include expired metadata and snapshots
+    #[arg(long)]
+    pub include_expired: bool,
+    /// Maximum cached results per kind
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub limit: u16,
+    /// Read cached events only
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(clap::Args)]
+pub struct CiSecretsArgs {
+    /// Coordinator public key (npub or hex)
+    pub coordinator: String,
+    /// JSON file mapping secret names to values; values are never accepted on
+    /// argv
+    #[arg(long, value_name = "PATH")]
+    pub set_file: Option<std::path::PathBuf>,
+    /// Set NAME from the environment variable NAME (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub set_from_env: Vec<String>,
+    /// Remove a secret name (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub remove: Vec<String>,
+}
+
 #[derive(Subcommand)]
-pub enum CiCommands {
-    /// show CI results, with the trust context of every signer behind them
-    #[command(
-        long_about = "show CI results, with the trust context of every signer behind them\n\n\
-        <TARGET> is resolved in this order:\n  \
-        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
-        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
-        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
-        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
-        5. with no target, the HEAD commit\n\n\
-        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Each job line includes its provider-published log URL when present. Signed per-job log tails are included for non-successful jobs by default; `--log-tail` selects auto, all, or none for both human and JSON output.\n\n\
-        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
-    )]
+pub enum CiServiceCommands {
+    /// Show coordinators with observed runs in the last 30 days, maintainer
+    /// relationships, service claims and advertised availability
     Status {
-        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
-        /// HEAD
-        #[arg(value_name = "TARGET")]
-        target: Option<String>,
-        /// Exit non-zero unless the current result is a success whose weakest
-        /// run meets this trust floor
-        #[arg(long, value_name = "LEVEL", value_enum)]
-        require_ci_trust: Option<CiTrustFloor>,
-        /// Which signed per-job log tails to include in human and JSON output
-        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
-        log_tail: LogTailMode,
-        /// Skip the relay fetch and NIP-05 trust verification, reading CI
-        /// from the local cache
+        /// Read cached evidence only; missing history is not proof of stopped
+        /// service
         #[arg(long)]
         offline: bool,
     },
     /// ask a coordinator to run CI for this repository
     #[command(
         long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
-        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci stop`. It never covers runs that started before it.\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
         <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
         The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
     )]
@@ -1506,13 +1578,120 @@ pub enum CiCommands {
     /// ask a coordinator to stop running CI for this repository
     #[command(
         long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
-        Published for the same repository perspective as `ngit ci request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
     )]
     Stop {
         /// Coordinator public key (npub or hex)
         #[arg(value_name = "COORDINATOR")]
         coordinator: String,
         /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CiCommands {
+    /// Manage standing CI service for this repository
+    Service {
+        #[command(subcommand)]
+        command: CiServiceCommands,
+    },
+    /// Publish an encrypted atomic secret update to a live coordinator inbox
+    Secrets(CiSecretsArgs),
+    /// Show detailed CI for HEAD, --target, or an exact signed event
+    Inspect(CiInspectArgs),
+    /// show CI results, with the trust context of every signer behind them
+    #[command(
+        long_about = "show CI results, with the trust context of every signer behind them\n\n\
+        <TARGET> is resolved in this order:\n  \
+        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
+        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
+        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
+        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
+        5. with no target, the HEAD commit\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Human output summarizes workflows and jobs, highlighting failed or active steps. Failed jobs show their steps and final three log lines. Use `ci inspect --target <TARGET>` for step durations, logs, artifacts and trust details. `--log-tail` selects tails for JSON only; human failed-job tails appear in `ci inspect` (use `--no-logs` to hide them).\n\n\
+        With no target, HEAD remains current. While its CI is unresolved, a separate summary may show the newest related previous PR/upstream tip with CI evidence. Explicit commit targets do not infer history. Earlier attempts on the current tip have concise status/time rows and exact inspect commands. Historical results never affect the current conclusion or trust gate.\n\n\
+        Unstarted jobs are labelled not reported, never guessed to be queued or skipped. Conditions are never evaluated locally. Bare `ci inspect` details the same HEAD selection; `ci inspect <ID>` selects exact event evidence.\n\n\
+        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
+    )]
+    Status {
+        /// Stream every distinct workflow/job update until interrupted (JSON
+        /// Lines with --json)
+        #[arg(long, conflicts_with_all = ["offline", "require_ci_trust"])]
+        watch: bool,
+        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
+        /// HEAD
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+        /// Exit non-zero unless the current result is a success whose weakest
+        /// run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
+        /// Which signed per-job log tails to include in JSON output
+        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
+        log_tail: LogTailMode,
+        /// Skip the relay fetch and NIP-05 trust verification, reading CI
+        /// from the local cache
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Deprecated alias for `ci service request`
+    #[command(
+        long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
+        <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
+        The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
+    )]
+    Request {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Deprecated alias for `ci service stop`
+    #[command(
+        long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+    )]
+    Stop {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// request cancellation of one exact workflow run
+    #[command(
+        long_about = "Request cancellation of one exact workflow run (kind 9846). By default, running jobs follow their cancellation grace periods. Use --force (kind 9848) to stop all active tasks in that run immediately, bypassing those grace periods; this also escalates an earlier ordinary cancellation. Requires a confirmed repository maintainer. Pass the coordinator and 64-character run id reported by ci status, and select the repository perspective used by that run with --repo. A successful command means the request was published; use ci status to observe confirmed completion. Cancellation cannot roll back effects already published."
+    )]
+    Cancel {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Exact workflow run id from ci status (64 lowercase hexadecimal
+        /// characters)
+        #[arg(value_name = "RUN-ID")]
+        run_id: String,
+        /// Use the local repository and maintainer cache without refreshing it
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Rerun a completed native workflow, retaining its dependency bindings
+    Rerun {
+        /// Coordinator public key (npub or hex)
+        coordinator: String,
+        /// Exact completed Workflow Result event id or nevent
+        result: String,
+        /// Rerun this job and its dependants; omit to restart every job
+        #[arg(long)]
+        job: Option<String>,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
+        /// Use cached source result and repository authority only
         #[arg(long)]
         offline: bool,
     },
@@ -1536,6 +1715,8 @@ pub enum CiCommands {
         /// Git ref published as the run's context, e.g. refs/heads/main
         #[arg(long = "ref", value_name = "GIT-REF")]
         git_ref: Option<String>,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1788,6 +1969,25 @@ mod tests {
         assert_eq!(log_tail, LogTailMode::None);
 
         assert!(Cli::try_parse_from(["ngit", "ci", "status", "--log-tail=everything"]).is_err());
+    }
+
+    #[test]
+    fn ci_inspect_defaults_to_head_and_keeps_exact_events_distinct() {
+        for args in [
+            vec!["ngit", "ci", "inspect"],
+            vec!["ngit", "ci", "inspect", "--target", "HEAD", "--logs"],
+            vec!["ngit", "ci", "inspect", "deadbeef", "--logs"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["ngit", "ci", "inspect", "deadbeef", "--target", "HEAD"],
+            vec![
+                "ngit", "ci", "inspect", "--target", "HEAD", "--kind", "19843",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {

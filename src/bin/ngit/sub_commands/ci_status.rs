@@ -35,6 +35,11 @@ use crate::{
     },
 };
 
+pub struct View {
+    pub detailed: bool,
+    pub log_tail: LogTailMode,
+}
+
 /// Run `ngit ci status`.
 ///
 /// # Errors
@@ -44,18 +49,36 @@ use crate::{
 /// document is emitted in full and the process exits non-zero.
 pub async fn launch(
     target: Option<&str>,
+    watch: bool,
     offline: bool,
     require_ci_trust: Option<CiTrustFloor>,
-    log_tail: LogTailMode,
+    view: View,
     json: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
+    if watch && json {
+        crate::output::start_stream();
+    }
     let git_repo = Repo::discover().context("failed to find a git repository")?;
     let git_repo_path = git_repo.get_path()?;
 
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     let selected_repo =
         get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let history_remote =
+        if selected_repo.remote.is_none() && !offline && target.is_none_or(|t| t.trim().is_empty())
+        {
+            ngit::repo_ref::get_nostr_remote_for_resolved_coordinate(&git_repo, &selected_repo)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            selected_repo.remote.clone()
+        };
+    let history_scope = crate::ci_history::Scope {
+        automatic: target.is_none_or(|t| t.trim().is_empty()),
+        selected_remote: history_remote.as_ref().map(|remote| remote.name.clone()),
+    };
     let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
     let mut repo_coordinates = selected_repo.coordinate;
 
@@ -82,6 +105,17 @@ pub async fn launch(
         relay_coverage(&repo_ref.relays, &report.state_per_relay)
     });
     let target = resolve_target(&git_repo, git_repo_path, &repo_ref, target).await?;
+    if watch {
+        return super::ci_watch::launch(
+            &git_repo,
+            &repo_ref,
+            &client,
+            &target,
+            json,
+            &history_scope,
+        )
+        .await;
+    }
     let report = build_report(
         &git_repo,
         git_repo_path,
@@ -98,17 +132,32 @@ pub async fn launch(
     )
     .await?;
 
+    let history =
+        crate::ci_history::load(&git_repo, &history_scope, git_repo_path, &repo_ref, &target)
+            .await?;
     let gate = require_ci_trust.and_then(|floor| report.gate_failure(floor));
 
     if json {
-        crate::output::set_value(report.to_json(
+        let mut document = report.to_json(
             &target,
             repo_ref.relays.first(),
-            log_tail,
+            view.log_tail,
             gate.as_deref(),
-        ));
+        );
+        if view.detailed {
+            document["action"] = serde_json::json!("inspect");
+        }
+        document["history"] = serde_json::to_value(&history)?;
+        crate::output::set_value(document);
     }
-    report.print(&target, log_tail);
+    if !json {
+        if view.detailed {
+            report.print(&target, view.log_tail);
+        } else {
+            crate::ci_display::print_status(&report, &target);
+        }
+        history.print();
+    }
 
     if let Some(reason) = gate {
         println!("{reason}");

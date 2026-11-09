@@ -498,16 +498,14 @@ mod tests {
         }));
 
         let ci_status = command_at_path(&export["command"], &["ci", "status"]);
+        assert!(ci_status["long_about"].as_str().unwrap().contains(
+            "Human output summarizes workflows and jobs, highlighting failed or active steps."
+        ));
         assert!(
             ci_status["long_about"]
                 .as_str()
                 .unwrap()
-                .contains("Each job line includes its provider-published log URL when present.")
-        );
-        assert!(
-            ci_status["long_about"].as_str().unwrap().contains(
-                "Signed per-job log tails are included for non-successful jobs by default"
-            )
+                .contains("human failed-job tails appear in `ci inspect`")
         );
         assert!(
             ci_status["args"]

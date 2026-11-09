@@ -6,8 +6,8 @@
 //! - The **cache tier** ([`resolve_cache_tier`]) is pure and local: the
 //!   control-history reduction, plus quote validation for the quoted requests
 //!   the local nostr cache already holds. It performs no network work at all,
-//!   so the NIP-05 domain ladder never runs and coverage is partial — the
-//!   canonical [`CONTEXT_INCOMPLETE_LABEL`] caveat applies. `pr list` uses it.
+//!   so the NIP-05 domain ladder never runs. Coverage is partial only when
+//!   additional identity or quoted-event evidence is needed. `pr list` uses it.
 //! - The **full tier** ([`resolve_full_tier`]) additionally obtains the missing
 //!   quoted requests through an injected fetcher and verifies NIP-05 identities
 //!   through an injected lookup. `pr view`, `ci status`, and merge CI gates use
@@ -163,11 +163,42 @@ impl QuotedEventFetcher for NoQuotedEventFetcher {
     }
 }
 
+/// Why coverage is partial; positive maintainer evidence remains valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageGap {
+    RepositoryInputs,
+    CacheOnlyIdentities,
+    QuotedEvents,
+    IdentityLookup,
+}
+
+impl CoverageGap {
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::RepositoryInputs => {
+                "Repository evidence was not fully refreshed; some relay queries may not have answered."
+            }
+            Self::CacheOnlyIdentities => {
+                "NIP-05 identity checks were skipped for this cached view; cached maintainer requests still apply."
+            }
+            Self::QuotedEvents => {
+                "Some quoted request events could not be retrieved; their authorization could not be checked."
+            }
+            Self::IdentityLookup => {
+                "Some NIP-05 identity lookups failed; verified maintainer requests still apply."
+            }
+        }
+    }
+}
+
 /// The assembled trust context for one repository view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CiTrustContext {
     /// Per-signer resolutions and the overall coverage.
     pub state: TrustContextState,
+    pub coverage_gaps: Vec<CoverageGap>,
     /// Repository-to-coordinator relationship tiers.
     pub relationships: HashMap<PublicKey, CoordinatorRelationship>,
     // The provenance verdicts and the repository facts they were reached
@@ -192,6 +223,7 @@ impl CiTrustContext {
     pub fn loading() -> Self {
         Self {
             state: TrustContextState::Loading,
+            coverage_gaps: Vec::new(),
             relationships: HashMap::new(),
             validated_provenance: Vec::new(),
             rejected_provenance: Vec::new(),
@@ -279,8 +311,8 @@ impl CiTrustContext {
 
 /// Resolve from the local cache alone: no network, no NIP-05.
 ///
-/// Coverage is partial whenever there is a signer to describe, because the
-/// domain ladder was skipped for it.
+/// Coverage is partial only when relevant identity or quoted-event evidence
+/// remains unresolved. Verified maintainer direction needs no domain lookup.
 #[must_use]
 pub fn resolve_cache_tier(inputs: &CiInputs<'_>) -> CiTrustContext {
     let outcome = provenance::validate_run_quotes(
@@ -290,12 +322,30 @@ pub fn resolve_cache_tier(inputs: &CiInputs<'_>) -> CiTrustContext {
         &inputs.repository.coordinates,
     );
     let controls = controls_in_closure(inputs);
-    let coverage = if described_signers(inputs.runs, &controls).is_empty() {
-        inputs.input_coverage
-    } else {
+    let baseline = assemble(
+        inputs,
+        controls.clone(),
+        outcome.clone(),
+        &HashMap::new(),
+        inputs.input_coverage,
+    );
+    let needs_identities = !unresolved_identity_signers(inputs, &controls, &baseline).is_empty();
+    let coverage = if needs_identities || !outcome.unavailable.is_empty() {
         Coverage::Partial
+    } else {
+        inputs.input_coverage
     };
-    assemble(inputs, controls, outcome, &HashMap::new(), coverage)
+    let mut context = assemble(inputs, controls, outcome, &HashMap::new(), coverage);
+    if inputs.input_coverage != Coverage::Complete {
+        context.coverage_gaps.push(CoverageGap::RepositoryInputs);
+    }
+    if needs_identities {
+        context.coverage_gaps.push(CoverageGap::CacheOnlyIdentities);
+    }
+    if !context.unavailable_provenance.is_empty() {
+        context.coverage_gaps.push(CoverageGap::QuotedEvents);
+    }
+    context
 }
 
 /// Resolve everything: fetch the missing quoted requests, then verify NIP-05
@@ -341,14 +391,17 @@ where
     }
 
     let controls = controls_in_closure(inputs);
+    let baseline = assemble(
+        inputs,
+        controls.clone(),
+        outcome.clone(),
+        &HashMap::new(),
+        coverage,
+    );
     let identities = verify_identities(
         lookup,
         nip05_cache,
-        &identity_lookup_signers(
-            inputs.runs,
-            &controls,
-            &inputs.repository.confirmed_maintainers,
-        ),
+        &unresolved_identity_signers(inputs, &controls, &baseline),
         inputs.profile_nip05,
         &inputs.repository.grasp_domains,
         inputs.now,
@@ -358,7 +411,17 @@ where
         coverage = Coverage::Partial;
     }
 
-    assemble(inputs, controls, outcome, &identities, coverage)
+    let mut context = assemble(inputs, controls, outcome, &identities, coverage);
+    if inputs.input_coverage != Coverage::Complete {
+        context.coverage_gaps.push(CoverageGap::RepositoryInputs);
+    }
+    if !context.unavailable_provenance.is_empty() {
+        context.coverage_gaps.push(CoverageGap::QuotedEvents);
+    }
+    if any_lookup_failed(&identities) {
+        context.coverage_gaps.push(CoverageGap::IdentityLookup);
+    }
+    context
 }
 
 /// The Service Requests and Stops that describe *this* repository.
@@ -460,6 +523,54 @@ pub fn identity_lookup_signers(
     )
 }
 
+// Domain evidence can at most establish an operational association. Do not
+// probe repository roots for a signer whose relevant roles already have that
+// evidence (or stronger). Delegation is checked per accepted job; a different,
+// unaccepted job from the same provider still needs its own identity evidence.
+fn unresolved_identity_signers(
+    inputs: &CiInputs<'_>,
+    controls: &[ServiceControl],
+    context: &CiTrustContext,
+) -> Vec<PublicKey> {
+    let established = |resolution: TrustResolution| {
+        matches!(
+            resolution.classification(),
+            Some(
+                TrustClassification::MaintainerDirected
+                    | TrustClassification::OperationallyAssociated
+            )
+        )
+    };
+    identity_lookup_signers(
+        inputs.runs,
+        controls,
+        &inputs.repository.confirmed_maintainers,
+    )
+    .into_iter()
+    .filter(|signer| {
+        if established(context.signer_resolution(signer)) {
+            return false;
+        }
+        let mut described = false;
+        for run in inputs.runs {
+            if run.coordinator == *signer {
+                described = true;
+                if !established(context.run_resolution(run)) {
+                    return true;
+                }
+            }
+            for job in run.jobs.iter().filter(|job| job.author == *signer) {
+                described = true;
+                if !established(context.job_resolution(run, job)) {
+                    return true;
+                }
+            }
+        }
+        !described
+    })
+    .collect()
+}
+
 /// Build the per-signer resolutions from the evidence each tier gathered.
 fn assemble(
     inputs: &CiInputs<'_>,
@@ -508,6 +619,7 @@ fn assemble(
     }
 
     CiTrustContext {
+        coverage_gaps: Vec::new(),
         state: TrustContextState::Settled {
             resolutions,
             coverage,
@@ -581,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_tier_settles_partial_because_domain_checks_were_skipped() {
+    fn verified_cached_requests_need_no_optional_domain_checks() {
         let coordinator = Keys::generate();
         let owner = Keys::generate();
         let maintainer = Keys::generate();
@@ -599,8 +711,9 @@ mod tests {
             &profiles,
             ts(1_000),
         ));
-        assert_eq!(context.coverage(), Some(Coverage::Partial));
-        assert!(context.is_incomplete());
+        assert_eq!(context.coverage(), Some(Coverage::Complete));
+        assert!(!context.is_incomplete());
+        assert!(context.coverage_gaps.is_empty());
         // The locally cached quote is still validated, so the run keeps its
         // maintainer direction.
         assert_eq!(context.validated_provenance().len(), 1);
@@ -609,6 +722,84 @@ mod tests {
         assert_eq!(
             context.run_resolution(&runs[0]).classification(),
             Some(TrustClassification::MaintainerDirected)
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_authorization_skips_domains_but_does_not_cover_unaccepted_jobs() {
+        use crate::ci::kinds::{CiEvent, JobQuote, validate};
+        let coordinator = Keys::generate();
+        let provider = Keys::generate();
+        let owner = Keys::generate();
+        let maintainer = Keys::generate();
+        let repository = repository(&owner, &maintainer);
+        let (request, mut run) = service_request_run(&coordinator, &owner, &maintainer);
+        let event = job_result(&provider, &coordinator, &owner, &run.run_id, "build", 110);
+        let CiEvent::JobResult(job) = validate(&event).unwrap() else {
+            panic!("job fixture");
+        };
+        run.result.as_mut().unwrap().jobs.push(JobQuote {
+            conclusion: None,
+            event_id: event.id,
+            relay: None,
+            publisher: Some(provider.public_key()),
+            job_id: "build".to_owned(),
+        });
+        run.jobs.push(job);
+        let quoted = [(request.id, request)].into_iter().collect();
+        let profiles = HashMap::new();
+        let lookup = CountingLookup::default();
+        let context = resolve_full_tier(
+            &CiInputs::new(
+                &repository,
+                &[run.clone()],
+                &[],
+                &quoted,
+                &profiles,
+                ts(1_000),
+            ),
+            &NoQuotedEventFetcher,
+            &lookup,
+            None,
+        )
+        .await;
+        assert_eq!(lookup.calls(), 0);
+        assert_eq!(context.coverage(), Some(Coverage::Complete));
+        assert_eq!(
+            context.run_resolution(&run).classification(),
+            Some(TrustClassification::MaintainerDirected)
+        );
+        assert_eq!(
+            context.job_resolution(&run, &run.jobs[0]).classification(),
+            Some(TrustClassification::OperationallyAssociated)
+        );
+
+        // A provider cannot reuse delegation for an event the coordinator
+        // did not accept. Its fallback identity evidence is still needed.
+        run.result.as_mut().unwrap().jobs.clear();
+        let context = resolve_full_tier(
+            &CiInputs::new(
+                &repository,
+                &[run.clone()],
+                &[],
+                &quoted,
+                &profiles,
+                ts(1_000),
+            ),
+            &NoQuotedEventFetcher,
+            &lookup,
+            None,
+        )
+        .await;
+        assert_eq!(lookup.looked_up(), vec!["_@grasp.example"]);
+        assert_eq!(context.coverage(), Some(Coverage::Partial));
+        assert_eq!(
+            context.run_resolution(&run).classification(),
+            Some(TrustClassification::MaintainerDirected)
+        );
+        assert_eq!(
+            context.job_resolution(&run, &run.jobs[0]).classification(),
+            Some(TrustClassification::NoKnownContext)
         );
     }
 
@@ -641,10 +832,9 @@ mod tests {
         let mut inputs = CiInputs::new(&repository, &[], &[], &quoted, &profiles, ts(1_000));
         inputs.input_coverage = Coverage::Partial;
 
-        assert_eq!(
-            resolve_cache_tier(&inputs).coverage(),
-            Some(Coverage::Partial)
-        );
+        let context = resolve_cache_tier(&inputs);
+        assert_eq!(context.coverage(), Some(Coverage::Partial));
+        assert_eq!(context.coverage_gaps, vec![CoverageGap::RepositoryInputs]);
     }
 
     #[test]
@@ -685,9 +875,10 @@ mod tests {
         let coordinator = Keys::generate();
         let owner = Keys::generate();
         let maintainer = Keys::generate();
-        let (request, run) = service_request_run(&coordinator, &owner, &maintainer);
+        let (request, mut run) = service_request_run(&coordinator, &owner, &maintainer);
         let repository = repository(&owner, &maintainer);
         let quoted: HashMap<EventId, Event> = [(request.id, request.clone())].into_iter().collect();
+        run.result.as_mut().expect("result fixture").provenance = None;
         let profiles = HashMap::new();
         let runs = [run];
 
@@ -704,15 +895,7 @@ mod tests {
         let resolution = context.signer_resolution(&coordinator.public_key());
         let kinds: Vec<TrustEvidenceKind> =
             resolution.evidence().iter().map(|item| item.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                // The validated quote is maintainer direction for the run, and
-                // earlier direction for the coordinator identity.
-                TrustEvidenceKind::HistoricalMaintainerRequest,
-                TrustEvidenceKind::RepositoryDomain,
-            ]
-        );
+        assert_eq!(kinds, vec![TrustEvidenceKind::RepositoryDomain,]);
         assert_eq!(
             resolution.classification(),
             Some(TrustClassification::OperationallyAssociated)
@@ -729,8 +912,9 @@ mod tests {
             coordinates: vec![perspective(&owner)],
             grasp_domains: vec!["grasp.example".to_owned(), "mirror.example".to_owned()],
         };
-        let (request, run) = service_request_run(&coordinator, &owner, &maintainer);
+        let (request, mut run) = service_request_run(&coordinator, &owner, &maintainer);
         let quoted: HashMap<EventId, Event> = [(request.id, request.clone())].into_iter().collect();
+        run.result.as_mut().expect("result fixture").provenance = None;
         let profiles = HashMap::new();
         let runs = [run];
 
@@ -818,6 +1002,7 @@ mod tests {
             Some(TrustClassification::NoKnownContext)
         );
         assert_eq!(failed.coverage(), Some(Coverage::Partial));
+        assert!(failed.coverage_gaps.contains(&CoverageGap::QuotedEvents));
     }
 
     #[tokio::test]

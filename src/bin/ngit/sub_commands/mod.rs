@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod checkout;
 pub mod ci_control;
+pub mod ci_inspect;
 pub mod ci_status;
 pub mod comment;
 pub mod container;
@@ -31,3 +32,7 @@ pub mod set_subject;
 pub mod skill;
 pub mod sync;
 pub mod whoami;
+
+pub mod ci_watch;
+
+pub mod ci_service;

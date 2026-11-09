@@ -768,10 +768,8 @@ async fn require_ci_trust_allows_a_merge_backed_by_maintainer_direction() -> Res
         );
         if offline {
             assert_eq!(
-                json["ci"]["coverage"], "partial",
-                "the cache tier skips the domain ladder, so it settles \
-                 partial — which withholds no evidence the control history \
-                 already established: {json}"
+                json["ci"]["coverage"], "complete",
+                "the cached signed request needs no optional domain evidence: {json}"
             );
         }
         assert_merged(&arranged, pr, &main_before).await?;
