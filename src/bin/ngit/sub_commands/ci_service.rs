@@ -57,8 +57,12 @@ pub async fn launch(offline: bool, auth: SignerParams<'_>) -> Result<()> {
     let events =
         collect_evidence(&client, path, &reference, &roots, offline, &mut failures).await?;
     let now = Timestamp::now();
-    let rows =
+    let mut rows =
         ngit::ci::service::summarize(&events, &roots, &reference.confirmed_maintainers(), now);
+    let identities = coordinator_identities(&client, path, &reference, &rows, offline, now).await;
+    for row in &mut rows {
+        row.verified_identity = identities.get(&row.coordinator).cloned();
+    }
     println!("CI coordinators · observed runs in the last 30 days");
     for row in &rows {
         print_row(row, now, roots.len() > 1)?;
@@ -81,7 +85,15 @@ fn print_row(
     multiple_perspectives: bool,
 ) -> Result<()> {
     let npub = row.coordinator.to_bech32()?;
-    println!("\n{}", console::style(&npub).bold());
+    if let Some(identity) = &row.verified_identity {
+        println!(
+            "\n{} ({})",
+            console::style(identity).bold(),
+            console::style(&npub).dim()
+        );
+    } else {
+        println!("\n{}", console::style(&npub).bold());
+    }
     for line in relationship_lines(row, now) {
         println!("  {line}");
     }
@@ -350,6 +362,65 @@ async fn fetch_run_requests(
         .await;
     }
     Ok(Vec::new())
+}
+
+async fn coordinator_identities(
+    client: &Client,
+    path: &std::path::Path,
+    reference: &ngit::repo_ref::RepoRef,
+    rows: &[ngit::ci::service::ServiceRow],
+    offline: bool,
+    now: Timestamp,
+) -> std::collections::HashMap<PublicKey, String> {
+    use std::collections::{HashMap, HashSet};
+
+    use ngit::ci::{domain, total_order_position};
+    let signers: HashSet<_> = rows.iter().map(|r| r.coordinator).collect();
+    if signers.is_empty() {
+        return HashMap::new();
+    }
+    if !offline {
+        crate::ci_projection::fetch_signer_profiles(path, client, reference, &signers).await;
+    }
+    let events = get_events_from_local_cache(
+        path,
+        vec![Filter::new().kind(Kind::Metadata).authors(signers.clone())],
+    )
+    .await
+    .unwrap_or_default();
+    let mut latest: HashMap<PublicKey, &Event> = HashMap::new();
+    for event in events
+        .iter()
+        .filter(|e| e.created_at <= now && e.verify().is_ok())
+    {
+        let current = latest.entry(event.pubkey).or_insert(event);
+        if total_order_position(event.created_at, event.id)
+            > total_order_position(current.created_at, current.id)
+        {
+            *current = event;
+        }
+    }
+    let profiles = latest
+        .into_iter()
+        .filter_map(|(key, event)| {
+            serde_json::from_str::<serde_json::Value>(&event.content)
+                .ok()
+                .and_then(|v| v["nip05"].as_str().map(str::to_owned))
+                .map(|identity| (key, identity))
+        })
+        .collect();
+    let cache = domain::Nip05Cache::discover().ok();
+    let repository = ngit::ci::resolve::RepositoryContext::from_repo_ref(reference);
+    domain::verified_identity_labels(
+        &domain::NetworkNip05Lookup,
+        cache.as_ref(),
+        &signers.into_iter().collect::<Vec<_>>(),
+        &profiles,
+        &repository.grasp_domains,
+        offline,
+        now,
+    )
+    .await
 }
 
 #[cfg(test)]

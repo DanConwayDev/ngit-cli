@@ -1488,7 +1488,7 @@ async fn load_quoted_events(
 /// Best effort by design: a signer with no reachable profile simply has no
 /// declared identity to verify, which is an absence of evidence rather than a
 /// finding, so a failure here is not surfaced.
-async fn fetch_signer_profiles(
+pub(crate) async fn fetch_signer_profiles(
     git_repo_path: &Path,
     client: &Client,
     repo_ref: &RepoRef,

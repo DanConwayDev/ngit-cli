@@ -1227,6 +1227,14 @@ standing service requests, previous requests and authorization of individual
 runs are distinct; signed request quotes are verified before counting a run as
 maintainer-authorized. A run does not itself prove a standing service agreement.
 
+Coordinator labels use verified NIP-05 identities, never profile display names.
+Root identities appear as domains (`relay.ngit.dev`); named identities retain
+their local part. The full npub stays visible and JSON exposes
+`verified_identity`. Only a coordinator's declared address is looked up;
+fresh cached root-domain matches may also supply a label. Offline mode uses
+fresh cached verification only. Missing, mismatched or expired verification
+falls back to the npub without changing CI authorization or emitting trust warnings.
+
 A single observed maintainer start remains `Maintainer requested 2mo ago`.
 Multiple requests or any maintainer stop use a newest-first `Maintainer requests:`
 timeline showing at most three entries, followed by the number of earlier

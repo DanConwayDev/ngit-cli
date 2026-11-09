@@ -57,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Requested coordinators with no recent observed runs remain visible. Standing requests,
   authorization of individual runs, service claims and advertised readiness
   remain distinct, with evidence and observation bounds available in JSON.
-  Relationship
+  Verified NIP-05 domains or addresses label coordinators alongside their npubs;
+  profile display names and unverified identity claims are not used. Relationship
   and acting claims precede activity, with an inspection tip last. A single start
   uses a simple request age; repeated starts or stops show the latest three
   maintainer requests newest first, with full observed history in JSON. Advertised

@@ -9,6 +9,8 @@ use super::{controls::open_requests, kinds::validate_service_control, total_orde
 #[derive(Debug, Serialize)]
 pub struct ServiceRow {
     pub coordinator: PublicKey,
+    /// Optional NIP-05 label with a verified key binding; never a profile name.
+    pub verified_identity: Option<String>,
     pub repository: String,
     pub service: &'static str,
     pub request: &'static str,
@@ -346,6 +348,7 @@ pub fn summarize(
             rows.push(ServiceRow {
                 activity,
                 coordinator: author,
+                verified_identity: None,
                 repository: root.to_string(),
                 service,
                 request,
