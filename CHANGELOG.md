@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Human CI summaries use `—` for unreported work and ambiguous live skipped
+- Running jobs show approximate elapsed counters in human CI views, advancing
+  during watch from the first observed running report.
+
+- Human CI summaries use `waiting` for unreported work and ambiguous live skipped
   placeholders. Routine incomplete relay refresh diagnostics appear only with
   verbose output; JSON retains coverage details and signed step outcomes.
 

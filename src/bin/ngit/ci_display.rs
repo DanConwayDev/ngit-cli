@@ -107,6 +107,39 @@ pub fn elapsed_label(ms: Option<u64>) -> Option<String> {
     ms.map(|ms| format!("~{}", crate::ci_plan::duration(ms)))
 }
 
+/// Approximate time since signed evidence reported this job running, not a
+/// claimed execution start. Allocation identity separates provider retries.
+pub fn live_job_row(
+    run: &RunReport,
+    id: &str,
+    clocks: &mut crate::ci_plan::LiveStepClocks,
+    now: Timestamp,
+) -> String {
+    let job = run
+        .run
+        .live_jobs
+        .iter()
+        .find(|job| job.job_id == id && job.is_live(now));
+    let observed = job.map(|job| job.created_at).or_else(|| {
+        run.run
+            .progress
+            .as_ref()
+            .filter(|p| p.in_progress_jobs.iter().any(|name| name == id))
+            .map(|p| p.created_at)
+    });
+    let elapsed = observed.map(|observed| {
+        let key = format!(
+            "job:{}:{}:{}:{:?}",
+            run.run.coordinator,
+            run.run.run_id,
+            id,
+            job.map(|job| (job.author, &job.details.allocation))
+        );
+        clocks.elapsed(key, observed.as_secs(), now.as_secs())
+    });
+    timed_row("running", id, 1, elapsed_label(elapsed).as_deref())
+}
+
 pub fn print_status(report: &CiReport, target: &Target) {
     print!(
         "{}",
@@ -181,7 +214,7 @@ pub fn render_status(
             let _ = writeln!(
                 output,
                 "{}{}",
-                row("running", &job.job_id, 1),
+                live_job_row(run, &job.job_id, clocks, now),
                 crate::ci_plan::live_steps(
                     job,
                     run.plan.iter().find(|p| p.id == job.job_id),
@@ -198,7 +231,7 @@ pub fn render_status(
                 .iter()
                 .any(|job| job.job_id == *id && job.is_live(now))
             {
-                let _ = writeln!(output, "{}", row("running", id, 1));
+                let _ = writeln!(output, "{}", live_job_row(run, id, clocks, now));
             }
         }
         for job in &run.plan {
@@ -210,7 +243,7 @@ pub fn render_status(
                     .iter()
                     .any(|j| j.job_id == job.id && j.is_live(now))
             {
-                let _ = writeln!(output, "{}", row("—", &job.label, 1));
+                let _ = writeln!(output, "{}", row("waiting", &job.label, 1));
             }
         }
     }

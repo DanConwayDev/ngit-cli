@@ -796,11 +796,16 @@ impl RunReport {
 
     pub fn print(&self, log_tail: LogTailMode) {
         self.print_header();
+        let now = Timestamp::now();
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
         for job in &self.run.live_jobs {
             if !job.is_live(Timestamp::now()) {
                 continue;
             }
-            println!("{}", crate::ci_display::row("in_progress", &job.job_id, 1));
+            println!(
+                "{}",
+                crate::ci_display::live_job_row(self, &job.job_id, &mut clocks, now)
+            );
             println!(
                 "{}{}",
                 crate::ci_plan::steps(
@@ -824,7 +829,7 @@ impl RunReport {
             {
                 println!(
                     "{} (reported by coordinator)",
-                    crate::ci_display::row("in_progress", id, 1)
+                    crate::ci_display::live_job_row(self, id, &mut clocks, now)
                 );
                 println!(
                     "{}",
@@ -1941,6 +1946,37 @@ mod tests {
             jobs: vec![job],
             run,
         }
+    }
+
+    #[test]
+    fn live_job_timer_ticks_through_renewals_and_separates_allocations() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        let job = &report.run.jobs[0];
+        report.run.live_jobs.push(kinds::JobProgress {
+            event_id: job.event_id,
+            author: job.author,
+            created_at: Timestamp::from_secs(100),
+            expiration: Timestamp::from_secs(500),
+            run: job.run.clone(),
+            job_id: job.job_id.clone(),
+            common: job.common.clone(),
+            details: job.details.clone(),
+            log_tail: String::new(),
+            logs: None,
+        });
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
+        let render = |report: &RunReport, clocks: &mut crate::ci_plan::LiveStepClocks, now| {
+            crate::ci_display::live_job_row(report, "build", clocks, Timestamp::from_secs(now))
+        };
+        assert!(render(&report, &mut clocks, 110).contains("~10s"));
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(112);
+        assert!(render(&report, &mut clocks, 115).contains("~15s"));
+        assert!(render(&report, &mut clocks, 120).contains("~20s"));
+        report.run.live_jobs[0].details.allocation = Some(EventId::from_byte_array([0; 32]));
+        assert!(render(&report, &mut clocks, 120).contains("~8s"));
+        report.run.run_id = "another-run".into();
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(119);
+        assert!(render(&report, &mut clocks, 120).contains("~1s"));
     }
 
     #[test]

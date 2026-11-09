@@ -121,11 +121,11 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
         .collect()
 }
 
-/// First signed observation of an active step, scoped to its allocation.
+/// First signed observations of active jobs and steps.
 #[derive(Default)]
 pub struct LiveStepClocks(std::collections::HashMap<String, u64>);
 impl LiveStepClocks {
-    fn elapsed(&mut self, key: String, reported: u64, now: u64) -> u64 {
+    pub(crate) fn elapsed(&mut self, key: String, reported: u64, now: u64) -> u64 {
         let since = self.0.entry(key).or_insert(reported);
         *since = (*since).min(reported);
         now.saturating_sub(*since).saturating_mul(1000)
@@ -182,7 +182,7 @@ pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String
                 let _ = write!(
                     output,
                     "\n{}",
-                    crate::ci_display::row("—", &expected.label, 2)
+                    crate::ci_display::row("waiting", &expected.label, 2)
                 );
             }
         }
@@ -207,7 +207,7 @@ fn untimed_skip(step: &ngit::ci::details::Step) -> bool {
 }
 
 pub fn pending_job(plan: &JobPlan) -> String {
-    let mut line = crate::ci_display::row("—", &plan.label, 1);
+    let mut line = crate::ci_display::row("waiting", &plan.label, 1);
     if !plan.needs.is_empty() {
         let _ = write!(line, " · needs: {}", plan.needs.join(", "));
     }
@@ -238,7 +238,7 @@ fn write_step(
         && step.start_ms.is_none()
         && step.duration_ms.is_none()
     {
-        "—"
+        "waiting"
     } else if live
         && step.outcome == "unknown"
         && step.start_ms.is_some()
@@ -436,7 +436,7 @@ mod tests {
         assert!(!row.contains("upload"));
         let details = JobDetails::default();
         let rendered = steps(&details, Some(plan), true);
-        assert!(rendered.contains("—") && rendered.contains("upload"));
+        assert!(rendered.contains("waiting") && rendered.contains("upload"));
         assert!(rendered.contains("1 conditional steps not yet reported"));
         assert!(!rendered.contains("diagnose"));
     }
@@ -464,7 +464,7 @@ mod tests {
         // Without a condition, the live placeholder is visible but has no
         // inferred outcome. The final snapshot still establishes a skip.
         let live = steps(&details, None, true);
-        assert!(live.contains("—") && live.contains("diagnose"));
+        assert!(live.contains("waiting") && live.contains("diagnose"));
         assert!(!live.contains("skipped") && !live.contains("planned"));
         assert!(steps(&details, None, false).contains("1 skipped steps"));
         details.steps[0].start_ms = Some(10);
