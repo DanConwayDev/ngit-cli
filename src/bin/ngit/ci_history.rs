@@ -29,7 +29,7 @@ pub struct AttemptSummary {
     pub timestamp: u64,
 }
 impl AttemptSummary {
-    fn new(run: &WorkflowRun, now: Timestamp) -> Self {
+    pub(crate) fn new(run: &WorkflowRun, now: Timestamp) -> Self {
         let status = match run.state(now) {
             RunState::Concluded(c) => c.to_string(),
             RunState::Running => run
@@ -220,7 +220,7 @@ fn earlier(runs: &[WorkflowRun], now: Timestamp) -> Vec<AttemptSummary> {
         .map(|r| AttemptSummary::new(r, now))
         .collect()
 }
-fn age(timestamp: u64, now: u64) -> String {
+pub(crate) fn age(timestamp: u64, now: u64) -> String {
     if timestamp > now {
         return "at a future timestamp".into();
     }

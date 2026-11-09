@@ -1494,8 +1494,18 @@ pub struct CiExecutionSelection {
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches.
 pub struct CiInspectArgs {
+    /// Commit-ish or PR to inspect; defaults to HEAD when no event/filter is
+    /// given
+    #[arg(long, conflicts_with_all = ["id", "event", "kinds", "author", "raw", "include_expired"])]
+    pub target: Option<String>,
+    /// Include log tails for successful jobs too (human output shows failed-job
+    /// logs by default)
+    #[arg(long, conflicts_with = "no_logs")]
+    pub logs: bool,
+    /// Hide embedded log tails; retain log links
+    #[arg(long)]
+    pub no_logs: bool,
     /// Exact workflow, job or service event ID (hex or nevent)
-    #[arg(required_unless_present_any = ["event", "kinds", "author"])]
     pub id: Option<String>,
     /// Include the original signed event instead of decoding its tags
     #[arg(long)]
@@ -1589,8 +1599,7 @@ pub enum CiCommands {
     },
     /// Publish an encrypted atomic secret update to a live coordinator inbox
     Secrets(CiSecretsArgs),
-    /// Inspect signed service, provider, allocation or execution event
-    /// envelopes
+    /// Show detailed CI for HEAD, --target, or an exact signed event
     Inspect(CiInspectArgs),
     /// show CI results, with the trust context of every signer behind them
     #[command(
@@ -1601,9 +1610,9 @@ pub enum CiCommands {
         3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
         4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
         5. with no target, the HEAD commit\n\n\
-        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Each job line includes its provider-published log URL when present. Signed per-job log tails are included for non-successful jobs by default; `--log-tail` selects auto, all, or none for both human and JSON output.\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Human output summarizes workflows and jobs, highlighting failed or active steps. Failed jobs show their steps and final three log lines. Use `ci inspect --target <TARGET>` for step durations, logs, artifacts and trust details. `--log-tail` selects tails for JSON only; human failed-job tails appear in `ci inspect` (use `--no-logs` to hide them).\n\n\
         With no target, HEAD remains current. While its CI is unresolved, a separate summary may show the newest related previous PR/upstream tip with CI evidence. Explicit commit targets do not infer history. Earlier attempts on the current tip have concise status/time rows and exact inspect commands. Historical results never affect the current conclusion or trust gate.\n\n\
-        Unstarted jobs stay collapsed with declared dependencies and condition markers. Active jobs show steps, outcomes and durations; unreported conditional steps and finished skipped steps are summarized. Conditions are never evaluated locally. Use ci inspect <ID> --json for full event evidence.\n\n\
+        Unstarted jobs are labelled not reported, never guessed to be queued or skipped. Conditions are never evaluated locally. Bare `ci inspect` details the same HEAD selection; `ci inspect <ID>` selects exact event evidence.\n\n\
         Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
     )]
     Status {
@@ -1619,7 +1628,7 @@ pub enum CiCommands {
         /// run meets this trust floor
         #[arg(long, value_name = "LEVEL", value_enum)]
         require_ci_trust: Option<CiTrustFloor>,
-        /// Which signed per-job log tails to include in human and JSON output
+        /// Which signed per-job log tails to include in JSON output
         #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
         log_tail: LogTailMode,
         /// Skip the relay fetch and NIP-05 trust verification, reading CI
@@ -1960,6 +1969,25 @@ mod tests {
         assert_eq!(log_tail, LogTailMode::None);
 
         assert!(Cli::try_parse_from(["ngit", "ci", "status", "--log-tail=everything"]).is_err());
+    }
+
+    #[test]
+    fn ci_inspect_defaults_to_head_and_keeps_exact_events_distinct() {
+        for args in [
+            vec!["ngit", "ci", "inspect"],
+            vec!["ngit", "ci", "inspect", "--target", "HEAD", "--logs"],
+            vec!["ngit", "ci", "inspect", "deadbeef", "--logs"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["ngit", "ci", "inspect", "deadbeef", "--target", "HEAD"],
+            vec![
+                "ngit", "ci", "inspect", "--target", "HEAD", "--kind", "19843",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {

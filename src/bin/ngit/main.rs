@@ -28,6 +28,7 @@ mod git_remote_helper;
 mod output;
 // Declared after `output` so the stdout-guarding `println!` macro is in
 // scope for it.
+mod ci_display;
 mod ci_event_view;
 mod ci_history;
 mod ci_plan;
@@ -518,7 +519,10 @@ async fn main() {
                         *watch,
                         *offline,
                         *require_ci_trust,
-                        *log_tail,
+                        sub_commands::ci_status::View {
+                            detailed: false,
+                            log_tail: *log_tail,
+                        },
                         cli.json,
                         signer_params,
                     )

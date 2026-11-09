@@ -217,6 +217,36 @@ async fn job_log_fields_follow_the_selected_json_output_mode() -> Result<()> {
     assert_eq!(job(&none, "test")["logs"], Value::Null);
     assert!(job(&none, "test").get("log_tail").is_none());
 
+    // Default inspection selects exactly the same HEAD attempts as status,
+    // with structured evidence and opt-in embedded logs.
+    for target_args in [vec![], vec!["--target", "HEAD"]] {
+        let output = arranged
+            .publisher
+            .ngit(
+                ["ci", "inspect", "--json", "--offline"]
+                    .into_iter()
+                    .chain(target_args),
+            )
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let inspected: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(inspected["ci"], none["ci"]);
+        assert_eq!(inspected["action"], "inspect");
+    }
+    let output = arranged
+        .publisher
+        .ngit(["ci", "inspect", "--json", "--offline", "--logs"])
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let inspected: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(inspected["ci"], all["ci"]);
+
     Ok(())
 }
 

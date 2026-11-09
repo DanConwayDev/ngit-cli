@@ -110,13 +110,17 @@ async fn service_view_is_repository_scoped_and_distinguishes_request_from_acting
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(json["services"][0]["service"], "acting");
     assert_eq!(json["services"][0]["request"], "maintainer_requested");
+    let inspection = repo.ngit(["ci", "inspect", "--json"]).output().await?;
+    assert!(inspection.status.success());
+    let inspected: serde_json::Value = serde_json::from_slice(&inspection.stdout)?;
     assert!(
-        !repo
-            .ngit(["ci", "inspect", "--json"])
-            .output()
-            .await?
-            .status
-            .success()
+        inspected["ci"]["runs"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+    assert!(
+        inspected.get("events").is_none(),
+        "default inspection must not list service advertisements"
     );
     Ok(())
 }

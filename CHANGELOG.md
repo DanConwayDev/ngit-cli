@@ -9,16 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CI trust coverage distinguishes missing requests, repository reads and identity
-  evidence. Optional NIP-05 lookups are skipped when signed evidence already
-  establishes the relationship, avoiding unrelated Git-server identity failures
-  for maintainer-authorized runs.
-
-- `ci status` shows workflow, job and step progress, including completed jobs
-  before the workflow finishes, step durations, artifact counts and output links.
-  Verified workflow definitions supply expected jobs, steps and dependencies;
-  unstarted jobs and conditional paths stay compact without predicting outcomes.
-  JSON includes detailed execution evidence, outputs and dependency bindings.
+- `ci status` summarizes workflow and job progress, expanding failed jobs into
+  steps and a boxed three-line log preview. `ci inspect` details the same HEAD
+  or an explicit `--target`, with coloured outcomes, artifacts, output links and trust
+  evidence. Bold workflows start with status; plain job/step rows start with
+  right-aligned durations (seconds below an hour, hours/minutes thereafter).
+  Workflow rows show short run labels and ages. Job timings are approximate; JSON preserves precise signed values.
+  Coordinator trust is separate from execution outcomes; provider evidence stays
+  in JSON. Inspection separates workflows with blank lines, labels full-log links,
+  and shows muted, copyable log content between start/end markers
+  (`--no-logs` hides them, `--logs` includes successful jobs too).
+  Exact-event inspection remains available by ID. Reported steps retain signed
+  execution order, including provider-added preparation and cleanup. Verified
+  workflow definitions supply missing jobs, steps and dependencies without
+  predicting conditional outcomes. JSON retains execution evidence, outputs
+  and dependency bindings. Coverage diagnostics distinguish incomplete relay
+  reads, unavailable requests and skipped or failed identity checks from
+  verified maintainer direction. Optional NIP-05 lookups are skipped when signed
+  evidence already establishes the signer relationship, avoiding unrelated
+  Git-server identity failures for maintainer-authorized CI. Optional identity
+  diagnostics remain available in verbose output and JSON.
   Earlier attempts are listed separately with relative times and exact-event
   inspection commands; they never contribute to the current result. While current
   CI is unresolved, a clearly labelled workflow-only summary can show the newest

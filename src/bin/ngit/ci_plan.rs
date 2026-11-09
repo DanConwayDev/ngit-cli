@@ -1,5 +1,5 @@
 //! A verified declaration of expected jobs, never a local scheduler.
-use std::{collections::HashSet, fmt::Write as _, path::Path};
+use std::{fmt::Write as _, path::Path};
 
 use ngit::{
     ci::{details::JobDetails, events::WorkflowRun},
@@ -124,46 +124,46 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
 /// Render observed steps and declared work without evaluating conditions.
 pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String {
     let mut output = String::new();
-    let mut shown = HashSet::new();
     let mut conditional = 0;
     let mut skipped = 0;
-    if let Some(plan) = plan {
-        for expected in &plan.steps {
-            if let Some(step) = details.steps.iter().find(|s| s.id == expected.id) {
-                if live && untimed_skip(step) && expected.condition.is_some() {
-                    conditional += 1;
-                } else if step.outcome == "skipped" && !(live && untimed_skip(step)) {
-                    skipped += 1;
-                } else {
-                    write_step(&mut output, step, details, live);
-                }
-                shown.insert(step.id.as_str());
-            } else if expected.condition.is_some() {
-                conditional += 1;
-            } else {
-                let _ = write!(output, "\n      {}: not reported", expected.label);
-            }
+    // Keep the signed execution order, including provider-added preparation
+    // and cleanup. YAML declares expected work; it must not reorder evidence.
+    for step in &details.steps {
+        let expected = plan.and_then(|plan| plan.steps.iter().find(|p| p.id == step.id));
+        if live && untimed_skip(step) && expected.is_some_and(|p| p.condition.is_some()) {
+            conditional += 1;
+        } else if step.outcome == "skipped" && !(live && untimed_skip(step)) {
+            skipped += 1;
+        } else {
+            write_step(&mut output, step, details, live);
         }
     }
-    for step in &details.steps {
-        if !shown.contains(step.id.as_str()) {
-            if step.outcome == "skipped" && !(live && untimed_skip(step)) {
-                skipped += 1;
+    if let Some(plan) = plan {
+        for expected in &plan.steps {
+            if details.steps.iter().any(|step| step.id == expected.id) {
+                continue;
+            }
+            if expected.condition.is_some() {
+                conditional += 1;
             } else {
-                write_step(&mut output, step, details, live);
+                let _ = write!(
+                    output,
+                    "\n{}",
+                    crate::ci_display::row("not reported", &expected.label, 2)
+                );
             }
         }
     }
     if conditional > 0 {
         let _ = write!(
             output,
-            "\n      {conditional} conditional steps not yet reported"
+            "\n    {conditional} conditional steps not yet reported"
         );
     }
     if skipped > 0 {
         let _ = write!(
             output,
-            "\n      {skipped} skipped steps (ci inspect for details)"
+            "\n    {skipped} skipped steps (ci inspect --json for details)"
         );
     }
     output
@@ -174,7 +174,7 @@ fn untimed_skip(step: &ngit::ci::details::Step) -> bool {
 }
 
 pub fn pending_job(plan: &JobPlan) -> String {
-    let mut line = format!("    job {}: not reported", plan.label);
+    let mut line = crate::ci_display::row("not reported", &plan.label, 1);
     if !plan.needs.is_empty() {
         let _ = write!(line, " · needs: {}", plan.needs.join(", "));
     }
@@ -193,9 +193,7 @@ fn write_step(
     details: &JobDetails,
     live: bool,
 ) {
-    let duration = step
-        .duration_ms
-        .map_or(String::new(), |ms| format!(" · {}", duration(ms)));
+    let duration = step.duration_ms.map(duration);
     let state = if live
         && step.outcome == "skipped"
         && step.start_ms.is_none()
@@ -225,7 +223,11 @@ fn write_step(
         .filter_map(|a| a.count)
         .fold(0, u64::saturating_add);
     let count = (direct as u64).saturating_add(known);
-    let _ = write!(output, "\n      {label}: {state}{duration}");
+    let _ = write!(
+        output,
+        "\n{}",
+        crate::ci_display::timed_row(state, &label, 2, duration.as_deref())
+    );
     if count > 0 {
         let _ = write!(output, " · {count} artifacts");
     }
@@ -259,7 +261,7 @@ pub fn artifact_links(details: &JobDetails) -> String {
     if details.artifacts.len() > 4 || details.artifact_manifests.len() > 4 {
         let _ = write!(
             output,
-            "\n      {} direct artifacts, {} manifests; use ci inspect for all references",
+            "\n      {} direct artifacts, {} manifests; use ci inspect --json for all references",
             details.artifacts.len(),
             details.artifact_manifests.len()
         );
@@ -268,18 +270,59 @@ pub fn artifact_links(details: &JobDetails) -> String {
 }
 
 pub fn duration(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{}.{:01}s", ms / 1000, ms % 1000 / 100)
+    let seconds = ms / 1000 + u64::from(ms % 1000 >= 500);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
     } else {
-        format!("{}m {}s", ms / 60_000, ms / 1000 % 60)
+        format!("{}h {:2}m", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durations_round_to_seconds_and_carry_into_minutes() {
+        assert_eq!(duration(71), "0s");
+        assert_eq!(duration(1500), "2s");
+        assert_eq!(duration(59_500), "1m 00s");
+        assert_eq!(duration(123_000), "2m 03s");
+        assert_eq!(duration(3_599_499), "59m 59s");
+        assert_eq!(duration(3_599_500), "1h  0m");
+        assert_eq!(duration(4_095_000), "1h  8m");
+        assert_eq!(duration(7_199_000), "1h 59m");
+        assert_eq!(duration(7_200_000), "2h  0m");
+        assert!(!duration(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn yaml_does_not_move_runtime_preparation_or_cleanup_around_failure() {
+        let plan = parse("jobs:\n  test:\n    steps: [publish]\n", true);
+        let details = JobDetails {
+            steps: [
+                ("prepare", "success"),
+                ("publish", "failure"),
+                ("cleanup", "success"),
+            ]
+            .into_iter()
+            .map(|(id, outcome)| ngit::ci::details::Step {
+                id: id.into(),
+                label: id.into(),
+                outcome: outcome.into(),
+                start_ms: None,
+                duration_ms: Some(1000),
+                artifacts: None,
+            })
+            .collect(),
+            ..JobDetails::default()
+        };
+        let rendered = steps(&details, Some(&plan[0]), false);
+        assert!(rendered.find("prepare") < rendered.find("publish"));
+        assert!(rendered.find("publish") < rendered.find("cleanup"));
+    }
+
     #[test]
     fn plans_only_match_stable_step_ids_and_never_evaluate_conditions() {
         let native = parse(
@@ -327,7 +370,7 @@ mod tests {
             steps(&details, None, false),
             artifact_links(&details)
         );
-        assert!(rendered.contains("1.2s"));
+        assert!(rendered.contains("1s"));
         assert!(rendered.contains("1000 artifacts"));
         assert!(rendered.len() < 1000);
     }
@@ -347,9 +390,9 @@ mod tests {
         assert!(!row.contains("upload"));
         let details = JobDetails::default();
         let rendered = steps(&details, Some(plan), true);
-        assert!(rendered.contains("upload: not reported"));
+        assert!(rendered.contains("not reported") && rendered.contains("upload"));
         assert!(rendered.contains("1 conditional steps not yet reported"));
-        assert!(!rendered.contains("diagnose:"));
+        assert!(!rendered.contains("diagnose"));
     }
 
     #[test]
@@ -376,7 +419,7 @@ mod tests {
         details.steps[0].duration_ms = Some(1200);
         details.steps[0].outcome = "success".into();
         let rendered = steps(&details, Some(&plans[0]), true);
-        assert!(rendered.contains("diagnose: success · 1.2s"));
+        assert!(rendered.contains("1s success diagnose"));
         assert!(!rendered.contains("conditional steps"));
     }
 }

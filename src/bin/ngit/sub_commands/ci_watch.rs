@@ -70,7 +70,7 @@ async fn observe(
             },
         )
         .await?;
-        report.print(target, crate::cli::LogTailMode::None);
+        crate::ci_display::print_status(&report, target);
         crate::ci_history::load(repo, history_scope, path, reference, target)
             .await?
             .print();

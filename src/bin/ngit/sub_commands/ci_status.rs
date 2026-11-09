@@ -35,6 +35,11 @@ use crate::{
     },
 };
 
+pub struct View {
+    pub detailed: bool,
+    pub log_tail: LogTailMode,
+}
+
 /// Run `ngit ci status`.
 ///
 /// # Errors
@@ -47,7 +52,7 @@ pub async fn launch(
     watch: bool,
     offline: bool,
     require_ci_trust: Option<CiTrustFloor>,
-    log_tail: LogTailMode,
+    view: View,
     json: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
@@ -133,13 +138,26 @@ pub async fn launch(
     let gate = require_ci_trust.and_then(|floor| report.gate_failure(floor));
 
     if json {
-        let mut document =
-            report.to_json(&target, repo_ref.relays.first(), log_tail, gate.as_deref());
+        let mut document = report.to_json(
+            &target,
+            repo_ref.relays.first(),
+            view.log_tail,
+            gate.as_deref(),
+        );
+        if view.detailed {
+            document["action"] = serde_json::json!("inspect");
+        }
         document["history"] = serde_json::to_value(&history)?;
         crate::output::set_value(document);
     }
-    report.print(&target, log_tail);
-    history.print();
+    if !json {
+        if view.detailed {
+            report.print(&target, view.log_tail);
+        } else {
+            crate::ci_display::print_status(&report, &target);
+        }
+        history.print();
+    }
 
     if let Some(reason) = gate {
         println!("{reason}");

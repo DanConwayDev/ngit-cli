@@ -17,6 +17,40 @@ pub const CI_KINDS: &[u16] = &[
 
 /// Inspect exact signed envelopes; no service/provider policy is inferred.
 pub async fn launch(args: &CiInspectArgs, auth: SignerParams<'_>) -> Result<()> {
+    if args.id.is_none() && args.event.is_none() && args.kinds.is_empty() && args.author.is_none() {
+        anyhow::ensure!(
+            !args.raw && !args.include_expired,
+            "--raw and --include-expired require an exact event or diagnostic filter"
+        );
+        return super::ci_status::launch(
+            args.target.as_deref(),
+            false,
+            args.offline,
+            None,
+            super::ci_status::View {
+                detailed: true,
+                log_tail: selected_log_mode(args.logs, args.no_logs, crate::output::is_json()),
+            },
+            crate::output::is_json(),
+            auth,
+        )
+        .await;
+    }
+    launch_events(args, auth).await
+}
+
+fn selected_log_mode(all: bool, none: bool, json: bool) -> crate::cli::LogTailMode {
+    use crate::cli::LogTailMode;
+    if all {
+        LogTailMode::All
+    } else if none || json {
+        LogTailMode::None
+    } else {
+        LogTailMode::Auto
+    }
+}
+
+async fn launch_events(args: &CiInspectArgs, auth: SignerParams<'_>) -> Result<()> {
     if args.kinds.iter().any(|k| !CI_KINDS.contains(k)) {
         bail!("--kind must name a NIP-C1 CI event kind");
     }
@@ -78,17 +112,19 @@ pub async fn launch(args: &CiInspectArgs, auth: SignerParams<'_>) -> Result<()> 
         if !live && !args.include_expired && id.is_none() {
             continue;
         }
-        println!(
-            "kind {} {} by {}{}",
-            event.kind,
-            event.id,
-            event.pubkey,
-            if live {
-                ""
-            } else {
-                " (expired or invalid expiry)"
-            }
-        );
+        if !crate::output::is_json() {
+            println!(
+                "kind {} {} by {}{}",
+                event.kind,
+                event.id,
+                event.pubkey,
+                if live {
+                    ""
+                } else {
+                    " (expired or invalid expiry)"
+                }
+            );
+        }
         let mut entry = inspect_event(
             args,
             &client,
@@ -101,7 +137,7 @@ pub async fn launch(args: &CiInspectArgs, auth: SignerParams<'_>) -> Result<()> 
         .await?;
         if id.is_some() {
             entry["status_context"] =
-                inspection_status(&repo, path, &reference, &client, &event, args.offline).await?;
+                inspection_status(&repo, path, &reference, &client, &event, args).await?;
         }
         output.push(entry);
     }
@@ -263,7 +299,16 @@ async fn inspect_event(
     failures: &mut Vec<String>,
 ) -> Result<serde_json::Value> {
     let decoded = crate::ci_event_view::decoded(event);
-    if !crate::output::is_json() {
+    let execution = matches!(
+        ngit::ci::kinds::validate(event),
+        Ok(ngit::ci::kinds::CiEvent::WorkflowResult(_)
+            | ngit::ci::kinds::CiEvent::WorkflowProgress(_)
+            | ngit::ci::kinds::CiEvent::JobResult(_)
+            | ngit::ci::kinds::CiEvent::JobProgress(_))
+    );
+    let show_envelope = !crate::output::is_json()
+        && (!execution || args.raw || args.id.is_none() && args.event.is_none());
+    if show_envelope {
         for tag in decoded["tags"].as_array().into_iter().flatten() {
             println!(
                 "  {}: {}",
@@ -271,7 +316,7 @@ async fn inspect_event(
                 tag["values"]
             );
         }
-        if !event.content.is_empty() {
+        if !event.content.is_empty() && (!execution || args.logs) {
             println!("{}", event.content);
         }
     }
@@ -285,7 +330,7 @@ async fn inspect_event(
     } else {
         Vec::new()
     };
-    if !crate::output::is_json() {
+    if show_envelope {
         for related in &related {
             println!(
                 "  related {} {}",
@@ -303,7 +348,7 @@ async fn inspect_event(
                     tag["values"]
                 );
             }
-            if !related.content.is_empty() {
+            if !related.content.is_empty() && args.logs {
                 println!("{}", related.content);
             }
         }
@@ -348,7 +393,7 @@ async fn inspection_status(
     reference: &ngit::repo_ref::RepoRef,
     client: &Client,
     event: &nostr::prelude::Event,
-    offline: bool,
+    args: &CiInspectArgs,
 ) -> Result<serde_json::Value> {
     use ngit::ci::kinds::CiEvent;
 
@@ -371,7 +416,11 @@ async fn inspection_status(
         client,
         &ProjectionRequest {
             target: &target,
-            tier: if offline { Tier::Cache } else { Tier::Full },
+            tier: if args.offline {
+                Tier::Cache
+            } else {
+                Tier::Full
+            },
             include_outdated: false,
             input_coverage: ngit::ci::trust::Coverage::Partial,
         },
@@ -379,7 +428,7 @@ async fn inspection_status(
     )
     .await?;
     if !crate::output::is_json() {
-        report.print(&target, crate::cli::LogTailMode::None);
+        report.print(&target, selected_log_mode(args.logs, args.no_logs, false));
     }
     Ok(report.to_json(
         &target,
@@ -387,4 +436,18 @@ async fn inspection_status(
         crate::cli::LogTailMode::All,
         None,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_log_mode;
+    use crate::cli::LogTailMode;
+
+    #[test]
+    fn human_failures_are_default_but_json_tails_remain_opt_in() {
+        assert_eq!(selected_log_mode(false, false, false), LogTailMode::Auto);
+        assert_eq!(selected_log_mode(false, true, false), LogTailMode::None);
+        assert_eq!(selected_log_mode(false, false, true), LogTailMode::None);
+        assert_eq!(selected_log_mode(true, false, true), LogTailMode::All);
+    }
 }

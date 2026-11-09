@@ -329,9 +329,10 @@ reference left open:
   call site (`Option<&Nip05Cache>`) and its directory and TTLs are
   injectable, so tests never touch the user's cache or the clock.
 - **Cache-tier coverage reflects unresolved evidence.**
-  Signed requests and accepted provider delegation need no optional domain
-  checks. Unknown signers, unavailable quotes and incomplete repository
-  inputs still leave coverage partial.
+  The domain ladder is skipped there by definition. Signed evidence can
+  already establish coordinator authority and accepted provider delegation;
+  those roles need no optional domain checks. Unknown signers, unavailable
+  quotes and incomplete repository inputs still leave coverage partial.
 - **Control history is filtered to the confirmed-member coordinate set once.**
   `resolve` reduces `CiInputs::controls` to the controls naming a coordinate
   in that set before anything reads them, so a Service Request for a
@@ -423,9 +424,11 @@ reference left open:
   handed to `resolve`, which filters them to the confirmed-member coordinate set.
 - **The full tier fetches missing quotes from the repository relays plus the
   quote's own relay hint**, and verifies NIP-05 through the WP2 machinery
-  and its TTL cache. Signers with established operational relationships or
-  maintainer direction need no domain checks. For unresolved signers, missing
-  NIP-05 documents remain unsettled evidence rather than negative claims.
+  and its TTL cache. Domain checks are omitted for signers whose relevant
+  roles already have an operational association or verified maintainer direction.
+  Accepted job delegation is checked per job; unaccepted providers still need
+  their own evidence. For unresolved signers, a GRASP host that serves no
+  NIP-05 document is an unsettled lookup, not a negative claim.
 - **CI signers' kind-0 profiles are fetched by this command.** A coordinator
   or compute provider is not a repository contributor, so the repository
   fetch never asks for its profile and the signer-declared `nip05` route
@@ -532,8 +535,9 @@ reference left open:
   evidence. It is ngit's own wording, not one of the canonical
   gitworkshop strings.
 - **The list path expresses no coverage caveat in human output.**
-  Coverage is reported per row in JSON; detailed views explain missing
-  evidence separately from execution outcomes.
+  Coverage is reported per row in JSON. Detail surfaces explain missing
+  repository inputs and quoted requests; optional identity diagnostics are
+  available in verbose output and JSON.
 - **The list JSON carries fields, not the glyph.** Every row has a `ci`
   object — `state`, `conclusion`, `classification`, `trust_floor_met`,
   `coverage`, `revision_matched` — including rows with no CI, so a consumer
@@ -1078,11 +1082,51 @@ wins over live snapshots; expired or future snapshots are not current progress.
 
 ### show workflow plans and timed step summaries
 
-`ci status` shows workflows, jobs and steps, including reported outcomes,
-step durations, artifact publication state, counts and output links. Small
-direct-artifact lists and manifest links are shown at the owning job; long
-lists are summarized with a pointer to inspection. Signed durations are
-milliseconds; step start offsets are job-relative, never wall-clock timestamps.
+`ci status` summarizes workflows and jobs, highlighting reported failed/active
+steps and completed-step counts for live jobs. Failed jobs expand their steps
+and the final three log lines; successful jobs stay on one row. Artifact links
+and routine identity/trust detail stay in inspection. Unknown signer
+context, workflow hash mismatches and incomplete evidence stay visible.
+
+`ci inspect` without an ID details the same HEAD and latest-attempt selection.
+Use `ci inspect --target <commit-ish|PR>` for the same selection as an explicit
+status target, or `ci inspect <event-ID>` for one exact attempt. Human inspection
+shows steps, durations, log links, artifact counts/manifests and trust evidence.
+Outcomes are coloured and secondary metadata muted on colour-capable terminals;
+plain output retains status words. Bold workflows start with their status.
+Plain job rows start with a right-aligned duration, followed by status and name;
+steps use the same columns with two spaces of additional indentation. Durations
+round to seconds below an hour (`2m 03s`); longer durations use hours and
+minutes (`1h  8m`) to keep rows compact. JSON retains exact milliseconds. The
+workflow row includes a muted abbreviated run ID and relative age; the first
+attempt number is omitted. Short run IDs are display labels, not inspection
+selectors: `ci inspect` still takes full event IDs/nevents, and its exact-event
+command remains visible. JSON keeps full run IDs and timestamp meanings. Completed jobs show approximate elapsed time from signed start to
+result publication; this includes any publication delay and is not an exact
+execution duration. Missing or reversed timestamps yield no duration.
+JSON retains `started_at`, `reported_at` and `elapsed_to_report_ms`, and run
+`timestamp`/`time_kind` fields. Provider identity and trust remain in JSON;
+human inspection shows coordinator trust on its own muted metadata line.
+
+Reported steps retain signed event order, including provider-added preparation
+and cleanup; workflow YAML supplies missing declarations without reordering
+execution evidence. A failure is not forced to the end if cleanup follows it.
+
+Human inspection includes unsuccessful-job logs with flush-left content between
+explicit start/end markers, without added indentation or side bars. Log content
+is muted, full-log links are labelled `logs:`, and workflows are separated by
+blank lines.
+`--no-logs` hides them; `--logs` also includes successful-job tails. Terminal
+control sequences are stripped from displayed tails so the section boundaries
+remain visible; signed JSON content is preserved.
+`status --log-tail` continues to control JSON tails only.
+
+JSON keeps structured outcomes, millisecond durations, step IDs and execution
+fields. Default/target inspection has the same CI projection as status; exact
+ID inspection retains decoded events and their status context. `--logs` adds
+embedded tails to default/target inspection JSON. Step start offsets are
+job-relative, never wall-clock timestamps. Neither view automatically downloads
+artifact manifests.
 
 When the exact local workflow blob matches the event's hash, `declared_jobs`
 provides expected jobs and stable step IDs. Native step keys and explicit act
@@ -1125,7 +1169,7 @@ manifest automatically.
 
 ### stream workflow and job updates until interrupted
 
-`ci status <target> --watch` first shows the current tree, then one compact line
+`ci status <target> --watch` first shows the compact current summary, then one compact line
 per distinct workflow/job event received. It has no timeout and remains open
 across completed attempts until interrupted. Ctrl-C stops observation without
 cancelling execution. A PR target is pinned to the revision resolved at startup;
@@ -1194,11 +1238,12 @@ Relays may prune expired, replaced or deleted evidence; this is an observed
 history, not an authoritative archive. An acting claim does not prove a live
 network connection or that a particular workflow is eligible.
 
-Bare `ci inspect` requires a target. Use `ci inspect <ID>` for evidence;
-explicit `--kind` or `--author` filters remain available for protocol diagnosis.
+Bare `ci inspect` shows current HEAD execution details. Use `ci inspect <ID>`
+for exact evidence; explicit `--kind` or `--author` filters remain available for
+protocol diagnosis.
 Use `ci service status` for repository discovery.
 
-Status keeps unstarted jobs on one row with declared `needs`, conditional and
+Inspection keeps unstarted jobs on one row with declared `needs`, conditional and
 runtime-expansion markers. These are declarations, not scheduling decisions.
 Active jobs show reported steps and unreported unconditional steps; unreported
 conditional steps are counted together. A native untimed `skipped` placeholder
@@ -1260,7 +1305,7 @@ provider diagnostics. No automatic provider/environment chooser exists yet.
 Pins select installed environments, do not request image installation, and do
 not remove other requirements. Omitted pins retain the normal selection.
 
-`ci status` details the latest attempt per coordinator, workflow and trigger
+`ci status` summarizes the latest attempt per coordinator, workflow and trigger
 context. Earlier attempts on the same tip appear as concise history rows with
 status, a labelled relative timestamp and a copyable `ci inspect <event-ID>`
 command. Running older attempts remain visible: rerunning does not cancel them.
@@ -1296,8 +1341,13 @@ separate from current results and trust gates, and marks history as incomplete.
 Human watch includes this context only in its initial summary; subsequent
 updates and JSON Lines remain pinned to the original current target.
 
-Coverage gaps distinguish repository inputs, quoted events, skipped identity
-checks and failed identity lookups. Signed evidence is validated before selecting
-NIP-05 candidates. Delegation applies only to accepted job events; unaccepted
-providers still require independent evidence. Missing optional domain evidence
-does not negate verified maintainer authorization.
+Coverage diagnostics identify `repository_inputs`, `cache_only_identities`,
+`quoted_events` and `identity_lookup` gaps in `ci.coverage_gaps`. A missing
+NIP-05 check or relay response does not negate a verified maintainer request.
+Optional domain evidence is not required when signed evidence already establishes
+the relationship. Missing quotes and incomplete repository reads still leave
+coverage partial; identity lookup failures do not remove verified authorization.
+
+Routine human output omits optional identity diagnostics; verbose output and
+JSON retain them. Missing maintainer authorization is reported as unverified
+coordinator evidence, not as a failed execution or proof of distrust.
