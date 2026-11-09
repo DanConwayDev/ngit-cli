@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Running jobs show approximate elapsed counters in human CI views, advancing
-  during watch from the first observed running report.
+- Live job counters include reported job-relative step timings. Job and active
+  step counters use `≥` to distinguish lower bounds from measured durations,
+  retaining their observations across watch renewals. Workflow headers show
+  elapsed time when a signed start timestamp is available.
 
 - Human CI summaries use `waiting` for unreported work and ambiguous live skipped
   placeholders. Routine incomplete relay refresh diagnostics appear only with

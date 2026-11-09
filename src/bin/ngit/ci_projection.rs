@@ -1968,15 +1968,37 @@ mod tests {
         let render = |report: &RunReport, clocks: &mut crate::ci_plan::LiveStepClocks, now| {
             crate::ci_display::live_job_row(report, "build", clocks, Timestamp::from_secs(now))
         };
-        assert!(render(&report, &mut clocks, 110).contains("~10s"));
+        assert!(render(&report, &mut clocks, 110).contains("≥10s"));
         report.run.live_jobs[0].created_at = Timestamp::from_secs(112);
-        assert!(render(&report, &mut clocks, 115).contains("~15s"));
-        assert!(render(&report, &mut clocks, 120).contains("~20s"));
+        assert!(render(&report, &mut clocks, 115).contains("≥15s"));
+        assert!(render(&report, &mut clocks, 120).contains("≥20s"));
         report.run.live_jobs[0].details.allocation = Some(EventId::from_byte_array([0; 32]));
-        assert!(render(&report, &mut clocks, 120).contains("~8s"));
+        assert!(render(&report, &mut clocks, 120).contains("≥8s"));
         report.run.run_id = "another-run".into();
         report.run.live_jobs[0].created_at = Timestamp::from_secs(119);
-        assert!(render(&report, &mut clocks, 120).contains("~1s"));
+        assert!(render(&report, &mut clocks, 120).contains("≥1s"));
+        // Joining mid-job must include its reported timeline, without adding
+        // durations together: work can overlap.
+        report.run.live_jobs[0].details.steps = vec![ngit::ci::details::Step {
+            id: "tests".into(),
+            label: "tests".into(),
+            start_ms: Some(178_000),
+            duration_ms: None,
+            outcome: "unknown".into(),
+            artifacts: None,
+        }];
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(400);
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
+        assert!(render(&report, &mut clocks, 420).contains("≥3m 18s"));
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut clocks,
+            Timestamp::from_secs(420),
+        );
+        assert!(steps.contains("≥20s"));
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(425);
+        assert!(render(&report, &mut clocks, 430).contains("≥3m 28s"));
     }
 
     #[test]
@@ -2060,6 +2082,9 @@ mod tests {
         let json = report.to_json(LogTailMode::None);
         assert_eq!(json["run_id"], "76c65676cf620d37");
         assert_eq!(json["time_kind"], "reported");
+        assert!(!metadata.contains("elapsed"));
+        report.run.result.as_mut().unwrap().started_at = Some(Timestamp::from_secs(100));
+        assert!(crate::ci_display::run_metadata(&report).contains("1m 40s elapsed"));
     }
 
     #[test]

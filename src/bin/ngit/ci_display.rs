@@ -91,6 +91,29 @@ pub fn run_metadata(run: &RunReport) -> String {
         short_run_id(&run.run.run_id),
         crate::ci_history::age(summary.timestamp, now.as_secs())
     );
+    if summary.time_kind == "started" {
+        metadata = format!(
+            "run {} · started {}",
+            short_run_id(&run.run.run_id),
+            crate::ci_history::age(summary.timestamp, now.as_secs())
+        );
+    }
+    let started = run
+        .run
+        .result
+        .as_ref()
+        .and_then(|r| r.started_at)
+        .or_else(|| run.run.progress.as_ref().and_then(|p| p.started_at));
+    let end =
+        run.run.result.as_ref().map(|r| r.created_at).or_else(|| {
+            matches!(run.state_label().as_str(), "running" | "in_progress").then_some(now)
+        });
+    if let Some(ms) = started
+        .zip(end)
+        .and_then(|(start, end)| elapsed_to_report(Some(start.as_secs()), end.as_secs()))
+    {
+        let _ = write!(metadata, " · {} elapsed", crate::ci_plan::duration(ms));
+    }
     if run.attempt_of > 1 {
         let _ = write!(metadata, " · attempt {}", run.attempt_of);
     }
@@ -107,8 +130,8 @@ pub fn elapsed_label(ms: Option<u64>) -> Option<String> {
     ms.map(|ms| format!("~{}", crate::ci_plan::duration(ms)))
 }
 
-/// Approximate time since signed evidence reported this job running, not a
-/// claimed execution start. Allocation identity separates provider retries.
+/// Lower bound from signed job-relative progress and time observed running.
+/// Allocation identity separates provider retries.
 pub fn live_job_row(
     run: &RunReport,
     id: &str,
@@ -135,9 +158,29 @@ pub fn live_job_row(
             id,
             job.map(|job| (job.author, &job.details.allocation))
         );
-        clocks.elapsed(key, observed.as_secs(), now.as_secs())
+        // Offsets share the provider's job-relative timeline. Use the furthest
+        // reported point, never sum durations (steps can overlap).
+        let offset = job.map_or(0, |job| {
+            job.details
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    step.start_ms
+                        .map(|start| start.saturating_add(step.duration_ms.unwrap_or(0)))
+                })
+                .max()
+                .unwrap_or(0)
+        });
+        clocks.elapsed_with_offset(key, observed.as_secs(), now.as_secs(), offset)
     });
-    timed_row("running", id, 1, elapsed_label(elapsed).as_deref())
+    timed_row(
+        "running",
+        id,
+        1,
+        elapsed
+            .map(|ms| format!("≥{}", crate::ci_plan::duration(ms)))
+            .as_deref(),
+    )
 }
 
 pub fn print_status(report: &CiReport, target: &Target) {

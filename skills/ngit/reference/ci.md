@@ -454,6 +454,11 @@ separate from current results and trust gates, and marks history as incomplete.
 Human watch removes the fallback as soon as current-tip run evidence arrives.
 Both the human view and JSON Lines remain pinned to the original current target.
 
-Live job durations marked `~` measure time since the first observed running
-report, not an exact execution start. Watch retains that observation across
-renewals and advances the counter between updates.
+Live job and step durations marked `≥` are lower bounds, not exact start-time
+estimates. Job bounds include the furthest reported job-relative step offset
+and duration, without summing potentially overlapping work. Active step bounds
+measure time since that step was first observed running. Watch retains these
+bounds across renewals and advances them between updates. Joining mid-run can
+understate elapsed time. Workflow headers show elapsed time when a signed
+`started_at` is available; finished workflows measure through result publication.
+Job and step rows retain execution order, with durations aligned on the left.

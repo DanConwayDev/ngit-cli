@@ -126,9 +126,20 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
 pub struct LiveStepClocks(std::collections::HashMap<String, u64>);
 impl LiveStepClocks {
     pub(crate) fn elapsed(&mut self, key: String, reported: u64, now: u64) -> u64 {
-        let since = self.0.entry(key).or_insert(reported);
-        *since = (*since).min(reported);
-        now.saturating_sub(*since).saturating_mul(1000)
+        self.elapsed_with_offset(key, reported, now, 0)
+    }
+
+    pub(crate) fn elapsed_with_offset(
+        &mut self,
+        key: String,
+        reported: u64,
+        now: u64,
+        offset_ms: u64,
+    ) -> u64 {
+        let origin = reported.saturating_mul(1000).saturating_sub(offset_ms);
+        let since = self.0.entry(key).or_insert(origin);
+        *since = (*since).min(origin);
+        now.saturating_mul(1000).saturating_sub(*since)
     }
 }
 
@@ -228,7 +239,7 @@ fn write_step(
 ) {
     let duration = step.duration_ms.map(|ms| {
         if live && step.outcome == "running" {
-            format!("~{}", duration(ms))
+            format!("≥{}", duration(ms))
         } else {
             duration(ms)
         }
