@@ -522,10 +522,31 @@ async fn main() {
                     )
                     .await
                 }
+                CiCommands::Service { command } => match command {
+                    cli::CiServiceCommands::Request {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_request(
+                            coordinator,
+                            *offline,
+                            signer_params,
+                        )
+                        .await
+                    }
+                    cli::CiServiceCommands::Stop {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
+                            .await
+                    }
+                },
                 CiCommands::Request {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci request` is deprecated; use `ci service request`");
                     sub_commands::ci_control::launch_request(coordinator, *offline, signer_params)
                         .await
                 }
@@ -533,6 +554,7 @@ async fn main() {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci stop` is deprecated; use `ci service stop`");
                     sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
                         .await
                 }

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Standing CI controls are now `ci service request` and `ci service stop`.
+  The old commands remain compatible and warn on stderr that they are deprecated.
+
 - Remote signer pairing keeps public-key approval guidance visible after the
   detailed report appears, including a reminder to check for a second signer
   notification.

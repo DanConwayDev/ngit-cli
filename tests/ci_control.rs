@@ -262,7 +262,11 @@ async fn request_publishes_one_service_request_for_the_repository_and_coordinato
     let arranged = arrange("ci-request").await?;
     let coordinator = arranged.coordinator_npub()?;
 
-    let json = ngit_json_ok(&arranged.publisher, &["ci", "request", &coordinator]).await?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "service", "request", &coordinator],
+    )
+    .await?;
     assert_eq!(json["command_status"], "ok");
     assert_eq!(json["action"], "service-requested");
     assert_eq!(json["entity"], "ci");
@@ -313,7 +317,11 @@ async fn stop_publishes_a_service_stop_with_the_same_shape() -> Result<()> {
     let arranged = arrange("ci-stop").await?;
     let coordinator = arranged.coordinator_npub()?;
 
-    let json = ngit_json_ok(&arranged.publisher, &["ci", "stop", &coordinator]).await?;
+    let json = ngit_json_ok(
+        &arranged.publisher,
+        &["ci", "service", "stop", &coordinator],
+    )
+    .await?;
     assert_eq!(json["action"], "service-stopped");
 
     let event = arranged.only_published(KIND_SERVICE_STOP).await?;

@@ -185,3 +185,7 @@ JSON reports `secret-update-published` with names only. Relay acceptance is not
 coordinator acceptance: inspect kind-39844 status for names, origin and accepted
 update times. `WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
 same channel; pairing, sanitizing and sealing remain coordinator responsibilities.
+
+`ci service request` and `ci service stop` manage standing repository service.
+The older `ci request` and `ci stop` commands remain compatible, but emit a
+deprecation warning on stderr. Their signed events and JSON results are unchanged.

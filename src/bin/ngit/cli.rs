@@ -1522,7 +1522,44 @@ pub struct CiSecretsArgs {
 }
 
 #[derive(Subcommand)]
+pub enum CiServiceCommands {
+    /// ask a coordinator to run CI for this repository
+    #[command(
+        long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
+        <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
+        The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
+    )]
+    Request {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// ask a coordinator to stop running CI for this repository
+    #[command(
+        long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+    )]
+    Stop {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum CiCommands {
+    /// Manage standing CI service for this repository
+    Service {
+        #[command(subcommand)]
+        command: CiServiceCommands,
+    },
     /// Publish an encrypted atomic secret update to a live coordinator inbox
     Secrets(CiSecretsArgs),
     /// Inspect signed service, provider, allocation or execution event
@@ -1561,10 +1598,10 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// ask a coordinator to run CI for this repository
+    /// Deprecated alias for `ci service request`
     #[command(
         long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
-        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci stop`. It never covers runs that started before it.\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
         <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
         The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
     )]
@@ -1576,10 +1613,10 @@ pub enum CiCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// ask a coordinator to stop running CI for this repository
+    /// Deprecated alias for `ci service stop`
     #[command(
         long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
-        Published for the same repository perspective as `ngit ci request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
     )]
     Stop {
         /// Coordinator public key (npub or hex)

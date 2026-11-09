@@ -3,7 +3,7 @@
 **Status:** all six work packages implemented — WP1 (`src/lib/ci/` core),
 WP2 (`provenance`, `domain`, `resolve`), WP3 (`ngit ci status`), WP4
 (`pr view` Checks, `pr list` CI column), WP5 (merge gating) and WP6
-(`ngit ci request|stop|trigger`). The deferred list below still stands.
+(`ngit ci service request|stop|trigger`). The deferred list below still stands.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -630,7 +630,7 @@ own — and its cost is one extra filter per repository relay.
   selected maintainer's coordinate otherwise (which is also what a
   contributor with no announcement asks about). The relay hint is the
   repository's first relay. All three commands share the choice, so
-  `ngit ci stop` normally closes what `ngit ci request` opened — but the
+  `ngit ci service stop` normally closes what `ngit ci service request` opened — but the
   choice reads live state, so it is not a promise that a stop always
   lands where its request did: a signer who publishes their own announcement
   between the two, or a repository whose selected maintainer changes, gets a
@@ -792,13 +792,13 @@ one-line evidence summary — plus integrity marker and a trailing
 non-zero when the rolled-up current result does not meet the floor or is not
 green. Supports `--offline` (cache tier only) and JSON output.
 
-### `ngit ci request|stop|trigger <coordinator>` (new commands)
+### `ngit ci service request|stop|trigger <coordinator>` (new commands)
 
 The maintainer controls, all non-interactive and driven by flags alone:
 
 ```
-ngit ci request <COORDINATOR> [--offline]
-ngit ci stop    <COORDINATOR> [--offline]
+ngit ci service request <COORDINATOR> [--offline]
+ngit ci service stop    <COORDINATOR> [--offline]
 ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH> [--rerun-dependencies]
                 [--ref <GIT-REF>] [--offline]
 ```
@@ -975,7 +975,7 @@ on WP1.
   not project CI. A `neutral` and a `skipped` conclusion are exercised on
   every surface that reads the green predicate — `ci status`, `pr list`,
   `pr view` and merge — asserting the one verdict.
-- **WP6 — maintainer controls** *(done)*: `ngit ci request|stop|trigger`
+- **WP6 — maintainer controls** *(done)*: `ngit ci service request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.
   Integration tests (`tests/ci_control.rs`): the exact published shape of each
@@ -1170,3 +1170,7 @@ JSON reports `secret-update-published` with names only. Relay acceptance is not
 coordinator acceptance: inspect kind-39844 status for names, origin and accepted
 update times. `WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
 same channel; pairing, sanitizing and sealing remain coordinator responsibilities.
+
+`ci service request` and `ci service stop` manage standing repository service.
+The older `ci request` and `ci stop` commands remain compatible, but emit a
+deprecation warning on stderr. Their signed events and JSON results are unchanged.
