@@ -7,279 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- CI status and inspect show coordinator-selected replacement allocations as
-  current work instead of letting an earlier capacity rejection hide progress.
-  Earlier results appear as muted attempt history and in JSON
-  `previous_job_attempts`, with exact-event inspection available.
-
-- CI views accept explicit pending/running steps and live job start timestamps.
-  Job and step counters use the shared execution clock when available; older
-  events retain measured durations and clearly marked observation-based bounds.
-  Inspect and status share live timing, and JSON retains the signed start anchor.
-
-- Without execution anchors, live job counters include reported job-relative
-  step timings. Counters use `≥` to distinguish lower bounds from measured durations,
-  retaining their observations across watch renewals. Workflow headers show
-  a ticking duration while running, and age plus duration after completion,
-  when a signed start timestamp is available.
-
-- Human CI summaries use `waiting` for unreported work and ambiguous live skipped
-  placeholders. Routine incomplete relay refresh diagnostics appear only with
-  verbose output; JSON retains coverage details and signed step outcomes.
-
-- `ci status --watch` exits after all observed workflows conclude and 10 seconds
-  pass without new updates. Queued dependencies, running or stale workflows,
-  and missing CI evidence keep it open. Human output shows the countdown;
-  `--follow` retains indefinite observation, including with JSON streaming.
-
-- `ci status` shows reported steps and timings for running jobs. Human
-  `ci status --watch` refreshes this coloured report inline without taking over
-  the terminal. Active-step elapsed estimates tick every second until replaced
-  by final durations. Redirected output receives snapshots on events.
-  Previous-tip results appear only when current-tip CI is absent, as muted
-  short-commit/workflow/outcome/age lines without a heading or command hint.
-  Historical summaries and navigation tips are muted. `--watch --json`
-  streams compact snapshots and semantic updates using run/allocation ID
-  prefixes, with full identities and workflow paths in the initial snapshots. Changed steps are complete replacements, other tag changes
-  preserve duplicates, and unchanged renewals are suppressed. `--full-events`
-  retains the complete decoded event stream.
-
-- `ci secrets` waits for coordinator inventory confirmation after encrypted
-  delivery, matching gitworkshop's checks for updated and removed names. Human
-  output and JSON distinguish accepted updates from pending confirmation;
-  `--confirmation-timeout` controls the wait (90 seconds by default).
-
-- `account login --profile NAME --no-activate` saves a signer profile without
-  changing the local or global login. Use `--signer NAME` or
-  `git -c nostr.signer=NAME` to select it for a single command.
-
-- `ci status` summarizes workflow and job progress, expanding failed jobs into
-  steps, a direct full-log link and a compact `└` preview of the last three log
-  lines. `ci inspect` details the same HEAD
-  or an explicit `--target`, with coloured outcomes, artifacts, output links and trust
-  evidence. Bold workflows start with status; plain job/step rows start with
-  right-aligned durations (seconds below an hour, hours/minutes thereafter).
-  Workflow rows show short run labels and ages. Job timings are approximate; JSON preserves precise signed values.
-  Coordinator trust is separate from execution outcomes; provider evidence stays
-  in JSON. Inspection separates workflows with blank lines, labels full-log links,
-  and shows muted, copyable log content between start/end markers
-  (`--no-logs` hides them, `--logs` includes successful jobs too).
-  Exact-event inspection remains available by ID. Reported steps retain signed
-  execution order, including provider-added preparation and cleanup. Verified
-  workflow definitions supply missing jobs, steps and dependencies without
-  predicting conditional outcomes. JSON retains execution evidence, outputs
-  and dependency bindings. Coverage diagnostics distinguish incomplete relay
-  reads, unavailable requests and skipped or failed identity checks from
-  verified maintainer direction. Optional NIP-05 lookups are skipped when signed
-  evidence already establishes the signer relationship, avoiding unrelated
-  Git-server identity failures for maintainer-authorized CI. Optional identity
-  diagnostics remain available in verbose output and JSON.
-  Earlier attempts are listed separately with relative times and exact-event
-  inspection commands; they never contribute to the current result. While current
-  CI is unresolved, a clearly labelled workflow-only summary can show the newest
-  related previous tip, with a command to inspect that exact commit. PR history
-  requires a branch association; shared commits alone do not establish one.
-  Missing PR history is reported independently of current-commit CI evidence.
-
-- Standing CI controls are now `ci service request` and `ci service stop`.
-  The old commands remain compatible and warn on stderr that they are deprecated.
-
-- Remote signer pairing keeps public-key approval guidance visible after the
-  detailed report appears, including a reminder to check for a second signer
-  notification.
-
-- JSON output and redirected progress use append-only stderr messages instead
-  of animations or cursor redraws, including relay, Git-server, signer,
-  Git-transfer and Blossom upload reporting. Verbose mode shows details
-  immediately and retains final diagnostics; normal terminal output keeps its
-  concise, delayed-detail presentation. JSON stdout remains one final document,
-  except for the event stream from `ci status --watch --json`.
-
 ### Added
 
-- `ci service status` shows coordinators with observed workflow runs in the last
-  30 days, their latest outcome and age, and dated maintainer relationships.
-  Requested coordinators with no recent observed runs remain visible. Standing requests,
-  authorization of individual runs, service claims and advertised readiness
-  remain distinct, with evidence and observation bounds available in JSON.
-  Verified NIP-05 domains or addresses label coordinators alongside their npubs;
-  profile display names and unverified identity claims are not used. Relationship
-  and acting claims precede activity, with an inspection tip last. A single start
-  uses a simple request age; repeated starts or stops show the latest three
-  maintainer requests newest first, with full observed history in JSON. Advertised
-  availability stays in JSON when an acting claim already communicates service.
-
-- `ci status --watch` observes workflow and job updates; stopping observation
-  does not cancel CI. `--follow` keeps watching after completed attempts.
-
-- `ci inspect <ID>` provides detailed workflow, job and service evidence, with
-  decoded or raw signed JSON and explicit filters for protocol diagnosis.
-  `--artifacts` retrieves and verifies artifact manifests without downloading
-  their listed files.
-
+- `ci status --watch` monitors workflow and job progress in an inline terminal
+  view without taking over the screen. It exits after all observed workflows
+  conclude and 10 seconds pass without updates; pending work or missing evidence
+  keeps it open. `--follow` watches indefinitely. Stopping observation does not
+  cancel execution.
+- `ci status --watch --json` streams compact snapshots and changes with short
+  run/allocation references and full identities in initial snapshots.
+  Unchanged renewals are suppressed; `--full-events` retains complete decoded
+  events. Redirected human output receives snapshots when events arrive.
+- `ci inspect` shows detailed CI for HEAD or an explicit `--target`, including
+  steps, logs, artifacts and coordinator trust. An event ID selects exact
+  evidence; decoded or raw signed JSON and filters support protocol diagnosis.
+  `--artifacts` retrieves and verifies manifests without downloading their files.
+- `ci service status` shows repository coordinators, observed runs from the last
+  30 days, latest outcomes and dated maintainer request/stop history. Requested
+  coordinators remain visible without recent runs. Verified domain identities
+  label coordinators; service claims, advertised availability and run
+  authorization remain distinct, with supporting evidence in JSON.
 - `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt from a
-  completed result, retaining external dependency bindings. Status identifies
-  reused job results and preserves distinct executions such as matrix instances.
-  Native trigger and rerun requests also support per-job environment pins and
-  resource requirements.
-
-- `ci secrets` publishes encrypted atomic set/remove updates to an advertised
-  coordinator inbox without exposing secret values. Publication does not imply
-  coordinator acceptance.
-
-- CI status supports workflows triggered by issue opening, reopening or
-  closing, and by release publication. Results for distinct issue actions or
-  release publications remain separate even at the same Git commit.
-
-- Accept `ngit ci trigger --rerun-dependencies` for native Nix workflows.
-  Current ngit-ci reruns the entire dependency graph on ordinary manual
-  triggers too. The flag is a compatibility alias and emits no obsolete
-  `rerun` tag, which current coordinators reject.
-
-- `ngit ci cancel <COORDINATOR> <RUN-ID>` lets confirmed maintainers request
-  cancellation of one exact workflow attempt. `--force` bypasses job grace
-  periods or escalates an earlier request. JSON reports request publication,
-  not confirmed termination; inspect CI status for completion.
-
-- Remote signer requests recover automatically with three sends two minutes
-  apart, then time out two minutes after the last send. Direct terminal users
-  can press `r` or `R` to resend immediately and restart the six-minute window.
-  Git's remote helper never reads recovery keys or advertises that shortcut;
-  JSON and headless runs keep automatic recovery. Terminals show a countdown,
-  while logs report attempt transitions. Reports refresh in place on resends,
-  show slow per-relay waiting spinners and explicit connection failures, and
-  keep recovery controls concise. The countdown counts delivery attempts for
-  the current request rather than suggesting a count of events. The initial signing line remains visible
-  until the detailed report replaces it; its heading preserves what is being
-  signed throughout the wait.
-  Signer refusals stop immediately.
-
-- `account login --nostrconnect` prints a pairing URI on stderr once a signer
-  relay confirms the response subscription, then waits without QR codes or
-  terminal input. It supports named profiles, explicit signer relays and
-  `--json`, whose stdout remains a single final result.
-
-- Remote signer progress distinguishes pairing from public-key approval and
-  keeps the waiting operation prominent above one concise line per signer
-  relay, ending with recovery guidance based on request delivery. Subscription
-  details and request IDs require verbose output. Relay acceptance remains
-  distinct from signer receipt, including when a signing app reconnects after
-  missing an ephemeral request.
-
-- Configure the existing long and short Nostr relay timeouts with
-  `nostr.relay-timeout-secs` (default 45 seconds) and
-  `nostr.relay-connect-timeout-secs` (default 7 seconds), or override them with
-  `NGIT_RELAY_TIMEOUT_SECS` and `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults,
-  deadline placement and retry behavior are unchanged when unconfigured. With
-  no valid connect override, the short timeout defaults to the smaller of 7
-  seconds and the long timeout. Explicit connect overrides remain independent.
-  `ngit --customize` lists precedence and scope. Test-mode budgets remain isolated
-  from production settings.
-
+  completed result while retaining external dependency bindings. Native trigger
+  and rerun requests support per-job environment pins and resource requirements.
+- `ci cancel COORDINATOR RUN-ID` lets confirmed maintainers request cancellation
+  of an exact workflow attempt. `--force` bypasses job grace periods or escalates
+  an earlier request. Publication is not confirmation of termination.
+- `ci secrets` sends encrypted atomic set/remove updates to a coordinator inbox
+  and waits for inventory confirmation. Output distinguishes accepted updates
+  from pending confirmation; `--confirmation-timeout` controls the wait
+  (90 seconds by default, zero for publication only).
+- CI supports issue-open/reopen/close and release-publication triggers, keeping
+  distinct activity contexts separate even when they share a Git commit.
+- `account login --nostrconnect` supports URI-based pairing without QR codes or
+  terminal input, including named profiles, explicit signer relays and JSON.
+  `--profile NAME --no-activate` saves a signer without changing the active login.
 - `account logout --all` removes all known saved profiles and credentials and
   clears current-repository and non-local Git login configuration, including
   conditional includes and Windows ProgramData configuration. It does not scan
   other repositories or revoke access at remote signers.
+- Configure relay timeouts through `nostr.relay-timeout-secs` and
+  `nostr.relay-connect-timeout-secs`, or `NGIT_RELAY_TIMEOUT_SECS` and
+  `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults remain 45 seconds and the smaller
+  of 7 seconds and the long timeout; an explicit connect override is independent.
+  `ngit --customize` documents precedence and scope.
 
 ### Changed
 
-- Defer relay authentication until a read or write is rejected with
-  `auth-required:`, avoiding unnecessary signer requests for public reads.
-  Gated requests authenticate and retry; `--proactive-auth`,
-  `nostr.proactive-auth`, or `NGIT_PROACTIVE_AUTH` restores immediate
-  authentication for eligible relays.
-
-- Keep unnamed interactive login prompts to a simple sign-in/cancel choice.
-  Named-profile prompts explain changing the global default or repository login
-  and identify the saved profile being retained. Keeping the current selection
-  explicitly cancels sign-in without saving a new profile; pairing over an existing profile warns about replacing
-  its saved signer connection.
-
-- Make `account whoami` lead with the active login and repository override,
-  distinguish saved accounts from active signers, and retain a concise command
-  guide. Removal hints distinguish one profile from an entire account and no
-  longer automatically authorize identity-key deletion. JSON output is unchanged.
+- Bring `ngit ci` up to date with the forthcoming ngit-ci event shapes and
+  controls. Status shows workflow, job and live step progress with readable
+  timings, short run IDs and ages. Failed jobs include a direct full-log link
+  and a muted `└` preview of the last three lines. Inspection adds full execution,
+  artifact and trust details with copyable log sections.
+- CI counters use signed job starts and step offsets when available, with
+  measured completed-step durations and labelled lower bounds for older events.
+  Explicit pending/running states are supported; verified workflow definitions
+  supply expected work without predicting conditional outcomes. Workflow headers
+  show a ticking duration while running, then age and duration after completion.
+- Current CI stays separate from earlier attempts and previous commits. Earlier
+  attempts retain inspection links; only the newest related previous tip appears,
+  as a concise workflow summary, when current-tip CI is absent. Shared commits
+  alone do not establish a published PR association. Reused results and distinct
+  executions such as matrix instances remain identifiable. Coordinator-selected
+  retries stay current, with rejected allocations retained as previous attempts.
+- CI trust uses relevant signed evidence without unnecessary identity lookups
+  when authorization is already established. Routine relay-refresh and optional
+  identity diagnostics stay in verbose output and JSON. Missing authorization
+  evidence and integrity problems remain visible.
+- Standing CI controls are now `ci service request` and `ci service stop`;
+  the old commands remain as deprecated aliases. Native manual triggers rerun
+  dependency graphs without emitting the obsolete `rerun` tag;
+  `--rerun-dependencies` is accepted as a compatibility alias.
+- Relay authentication is deferred until a request receives `auth-required:`,
+  avoiding signer prompts for public reads. Gated requests authenticate and
+  retry; `--proactive-auth`, `nostr.proactive-auth`, or `NGIT_PROACTIVE_AUTH`
+  restores immediate authentication for eligible relays.
+- Remote signer requests retry automatically with three sends two minutes apart,
+  then time out two minutes after the last send. Direct terminal users can press
+  `r` or `R` to resend and restart the window. JSON, headless and Git-helper
+  operations retain automatic recovery without reading recovery keys. Refusals
+  stop immediately; initial pairing and waits behind another signer operation
+  are bounded to two minutes. Pairing failures retain their causes.
+- Signer progress distinguishes pairing, public-key approval and request delivery,
+  shows per-relay connection state and recovery guidance, and retains reminders
+  for a second approval. Terminal progress stays aligned during pairing, and
+  concurrent requests keep separate reports. JSON and redirected progress use
+  append-only stderr messages across relay, Git, signer and Blossom operations. Verbose mode retains
+  detailed diagnostics; JSON stdout remains structured command output or the
+  explicit CI watch stream.
 - Name reusable signer configurations with `account login --profile NAME`.
   The old `--alias` spelling, stored bindings and JSON fields remain compatible.
-- Ordinary logout removes the selected connection and its saved profile instead
-  of retaining credentials. It prefers the repository override, then the default
-  login; `--local` and `--global` explicitly select the scope. Removing an override
-  reports any default account that becomes active, and lists remaining accounts.
-  Removing shared credentials also makes them unavailable to other repositories.
-- Deleting identity keys requires `logout --forget`; `--keep-credentials` signs
-  out while retaining credentials. These safeguards also apply to `--all`, with
-  errors before changes and no interactive prompt. Retention refuses legacy
-  Git-config remote connections that cannot be preserved automatically; export
-  those connections first. Remote session credentials do not need `--forget`.
-- An explicit npub in `account logout` or `account forget-keys` removes all known
-  credentials and profile bindings for that identity, including remote sessions.
-  Logout still requires `--forget` for identity keys; `forget-keys` explicitly
-  authorizes deletion. Named profiles and exact credential-entry targets remain
-  selective. Saved credentials can be removed after logout without contacting
-  the signer.
+  Login prompts clarify scope and profile replacement; `account whoami`
+  distinguishes active signers, repository overrides and saved accounts.
+- Ordinary logout removes the selected connection and saved profile. Use
+  `--keep-credentials` to sign out without deleting credentials; identity-key
+  deletion requires `--forget`. These safeguards also apply to `--all`.
+  Repository overrides take precedence over defaults, with explicit `--local`
+  and `--global` scope controls. Removing shared credentials affects other
+  repositories that use them.
+- An explicit npub in `account logout` or `account forget-keys` selects all known
+  credentials and profiles for that identity; named-profile and credential-entry
+  targets remain selective. Saved credentials can be removed without contacting
+  a signer. Legacy Git-config connections that cannot be retained automatically
+  must be exported before using `--keep-credentials`.
 
-- Update nostr/nostr-sdk to 0.45.6 — upstream fix for a signature-verification cache issue; ngit ingests relay events through this path, so clients should update
 ### Fixed
 
-- Remote signer progress stays aligned and refreshes in place while the
-  interactive pairing menu reads keys in raw terminal mode, instead of
-  appending repeated headings and drifting relay lines sideways.
+- Named remote-signer profiles can use JSON storage when the OS credential store
+  is unavailable, without losing the new connection or binding it to an existing
+  default signer. Fresh login replaces the identity's default remote session
+  while preserving independent profiles and keys. Failed authentication or
+  storage leaves the working selection intact; global login preserves local
+  overrides.
+- Incomplete local login selections block signing rather than silently using the
+  global identity. Account inventory reports unavailable selections accurately.
+- File-store logout works on headless Unix systems without a session bus. OS-store
+  access is checked before deletion; failed deletion does not leave profile
+  removal markers. Git include cleanup follows symlink-relative paths without
+  modifying unrelated configuration files.
+- Bare clone/fetch consumers, including Nix source caches, can load existing
+  signers and discover proposal refs. Automatic PR branch visibility remains
+  opt-in; this does not provide full bare-repository command or publishing support.
+- Repository state ignores names such as `refs/tagsevil` rather than treating
+  them as genuine `refs/tags/` entries.
 
-- Pairing a new remote signer profile falls back to JSON storage when the OS
-  credential store is unavailable. Failed named-profile storage now stops before
-  offering a plaintext fallback that could discard the new connection and bind
-  the profile to the existing default signer.
+### Security
 
-- Support bare clone/fetch consumers, including Nix source caches, when loading
-  an existing signer or discovering proposal refs. Keep automatic PR branch
-  visibility opt-in; this does not provide full bare-repository support for
-  ngit commands or publishing workflows.
-
-- `ngit release publish` now refuses manifest file paths that resolve outside
-  the repository root (`assets[].file`, `release_source`, `release_notes`,
-  application `icon` and `images`). Absolute paths and `..` escapes are rejected
-  at resolution time, before any file is opened or uploaded to Blossom servers.
-  Symlinks that resolve outside the repository are also rejected. User-supplied
-  CLI arguments (`--manifest`, `--notes-file`) remain allowed to be absolute as a
-  deliberate read primitive.
-
-- Ignore refs that merely start with `refs/tags` (for example `refs/tagsevil`)
-  when reading repository state events, instead of accepting them into the
-  repository state alongside genuine `refs/tags/` entries.
-
-- Verify signatures of cached update metadata before using it, so a tampered
-  local cache cannot direct `ngit update` to an unrelated release.
-
-- Initial pairing and time queued behind another operation using the same
-  signer stop after two minutes with recovery guidance.
-  Concurrent operations no longer mix their pending-request reports.
-  Pairing preserves failure causes instead of silently retrying indefinitely;
-  signer refusals remain distinct from timeouts. Commands do not resume from
-  an intermediate signing step.
-
-- Allow file-store logout and credential deletion on headless Unix systems
-  without a configured session bus. Keep errors for inaccessible configured OS
-  stores, check access before deletion, and avoid leaving profile-removal
-  markers when the OS deletion fails.
-
-- Fresh remote-signer login replaces the npub's default session while preserving
-  independent named connections and identity keys. Failed authentication or
-  credential storage leaves the working login selected; global login preserves
-  repository overrides.
-- Incomplete local login configuration blocks signing instead of silently
-  falling back to the global identity. Account inventory reports unavailable
-  selections rather than advertising the global account as active.
-- Logout cleanup follows Git's symlink-relative include paths without modifying
-  unrelated sibling configuration files.
-
-- `ngit update` Cargo installs now run from the detected Cargo installation
-  root instead of the caller's working directory, avoiding repository-local
-  `.cargo/config.toml` settings such as `build.rustc-wrapper`,
-  `target.*.linker`, or `[source]` replacements. User-level Cargo configuration
-  (`$CARGO_HOME`) still applies. The standalone installer (`install.sh`) uses
-  the same working directory.
+- Update nostr/nostr-sdk to 0.45.6 for an upstream signature-verification cache
+  fix. ngit ingests relay events through this path, so clients should update.
+- `ngit release publish` rejects manifest file paths outside the repository root,
+  including absolute paths, `..` escapes and escaping symlinks, before opening or
+  uploading them. This covers assets, source, notes, icons and images. Explicit
+  CLI paths such as `--manifest` and `--notes-file` remain allowed to be absolute.
+- Verify signatures of cached update metadata before using it, preventing a
+  tampered local cache from directing `ngit update` to an unrelated release.
+- Cargo-based updates and the standalone installer run from the detected Cargo
+  installation root, avoiding repository-local `.cargo/config.toml` settings
+  such as compiler wrappers, linkers and source replacements. User-level Cargo
+  configuration still applies.
 
 ## [3.0.5] - 2026-10-28
 
