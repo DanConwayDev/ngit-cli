@@ -141,7 +141,8 @@ pub struct Cli {
     /// Output machine-readable JSON on stdout
     ///
     /// Most commands emit one document. `ci status --watch` emits one decoded
-    /// workflow/job event per line until interrupted.
+    /// workflow/job event per line until completion; --follow observes
+    /// indefinitely.
     ///
     /// Progress stays on stderr as plain state changes without terminal
     /// redraws.
@@ -1621,10 +1622,13 @@ pub enum CiCommands {
         Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
     )]
     Status {
-        /// Stream every distinct workflow/job update until interrupted (JSON
-        /// Lines with --json)
+        /// Watch CI until all observed workflows finish, then wait 10 quiet
+        /// seconds for further updates (JSON Lines with --json)
         #[arg(long, conflicts_with_all = ["offline", "require_ci_trust"])]
         watch: bool,
+        /// Keep watching after completion until interrupted
+        #[arg(long, requires = "watch")]
+        follow: bool,
         /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
         /// HEAD
         #[arg(value_name = "TARGET")]

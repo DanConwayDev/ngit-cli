@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ci status` expands running jobs into reported steps with durations and
-  approximate active-step elapsed times. Historical workflow summaries and
-  tips are muted and omit coordinator identities and routine branch notes.
+- `ci status --watch` exits after all observed workflows conclude and 10 seconds
+  pass without new updates. Queued dependencies, running or stale workflows,
+  and missing CI evidence keep it open. Human output shows the countdown;
+  `--follow` retains indefinite observation, including with JSON streaming.
+
+- `ci status` shows reported steps and timings for running jobs. Human
+  `ci status --watch` refreshes this coloured report inline without taking over
+  the terminal. Active-step elapsed estimates tick every second until replaced
+  by final durations. Redirected output receives snapshots on events.
+  Previous-tip summaries omit coordinators and routine branch-coverage notes;
+  historical summaries and navigation tips are muted. `--watch --json`
+  continues streaming individual event updates.
 
 - `ci secrets` waits for coordinator inventory confirmation after encrypted
   delivery, matching gitworkshop's checks for updated and removed names. Human
@@ -77,9 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   maintainer requests newest first, with full observed history in JSON. Advertised
   availability stays in JSON when an acting claim already communicates service.
 
-- `ci status --watch` streams workflow and job updates until interrupted, without
-  a timeout. `--json` emits decoded events as JSON Lines; stopping observation
-  does not cancel CI.
+- `ci status --watch` observes workflow and job updates; stopping observation
+  does not cancel CI. `--follow` keeps watching after completed attempts.
 
 - `ci inspect <ID>` provides detailed workflow, job and service evidence, with
   decoded or raw signed JSON and explicit filters for protocol diagnosis.

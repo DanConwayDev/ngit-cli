@@ -46,7 +46,8 @@ it. Explanation: https://ngit.dev/how-it-works
   name is a plain push and never creates a PR.
 - **Read ngit output with `--json`.** It is a global option and works at any
   position. Stdout is one JSON document, except `ci status --watch --json` streams one
-  decoded workflow/job event per line until interrupted. Progress and diagnostics go to
+  decoded workflow/job event per line; watch exits after completion grace
+  unless --follow is supplied. Progress and diagnostics go to
   stderr. `git` commands have no `--json`. Top-level `command_status` is `ok`
   for exit 0 and `error` otherwise; it never describes a nested domain result
   (`ngit ci status --json` reports `ok` with `ci.conclusion: "failure"` unless a

@@ -509,6 +509,7 @@ async fn main() {
             Commands::Ci(args) => match &args.ci_command {
                 CiCommands::Status {
                     watch,
+                    follow,
                     target,
                     require_ci_trust,
                     log_tail,
@@ -521,6 +522,7 @@ async fn main() {
                         *require_ci_trust,
                         sub_commands::ci_status::View {
                             detailed: false,
+                            follow: *follow,
                             log_tail: *log_tail,
                         },
                         cli.json,

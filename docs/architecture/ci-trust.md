@@ -1167,11 +1167,26 @@ SHA-256, and checked for schema version and declared file count. No archive is
 extracted and no listed file is downloaded. Status and watch never expand a
 manifest automatically.
 
-### stream workflow and job updates until interrupted
+### watch workflow and job updates
 
-`ci status <target> --watch` first shows the compact current summary, then one compact line
-per distinct workflow/job event received. It has no timeout and remains open
-across completed attempts until interrupted. Ctrl-C stops observation without
+`ci status <target> --watch` refreshes the human status view as workflow/job
+updates arrive. Running jobs show reported step progress and durations, as in
+ordinary status. Terminals update the report inline once per second, leaving
+scrollback and the last report in place; redirected output receives snapshots
+on events. Active-step timers are approximate elapsed time since the first
+signed active snapshot observed by this command, not a measured execution
+duration. Snapshot renewals do not reset the timer; final durations replace it.
+Reports taller than the terminal are shortened with an inspect hint, preventing
+repeated scrolling on each timer tick.
+Historical evidence and metadata are muted. Once all observed workflows have
+concluded, watch exits after 10 seconds without a new distinct workflow/job
+update. Queued, running, stale or ungrouped evidence prevents completion;
+no CI evidence keeps waiting. New updates reset the grace period. The human
+footer shows the countdown. `--watch --follow` observes indefinitely instead.
+This is an observed-completion grace period, not a guarantee no future workflow
+will be scheduled. JSON keeps its event-only stream and exits without a trailing
+summary; normal completion exits zero regardless of the CI conclusion.
+Ctrl-C stops observation without
 cancelling execution. A PR target is pinned to the revision resolved at startup;
 restart observation to follow a new revision. Ordinary network/cleanup bounds
 still apply. `--offline` and `--require-ci-trust` cannot be combined with watch.

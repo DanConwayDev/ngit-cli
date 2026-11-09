@@ -37,7 +37,17 @@ use crate::{
 
 pub struct View {
     pub detailed: bool,
+    pub follow: bool,
     pub log_tail: LogTailMode,
+}
+
+impl View {
+    fn watch_mode(&self, json: bool) -> super::ci_watch::Mode {
+        super::ci_watch::Mode {
+            json,
+            follow: self.follow,
+        }
+    }
 }
 
 /// Run `ngit ci status`.
@@ -111,7 +121,7 @@ pub async fn launch(
             &repo_ref,
             &client,
             &target,
-            json,
+            view.watch_mode(json),
             &history_scope,
         )
         .await;

@@ -58,7 +58,7 @@ async fn watch_emits_intermediate_receipts_once_and_stays_open_after_completion(
         .publish_ci_events(&relay, std::slice::from_ref(&seed))
         .await?;
     let mut child = repo
-        .ngit(["ci", "status", "--watch", "--json"])
+        .ngit(["ci", "status", "--watch", "--follow", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -132,5 +132,100 @@ async fn watch_emits_intermediate_receipts_once_and_stays_open_after_completion(
         failed.stdout.is_empty(),
         "startup errors must not corrupt the event stream"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_watch_exits_after_grace_without_a_trailing_json_document() -> Result<()> {
+    use test_harness::{CiProgress, CiRunSpec, CiTrigger, build_ci_run, workflow_hash};
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("ci")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("ci").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
+    let spec = CiRunSpec::new(
+        &published,
+        "finished",
+        repo.rev_parse("HEAD").await?,
+        CiTrigger::push("refs/heads/main"),
+        Timestamp::now().as_secs(),
+    );
+    let coordinator = Keys::generate();
+    let run = build_ci_run(&coordinator, &spec)?;
+    harness.publish_ci_events(&relay, &run.all()).await?;
+    let mut child = repo
+        .ngit(["ci", "status", "--watch", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stdout.take().context("stdout")?).lines();
+    assert_eq!(next(&mut lines).await?["event"]["kind"], 9842);
+    let now = Timestamp::now().as_secs();
+    let mut dependent = CiRunSpec::new(
+        &published,
+        "dependent",
+        repo.rev_parse("HEAD").await?,
+        CiTrigger::push("refs/heads/main"),
+        now,
+    )
+    .workflow("deploy.yml", workflow_hash(""))
+    .conclusion(None)
+    .progress(CiProgress {
+        status: "queued".into(),
+        created_at: now,
+        expiration: now + 120,
+        conclusion: None,
+    });
+    harness
+        .publish_ci_events(&relay, &build_ci_run(&coordinator, &dependent)?.all())
+        .await?;
+    assert_eq!(next(&mut lines).await?["event"]["kind"], 39842);
+    // Passage of the completion grace is the behavior under test. Waiting on
+    // process exit verifies queued work keeps observation alive beyond it.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(11), child.wait())
+            .await
+            .is_err()
+    );
+    dependent.progress = None;
+    dependent.conclusion = Some("success".into());
+    dependent.created_at = Timestamp::now().as_secs();
+    harness
+        .publish_ci_events(&relay, &build_ci_run(&coordinator, &dependent)?.all())
+        .await?;
+    assert_eq!(next(&mut lines).await?["event"]["kind"], 9842);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await??
+            .success()
+    );
+    assert!(
+        lines.next_line().await?.is_none(),
+        "no trailing aggregate document"
+    );
+    // A fresh watcher of an already-completed commit also finishes from its
+    // initial snapshot, without needing another relay event to start the grace.
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        repo.ngit(["ci", "status", "--watch", "--json"]).output(),
+    )
+    .await??;
+    assert!(output.status.success());
+    for line in String::from_utf8(output.stdout)?.lines() {
+        let record: Value = serde_json::from_str(line)?;
+        assert!(record.get("event").is_some(), "only event records");
+    }
     Ok(())
 }

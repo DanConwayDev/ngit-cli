@@ -29,6 +29,7 @@ pub async fn launch(args: &CiInspectArgs, auth: SignerParams<'_>) -> Result<()> 
             None,
             super::ci_status::View {
                 detailed: true,
+                follow: false,
                 log_tail: selected_log_mode(args.logs, args.no_logs, crate::output::is_json()),
             },
             crate::output::is_json(),
