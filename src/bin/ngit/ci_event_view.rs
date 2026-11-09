@@ -61,6 +61,10 @@ fn tag_name(kind: u16, tag: &[String]) -> &str {
 
 /// Every value after the tag name is retained, including empty placeholders and
 /// future extension slots. Consumers need not reverse a lossy typed projection.
+pub fn decoded_tag(kind: u16, tag: &[String]) -> Value {
+    json!({"tag": tag[0], "name": tag_name(kind, tag), "values": tag[1..]})
+}
+
 pub fn decoded(event: &Event) -> Value {
     json!({
         "id": event.id, "kind": event.kind.as_u16(),
@@ -68,7 +72,7 @@ pub fn decoded(event: &Event) -> Value {
         "created_at": event.created_at.as_secs(), "content": event.content,
         "tags": event.tags.iter().map(|t| {
             let t = t.as_slice();
-            json!({"tag": t[0], "name": tag_name(event.kind.as_u16(), t), "values": t[1..]})
+            decoded_tag(event.kind.as_u16(), t)
         }).collect::<Vec<_>>()
     })
 }

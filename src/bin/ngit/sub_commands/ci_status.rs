@@ -38,6 +38,7 @@ use crate::{
 pub struct View {
     pub detailed: bool,
     pub follow: bool,
+    pub full_events: bool,
     pub log_tail: LogTailMode,
 }
 
@@ -46,6 +47,7 @@ impl View {
         super::ci_watch::Mode {
             json,
             follow: self.follow,
+            full_events: self.full_events,
         }
     }
 }

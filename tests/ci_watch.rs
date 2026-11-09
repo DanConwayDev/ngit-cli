@@ -58,7 +58,14 @@ async fn watch_emits_intermediate_receipts_once_and_stays_open_after_completion(
         .publish_ci_events(&relay, std::slice::from_ref(&seed))
         .await?;
     let mut child = repo
-        .ngit(["ci", "status", "--watch", "--follow", "--json"])
+        .ngit([
+            "ci",
+            "status",
+            "--watch",
+            "--follow",
+            "--json",
+            "--full-events",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -165,7 +172,7 @@ async fn completed_watch_exits_after_grace_without_a_trailing_json_document() ->
     let run = build_ci_run(&coordinator, &spec)?;
     harness.publish_ci_events(&relay, &run.all()).await?;
     let mut child = repo
-        .ngit(["ci", "status", "--watch", "--json"])
+        .ngit(["ci", "status", "--watch", "--json", "--full-events"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -219,7 +226,8 @@ async fn completed_watch_exits_after_grace_without_a_trailing_json_document() ->
     // initial snapshot, without needing another relay event to start the grace.
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        repo.ngit(["ci", "status", "--watch", "--json"]).output(),
+        repo.ngit(["ci", "status", "--watch", "--json", "--full-events"])
+            .output(),
     )
     .await??;
     assert!(output.status.success());
@@ -227,5 +235,115 @@ async fn completed_watch_exits_after_grace_without_a_trailing_json_document() ->
         let record: Value = serde_json::from_str(line)?;
         assert!(record.get("event").is_some(), "only event records");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_watch_emits_changed_steps_and_suppresses_renewals() -> Result<()> {
+    use test_harness::{CiProgress, CiRunSpec, CiTrigger, build_ci_run};
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("ci")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("ci").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
+    let commit = repo.rev_parse("HEAD").await?;
+    let coordinator = Keys::generate();
+    let provider = Keys::generate();
+    let now = Timestamp::now().as_secs();
+    let spec = CiRunSpec::new(
+        &published,
+        "run",
+        &commit,
+        CiTrigger::push("refs/heads/main"),
+        now,
+    )
+    .conclusion(None)
+    .progress(CiProgress::running(now));
+    harness
+        .publish_ci_events(&relay, &build_ci_run(&coordinator, &spec)?.all())
+        .await?;
+    let mut child = repo
+        .ngit(["ci", "status", "--watch", "--follow", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stdout.take().context("stdout")?).lines();
+    let initial = next(&mut lines).await?;
+    assert_eq!(initial["type"], "snapshot");
+    assert_eq!(initial["ref"], "run");
+    assert_eq!(initial["workflow"], "ci.yml");
+    let job = |n: u64, complete: bool| -> Result<Event> {
+        Ok(EventBuilder::new(Kind::Custom(39846), "")
+            .custom_created_at(Timestamp::from_secs(now - 10 + n))
+            .tags([
+                Tag::custom("a", [repo_coordinate(&published)]),
+                Tag::custom("c", [&commit]),
+                Tag::custom("w", ["ci.yml".into(), spec.workflow_hash.clone()]),
+                Tag::custom("o", ["push"]),
+                Tag::custom("r", ["refs/heads/main"]),
+                Tag::custom(
+                    "q",
+                    [
+                        format!("39842:{}:run", coordinator.public_key()),
+                        relay.clone(),
+                    ],
+                ),
+                Tag::custom(
+                    "q",
+                    [
+                        "ab".repeat(32),
+                        relay.clone(),
+                        coordinator.public_key().to_hex(),
+                        "job-allocation".into(),
+                    ],
+                ),
+                Tag::identifier("ab".repeat(32)),
+                Tag::custom("job", ["rust"]),
+                Tag::custom("expiration", [(now + 100 + n).to_string()]),
+                Tag::custom("step", ["compile", "compile", "", "1000", "success"]),
+                Tag::custom(
+                    "step",
+                    [
+                        "tests",
+                        "tests",
+                        "",
+                        if complete { "2000" } else { "" },
+                        if complete { "success" } else { "unknown" },
+                    ],
+                ),
+            ])
+            .finalize(&provider)?)
+    };
+    harness.publish_ci_events(&relay, &[job(0, false)?]).await?;
+    let initial_job = next(&mut lines).await?;
+    assert_eq!(initial_job["ref"], "run/abababab");
+    assert_eq!(initial_job["steps"][1]["status"], "running");
+    harness.publish_ci_events(&relay, &[job(1, false)?]).await?;
+    harness.publish_ci_events(&relay, &[job(2, true)?]).await?;
+    let update = next(&mut lines).await?;
+    assert_eq!(update["type"], "update");
+    assert_eq!(update["ref"], "run/abababab");
+    assert_eq!(update["timestamp"], now - 8);
+    assert_eq!(
+        update["changes"]["steps"]
+            .as_array()
+            .context("steps")?
+            .len(),
+        1
+    );
+    assert_eq!(update["changes"]["steps"][0]["id"], "tests");
+    child.kill().await?;
     Ok(())
 }

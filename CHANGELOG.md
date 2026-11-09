@@ -20,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by final durations. Redirected output receives snapshots on events.
   Previous-tip summaries omit coordinators and routine branch-coverage notes;
   historical summaries and navigation tips are muted. `--watch --json`
-  continues streaming individual event updates.
+  streams compact snapshots and semantic updates using run/allocation ID
+  prefixes, with full identities and workflow paths in the initial snapshots. Changed steps are complete replacements, other tag changes
+  preserve duplicates, and unchanged renewals are suppressed. `--full-events`
+  retains the complete decoded event stream.
 
 - `ci secrets` waits for coordinator inventory confirmation after encrypted
   delivery, matching gitworkshop's checks for updated and removed names. Human

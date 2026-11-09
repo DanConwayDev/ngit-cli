@@ -1,6 +1,6 @@
 //! Open-ended observation of distinct workflow/job receipts. No scheduler or
-//! synthetic lifecycle events: JSON streams receipts, humans see current
-//! status.
+//! synthetic lifecycle events: JSON streams semantic changes or full receipts;
+//! humans see current status.
 use std::{
     collections::HashSet,
     io::{IsTerminal, Write},
@@ -21,6 +21,7 @@ use crate::ci_projection::{ProjectionRequest, Target, Tier, build_report};
 pub struct Mode {
     pub json: bool,
     pub follow: bool,
+    pub full_events: bool,
 }
 
 pub async fn launch(
@@ -57,16 +58,16 @@ async fn observe(
     subscription: &mut Subscription,
 ) -> Result<()> {
     let json = mode.json;
+    let mut output = JsonOutput::new(mode);
     let mut completion = Completion::default();
     let path = repo.get_path()?;
     let filter = target
         .ci_filter()
         .kinds([9841, 9842, 39842, 39846].map(Kind::Custom));
-    let mut initial: Vec<_> = get_events_from_local_cache(path, vec![filter.clone()])
+    let initial: Vec<_> = get_events_from_local_cache(path, vec![filter.clone()])
         .await?
         .into_iter()
         .collect();
-    initial.sort_by_key(|event| (event.created_at, event.id));
     let mut screen = InlineReport::default();
     let mut clocks = crate::ci_plan::LiveStepClocks::default();
     let mut snapshot = if json {
@@ -91,7 +92,7 @@ async fn observe(
     }
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut seen = emit_initial(initial, target, reference, json).await?;
+    let mut seen = emit_initial(initial, target, reference, &mut output).await?;
     loop {
         let update = tokio::select! {
             biased;
@@ -125,7 +126,7 @@ async fn observe(
                     && seen.insert(event.id)
                 {
                     if json {
-                        emit(&event).await?;
+                        output.emit(&event).await?;
                     }
                     save_event_in_local_cache(path, &event).await?;
                     if !mode.follow {
@@ -157,11 +158,13 @@ async fn observe(
 }
 
 async fn emit_initial(
-    initial: Vec<Event>,
+    mut initial: Vec<Event>,
     target: &Target,
     reference: &RepoRef,
-    json: bool,
+    output: &mut JsonOutput,
 ) -> Result<HashSet<EventId>> {
+    initial.sort_by_key(|event| (event.created_at, event.id));
+    let json = output.mode.json;
     let mut seen = HashSet::new();
     for event in initial {
         if matches_target(target, reference, &event)
@@ -169,7 +172,7 @@ async fn emit_initial(
             && seen.insert(event.id)
             && json
         {
-            emit(&event).await?;
+            output.emit(&event).await?;
         }
     }
     if json {
@@ -212,8 +215,30 @@ fn matches_target(target: &Target, reference: &RepoRef, event: &Event) -> bool {
     }
 }
 
-async fn emit(event: &Event) -> Result<()> {
-    crate::output::write_json_line(&serde_json::json!({"event": crate::ci_event_view::decoded(event), "signature_verified": true})).await
+struct JsonOutput {
+    mode: Mode,
+    stream: crate::ci_delta::Stream,
+}
+impl JsonOutput {
+    fn new(mode: Mode) -> Self {
+        Self {
+            mode,
+            stream: crate::ci_delta::Stream::default(),
+        }
+    }
+    async fn emit(&mut self, event: &Event) -> Result<()> {
+        let record = if self.mode.full_events {
+            Some(
+                serde_json::json!({"event": crate::ci_event_view::decoded(event), "signature_verified": true}),
+            )
+        } else {
+            self.stream.update(event)
+        };
+        if let Some(record) = record {
+            crate::output::write_json_line(&record).await?;
+        }
+        Ok(())
+    }
 }
 
 async fn load_snapshot(

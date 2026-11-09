@@ -1184,19 +1184,66 @@ update. Queued, running, stale or ungrouped evidence prevents completion;
 no CI evidence keeps waiting. New updates reset the grace period. The human
 footer shows the countdown. `--watch --follow` observes indefinitely instead.
 This is an observed-completion grace period, not a guarantee no future workflow
-will be scheduled. JSON keeps its event-only stream and exits without a trailing
+will be scheduled. JSON keeps its streaming format and exits without a trailing
 summary; normal completion exits zero regardless of the CI conclusion.
 Ctrl-C stops observation without
 cancelling execution. A PR target is pinned to the revision resolved at startup;
 restart observation to follow a new revision. Ordinary network/cleanup bounds
 still apply. `--offline` and `--require-ci-trust` cannot be combined with watch.
 
-With `--watch --json`, stdout is JSON Lines: each record contains `event` in the
-same decoded representation as inspect, plus `signature_verified`. There is no
-synthetic per-artifact event, aggregate summary document, or trailing success
-document. Every distinct received update is emitted, including late updates and
-renewals; identical relay copies are deduplicated by event ID. This stream is
-observations, not the latest-status reducer or an authorization verdict.
+With `--watch --json`, stdout is compact JSON Lines. References use run/allocation ID prefixes, assigned once within this command
+invocation. They are exact stream labels, not arguments for inspect:
+
+- `type: "snapshot"` establishes a workflow (`ref: "f7e8170d"`) or job allocation
+  (`ref: "f7e8170d/a3b921c0"`) with its complete initial semantic state. It includes
+  `run_ref`, coordinator, full run ID, top-level workflow path, kind, source
+  `event_id`, Unix-seconds
+  `timestamp`, decoded `tags`, `steps`, `content` and `signature_verified`.
+  Jobs also include their job ID, provider and allocation ID (null for legacy
+  results without an allocation). A job snapshot may establish a run alias
+  before its workflow snapshot arrives. References start with eight characters
+  (short IDs remain whole). A newly colliding ID gets a longer prefix; reuse of
+  the identical ID by another coordinator/provider gets a numeric suffix.
+  Already assigned labels never change. Legacy jobs without an allocation use
+  their first result event ID prefix. Different coordinators, runs, providers
+  and allocations are never combined; full IDs in snapshots remain authoritative.
+- `type: "update"` carries `ref`, the delivering event's Unix-seconds
+  `timestamp`, and `changes`. There is no previous-event chain. Fields absent
+  from `changes` are unchanged. `kind` changes on progress/result transitions.
+  `content`, when present, replaces the entire content, including an empty
+  string clearing the old log tail.
+- `changes.steps` contains complete replacements for changed steps, keyed by
+  `id`; replace the whole step object, do not merge omitted optional fields.
+  `removed_steps` removes IDs. `step_order`, when present, replaces the ordered
+  list of step IDs. Snapshot steps establish the initial order.
+- Steps use `id`, `status`, optional `label`, numeric `start_ms` and
+  `duration_ms`, and `extra` for trailing protocol fields such as artifact
+  publication state. Empty/redundant labels and absent timings are omitted.
+  Live unknown steps without a duration use `status: "running"` and retain
+  `outcome: "unknown"`; this is reported state, not a locally ticking estimate.
+- `tags_added` and `tags_removed` contain decoded tags with their full values,
+  including unknown tags and empty slots. Apply removals first, one occurrence
+  per entry, then additions. Tags are a multiset: duplicates matter, order does
+  not. Step tags are represented by the step fields instead.
+
+For example, after a snapshot establishes `f7e8170d/a3b921c0`:
+
+```json
+{"type":"update","ref":"f7e8170d/a3b921c0","timestamp":1794230400,"changes":{"steps":[{"id":"compile","status":"success","duration_ms":58000}]}}
+```
+
+Timestamp/expiration-only renewals and duplicate events emit nothing. Expiration
+is excluded from compact state; use full events for liveness/expiry analysis.
+Late events cannot roll the state back; a final result supersedes progress, and
+subsequent progress cannot undo it. Unrecognized or invalid shapes remain
+visible as `type: "event"` records containing the full decoded `event` and
+`signature_verified`, without assigning a potentially misleading alias.
+
+`--watch --json --full-events` retains the original event stream: each record
+contains `event` in the same decoded representation as inspect, plus
+`signature_verified`. It emits every distinct received event, including late
+updates and renewals. Both modes omit signatures and trailing summary documents;
+neither signature verification nor compact state establishes CI authorization.
 
 Subscription starts before the cache snapshot. Events are observed after SDK
 signature/filter checks but before duplicate/replacement reduction, using a

@@ -140,9 +140,8 @@ pub struct Cli {
     pub repo: Option<String>,
     /// Output machine-readable JSON on stdout
     ///
-    /// Most commands emit one document. `ci status --watch` emits one decoded
-    /// workflow/job event per line until completion; --follow observes
-    /// indefinitely.
+    /// Most commands emit one document. `ci status --watch` streams compact
+    /// snapshots/changes as JSON Lines; --full-events emits complete events.
     ///
     /// Progress stays on stderr as plain state changes without terminal
     /// redraws.
@@ -1629,6 +1628,9 @@ pub enum CiCommands {
         /// Keep watching after completion until interrupted
         #[arg(long, requires = "watch")]
         follow: bool,
+        /// Emit complete decoded events instead of compact JSON changes
+        #[arg(long, requires_all = ["watch", "json"])]
+        full_events: bool,
         /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
         /// HEAD
         #[arg(value_name = "TARGET")]
