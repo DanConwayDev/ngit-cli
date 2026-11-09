@@ -363,7 +363,8 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
             || t[1].is_empty()
             || !step_ids.insert(t[1].clone())
             || (Conclusion::parse(&t[5]).is_none()
-                && !matches!(t[5].as_str(), "cached" | "unknown"))
+                && !matches!(t[5].as_str(), "cached" | "unknown")
+                && !(progress && matches!(t[5].as_str(), "pending" | "running")))
         {
             return Err(invalid("step"));
         }
@@ -374,11 +375,21 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
                 return Err(invalid("step"));
             }
         }
+        let start_ms = timing(&t[3])?;
+        let duration_ms = timing(&t[4])?;
+        if (t[5] == "pending" && (start_ms.is_some() || duration_ms.is_some() || t.len() == 7))
+            || (t[5] == "running" && (start_ms.is_none() || duration_ms.is_some() || t.len() == 7))
+            || start_ms
+                .zip(duration_ms)
+                .is_some_and(|(start, duration)| start.checked_add(duration).is_none())
+        {
+            return Err(invalid("step"));
+        }
         result.steps.push(Step {
             id: t[1].clone(),
             label: t[2].clone(),
-            start_ms: timing(&t[3])?,
-            duration_ms: timing(&t[4])?,
+            start_ms,
+            duration_ms,
             outcome: t[5].clone(),
             artifacts: t.get(6).cloned(),
         });
@@ -560,6 +571,39 @@ mod tests {
 
     use super::*;
     use crate::ci::kinds::test_events::{event, tag};
+
+    #[test]
+    fn explicit_step_states_validate_progress_and_preserve_legacy_outcomes() {
+        let keys = Keys::generate();
+        let parse = |start, duration, outcome, progress| {
+            job(
+                &event(
+                    &keys,
+                    Kind::Custom(39846),
+                    100,
+                    vec![tag(&["step", "test", "Test", start, duration, outcome])],
+                ),
+                progress,
+            )
+        };
+        assert!(parse("", "", "pending", true).is_ok());
+        assert!(parse("1234", "", "running", true).is_ok());
+        for (start, duration, state) in [
+            ("0", "", "pending"),
+            ("", "1", "pending"),
+            ("", "", "running"),
+            ("0", "1", "running"),
+        ] {
+            assert!(parse(start, duration, state, true).is_err());
+        }
+        assert!(parse("", "", "pending", false).is_err());
+        assert!(parse("0", "", "running", false).is_err());
+        for state in ["unknown", "skipped"] {
+            assert!(parse("", "", state, true).is_ok());
+            assert!(parse("", "", state, false).is_ok());
+        }
+        assert!(parse("18446744073709551615", "1", "success", true).is_err());
+    }
 
     #[test]
     fn execution_evidence_preserves_empty_outputs_and_rejects_conflicts() {

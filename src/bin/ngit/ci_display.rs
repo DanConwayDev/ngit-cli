@@ -154,6 +154,14 @@ pub fn live_job_row(
         .live_jobs
         .iter()
         .find(|job| job.job_id == id && job.is_live(now));
+    if let Some(start) = job.and_then(|job| job.started_at) {
+        let duration = crate::ci_plan::duration(
+            now.as_secs()
+                .saturating_sub(start.as_secs())
+                .saturating_mul(1000),
+        );
+        return timed_row("running", id, 1, Some(&duration));
+    }
     let observed = job.map(|job| job.created_at).or_else(|| {
         run.run
             .progress

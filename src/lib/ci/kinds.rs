@@ -493,6 +493,9 @@ impl WorkflowProgress {
 /// Provider-signed live snapshot. It carries no terminal job conclusion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobProgress {
+    /// Optional Unix-second execution anchor shared with job-relative step
+    /// offsets.
+    pub started_at: Option<Timestamp>,
     pub event_id: EventId,
     pub author: PublicKey,
     pub created_at: Timestamp,
@@ -570,7 +573,18 @@ pub fn validate_job_progress(event: &Event) -> Result<JobProgress, ShapeReason> 
             ));
         }
     }
+    let started_at = view
+        .optional_value("started_at")?
+        .map(|value| parse_timestamp("started_at", value))
+        .transpose()?;
+    if started_at.is_some_and(|start| start > event.created_at) {
+        return Err(ShapeReason::InvalidTagValue {
+            tag: "started_at",
+            value: "job start is after progress publication".into(),
+        });
+    }
     Ok(JobProgress {
+        started_at,
         event_id: event.id,
         author: event.pubkey,
         created_at: event.created_at,

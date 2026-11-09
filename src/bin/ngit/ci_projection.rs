@@ -722,6 +722,7 @@ impl RunReport {
             "jobs": jobs,
             "live_jobs": self.run.live_jobs.iter().filter(|j| j.is_live(Timestamp::now())).map(|j| json!({
                 "job": j.job_id, "provider": npub(j.author), "state": "in_progress", "expiration": j.expiration.as_secs(),
+                "started_at": j.started_at.map(|t| t.as_secs()),
                 "execution": j.details, "logs": j.logs,
                 "log_tail": if matches!(log_tail, LogTailMode::None) { None } else { Some(&j.log_tail) },
             })).collect::<Vec<_>>(),
@@ -808,10 +809,11 @@ impl RunReport {
             );
             println!(
                 "{}{}",
-                crate::ci_plan::steps(
-                    &job.details,
+                crate::ci_plan::live_steps(
+                    job,
                     self.plan.iter().find(|p| p.id == job.job_id),
-                    true
+                    &mut clocks,
+                    now
                 ),
                 crate::ci_plan::artifact_links(&job.details)
             );
@@ -1953,6 +1955,7 @@ mod tests {
         let mut report = run_report_with_job(Conclusion::Success, "", None);
         let job = &report.run.jobs[0];
         report.run.live_jobs.push(kinds::JobProgress {
+            started_at: None,
             event_id: job.event_id,
             author: job.author,
             created_at: Timestamp::from_secs(100),
@@ -1999,6 +2002,49 @@ mod tests {
         assert!(steps.contains("≥20s"));
         report.run.live_jobs[0].created_at = Timestamp::from_secs(425);
         assert!(render(&report, &mut clocks, 430).contains("≥3m 28s"));
+        // A supplied anchor replaces fallback clocks even when observation
+        // started late. Explicit states are authoritative, including unknown.
+        let job = &mut report.run.live_jobs[0];
+        job.started_at = Some(Timestamp::from_secs(100));
+        job.details.steps[0].outcome = "running".into();
+        for (id, state) in [
+            ("future", "pending"),
+            ("omitted", "skipped"),
+            ("uncertain", "unknown"),
+        ] {
+            job.details.steps.push(ngit::ci::details::Step {
+                id: id.into(),
+                label: id.into(),
+                start_ms: None,
+                duration_ms: None,
+                outcome: state.into(),
+                artifacts: None,
+            });
+        }
+        assert!(render(&report, &mut clocks, 430).contains("5m 30s"));
+        assert!(!render(&report, &mut clocks, 430).contains('≥'));
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut clocks,
+            Timestamp::from_secs(430),
+        );
+        assert!(steps.contains("2m 32s running tests"));
+        assert!(steps.contains("pending future"));
+        assert!(steps.contains("unknown uncertain"));
+        assert!(steps.contains("1 skipped steps"));
+        assert!(!steps.contains('≥'));
+        assert_eq!(report.run.live_jobs[0].details.steps[0].duration_ms, None);
+        report.run.live_jobs[0].started_at = None;
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut crate::ci_plan::LiveStepClocks::default(),
+            Timestamp::from_secs(430),
+        );
+        assert!(steps.contains("≥5s running tests"));
+        assert!(steps.contains("unknown uncertain"));
+        assert!(steps.contains("1 skipped steps"));
     }
 
     #[test]

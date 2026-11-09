@@ -150,8 +150,15 @@ pub fn live_steps(
     now: nostr::prelude::Timestamp,
 ) -> String {
     let mut details = job.details.clone();
+    let explicit = job.started_at.is_some()
+        || details
+            .steps
+            .iter()
+            .any(|s| matches!(s.outcome.as_str(), "pending" | "running"));
+    let mut lower_bounds = std::collections::HashSet::new();
     for step in &mut details.steps {
-        if matches!(step.outcome.as_str(), "unknown" | "running" | "in_progress")
+        if (step.outcome == "running"
+            || (!explicit && matches!(step.outcome.as_str(), "unknown" | "in_progress")))
             && step.duration_ms.is_none()
         {
             let key = format!(
@@ -159,14 +166,39 @@ pub fn live_steps(
                 job.author, job.details.allocation, job.job_id, step.id, step.start_ms
             );
             step.outcome = "running".into();
-            step.duration_ms = Some(clocks.elapsed(key, job.created_at.as_secs(), now.as_secs()));
+            step.duration_ms = Some(
+                if let Some((start, offset)) = job.started_at.zip(step.start_ms) {
+                    now.as_secs()
+                        .saturating_mul(1000)
+                        .saturating_sub(start.as_secs().saturating_mul(1000).saturating_add(offset))
+                } else {
+                    lower_bounds.insert(step.id.clone());
+                    clocks.elapsed(key, job.created_at.as_secs(), now.as_secs())
+                },
+            );
         }
     }
-    steps(&details, plan, true)
+    render_steps(&details, plan, true, explicit, &lower_bounds)
 }
 
 /// Render observed steps and declared work without evaluating conditions.
 pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String {
+    render_steps(
+        details,
+        plan,
+        live,
+        false,
+        &std::collections::HashSet::new(),
+    )
+}
+
+fn render_steps(
+    details: &JobDetails,
+    plan: Option<&JobPlan>,
+    live: bool,
+    explicit: bool,
+    lower_bounds: &std::collections::HashSet<String>,
+) -> String {
     let mut output = String::new();
     let mut conditional = 0;
     let mut skipped = 0;
@@ -174,12 +206,21 @@ pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String
     // and cleanup. YAML declares expected work; it must not reorder evidence.
     for step in &details.steps {
         let expected = plan.and_then(|plan| plan.steps.iter().find(|p| p.id == step.id));
-        if live && untimed_skip(step) && expected.is_some_and(|p| p.condition.is_some()) {
+        if live
+            && ((untimed_skip(step) && !explicit) || step.outcome == "pending")
+            && expected.is_some_and(|p| p.condition.is_some())
+        {
             conditional += 1;
-        } else if step.outcome == "skipped" && !(live && untimed_skip(step)) {
+        } else if step.outcome == "skipped" && !(live && !explicit && untimed_skip(step)) {
             skipped += 1;
         } else {
-            write_step(&mut output, step, details, live);
+            write_step(
+                &mut output,
+                step,
+                details,
+                live && !explicit,
+                lower_bounds.contains(&step.id),
+            );
         }
     }
     if let Some(plan) = plan {
@@ -236,9 +277,10 @@ fn write_step(
     step: &ngit::ci::details::Step,
     details: &JobDetails,
     live: bool,
+    lower_bound: bool,
 ) {
     let duration = step.duration_ms.map(|ms| {
-        if live && step.outcome == "running" {
+        if lower_bound {
             format!("≥{}", duration(ms))
         } else {
             duration(ms)

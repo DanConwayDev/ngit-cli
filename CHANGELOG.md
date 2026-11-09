@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Live job counters include reported job-relative step timings. Job and active
-  step counters use `≥` to distinguish lower bounds from measured durations,
+- CI views accept explicit pending/running steps and live job start timestamps.
+  Job and step counters use the shared execution clock when available; older
+  events retain measured durations and clearly marked observation-based bounds.
+  Inspect and status share live timing, and JSON retains the signed start anchor.
+
+- Without execution anchors, live job counters include reported job-relative
+  step timings. Counters use `≥` to distinguish lower bounds from measured durations,
   retaining their observations across watch renewals. Workflow headers show
   a ticking duration while running, and age plus duration after completion,
   when a signed start timestamp is available.

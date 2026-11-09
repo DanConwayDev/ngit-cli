@@ -1053,6 +1053,32 @@ mod job_progress_tests {
             ]),
         ]);
         let snapshot = event(&provider, KIND_CI_JOB_PROGRESS, 100, tags.clone());
+        assert!(
+            kinds::validate_job_progress(&snapshot)
+                .unwrap()
+                .started_at
+                .is_none()
+        );
+        let mut anchored = tags.clone();
+        anchored.push(tag(&["started_at", "90"]));
+        assert_eq!(
+            kinds::validate_job_progress(&event(
+                &provider,
+                KIND_CI_JOB_PROGRESS,
+                100,
+                anchored.clone()
+            ))
+            .unwrap()
+            .started_at,
+            Some(Timestamp::from_secs(90))
+        );
+        anchored.pop();
+        anchored.push(tag(&["started_at", "101"]));
+        assert!(
+            kinds::validate_job_progress(&event(&provider, KIND_CI_JOB_PROGRESS, 100, anchored))
+                .is_err()
+        );
+
         let marker = with_tags(
             &coordinator,
             &workflow_progress(

@@ -156,12 +156,12 @@ IDs can be matched; generated/nested act IDs and matrix expansion remain runtime
 information. Routine incomplete relay refresh diagnostics are available in
 verbose output and JSON, without warning in the normal human summary.
 Missing entries show `waiting` (waiting for evidence), not inferred as queued,
-skipped or failed. Conditions are not evaluated locally. Native live snapshots
+skipped or failed. Conditions are not evaluated locally. Legacy live snapshots
 can initially describe planned, untimed steps as `skipped`; text distinguishes
 these with `waiting` until a timed or final outcome establishes a skip.
 Unavailable or mismatched YAML falls back to reported execution evidence.
-Native explicit-step jobs publish live progress; current act and simple native
-run/build jobs do not promise equivalent live steps.
+Native explicit-step jobs and instrumented command wrappers publish live
+progress; act and uninstrumented commands do not promise equivalent live steps.
 
 `ci inspect <ID> --json` inspects exact evidence. Explicit --kind or --author
 filters support protocol diagnosis; use `ci service status` for discovery.
@@ -465,3 +465,14 @@ through result publication (for example, `4h ago · 39m 21s`). Without a signed
 start, headers retain the report age. Workflow durations retain seconds even
 beyond an hour.
 Job and step rows retain execution order, with durations aligned on the left.
+
+Live job snapshots may include `started_at` (Unix seconds). When present, job
+counters use `now - started_at`, and running steps with `start_ms` use
+`now_ms - started_at * 1000 - start_ms`. These counters do not reset on renewal.
+Explicit `pending` has no timing; `running` has a start offset but no final
+duration. Neither is valid in a terminal Job Result. On modern snapshots,
+`unknown` remains unknown and `skipped` is a definitive skip. Historical events
+without the anchor or explicit states retain the legacy placeholder handling.
+Missing anchors or offsets fall back to `≥` observation-based counters; completed
+step durations remain available. JSON preserves signed timings and outcomes,
+including nullable `live_jobs[].started_at`, without inserting local estimates.
