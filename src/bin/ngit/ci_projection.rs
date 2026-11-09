@@ -2084,7 +2084,45 @@ mod tests {
         assert_eq!(json["time_kind"], "reported");
         assert!(!metadata.contains("elapsed"));
         report.run.result.as_mut().unwrap().started_at = Some(Timestamp::from_secs(100));
-        assert!(crate::ci_display::run_metadata(&report).contains("1m 40s elapsed"));
+        assert!(crate::ci_display::run_metadata(&report).contains(" · 1m 40s"));
+    }
+
+    #[test]
+    fn running_workflow_header_ticks_without_repeating_start_age() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        let result = report.run.result.take().unwrap();
+        report.run.progress = Some(kinds::WorkflowProgress {
+            details: result.details,
+            event_id: result.event_id,
+            author: result.author,
+            created_at: Timestamp::from_secs(200),
+            run_id: result.run_id,
+            status: kinds::ProgressStatus::InProgress,
+            conclusion: None,
+            expiration: Timestamp::from_secs(10_000),
+            queued_at: None,
+            started_at: Some(Timestamp::from_secs(100)),
+            queue: None,
+            in_progress_jobs: vec![],
+            provenance: result.provenance,
+            jobs: vec![],
+            common: result.common,
+        });
+        report.state = RunState::Running;
+        let render = |now| crate::ci_display::run_metadata_at(&report, Timestamp::from_secs(now));
+        let metadata = render(532);
+        assert!(metadata.contains("7m 12s"));
+        assert!(
+            !metadata.contains("ago")
+                && !metadata.contains("started")
+                && !metadata.contains("elapsed")
+        );
+        assert!(render(533).contains("7m 13s"));
+        assert!(render(3701).contains("1h 00m 01s"));
+        report.run.progress.as_mut().unwrap().started_at = None;
+        assert!(
+            crate::ci_display::run_metadata_at(&report, Timestamp::from_secs(532)).contains("ago")
+        );
     }
 
     #[test]

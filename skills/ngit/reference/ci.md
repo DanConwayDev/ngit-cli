@@ -459,6 +459,9 @@ estimates. Job bounds include the furthest reported job-relative step offset
 and duration, without summing potentially overlapping work. Active step bounds
 measure time since that step was first observed running. Watch retains these
 bounds across renewals and advances them between updates. Joining mid-run can
-understate elapsed time. Workflow headers show elapsed time when a signed
-`started_at` is available; finished workflows measure through result publication.
+understate elapsed time. With a signed `started_at`, running workflow headers
+show only a ticking duration; finished workflows show age followed by duration
+through result publication (for example, `4h ago · 39m 21s`). Without a signed
+start, headers retain the report age. Workflow durations retain seconds even
+beyond an hour.
 Job and step rows retain execution order, with durations aligned on the left.

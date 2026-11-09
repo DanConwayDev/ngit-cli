@@ -84,20 +84,16 @@ fn short_run_id(id: &str) -> String {
 }
 
 pub fn run_metadata(run: &RunReport) -> String {
-    let now = Timestamp::now();
+    run_metadata_at(run, Timestamp::now())
+}
+
+pub(crate) fn run_metadata_at(run: &RunReport, now: Timestamp) -> String {
     let summary = crate::ci_history::AttemptSummary::new(&run.run, now);
     let mut metadata = format!(
         "run {} · {}",
         short_run_id(&run.run.run_id),
         crate::ci_history::age(summary.timestamp, now.as_secs())
     );
-    if summary.time_kind == "started" {
-        metadata = format!(
-            "run {} · started {}",
-            short_run_id(&run.run.run_id),
-            crate::ci_history::age(summary.timestamp, now.as_secs())
-        );
-    }
     let started = run
         .run
         .result
@@ -112,7 +108,22 @@ pub fn run_metadata(run: &RunReport) -> String {
         .zip(end)
         .and_then(|(start, end)| elapsed_to_report(Some(start.as_secs()), end.as_secs()))
     {
-        let _ = write!(metadata, " · {} elapsed", crate::ci_plan::duration(ms));
+        let seconds = ms / 1000;
+        let duration = if seconds >= 3600 {
+            format!(
+                "{}h {:02}m {:02}s",
+                seconds / 3600,
+                seconds % 3600 / 60,
+                seconds % 60
+            )
+        } else {
+            crate::ci_plan::duration(ms)
+        };
+        if run.run.result.is_some() {
+            let _ = write!(metadata, " · {duration}");
+        } else {
+            metadata = format!("run {} · {duration}", short_run_id(&run.run.run_id));
+        }
     }
     if run.attempt_of > 1 {
         let _ = write!(metadata, " · attempt {}", run.attempt_of);
