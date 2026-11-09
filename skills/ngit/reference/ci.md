@@ -104,8 +104,8 @@ wins over live snapshots; expired or future snapshots are not current progress.
 
 `ci status` summarizes workflows and jobs, highlighting reported failed/active
 steps and completed-step counts for live jobs. Failed jobs expand their steps
-and a boxed preview of the final three log lines; successful jobs stay on one
-row. Artifact links and routine identity/trust detail stay in inspection. Unknown signer
+and a labelled full-log link followed by a muted `└` preview of the final three
+log lines; successful jobs stay on one row. Artifact links and routine identity/trust detail stay in inspection. Unknown signer
 context, workflow hash mismatches and incomplete evidence stay visible.
 
 `ci inspect` without an ID details the same HEAD and latest-attempt selection.

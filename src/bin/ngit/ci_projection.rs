@@ -2173,13 +2173,30 @@ mod tests {
 
     #[test]
     fn status_expands_only_failed_jobs_and_keeps_the_log_preview_bounded() {
-        let failed = run_report_with_job(Conclusion::Failure, "first\nsecond\nthird\nfourth", None);
+        let failed = run_report_with_job(
+            Conclusion::Failure,
+            "first\nsecond\nthird\nfourth",
+            Some("https://ci.example/failure.txt"),
+        );
         let success =
             run_report_with_job(Conclusion::Success, "first\nsecond\nthird\nfourth", None);
         let details = crate::ci_display::failure_details(&failed.jobs[0], None);
         assert!(!details.contains("first"));
         assert!(details.contains("second"));
         assert!(details.contains("fourth"));
+        let plain = console::strip_ansi_codes(&details);
+        assert!(plain.contains("Full log: https://ci.example/failure.txt"));
+        assert!(plain.contains("└ second"));
+        assert!(!plain.contains("end log preview"));
+        assert!(plain.find("Full log:") < plain.find("└ second"));
+        let empty = run_report_with_job(
+            Conclusion::Failure,
+            "",
+            Some("https://ci.example/failure.txt"),
+        );
+        let empty = crate::ci_display::failure_details(&empty.jobs[0], None);
+        assert!(empty.contains("https://ci.example/failure.txt"));
+        assert!(!empty.contains('└'));
         assert!(crate::ci_display::failure_details(&success.jobs[0], None).is_empty());
     }
 

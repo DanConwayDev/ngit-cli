@@ -63,13 +63,18 @@ pub fn failure_details(job: &JobReport, plan: Option<&crate::ci_plan::JobPlan>) 
         return String::new();
     }
     let mut output = crate::ci_plan::steps(&job.details, plan, false);
+    if let Some(logs) = &job.logs {
+        let _ = write!(
+            output,
+            "\n  {} {}",
+            style("Full log:").dim(),
+            style(logs).cyan()
+        );
+    }
     let tail = log_tail_preview(&job.log_tail);
-    if !tail.is_empty() {
-        let _ = write!(output, "\n    {}", style("┌─ last log lines ─").dim());
-        for line in tail.lines() {
-            let _ = write!(output, "\n    {}", style(format!("│ {line}")).dim());
-        }
-        let _ = write!(output, "\n    {}", style("└─ end log preview ─").dim());
+    for (index, line) in tail.lines().enumerate() {
+        let prefix = if index == 0 { "└ " } else { "  " };
+        let _ = write!(output, "\n  {}", style(format!("{prefix}{line}")).dim());
     }
     output
 }

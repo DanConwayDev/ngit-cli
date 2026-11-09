@@ -51,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git -c nostr.signer=NAME` to select it for a single command.
 
 - `ci status` summarizes workflow and job progress, expanding failed jobs into
-  steps and a boxed three-line log preview. `ci inspect` details the same HEAD
+  steps, a direct full-log link and a compact `└` preview of the last three log
+  lines. `ci inspect` details the same HEAD
   or an explicit `--target`, with coloured outcomes, artifacts, output links and trust
   evidence. Bold workflows start with status; plain job/step rows start with
   right-aligned durations (seconds below an hour, hours/minutes thereafter).
