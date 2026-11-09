@@ -210,7 +210,7 @@ pub fn render_status(
                     .iter()
                     .any(|j| j.job_id == job.id && j.is_live(now))
             {
-                let _ = writeln!(output, "{}", row("not reported", &job.label, 1));
+                let _ = writeln!(output, "{}", row("—", &job.label, 1));
             }
         }
     }

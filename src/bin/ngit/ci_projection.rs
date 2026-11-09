@@ -611,13 +611,9 @@ impl CiReport {
         verbose: bool,
     ) -> impl Iterator<Item = &ngit::ci::resolve::CoverageGap> {
         use ngit::ci::resolve::CoverageGap;
-        self.coverage_gaps.iter().filter(move |gap| {
-            verbose
-                || matches!(
-                    gap,
-                    CoverageGap::RepositoryInputs | CoverageGap::QuotedEvents
-                )
-        })
+        self.coverage_gaps
+            .iter()
+            .filter(move |gap| verbose || matches!(gap, CoverageGap::QuotedEvents))
     }
 
     /// Earlier revisions, under their own heading. A result for a superseded
@@ -2231,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_identity_diagnostics_remain_available_without_routine_warnings() {
+    fn routine_coverage_diagnostics_remain_available_without_summary_warnings() {
         use ngit::ci::resolve::CoverageGap;
         let mut report = rolled_up(
             CiState::Concluded,
@@ -2249,7 +2245,7 @@ mod tests {
                 .visible_coverage_gaps(false)
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![CoverageGap::RepositoryInputs, CoverageGap::QuotedEvents]
+            vec![CoverageGap::QuotedEvents]
         );
         assert_eq!(report.visible_coverage_gaps(true).count(), 4);
         assert_eq!(

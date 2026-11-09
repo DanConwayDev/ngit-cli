@@ -182,7 +182,7 @@ pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String
                 let _ = write!(
                     output,
                     "\n{}",
-                    crate::ci_display::row("not reported", &expected.label, 2)
+                    crate::ci_display::row("—", &expected.label, 2)
                 );
             }
         }
@@ -207,7 +207,7 @@ fn untimed_skip(step: &ngit::ci::details::Step) -> bool {
 }
 
 pub fn pending_job(plan: &JobPlan) -> String {
-    let mut line = crate::ci_display::row("not reported", &plan.label, 1);
+    let mut line = crate::ci_display::row("—", &plan.label, 1);
     if !plan.needs.is_empty() {
         let _ = write!(line, " · needs: {}", plan.needs.join(", "));
     }
@@ -238,7 +238,7 @@ fn write_step(
         && step.start_ms.is_none()
         && step.duration_ms.is_none()
     {
-        "skipped/planned (not timed)"
+        "—"
     } else if live
         && step.outcome == "unknown"
         && step.start_ms.is_some()
@@ -436,7 +436,7 @@ mod tests {
         assert!(!row.contains("upload"));
         let details = JobDetails::default();
         let rendered = steps(&details, Some(plan), true);
-        assert!(rendered.contains("not reported") && rendered.contains("upload"));
+        assert!(rendered.contains("—") && rendered.contains("upload"));
         assert!(rendered.contains("1 conditional steps not yet reported"));
         assert!(!rendered.contains("diagnose"));
     }
@@ -461,6 +461,12 @@ mod tests {
             steps(&details, Some(&plans[0]), true).contains("conditional steps not yet reported")
         );
         assert!(steps(&details, Some(&plans[0]), false).contains("1 skipped steps"));
+        // Without a condition, the live placeholder is visible but has no
+        // inferred outcome. The final snapshot still establishes a skip.
+        let live = steps(&details, None, true);
+        assert!(live.contains("—") && live.contains("diagnose"));
+        assert!(!live.contains("skipped") && !live.contains("planned"));
+        assert!(steps(&details, None, false).contains("1 skipped steps"));
         details.steps[0].start_ms = Some(10);
         details.steps[0].duration_ms = Some(1200);
         details.steps[0].outcome = "success".into();

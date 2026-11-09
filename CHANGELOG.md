@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Human CI summaries use `—` for unreported work and ambiguous live skipped
+  placeholders. Routine incomplete relay refresh diagnostics appear only with
+  verbose output; JSON retains coverage details and signed step outcomes.
+
 - `ci status --watch` exits after all observed workflows conclude and 10 seconds
   pass without new updates. Queued dependencies, running or stale workflows,
   and missing CI evidence keep it open. Human output shows the countdown;

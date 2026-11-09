@@ -153,11 +153,13 @@ artifact manifests.
 When the exact local workflow blob matches the event's hash, `declared_jobs`
 provides expected jobs and stable step IDs. Native step keys and explicit act
 IDs can be matched; generated/nested act IDs and matrix expansion remain runtime
-information. Missing entries are `not reported`, not inferred as queued,
+information. Routine incomplete relay refresh diagnostics are available in
+verbose output and JSON, without warning in the normal human summary.
+Missing entries show `—`, not inferred as queued,
 skipped or failed. Conditions are not evaluated locally. Native live snapshots
 can initially describe planned, untimed steps as `skipped`; text distinguishes
-these from a timed skip. Unavailable or mismatched YAML falls back to reported
-execution evidence. Native explicit-step jobs publish live progress; current
+these with `—` until a timed or final outcome establishes a skip. Unavailable
+or mismatched YAML falls back to reported execution evidence. Native explicit-step jobs publish live progress; current
 act and simple native run/build jobs do not promise equivalent live steps.
 
 `ci inspect <ID> --json` inspects exact evidence. Explicit --kind or --author
