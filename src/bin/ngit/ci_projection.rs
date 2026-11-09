@@ -606,7 +606,7 @@ impl CiReport {
         }
     }
 
-    fn visible_coverage_gaps(
+    pub(crate) fn visible_coverage_gaps(
         &self,
         verbose: bool,
     ) -> impl Iterator<Item = &ngit::ci::resolve::CoverageGap> {

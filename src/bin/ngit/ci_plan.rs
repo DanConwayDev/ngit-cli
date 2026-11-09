@@ -121,6 +121,39 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
         .collect()
 }
 
+/// First signed observation of an active step, scoped to its allocation.
+#[derive(Default)]
+pub struct LiveStepClocks(std::collections::HashMap<String, u64>);
+impl LiveStepClocks {
+    fn elapsed(&mut self, key: String, reported: u64, now: u64) -> u64 {
+        let since = self.0.entry(key).or_insert(reported);
+        *since = (*since).min(reported);
+        now.saturating_sub(*since).saturating_mul(1000)
+    }
+}
+
+pub fn live_steps(
+    job: &ngit::ci::kinds::JobProgress,
+    plan: Option<&JobPlan>,
+    clocks: &mut LiveStepClocks,
+    now: nostr::prelude::Timestamp,
+) -> String {
+    let mut details = job.details.clone();
+    for step in &mut details.steps {
+        if matches!(step.outcome.as_str(), "unknown" | "running" | "in_progress")
+            && step.duration_ms.is_none()
+        {
+            let key = format!(
+                "{}:{:?}:{}:{}:{:?}",
+                job.author, job.details.allocation, job.job_id, step.id, step.start_ms
+            );
+            step.outcome = "running".into();
+            step.duration_ms = Some(clocks.elapsed(key, job.created_at.as_secs(), now.as_secs()));
+        }
+    }
+    steps(&details, plan, true)
+}
+
 /// Render observed steps and declared work without evaluating conditions.
 pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String {
     let mut output = String::new();
@@ -193,13 +226,26 @@ fn write_step(
     details: &JobDetails,
     live: bool,
 ) {
-    let duration = step.duration_ms.map(duration);
+    let duration = step.duration_ms.map(|ms| {
+        if live && step.outcome == "running" {
+            format!("~{}", duration(ms))
+        } else {
+            duration(ms)
+        }
+    });
     let state = if live
         && step.outcome == "skipped"
         && step.start_ms.is_none()
         && step.duration_ms.is_none()
     {
         "skipped/planned (not timed)"
+    } else if live
+        && step.outcome == "unknown"
+        && step.start_ms.is_some()
+        && step.duration_ms.is_none()
+    {
+        // ngit-ci reports a started step with no conclusion until it finishes.
+        "running"
     } else {
         &step.outcome
     };
@@ -421,5 +467,33 @@ mod tests {
         let rendered = steps(&details, Some(&plans[0]), true);
         assert!(rendered.contains("1s success diagnose"));
         assert!(!rendered.contains("conditional steps"));
+    }
+    #[test]
+    fn started_unfinished_step_is_running_only_in_live_evidence() {
+        let mut details = JobDetails::default();
+        details.steps.push(ngit::ci::details::Step {
+            id: "compile".into(),
+            label: String::new(),
+            start_ms: Some(0),
+            duration_ms: None,
+            outcome: "unknown".into(),
+            artifacts: None,
+        });
+        assert!(steps(&details, None, true).contains("running"));
+        assert!(steps(&details, None, false).contains("unknown"));
+        details.steps[0].start_ms = None;
+        assert!(steps(&details, None, true).contains("unknown"));
+        details.steps[0].start_ms = Some(0);
+        details.steps[0].duration_ms = Some(10);
+        assert!(steps(&details, None, true).contains("unknown"));
+    }
+    #[test]
+    fn live_clock_ticks_without_updates_and_survives_renewals() {
+        let mut clocks = LiveStepClocks::default();
+        assert_eq!(clocks.elapsed("allocation:step".into(), 100, 100), 0);
+        assert_eq!(clocks.elapsed("allocation:step".into(), 100, 105), 5000);
+        assert_eq!(clocks.elapsed("allocation:step".into(), 104, 106), 6000);
+        assert_eq!(clocks.elapsed("other-allocation:step".into(), 106, 106), 0);
+        assert_eq!(clocks.elapsed("allocation:next".into(), 107, 106), 0);
     }
 }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ci status` expands running jobs into reported steps with durations and
+  approximate active-step elapsed times. Historical workflow summaries and
+  tips are muted and omit coordinator identities and routine branch notes.
+
 - `ci secrets` waits for coordinator inventory confirmation after encrypted
   delivery, matching gitworkshop's checks for updated and removed names. Human
   output and JSON distinguish accepted updates from pending confirmation;

@@ -2,7 +2,7 @@
 use std::fmt::Write as _;
 
 use console::{StyledObject, style};
-use ngit::ci::{details::JobDetails, trust::TrustClassification};
+use ngit::ci::trust::TrustClassification;
 use nostr::prelude::Timestamp;
 
 use crate::ci_projection::{CiReport, JobReport, RunReport, Target};
@@ -108,6 +108,22 @@ pub fn elapsed_label(ms: Option<u64>) -> Option<String> {
 }
 
 pub fn print_status(report: &CiReport, target: &Target) {
+    print!(
+        "{}",
+        render_status(
+            report,
+            target,
+            &mut crate::ci_plan::LiveStepClocks::default()
+        )
+    );
+}
+
+pub fn render_status(
+    report: &CiReport,
+    target: &Target,
+    clocks: &mut crate::ci_plan::LiveStepClocks,
+) -> String {
+    let mut output = String::new();
     let heading = match target {
         Target::Commit { ids, .. } => format!(
             "CI for {} ({})",
@@ -116,13 +132,14 @@ pub fn print_status(report: &CiReport, target: &Target) {
         ),
         Target::PullRequest { .. } => format!("CI for {}", target.describe()),
     };
-    println!("{}", style(heading).bold());
+    let _ = writeln!(output, "{}", style(heading).bold());
     if report.runs.is_empty() {
-        println!("  No CI evidence for this commit");
-        return;
+        let _ = writeln!(output, "  No CI evidence for this commit");
+        return output;
     }
     for run in &report.runs {
-        println!(
+        let _ = writeln!(
+            output,
             "\n{} · {}",
             row(&run.state_label(), &run.run.workflow_path, 0),
             style(run_metadata(run)).dim()
@@ -136,17 +153,19 @@ pub fn print_status(report: &CiReport, target: &Target) {
             .count()
             > 1
         {
-            println!(
+            let _ = writeln!(
+                output,
                 "    {} · coordinator {}",
                 crate::ci_history::context_label(run.run.activity_context()),
                 run.run.coordinator
             );
         }
         for warning in warnings(run) {
-            println!("    {}", style(warning).yellow());
+            let _ = writeln!(output, "    {}", style(warning).yellow());
         }
         for job in &run.jobs {
-            println!(
+            let _ = writeln!(
+                output,
                 "{}{}",
                 timed_row(
                     &job.conclusion.to_string(),
@@ -159,10 +178,16 @@ pub fn print_status(report: &CiReport, target: &Target) {
         }
         let now = Timestamp::now();
         for job in run.run.live_jobs.iter().filter(|job| job.is_live(now)) {
-            println!(
+            let _ = writeln!(
+                output,
                 "{}{}",
                 row("running", &job.job_id, 1),
-                step_summary(&job.details, true)
+                crate::ci_plan::live_steps(
+                    job,
+                    run.plan.iter().find(|p| p.id == job.job_id),
+                    clocks,
+                    now
+                )
             );
         }
         let running = run.running_jobs();
@@ -173,7 +198,7 @@ pub fn print_status(report: &CiReport, target: &Target) {
                 .iter()
                 .any(|job| job.job_id == *id && job.is_live(now))
             {
-                println!("{}", row("running", id, 1));
+                let _ = writeln!(output, "{}", row("running", id, 1));
             }
         }
         for job in &run.plan {
@@ -185,17 +210,20 @@ pub fn print_status(report: &CiReport, target: &Target) {
                     .iter()
                     .any(|j| j.job_id == job.id && j.is_live(now))
             {
-                println!("{}", row("not reported", &job.label, 1));
+                let _ = writeln!(output, "{}", row("not reported", &job.label, 1));
             }
         }
     }
     if report.is_incomplete() {
-        report.print_coverage();
+        for gap in report.visible_coverage_gaps(ngit::output_mode::is_verbose()) {
+            let _ = writeln!(output, "{}", style(gap.message()).dim());
+        }
     }
-    print_inspection_tip(target);
+    output.push_str(&inspection_tip(target));
+    output
 }
 
-fn print_inspection_tip(target: &Target) {
+fn inspection_tip(target: &Target) -> String {
     let command = match target {
         Target::Commit { described, .. } if described == "HEAD" => "ngit ci inspect".to_owned(),
         Target::Commit { ids, .. } => format!(
@@ -205,12 +233,12 @@ fn print_inspection_tip(target: &Target) {
         Target::PullRequest { root, .. } => format!("ngit ci inspect --target {root}"),
     };
     // PR targets need their exact ID, not the checked-out branch's HEAD.
-    println!(
-        "\n{} {} {}",
+    format!(
+        "\n{} {} {}\n",
         style("Tip:").dim(),
         style(format!("`{command}`")).cyan().bold(),
         style("for details").dim()
-    );
+    )
 }
 
 fn warnings(run: &RunReport) -> Vec<String> {
@@ -229,67 +257,8 @@ fn warnings(run: &RunReport) -> Vec<String> {
     warnings
 }
 
-/// Only reported failing/active steps are highlighted. Never predict a route
-/// through conditional steps or count untimed skipped placeholders as finished.
-fn step_summary(details: &JobDetails, live: bool) -> String {
-    let relevant = details
-        .steps
-        .iter()
-        .find(|step| {
-            matches!(
-                step.outcome.as_str(),
-                "failure" | "timed_out" | "startup_failure" | "error"
-            )
-        })
-        .or_else(|| {
-            if live {
-                details
-                    .steps
-                    .iter()
-                    .find(|step| matches!(step.outcome.as_str(), "in_progress" | "running"))
-            } else {
-                None
-            }
-        });
-    let mut result = String::new();
-    if let Some(step) = relevant {
-        let action = if matches!(step.outcome.as_str(), "in_progress" | "running") {
-            "at"
-        } else {
-            "failed at"
-        };
-        let _ = write!(
-            result,
-            " · {action} {}",
-            if step.label.is_empty() {
-                &step.id
-            } else {
-                &step.label
-            }
-        );
-    }
-    if live {
-        let completed = details
-            .steps
-            .iter()
-            .filter(|step| {
-                matches!(
-                    step.outcome.as_str(),
-                    "success" | "failure" | "cancelled" | "timed_out"
-                ) || step.outcome == "skipped" && step.duration_ms.is_some()
-            })
-            .count();
-        if completed > 0 {
-            let _ = write!(result, " · {completed} reported steps complete");
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
-    use ngit::ci::details::Step;
-
     use super::*;
 
     #[test]
@@ -336,40 +305,5 @@ mod tests {
         assert_eq!(elapsed_to_report(Some(100), 125), Some(25_000));
         assert_eq!(elapsed_to_report(None, 125), None);
         assert_eq!(elapsed_to_report(Some(126), 125), None);
-    }
-
-    #[test]
-    fn summary_highlights_failure_without_dumping_logs_or_successful_steps() {
-        let mut details = JobDetails::default();
-        for (id, outcome) in [("install", "success"), ("publish", "failure")] {
-            details.steps.push(Step {
-                id: id.into(),
-                label: id.into(),
-                outcome: outcome.into(),
-                duration_ms: Some(9500),
-                start_ms: None,
-                artifacts: None,
-            });
-        }
-        let summary = step_summary(&details, false);
-        assert!(summary.contains("failed at publish"));
-        assert!(!summary.contains("9.5s"));
-        assert!(!summary.contains("install"));
-    }
-
-    #[test]
-    fn planned_skips_do_not_count_as_completed_progress() {
-        let details = JobDetails {
-            steps: vec![Step {
-                id: "conditional".into(),
-                label: String::new(),
-                outcome: "skipped".into(),
-                duration_ms: None,
-                start_ms: None,
-                artifacts: None,
-            }],
-            ..JobDetails::default()
-        };
-        assert!(step_summary(&details, true).is_empty());
     }
 }

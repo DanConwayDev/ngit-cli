@@ -1,7 +1,8 @@
 //! Concise historical evidence. It never contributes to current CI gates.
-use std::path::Path;
+use std::{fmt::Write as _, path::Path};
 
 use anyhow::Result;
+use console::style;
 use ngit::{
     ci::{
         events::{RunState, WorkflowRun, group_workflow_runs, latest_attempts},
@@ -71,19 +72,27 @@ impl AttemptSummary {
             timestamp: timestamp.as_secs(),
         }
     }
-    pub fn print(&self, inspect: bool, now: Timestamp) {
-        println!(
-            "  {} · coordinator {} · {} · {} · {} {}",
-            self.workflow,
-            self.coordinator,
-            context_label(self.context.as_ref()),
-            self.status,
-            self.time_kind,
-            age(self.timestamp, now.as_secs())
+    fn render(&self, inspect: bool, now: Timestamp) -> String {
+        let mut output = String::new();
+        let _ = writeln!(
+            output,
+            "{}",
+            style(format!(
+                "  {} · {} · {}",
+                self.workflow,
+                self.status,
+                age(self.timestamp, now.as_secs())
+            ))
+            .dim()
         );
         if inspect {
-            println!("    ngit ci inspect {}", self.event);
+            let _ = writeln!(
+                output,
+                "{}",
+                style(format!("    `ngit ci inspect {}`", self.event)).dim()
+            );
         }
+        output
     }
 }
 
@@ -109,25 +118,49 @@ pub struct PreviousTip {
 }
 impl History {
     pub fn print(&self) {
+        print!("{}", self.render());
+    }
+    pub fn render(&self) -> String {
+        let mut output = String::new();
         if !self.earlier_attempts.is_empty() {
-            println!("Earlier attempts for this tip — not current results:");
+            let _ = writeln!(
+                output,
+                "{}",
+                style("Earlier attempts for this tip — not current results:").dim()
+            );
             for attempt in &self.earlier_attempts {
-                attempt.print(true, Timestamp::now());
+                output.push_str(&attempt.render(true, Timestamp::now()));
             }
         }
         if let Some(previous) = &self.previous_tip {
-            println!(
-                "Previous tip {} — does not cover the current tip:",
-                previous.commit
+            let _ = writeln!(
+                output,
+                "{}",
+                style(format!(
+                    "Previous tip {} — does not cover the current tip:",
+                    previous.commit
+                ))
+                .dim()
             );
             for run in &previous.workflows {
-                run.print(false, Timestamp::now());
+                output.push_str(&run.render(false, Timestamp::now()));
             }
-            println!("Tip: {}", previous.command);
+            let _ = writeln!(
+                output,
+                "{}",
+                style(format!("Tip: `{}`", previous.command)).dim()
+            );
         }
         if let Some(notice) = &self.notice {
-            println!("  {notice}");
+            if self
+                .previous_tip
+                .as_ref()
+                .is_none_or(|tip| tip.source != "repository_branch_history")
+            {
+                let _ = writeln!(output, "{}", style(notice).dim());
+            }
         }
+        output
     }
 }
 
