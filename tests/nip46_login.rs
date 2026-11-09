@@ -918,6 +918,56 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
     let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
     assert_eq!(stored["nostr/alias-credential:host"], "signer-alias:host");
     assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
+
+    // A newly paired same-npub profile must reach the JSON fallback even
+    // when the OS lookup fails (rather than simply reporting no entry).
+    let fallback_repo = harness.fresh_repo()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        fallback_repo
+            .ngit([
+                "account",
+                "login",
+                "--local",
+                "--offline",
+                "--nbunksec",
+                &first_encoded,
+                "--profile",
+                "fallback",
+                "--secret-storage",
+                "auto",
+            ])
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .env("NGIT_TEST_OS_STORE_UNAVAILABLE", "true")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&fallback_repo, credentials.path()).await?,
+        nbunksec::decode(&first_encoded)?
+    );
+    assert_eq!(
+        export_stored_signer(&repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(
+        stored["nostr/alias-credential:fallback"],
+        "signer-alias:fallback"
+    );
+    assert!(
+        fallback_repo
+            .config("nostr.bunker-app-key")
+            .await?
+            .is_none()
+    );
+
     // Re-pair the named profile without changing the default connection.
     let output = run_nbunksec_login(
         &named_repo,

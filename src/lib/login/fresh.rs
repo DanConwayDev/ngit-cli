@@ -1390,6 +1390,14 @@ fn protect_secrets(
             if credential_store::is_signer_credential_conflict(&error) {
                 return Err(error);
             }
+            if alias.is_some() {
+                // A named profile needs a durable credential binding. Falling
+                // back to plaintext here would let the later alias write
+                // replace the connection with a selection of the npub default.
+                return Err(error.context(
+                    "failed to save the named signer profile; fix credential storage and retry; the configured login has not changed",
+                ));
+            }
             if !Interactor::is_non_interactive()
                 && Interactor::default().confirm(PromptConfirmParms::default().with_prompt(
                     "failed to store the secret in a credential store. save it as plaintext in git config instead?",

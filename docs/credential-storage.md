@@ -196,9 +196,10 @@ The `nostr.secret-storage` git config item — overridden by the
   removal command instead of writing a credential that could never be used.
 - `git-config`: plaintext in git config, as ngit stored secrets previously.
 
-When a secret cannot be stored under `auto` or `file`, login fails with
-guidance (interactively, it offers the plaintext fallback explicitly)
-instead of silently writing plaintext to git config.
+When a secret cannot be stored under `auto` or `file`, named-profile login
+fails without changing the configured login. It never substitutes a binding
+to the identity's default signer for an unsaved connection. Login without a
+profile can explicitly offer a plaintext Git-config fallback interactively.
 
 The pre-release `nostr.credential-store` / `NGIT_CREDENTIAL_STORE` boolean
 is still read: `false` maps to `git-config`, `true` to `auto`.

@@ -422,14 +422,24 @@ fn bunker_signer_entry_for_store(
     };
 
     // Re-pairing an existing profile replaces exactly its bound connection.
-    match retrieve_signer_alias(alias) {
-        Ok(binding) if binding.npub == npub => {
-            if let Some(credential) = binding.credential {
-                return Ok(credential);
+    // Pairing may create a new alias while the OS store is unavailable.
+    // A missing file-store alias then means there is no binding to preserve,
+    // rather than preventing the subsequent file-store write. Keep normal
+    // selection lookup strict: it must not guess at an unavailable identity.
+    for backend in [Backend::Os, Backend::File] {
+        match retrieve_signer_alias_from(alias, backend) {
+            Ok(binding) => {
+                if binding.npub == npub {
+                    if let Some(credential) = binding.credential {
+                        return Ok(credential);
+                    }
+                }
+                break;
             }
+            Err(LookupError::Missing(_)) => {}
+            Err(LookupError::Unavailable(_)) if backend == Backend::Os => {}
+            Err(error) => return Err(anyhow!(error)),
         }
-        Ok(_) | Err(LookupError::Missing(_)) => {}
-        Err(error) => return Err(anyhow!(error)),
     }
     let alias_name = alias_signer_entry_name(alias)?;
     if !bunker_signers_named(&alias_name, npub)?.is_empty() {
