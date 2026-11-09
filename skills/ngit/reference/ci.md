@@ -100,7 +100,11 @@ in the pinned workflow. Environment URLs must match the digest.
 
 Job progress (39846) is matched to exact provider/allocation/job references.
 Completed job results appear before the workflow finishes. Terminal evidence
-wins over live snapshots; expired or future snapshots are not current progress.
+wins over live snapshots for the same allocation. A coordinator-selected
+replacement allocation stays current even when an earlier attempt has a result.
+Status and inspect show that earlier result as muted attempt history; JSON puts
+it in `previous_job_attempts` with its exact event and log evidence. Expired or
+future snapshots are not current progress.
 
 `ci status` summarizes workflows and jobs, highlighting reported failed/active
 steps and completed-step counts for live jobs. Failed jobs expand their steps

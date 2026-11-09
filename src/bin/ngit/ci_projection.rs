@@ -631,6 +631,31 @@ impl CiReport {
 }
 
 impl RunReport {
+    pub(crate) fn previous_attempt(&self, job: &JobReport) -> bool {
+        self.run
+            .has_replacement_allocation(&job.job_id, job.provider, job.details.allocation)
+    }
+
+    pub(crate) fn current_jobs(&self) -> impl Iterator<Item = &JobReport> {
+        self.jobs.iter().filter(|job| !self.previous_attempt(job))
+    }
+
+    pub(crate) fn previous_attempt_lines(&self) -> String {
+        let mut output = String::new();
+        for job in self.jobs.iter().filter(|job| self.previous_attempt(job)) {
+            let _ = writeln!(
+                output,
+                "    {}",
+                console::style(format!(
+                    "{}: previous attempt {} · replacement allocated · ngit ci inspect {}",
+                    job.job_id, job.conclusion, job.event_id
+                ))
+                .dim()
+            );
+        }
+        output
+    }
+
     #[must_use]
     pub fn conclusion(&self) -> Option<Conclusion> {
         match self.state {
@@ -654,31 +679,34 @@ impl RunReport {
 
     #[must_use]
     pub fn to_json(&self, log_tail: LogTailMode) -> Value {
-        let jobs = self
+        let encode_job = |job: &JobReport| {
+            let mut value = json!({
+                "job": job.job_id,
+                "name": job.name,
+                "event": crate::output::event_id_to_nevent(job.event_id, None),
+                "execution": job.details,
+                "execution_run_id": job.execution_run_id,
+                "reused": job.reused,
+                "conclusion": job.conclusion.as_str(),
+                "provider": npub(job.provider),
+                "started_at": job.started_at,
+                "reported_at": job.reported_at,
+                "elapsed_to_report_ms": crate::ci_display::elapsed_to_report(job.started_at, job.reported_at),
+                "logs": job.logs,
+                "classification": job.resolution.classification().map(TrustClassification::as_str),
+            });
+            if let Some(tail) = job.included_log_tail(log_tail) {
+                value["log_tail"] = json!(tail);
+            }
+            value
+        };
+        let jobs = self.current_jobs().map(encode_job).collect::<Vec<_>>();
+        let previous_jobs = self
             .jobs
             .iter()
-            .map(|job| {
-                let mut value = json!({
-                    "job": job.job_id,
-                    "name": job.name,
-                    "event": crate::output::event_id_to_nevent(job.event_id, None),
-                    "execution": job.details,
-                    "execution_run_id": job.execution_run_id,
-                    "reused": job.reused,
-                    "conclusion": job.conclusion.as_str(),
-                    "provider": npub(job.provider),
-                    "started_at": job.started_at,
-                    "reported_at": job.reported_at,
-                    "elapsed_to_report_ms": crate::ci_display::elapsed_to_report(job.started_at, job.reported_at),
-                    "logs": job.logs,
-                    "classification": job.resolution.classification().map(TrustClassification::as_str),
-                });
-                if let Some(tail) = job.included_log_tail(log_tail) {
-                    value["log_tail"] = json!(tail);
-                }
-                value
-            })
-            .collect::<Vec<Value>>();
+            .filter(|job| self.previous_attempt(job))
+            .map(encode_job)
+            .collect::<Vec<_>>();
         let timing = crate::ci_history::AttemptSummary::new(&self.run, Timestamp::now());
         json!({
             "time_kind": timing.time_kind,
@@ -720,6 +748,7 @@ impl RunReport {
             "in_progress_jobs": self.running_jobs(),
             "declared_jobs": self.plan,
             "jobs": jobs,
+            "previous_job_attempts": previous_jobs,
             "live_jobs": self.run.live_jobs.iter().filter(|j| j.is_live(Timestamp::now())).map(|j| json!({
                 "job": j.job_id, "provider": npub(j.author), "state": "in_progress", "expiration": j.expiration.as_secs(),
                 "started_at": j.started_at.map(|t| t.as_secs()),
@@ -741,7 +770,7 @@ impl RunReport {
             })
             .into_iter()
             .flat_map(|p| p.in_progress_jobs.iter().map(String::as_str))
-            .filter(|id| !self.jobs.iter().any(|job| job.job_id == *id))
+            .filter(|id| !self.current_jobs().any(|job| job.job_id == *id))
             .collect()
     }
 
@@ -855,7 +884,8 @@ impl RunReport {
                 println!("{}", crate::ci_plan::pending_job(expected));
             }
         }
-        for job in &self.jobs {
+        print!("{}", self.previous_attempt_lines());
+        for job in self.current_jobs() {
             println!(
                 "{}",
                 job.human_lines(log_tail, self.plan.iter().find(|p| p.id == job.job_id))
@@ -2131,6 +2161,69 @@ mod tests {
         assert!(!metadata.contains("elapsed"));
         report.run.result.as_mut().unwrap().started_at = Some(Timestamp::from_secs(100));
         assert!(crate::ci_display::run_metadata(&report).contains(" · 1m 40s"));
+    }
+
+    #[test]
+    fn replacement_allocation_moves_rejected_result_to_history_before_snapshot() {
+        let mut report =
+            run_report_with_job(Conclusion::StartupFailure, "capacity exhausted", None);
+        let result = report.run.result.take().unwrap();
+        let allocation = EventId::from_byte_array([1; 32]);
+        report.jobs[0].details.allocation = Some(allocation);
+        let mut details = result.details.clone();
+        details
+            .job_progress
+            .push(ngit::ci::details::JobProgressReference {
+                provider: report.jobs[0].provider,
+                allocation: EventId::from_byte_array([2; 32]),
+                job: "build".into(),
+            });
+        report.run.progress = Some(kinds::WorkflowProgress {
+            details,
+            event_id: result.event_id,
+            author: result.author,
+            created_at: Timestamp::now(),
+            run_id: result.run_id.clone(),
+            status: kinds::ProgressStatus::InProgress,
+            conclusion: None,
+            expiration: Timestamp::from_secs(Timestamp::now().as_secs() + 600),
+            queued_at: None,
+            started_at: None,
+            queue: None,
+            in_progress_jobs: vec!["build".into()],
+            provenance: result.provenance.clone(),
+            jobs: vec![],
+            common: result.common.clone(),
+        });
+        report.state = RunState::Running;
+        assert_eq!(report.running_jobs(), ["build"]);
+        assert_eq!(report.current_jobs().count(), 0);
+        let json = report.to_json(LogTailMode::All);
+        assert_eq!(json["jobs"], json!([]));
+        assert_eq!(
+            json["previous_job_attempts"][0]["conclusion"],
+            "startup_failure"
+        );
+        assert_eq!(
+            json["previous_job_attempts"][0]["log_tail"],
+            "capacity exhausted"
+        );
+        assert!(
+            report
+                .previous_attempt_lines()
+                .contains("replacement allocated")
+        );
+
+        // Same-allocation completion and the immutable workflow result retain
+        // their authority, even if stale progress still references a retry.
+        report.run.progress.as_mut().unwrap().details.job_progress[0].allocation = allocation;
+        assert_eq!(report.current_jobs().count(), 1);
+        assert!(report.running_jobs().is_empty());
+        report.run.progress.as_mut().unwrap().details.job_progress[0].allocation =
+            EventId::from_byte_array([2; 32]);
+        report.run.result = Some(result);
+        assert_eq!(report.current_jobs().count(), 1);
+        assert!(report.previous_attempt_lines().is_empty());
     }
 
     #[test]

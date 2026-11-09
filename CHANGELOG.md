@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI status and inspect show coordinator-selected replacement allocations as
+  current work instead of letting an earlier capacity rejection hide progress.
+  Earlier results appear as muted attempt history and in JSON
+  `previous_job_attempts`, with exact-event inspection available.
+
 - CI views accept explicit pending/running steps and live job start timestamps.
   Job and step counters use the shared execution clock when available; older
   events retain measured durations and clearly marked observation-based bounds.

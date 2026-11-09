@@ -64,6 +64,28 @@ pub enum RunState {
 }
 
 impl WorkflowRun {
+    /// A coordinator-selected replacement allocation makes an older result
+    /// attempt history, even before the replacement publishes a snapshot.
+    #[must_use]
+    pub fn has_replacement_allocation(
+        &self,
+        job_id: &str,
+        provider: PublicKey,
+        allocation: Option<EventId>,
+    ) -> bool {
+        let Some(allocation) = allocation else {
+            return false;
+        };
+        self.result.is_none()
+            && self.progress.as_ref().is_some_and(|marker| {
+                marker.is_pending()
+                    && marker.details.job_progress.iter().any(|q| q.job == job_id)
+                    && !marker.details.job_progress.iter().any(|q| {
+                        q.job == job_id && q.provider == provider && q.allocation == allocation
+                    })
+            })
+    }
+
     /// The commit the workflow ran against.
     #[must_use]
     pub fn commit(&self) -> &str {
@@ -399,9 +421,13 @@ pub fn group_workflow_runs<'a>(events: impl IntoIterator<Item = &'a Event>) -> R
                                         && job.run.run_id == key.run_id
                                         && job.job_id == quote.job
                                         && same_execution_context(&job.common, &marker.common)
-                                        && !run_jobs
-                                            .iter()
-                                            .any(|terminal| terminal.job_id == job.job_id)
+                                        && !run_jobs.iter().any(|terminal| {
+                                            terminal.job_id == job.job_id
+                                                && (terminal.details.allocation.is_none()
+                                                    || (terminal.author == job.author
+                                                        && terminal.details.allocation
+                                                            == job.details.allocation))
+                                        })
                                 })
                                 .cloned()
                         })
@@ -1105,6 +1131,67 @@ mod job_progress_tests {
             runs.runs[0].state(Timestamp::from_secs(200)),
             RunState::Running
         );
+        // A rejected allocation must not hide a coordinator-selected retry,
+        // whether it uses the same provider or another provider.
+        for previous_provider in [&provider, &outsider] {
+            let previous = with_tags(
+                previous_provider,
+                &job_result(
+                    previous_provider,
+                    &coordinator,
+                    &coordinator,
+                    "run",
+                    "build",
+                    99,
+                ),
+                |tags| {
+                    tags.retain(|t| t.as_slice()[0] != "conclusion");
+                    tags.push(tag(&["conclusion", "startup_failure"]));
+                    tags.push(tag(&[
+                        "q",
+                        &"cd".repeat(32),
+                        "",
+                        &coordinator.public_key().to_hex(),
+                        "job-allocation",
+                    ]));
+                },
+            );
+            let runs = group_workflow_runs([&snapshot, &marker, &previous]);
+            let run = &runs.runs[0];
+            assert_eq!(run.live_jobs.len(), 1);
+            assert!(run.has_replacement_allocation(
+                "build",
+                previous_provider.public_key(),
+                run.jobs[0].details.allocation
+            ));
+            let without_snapshot = group_workflow_runs([&marker, &previous]);
+            assert!(without_snapshot.runs[0].has_replacement_allocation(
+                "build",
+                previous_provider.public_key(),
+                run.jobs[0].details.allocation
+            ));
+        }
+        let completed = with_tags(
+            &provider,
+            &job_result(&provider, &coordinator, &coordinator, "run", "build", 101),
+            |tags| {
+                tags.push(tag(&[
+                    "q",
+                    &allocation,
+                    "",
+                    &coordinator.public_key().to_hex(),
+                    "job-allocation",
+                ]))
+            },
+        );
+        let runs = group_workflow_runs([&snapshot, &marker, &completed]);
+        assert!(runs.runs[0].live_jobs.is_empty());
+        assert!(!runs.runs[0].has_replacement_allocation(
+            "build",
+            provider.public_key(),
+            runs.runs[0].jobs[0].details.allocation
+        ));
+
         let concluded = with_tags(&coordinator, &marker, |tags| {
             tags.retain(|tag| tag.as_slice()[0] != "status");
             tags.push(tag(&["status", "concluded"]));

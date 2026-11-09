@@ -263,7 +263,8 @@ pub fn render_status(
         for warning in warnings(run) {
             let _ = writeln!(output, "    {}", style(warning).yellow());
         }
-        for job in &run.jobs {
+        output.push_str(&run.previous_attempt_lines());
+        for job in run.current_jobs() {
             let _ = writeln!(
                 output,
                 "{}{}",
