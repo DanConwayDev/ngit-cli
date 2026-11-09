@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI status collapses unstarted jobs, labels declared dependencies and conditions,
+  and summarizes unreported conditional steps and finished skipped steps.
+
 - Standing CI controls are now `ci service request` and `ci service stop`.
   The old commands remain compatible and warn on stderr that they are deprecated.
 

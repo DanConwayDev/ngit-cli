@@ -215,3 +215,14 @@ network connection or that a particular workflow is eligible.
 Bare `ci inspect` requires a target. Use `ci inspect <ID>` for evidence;
 explicit `--kind` or `--author` filters remain available for protocol diagnosis.
 Use `ci service status` for repository discovery.
+
+Status keeps unstarted jobs on one row with declared `needs`, conditional and
+runtime-expansion markers. These are declarations, not scheduling decisions.
+Active jobs show reported steps and unreported unconditional steps; unreported
+conditional steps are counted together. A native untimed `skipped` placeholder
+is not evidence that a conditional step finished. Once execution is reported,
+its outcome and duration take precedence. Finished skipped steps are summarized
+as a count; `ci inspect <ID> --json` retains individual outcomes and reasons.
+Conditions and dependencies are retained in `declared_jobs` JSON without local
+evaluation, matrix expansion or predicting a success path. Missing events never
+turn into inferred queued or skipped states.

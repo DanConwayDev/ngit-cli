@@ -1584,6 +1584,7 @@ pub enum CiCommands {
         4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
         5. with no target, the HEAD commit\n\n\
         A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Each job line includes its provider-published log URL when present. Signed per-job log tails are included for non-successful jobs by default; `--log-tail` selects auto, all, or none for both human and JSON output.\n\n\
+        Unstarted jobs stay collapsed with declared dependencies and condition markers. Active jobs show steps, outcomes and durations; unreported conditional steps and finished skipped steps are summarized. Conditions are never evaluated locally. Use ci inspect <ID> --json for full event evidence.\n\n\
         Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
     )]
     Status {

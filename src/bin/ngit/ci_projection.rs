@@ -776,23 +776,7 @@ impl RunReport {
                     .iter()
                     .any(|j| j.job_id == expected.id && j.is_live(Timestamp::now()))
             {
-                println!(
-                    "    job {}: not reported{}",
-                    expected.label,
-                    if expected.dynamic {
-                        " (runtime expansion)"
-                    } else {
-                        ""
-                    }
-                );
-                println!(
-                    "{}",
-                    crate::ci_plan::steps(
-                        &ngit::ci::details::JobDetails::default(),
-                        Some(expected),
-                        false
-                    )
-                );
+                println!("{}", crate::ci_plan::pending_job(expected));
             }
         }
         for job in &self.jobs {

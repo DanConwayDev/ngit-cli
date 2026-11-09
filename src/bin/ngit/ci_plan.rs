@@ -14,11 +14,14 @@ pub struct JobPlan {
     pub label: String,
     pub steps: Vec<StepPlan>,
     pub dynamic: bool,
+    pub needs: Vec<String>,
+    pub condition: Option<Value>,
 }
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct StepPlan {
     pub id: String,
     pub label: String,
+    pub condition: Option<Value>,
 }
 
 pub fn load(repo: &Repo, run: &WorkflowRun) -> Vec<JobPlan> {
@@ -74,6 +77,11 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
                         Some(StepPlan {
                             id: id.to_owned(),
                             label: id.to_owned(),
+                            condition: step
+                                .as_object()
+                                .and_then(|o| o.get(id))
+                                .and_then(|v| field(v, "if"))
+                                .cloned(),
                         })
                     } else {
                         // act's generated/nested IDs are runtime identities; only an
@@ -88,6 +96,7 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
                                 .and_then(Value::as_str)
                                 .unwrap_or(id)
                                 .to_owned(),
+                            condition: field(step, "if").cloned(),
                         })
                     }
                 })
@@ -97,19 +106,40 @@ fn parse(yaml: &str, native: bool) -> Vec<JobPlan> {
                 label,
                 steps,
                 dynamic,
+                needs: match field(job, "needs") {
+                    Some(Value::String(value)) => vec![value.clone()],
+                    Some(Value::Array(values)) => values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                condition: field(job, "if").cloned(),
             }
         })
         .collect()
 }
 
+/// Render observed steps and declared work without evaluating conditions.
 pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String {
     let mut output = String::new();
     let mut shown = HashSet::new();
+    let mut conditional = 0;
+    let mut skipped = 0;
     if let Some(plan) = plan {
         for expected in &plan.steps {
             if let Some(step) = details.steps.iter().find(|s| s.id == expected.id) {
-                write_step(&mut output, step, details, live);
+                if live && untimed_skip(step) && expected.condition.is_some() {
+                    conditional += 1;
+                } else if step.outcome == "skipped" && !(live && untimed_skip(step)) {
+                    skipped += 1;
+                } else {
+                    write_step(&mut output, step, details, live);
+                }
                 shown.insert(step.id.as_str());
+            } else if expected.condition.is_some() {
+                conditional += 1;
             } else {
                 let _ = write!(output, "\n      {}: not reported", expected.label);
             }
@@ -117,10 +147,44 @@ pub fn steps(details: &JobDetails, plan: Option<&JobPlan>, live: bool) -> String
     }
     for step in &details.steps {
         if !shown.contains(step.id.as_str()) {
-            write_step(&mut output, step, details, live);
+            if step.outcome == "skipped" && !(live && untimed_skip(step)) {
+                skipped += 1;
+            } else {
+                write_step(&mut output, step, details, live);
+            }
         }
     }
+    if conditional > 0 {
+        let _ = write!(
+            output,
+            "\n      {conditional} conditional steps not yet reported"
+        );
+    }
+    if skipped > 0 {
+        let _ = write!(
+            output,
+            "\n      {skipped} skipped steps (ci inspect for details)"
+        );
+    }
     output
+}
+
+fn untimed_skip(step: &ngit::ci::details::Step) -> bool {
+    step.outcome == "skipped" && step.start_ms.is_none() && step.duration_ms.is_none()
+}
+
+pub fn pending_job(plan: &JobPlan) -> String {
+    let mut line = format!("    job {}: not reported", plan.label);
+    if !plan.needs.is_empty() {
+        let _ = write!(line, " · needs: {}", plan.needs.join(", "));
+    }
+    if plan.condition.is_some() {
+        line.push_str(" · conditional");
+    }
+    if plan.dynamic {
+        line.push_str(" · runtime expansion");
+    }
+    line
 }
 
 fn write_step(
@@ -266,5 +330,53 @@ mod tests {
         assert!(rendered.contains("1.2s"));
         assert!(rendered.contains("1000 artifacts"));
         assert!(rendered.len() < 1000);
+    }
+    #[test]
+    fn pending_jobs_are_compact_and_conditional_paths_are_not_predicted() {
+        let plans = parse(
+            "jobs:\n  publish:\n    needs: [build, test]\n    if: {result: test, in: [success]}\n    steps:\n      - upload\n      - diagnose:\n          if: {result: upload, in: [failure]}\n",
+            true,
+        );
+        let plan = &plans[0];
+        assert_eq!(plan.needs, ["build", "test"]);
+        assert!(plan.condition.is_some());
+        assert!(plan.steps[1].condition.is_some());
+        let row = pending_job(plan);
+        assert!(row.contains("needs: build, test"));
+        assert!(row.contains("conditional"));
+        assert!(!row.contains("upload"));
+        let details = JobDetails::default();
+        let rendered = steps(&details, Some(plan), true);
+        assert!(rendered.contains("upload: not reported"));
+        assert!(rendered.contains("1 conditional steps not yet reported"));
+        assert!(!rendered.contains("diagnose:"));
+    }
+
+    #[test]
+    fn reported_conditional_execution_wins_and_final_skips_are_compact() {
+        use ngit::ci::details::Step;
+        let plans = parse(
+            "jobs:\n  test:\n    steps:\n      - diagnose:\n          if: {result: test, in: [failure]}\n",
+            true,
+        );
+        let mut details = JobDetails::default();
+        details.steps.push(Step {
+            id: "diagnose".into(),
+            label: "diagnose".into(),
+            start_ms: None,
+            duration_ms: None,
+            outcome: "skipped".into(),
+            artifacts: None,
+        });
+        assert!(
+            steps(&details, Some(&plans[0]), true).contains("conditional steps not yet reported")
+        );
+        assert!(steps(&details, Some(&plans[0]), false).contains("1 skipped steps"));
+        details.steps[0].start_ms = Some(10);
+        details.steps[0].duration_ms = Some(1200);
+        details.steps[0].outcome = "success".into();
+        let rendered = steps(&details, Some(&plans[0]), true);
+        assert!(rendered.contains("diagnose: success · 1.2s"));
+        assert!(!rendered.contains("conditional steps"));
     }
 }
