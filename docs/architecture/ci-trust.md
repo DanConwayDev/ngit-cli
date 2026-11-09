@@ -1272,3 +1272,29 @@ timestamp; explicit start/queue times are labelled accordingly. JSON keeps
 absolute timestamps, their meaning and result/progress event types in `history`.
 History never contributes to the current conclusion or trust gate. Watch keeps
 its event-stream contract, with history only in the initial human summary.
+
+With no explicit target, `ci status` describes local HEAD and may add one
+previous-tip summary from the associated PR or configured Nostr upstream.
+PR association requires an ID suffix in the branch name or a matching branch
+name authored by the selected account. Shared commits, including an identical
+tip, do not establish an association. No matching published PR is reported
+separately from multiple matches, using the available repository data.
+PR tips are ordered by published revision, never CI arrival time. Branch
+history requires the upstream remote to match the selected repository and
+uses retained repository state plus first-parent ancestry; cached Git remote
+refs alone are not treated as refreshed publication evidence. Ambiguous,
+missing, behind or divergent history is labelled rather than guessed.
+
+Only the newest related previous tip with CI evidence is shown, with one
+concise latest-attempt summary per coordinator/workflow/context. It has no
+job/step tree and never fills gaps in current results. Its heading says it
+does not cover the current tip and `Tip: ngit ci status <full-commit>` selects
+that exact commit. Full hashes remain usable even as refs move.
+
+Previous-tip context disappears when all observed current attempts are
+terminal (including failure); no evidence and stale progress are not completion.
+Explicit commit targets do not infer previous tips. Explicit PR targets may
+show the previous published revision. JSON keeps this under `history.previous_tip`,
+separate from current results and trust gates, and marks history as incomplete.
+Human watch includes this context only in its initial summary; subsequent
+updates and JSON Lines remain pinned to the original current target.

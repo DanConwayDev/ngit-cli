@@ -31,6 +31,7 @@ mod output;
 mod ci_event_view;
 mod ci_history;
 mod ci_plan;
+mod ci_previous;
 mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;

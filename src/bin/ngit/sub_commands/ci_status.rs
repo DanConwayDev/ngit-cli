@@ -60,6 +60,20 @@ pub async fn launch(
     let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
     let selected_repo =
         get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
+    let history_remote =
+        if selected_repo.remote.is_none() && !offline && target.is_none_or(|t| t.trim().is_empty())
+        {
+            ngit::repo_ref::get_nostr_remote_for_resolved_coordinate(&git_repo, &selected_repo)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            selected_repo.remote.clone()
+        };
+    let history_scope = crate::ci_history::Scope {
+        automatic: target.is_none_or(|t| t.trim().is_empty()),
+        selected_remote: history_remote.as_ref().map(|remote| remote.name.clone()),
+    };
     let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
     let mut repo_coordinates = selected_repo.coordinate;
 
@@ -89,11 +103,11 @@ pub async fn launch(
     if watch {
         return super::ci_watch::launch(
             &git_repo,
-            git_repo_path,
             &repo_ref,
             &client,
             &target,
             json,
+            &history_scope,
         )
         .await;
     }
@@ -113,7 +127,9 @@ pub async fn launch(
     )
     .await?;
 
-    let history = crate::ci_history::load(git_repo_path, &repo_ref, &target).await?;
+    let history =
+        crate::ci_history::load(&git_repo, &history_scope, git_repo_path, &repo_ref, &target)
+            .await?;
     let gate = require_ci_trust.and_then(|floor| report.gate_failure(floor));
 
     if json {

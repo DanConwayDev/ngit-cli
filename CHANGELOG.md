@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unstarted jobs and conditional paths stay compact without predicting outcomes.
   JSON includes detailed execution evidence, outputs and dependency bindings.
   Earlier attempts are listed separately with relative times and exact-event
-  inspection commands; they never contribute to the current result.
+  inspection commands; they never contribute to the current result. While current
+  CI is unresolved, a clearly labelled workflow-only summary can show the newest
+  related previous tip, with a command to inspect that exact commit. PR history
+  requires a branch association; shared commits alone do not establish one.
+  Missing PR history is reported independently of current-commit CI evidence.
 
 - Standing CI controls are now `ci service request` and `ci service stop`.
   The old commands remain compatible and warn on stderr that they are deprecated.

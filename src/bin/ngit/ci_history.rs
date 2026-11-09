@@ -41,17 +41,15 @@ impl AttemptSummary {
         };
         // Results have no distinct completion timestamp in the current protocol.
         // A publication timestamp is therefore always labelled "reported".
-        let (time_kind, timestamp) = if run.result.is_some() {
+        let (time_kind, timestamp) = if matches!(run.state(now), RunState::Concluded(_)) {
             ("reported", run.container_created_at())
         } else if let Some(p) = &run.progress {
             if p.status == ProgressStatus::Queued {
                 p.queued_at
-                    .map(|t| ("queued", t))
-                    .unwrap_or(("reported", p.created_at))
+                    .map_or(("reported", p.created_at), |t| ("queued", t))
             } else {
                 p.started_at
-                    .map(|t| ("started", t))
-                    .unwrap_or(("reported", p.created_at))
+                    .map_or(("reported", p.created_at), |t| ("started", t))
             }
         } else {
             ("reported", run.container_created_at())
@@ -75,9 +73,10 @@ impl AttemptSummary {
     }
     pub fn print(&self, inspect: bool, now: Timestamp) {
         println!(
-            "  {} · coordinator {} · {} · {} {}",
+            "  {} · coordinator {} · {} · {} · {} {}",
             self.workflow,
             self.coordinator,
+            context_label(self.context.as_ref()),
             self.status,
             self.time_kind,
             age(self.timestamp, now.as_secs())
@@ -88,9 +87,25 @@ impl AttemptSummary {
     }
 }
 
+pub struct Scope {
+    pub automatic: bool,
+    pub selected_remote: Option<String>,
+}
+
 #[derive(Default, Serialize)]
 pub struct History {
     pub earlier_attempts: Vec<AttemptSummary>,
+    pub previous_tip: Option<PreviousTip>,
+    pub notice: Option<String>,
+    #[serde(rename = "history_complete")]
+    pub complete: bool,
+}
+#[derive(Serialize)]
+pub struct PreviousTip {
+    pub commit: String,
+    pub source: &'static str,
+    pub workflows: Vec<AttemptSummary>,
+    pub command: String,
 }
 impl History {
     pub fn print(&self) {
@@ -100,12 +115,31 @@ impl History {
                 attempt.print(true, Timestamp::now());
             }
         }
+        if let Some(previous) = &self.previous_tip {
+            println!(
+                "Previous tip {} — does not cover the current tip:",
+                previous.commit
+            );
+            for run in &previous.workflows {
+                run.print(false, Timestamp::now());
+            }
+            println!("Tip: {}", previous.command);
+        }
+        if let Some(notice) = &self.notice {
+            println!("  {notice}");
+        }
     }
 }
 
-pub async fn load(path: &Path, reference: &RepoRef, target: &Target) -> Result<History> {
+pub async fn load(
+    repo: &ngit::git::Repo,
+    scope: &Scope,
+    path: &Path,
+    reference: &RepoRef,
+    target: &Target,
+) -> Result<History> {
     let events = get_events_from_local_cache(path, vec![target.ci_filter()]).await?;
-    let grouped = group_workflow_runs(&events);
+    let grouped = group_workflow_runs(events.iter().filter(|e| e.verify().is_ok()));
     let roots = reference.coordinates();
     let runs: Vec<_> = grouped
         .runs
@@ -118,9 +152,58 @@ pub async fn load(path: &Path, reference: &RepoRef, target: &Target) -> Result<H
         })
         .collect();
     let selected = target.select(&runs);
-    Ok(History {
+    let mut history = History {
         earlier_attempts: earlier(&selected.current, Timestamp::now()),
-    })
+        ..History::default()
+    };
+    let latest = latest_attempts(&selected.current);
+    if !latest.is_empty()
+        && latest
+            .iter()
+            .all(|r| matches!(r.state(Timestamp::now()), RunState::Concluded(_)))
+    {
+        return Ok(history);
+    }
+    if !scope.automatic && matches!(target, Target::Commit { .. }) {
+        return Ok(history);
+    }
+    let filters = vec![
+        nostr::prelude::Filter::new()
+            .kinds(ngit::ci::kinds::CONSUMED_CI_KINDS.to_vec())
+            .custom_tags(
+                nostr::prelude::SingleLetterTag::LOWERCASE_A,
+                roots
+                    .iter()
+                    .map(|r| r.coordinate.to_string())
+                    .collect::<Vec<_>>(),
+            ),
+    ];
+    let events = get_events_from_local_cache(path, filters).await?;
+    let all = group_workflow_runs(events.iter().filter(|e| e.verify().is_ok()));
+    let candidates = crate::ci_previous::resolve(repo, reference, target, scope, all.runs).await?;
+    history.notice = candidates.notice;
+    for commit in candidates.commits {
+        let at_tip: Vec<_> = candidates
+            .runs
+            .iter()
+            .filter(|r| r.commit() == commit)
+            .cloned()
+            .collect();
+        if at_tip.is_empty() {
+            continue;
+        }
+        history.previous_tip = Some(PreviousTip {
+            command: format!("ngit ci status {commit}"),
+            commit,
+            source: candidates.source,
+            workflows: latest_attempts(&at_tip)
+                .into_iter()
+                .map(|r| AttemptSummary::new(r, Timestamp::now()))
+                .collect(),
+        });
+        break;
+    }
+    Ok(history)
 }
 fn earlier(runs: &[WorkflowRun], now: Timestamp) -> Vec<AttemptSummary> {
     let latest = latest_attempts(runs);
@@ -148,20 +231,50 @@ fn age(timestamp: u64, now: u64) -> String {
         format!("{}m ago", seconds / 60)
     } else if seconds < 86400 {
         format!("{}h ago", seconds / 3600)
-    } else if seconds < 604800 {
+    } else if seconds < 604_800 {
         format!("{}d ago", seconds / 86400)
     } else {
-        format!("{}w ago", seconds / 604800)
+        format!("{}w ago", seconds / 604_800)
     }
 }
+pub fn context_label(context: Option<&ngit::ci::kinds::TriggerContext>) -> String {
+    use ngit::ci::kinds::TriggerContext;
+    match context {
+        Some(TriggerContext::Push { git_ref }) => git_ref.clone(),
+        Some(TriggerContext::PullRequest(pr)) => {
+            format!("PR {}", crate::ci_projection::short(&pr.root.to_hex()))
+        }
+        Some(TriggerContext::Issue {
+            root,
+            activity,
+            action,
+            ..
+        }) => format!(
+            "issue {} {action} ({})",
+            crate::ci_projection::short(&root.to_hex()),
+            crate::ci_projection::short(&activity.to_hex())
+        ),
+        Some(TriggerContext::Release {
+            version,
+            channel,
+            revision,
+            ..
+        }) => format!(
+            "release {version} {channel} ({})",
+            crate::ci_projection::short(&revision.to_hex())
+        ),
+        None => "unspecified trigger context".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn relative_times_do_not_turn_future_timestamps_into_recent_history() {
         assert_eq!(age(0, 1200), "20m ago");
-        assert_eq!(age(0, 172800), "2d ago");
-        assert_eq!(age(0, 1209600), "2w ago");
+        assert_eq!(age(0, 172_800), "2d ago");
+        assert_eq!(age(0, 1_209_600), "2w ago");
         assert_eq!(age(200, 100), "at a future timestamp");
     }
 }

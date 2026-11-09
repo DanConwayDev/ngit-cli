@@ -80,8 +80,8 @@ impl WorkflowRun {
             .expect("a run has an aggregate")
     }
 
-    /// Issue activity and release revisions are independent attempts even at
-    /// one commit.
+    /// Distinct branch, PR, issue and release contexts are independent even
+    /// at one commit.
     #[must_use]
     pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
         self.common().context.as_ref()

@@ -1,12 +1,12 @@
 //! Open-ended observation of distinct workflow/job receipts. No scheduler or
 //! synthetic lifecycle events: the signed event remains the unit of output.
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use ngit::{
     ci::watch::{Subscription, Update},
     client::{Client, get_events_from_local_cache, save_event_in_local_cache},
-    git::Repo,
+    git::{Repo, RepoActions},
     repo_ref::RepoRef,
 };
 use nostr::prelude::{Event, EventId, Kind, MatchEventOptions};
@@ -15,11 +15,11 @@ use crate::ci_projection::{ProjectionRequest, Target, Tier, build_report};
 
 pub async fn launch(
     repo: &Repo,
-    path: &Path,
     reference: &RepoRef,
     client: &Client,
     target: &Target,
     json: bool,
+    history_scope: &crate::ci_history::Scope,
 ) -> Result<()> {
     if json {
         crate::output::start_stream();
@@ -31,7 +31,7 @@ pub async fn launch(
     // Keep one interrupt listener alive, including during cache and output I/O.
     let result = tokio::select! {
         signal = tokio::signal::ctrl_c() => signal.map_err(anyhow::Error::from),
-        result = observe(repo, path, reference, client, target, json, &mut subscription) => result,
+        result = observe(repo, reference, client, target, json, history_scope, &mut subscription) => result,
     };
     subscription.close().await;
     result
@@ -39,13 +39,14 @@ pub async fn launch(
 
 async fn observe(
     repo: &Repo,
-    path: &Path,
     reference: &RepoRef,
     client: &Client,
     target: &Target,
     json: bool,
+    history_scope: &crate::ci_history::Scope,
     subscription: &mut Subscription,
 ) -> Result<()> {
+    let path = repo.get_path()?;
     let filter = target
         .ci_filter()
         .kinds([9841, 9842, 39842, 39846].map(Kind::Custom));
@@ -70,7 +71,7 @@ async fn observe(
         )
         .await?;
         report.print(target, crate::cli::LogTailMode::None);
-        crate::ci_history::load(path, reference, target)
+        crate::ci_history::load(repo, history_scope, path, reference, target)
             .await?
             .print();
     }

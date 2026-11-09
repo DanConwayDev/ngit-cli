@@ -530,7 +530,14 @@ impl CiReport {
 
     /// The `ngit ci status` human rendering.
     pub fn print(&self, target: &Target, log_tail: LogTailMode) {
-        println!("CI for {}", target.describe());
+        match target {
+            Target::Commit { ids, .. } => println!(
+                "CI for {} ({})",
+                target.describe(),
+                ids.first().map_or("unknown commit", String::as_str)
+            ),
+            Target::PullRequest { .. } => println!("CI for {}", target.describe()),
+        }
         self.print_result_lines(log_tail);
         // Shape rejections are diagnostics for a publisher, not something a
         // reader of this repository can act on, so they follow ngit's
@@ -716,6 +723,13 @@ impl RunReport {
             "  {:<10} {}  [{label}]{evidence}",
             self.state_label(),
             self.run.workflow_path,
+        );
+        println!(
+            "    coordinator {} · {} · attempt {} · ngit ci inspect {}",
+            npub(self.run.coordinator),
+            crate::ci_history::context_label(self.run.activity_context()),
+            self.attempt_of,
+            self.run.container_event_id()
         );
         println!(
             "    integrity: commit {}, workflow hash {}",
@@ -1191,7 +1205,7 @@ struct Attempt {
     attempt_of: usize,
 }
 
-/// The latest attempt per coordinator, workflow and issue/release activity,
+/// The latest attempt per coordinator, workflow and trigger context,
 /// each with the number of attempts it is the latest of.
 fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
     let mut counts = HashMap::<_, usize>::new();
@@ -1223,8 +1237,8 @@ fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
 /// The latest attempts of every superseded revision, newest revision first.
 ///
 /// Attempts are collapsed *within* a revision, never across them:
-/// `latest_attempts` keys on `(coordinator, workflow)` alone, so collapsing
-/// the whole set would hide one revision's result behind another's.
+/// `latest_attempts` keys on coordinator, workflow and trigger context;
+/// collapsing the whole set would hide one revision's result behind another's.
 fn outdated_attempts(runs: &[WorkflowRun]) -> Vec<Attempt> {
     let mut by_revision: HashMap<Option<EventId>, Vec<WorkflowRun>> = HashMap::new();
     for run in runs {
