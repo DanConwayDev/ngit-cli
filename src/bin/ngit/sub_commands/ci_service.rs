@@ -59,30 +59,153 @@ pub async fn launch(offline: bool, auth: SignerParams<'_>) -> Result<()> {
     let now = Timestamp::now();
     let rows =
         ngit::ci::service::summarize(&events, &roots, &reference.confirmed_maintainers(), now);
+    println!("CI coordinators · observed runs in the last 30 days");
     for row in &rows {
-        println!(
-            "{}  {}  {}{}\n  {}",
-            row.coordinator.to_bech32()?,
-            row.service.replace('_', " "),
-            row.request.replace('_', " "),
-            if row.advertised_ready {
-                " · advertises readiness"
-            } else {
-                ""
-            },
-            row.repository
-        );
+        print_row(row, now, roots.len() > 1)?;
     }
     if rows.is_empty() {
-        println!("No coordinator service evidence found for this repository.");
+        println!("No recent runs, service requests or advertised availability observed.");
     }
-    println!(
-        "Service is a signed coordinator claim; missing or expired evidence does not prove service stopped."
-    );
+    if !failures.is_empty() {
+        println!("Some relay queries failed; observed activity may be incomplete.");
+    }
     crate::output::set_value(
-        serde_json::json!({"command_status":"ok", "entity":"ci", "action":"service-status", "services":rows, "relay_failures":failures, "offline":offline, "history_complete":false}),
+        serde_json::json!({"command_status":"ok", "entity":"ci", "action":"service-status", "services":rows, "relay_failures":failures, "offline":offline, "history_complete":false, "activity_since":now.as_secs().saturating_sub(ngit::ci::service::ACTIVITY_WINDOW_SECS), "observed_at":now.as_secs()}),
     );
     Ok(())
+}
+
+fn print_row(
+    row: &ngit::ci::service::ServiceRow,
+    now: Timestamp,
+    multiple_perspectives: bool,
+) -> Result<()> {
+    let npub = row.coordinator.to_bech32()?;
+    println!("\n{}", console::style(&npub).bold());
+    for line in relationship_lines(row, now) {
+        println!("  {line}");
+    }
+    if multiple_perspectives {
+        println!(
+            "  {}",
+            console::style(format!("Repository perspective: {}", row.repository)).dim()
+        );
+    }
+    if let Some(latest) = &row.activity.latest {
+        let mut counts = vec![format!("{} runs observed", row.activity.runs_observed)];
+        if row.activity.maintainer_directed_runs > 0 {
+            counts.push(format!(
+                "{} maintainer-authorized",
+                row.activity.maintainer_directed_runs
+            ));
+        }
+        for (count, label) in [
+            (row.activity.running, "active"),
+            (row.activity.concluded, "finished"),
+            (row.activity.stale, "stale"),
+        ] {
+            if count > 0 {
+                counts.push(format!("{count} {label}"));
+            }
+        }
+        println!("  {}", counts.join(" · "));
+        println!(
+            "  Latest: {} {} · {}",
+            crate::ci_display::outcome(&latest.status),
+            latest.workflow,
+            crate::ci_history::age(latest.reported_at, now.as_secs())
+        );
+        println!(
+            "  {} {}",
+            console::style("Tip:").dim(),
+            console::style(format!("`ngit ci inspect {}`", latest.event_id)).cyan()
+        );
+    } else {
+        println!("  No runs observed in the last 30 days");
+    }
+    Ok(())
+}
+
+fn maintainer_history_summary(
+    history: &[ngit::ci::service::RequestHistoryEntry],
+    now: Timestamp,
+) -> Option<(String, bool)> {
+    let history: Vec<_> = history.iter().filter(|h| h.maintainer).collect();
+    let first = history.first()?;
+    if history.len() == 1 && first.action == "start" {
+        return Some((
+            format!(
+                "Maintainer requested {}",
+                crate::ci_history::age(first.created_at, now.as_secs())
+            ),
+            false,
+        ));
+    }
+    let mut changes: Vec<_> = history
+        .iter()
+        .take(3)
+        .map(|h| {
+            format!(
+                "{} {}",
+                h.action,
+                crate::ci_history::age(h.created_at, now.as_secs())
+            )
+        })
+        .collect();
+    if history.len() > 3 {
+        let remaining = history.len() - 3;
+        changes.push(format!(
+            "{remaining} earlier {}",
+            if remaining == 1 { "change" } else { "changes" }
+        ));
+    }
+    Some((
+        format!("Maintainer requests: {}", changes.join(" · ")),
+        true,
+    ))
+}
+
+fn relationship_lines(row: &ngit::ci::service::ServiceRow, now: Timestamp) -> Vec<String> {
+    let (mut relationship, timeline) = maintainer_history_summary(&row.request_history, now)
+        .unwrap_or_else(|| {
+            let relationship = match row.request {
+                "maintainer_requested" => "Maintainer requested",
+                "previously_requested" => "Previously maintainer-requested",
+                "other_request_observed" => "Requested by a non-maintainer",
+                _ if row.activity.maintainer_directed_runs > 0 => "Maintainer-authorized runs",
+                _ => "No maintainer relationship verified",
+            };
+            let mut label = relationship.to_owned();
+            if let Some(timestamp) = row.request_created_at {
+                label.push(' ');
+                label.push_str(&crate::ci_history::age(timestamp, now.as_secs()));
+            }
+            (label, false)
+        });
+    let mut claims = Vec::new();
+    if row.service == "acting" {
+        claims.push("Coordinator reports acting".to_owned());
+    } else {
+        if row.service != "no_status_observed" {
+            claims.push(format!("Service claim: {}", row.service.replace('_', " ")));
+        }
+        if row.advertised_ready {
+            claims.push("Advertises availability".to_owned());
+        }
+    }
+    if timeline {
+        let mut lines = vec![relationship];
+        if !claims.is_empty() {
+            lines.push(claims.join(" · "));
+        }
+        lines
+    } else {
+        for claim in claims {
+            relationship.push_str(" · ");
+            relationship.push_str(&claim.to_lowercase());
+        }
+        vec![relationship]
+    }
 }
 
 async fn collect_evidence(
@@ -95,6 +218,7 @@ async fn collect_evidence(
 ) -> Result<Vec<Event>> {
     let addresses: Vec<_> = roots.iter().map(ToString::to_string).collect();
     let owners: Vec<_> = roots.iter().map(|r| r.public_key.to_hex()).collect();
+    let now = Timestamp::now();
     let mut events = fetch(
         client,
         path,
@@ -102,7 +226,17 @@ async fn collect_evidence(
         vec![
             Filter::new()
                 .kinds([9843, 9844, 39844, 19844].map(Kind::Custom))
-                .custom_tags(SingleLetterTag::LOWERCASE_A, addresses),
+                .custom_tags(SingleLetterTag::LOWERCASE_A, addresses.clone()),
+            Filter::new()
+                .kinds([
+                    ngit::ci::kinds::KIND_CI_WORKFLOW_RESULT,
+                    ngit::ci::kinds::KIND_CI_WORKFLOW_PROGRESS,
+                ])
+                .custom_tags(SingleLetterTag::LOWERCASE_A, addresses)
+                .since(Timestamp::from_secs(
+                    now.as_secs()
+                        .saturating_sub(ngit::ci::service::ACTIVITY_WINDOW_SECS),
+                )),
             Filter::new()
                 .kind(Kind::Custom(19844))
                 .custom_tags(SingleLetterTag::LOWERCASE_P, owners),
@@ -111,7 +245,9 @@ async fn collect_evidence(
         failures,
     )
     .await?;
-    let now = Timestamp::now();
+    events.extend(
+        fetch_run_requests(client, path, &reference.relays, &events, offline, failures).await?,
+    );
     let mut authors: Vec<PublicKey> = events
         .iter()
         .filter(|e| e.verify().is_ok() && e.created_at <= now)
@@ -120,8 +256,10 @@ async fn collect_evidence(
                 ngit::ci::kinds::validate_service_control(e)
                     .ok()
                     .map(|c| c.coordinator)
-            } else {
+            } else if matches!(e.kind.as_u16(), 19843 | 19844 | 39844 | 9842 | 39842) {
                 Some(e.pubkey)
+            } else {
+                None
             }
         })
         .collect();
@@ -178,4 +316,78 @@ async fn collect_evidence(
     events.sort_by_key(|e| e.id);
     events.dedup_by_key(|e| e.id);
     Ok(events)
+}
+
+async fn fetch_run_requests(
+    client: &Client,
+    path: &std::path::Path,
+    repository_relays: &[nostr::prelude::RelayUrl],
+    events: &[Event],
+    offline: bool,
+    failures: &mut Vec<String>,
+) -> Result<Vec<Event>> {
+    let runs = ngit::ci::events::group_workflow_runs(events).runs;
+    let wanted = ngit::ci::provenance::wanted_quotes(&runs);
+    if !wanted.is_empty() {
+        // One-shot triggers may predate the activity window. Fetch their exact
+        // signed IDs so run authorization is not confused with standing service.
+        let mut relays = repository_relays.to_vec();
+        for hint in wanted.iter().filter_map(|w| w.relay.as_ref()) {
+            if let Ok(relay) = nostr::prelude::RelayUrl::parse(hint) {
+                if !relays.contains(&relay) {
+                    relays.push(relay);
+                }
+            }
+        }
+        return fetch(
+            client,
+            path,
+            &relays,
+            vec![Filter::new().ids(wanted.iter().map(|w| w.event_id))],
+            offline,
+            failures,
+        )
+        .await;
+    }
+    Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_start_stays_simple_but_control_history_is_bounded_and_newest_first() {
+        let key = nostr::prelude::Keys::generate().public_key();
+        let now = Timestamp::from_secs(100 * 86400);
+        let entry = |action: &'static str, days: u64, maintainer: bool| {
+            ngit::ci::service::RequestHistoryEntry {
+                event_id: format!("{action}-{days}"),
+                author: key,
+                created_at: now.as_secs() - days * 86400,
+                action,
+                maintainer,
+            }
+        };
+        let mut history = vec![entry("start", 60, true)];
+        let (text, timeline) = maintainer_history_summary(&history, now).unwrap();
+        assert!(!timeline);
+        assert!(text.contains("Maintainer requested 2mo ago"));
+        history = vec![
+            entry("start", 2, true),
+            entry("stop", 7, true),
+            entry("start", 60, true),
+            entry("stop", 70, true),
+            entry("start", 90, true),
+        ];
+        let (text, timeline) = maintainer_history_summary(&history, now).unwrap();
+        assert!(timeline);
+        assert!(text.contains("start 2d ago · stop 1w ago · start 2mo ago"));
+        assert!(text.contains("2 earlier changes"));
+        assert!(!text.contains("3mo ago"));
+        assert!(maintainer_history_summary(&[entry("start", 1, false)], now).is_none());
+        let (text, timeline) = maintainer_history_summary(&[entry("stop", 1, true)], now).unwrap();
+        assert!(timeline);
+        assert!(text.contains("stop 1d ago"));
+    }
 }

@@ -234,9 +234,30 @@ deprecation warning on stderr. Their signed events and JSON results are unchange
 
 ### Repository service status
 
-`ngit ci service status` shows coordinator evidence for this repository,
-separately from `ci status` execution results. Each row identifies the exact
-repository perspective, coordinator, service claim and maintainer-request state.
+`ngit ci service status` shows which coordinators have observed workflow runs
+for this repository in the last 30 days, across commits and branches. It reports
+unique attempts, active/finished/stale counts, maintainer-authorized run counts,
+and the latest workflow outcome and age with an exact-event inspection command.
+Coordinators with requests but no recent observed runs remain visible. Current
+standing service requests, previous requests and authorization of individual
+runs are distinct; signed request quotes are verified before counting a run as
+maintainer-authorized. A run does not itself prove a standing service agreement.
+
+A single observed maintainer start remains `Maintainer requested 2mo ago`.
+Multiple requests or any maintainer stop use a newest-first `Maintainer requests:`
+timeline showing at most three entries, followed by the number of earlier
+changes. These are requests, not confirmed service transitions. The coordinator's
+acting claim sits on a separate line beneath a timeline. JSON retains the full
+observed `request_history`, with action, timestamp, event ID, author and current
+maintainer attribution, plus the selected request's timestamp and event ID.
+Human output puts relationships and claims before activity, with the inspection
+tip last. Advertised availability is shown only without an
+acting claim; both protocol signals remain separately available in JSON.
+Relative ages use approximate months and years for older evidence.
+
+Service claims and advertised availability remain separate from activity.
+Repository perspectives remain explicit in JSON and in human output when the
+repository has multiple perspectives.
 A live kind-39844 acting claim requires a live kind-19843 advertisement. Expired,
 withdrawn or unavailable evidence is labelled; absence never proves stopped
 service or operator configuration. Requests are reduced with maintainer-wide
@@ -249,7 +270,8 @@ is a discovery hint, not a promise of acceptance. A newer list that removes
 this repository supersedes its previous readiness claim.
 
 `--offline` reads cached evidence. JSON includes separate service/request
-states, evidence event IDs, relay failures and `history_complete: false`.
+states, activity counts and latest-run evidence, the observation window,
+evidence event IDs, relay failures and `history_complete: false`.
 Relays may prune expired, replaced or deleted evidence; this is an observed
 history, not an authoritative archive. An acting claim does not prove a live
 network connection or that a particular workflow is eligible.

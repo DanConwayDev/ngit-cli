@@ -10,7 +10,7 @@ description:
   static sites published through Blossom.
 license: CC-BY-SA-4.0
 metadata:
-  version: "1.24"
+  version: "1.27"
 ---
 
 # ngit — Nostr Plugin for Git

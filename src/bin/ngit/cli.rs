@@ -1552,8 +1552,8 @@ pub struct CiSecretsArgs {
 
 #[derive(Subcommand)]
 pub enum CiServiceCommands {
-    /// Show repository service claims, maintainer requests and advertised
-    /// candidates
+    /// Show coordinators with observed runs in the last 30 days, maintainer
+    /// relationships, service claims and advertised availability
     Status {
         /// Read cached evidence only; missing history is not proof of stopped
         /// service

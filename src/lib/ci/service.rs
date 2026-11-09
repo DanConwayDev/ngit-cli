@@ -1,12 +1,10 @@
-//! Repository service evidence, kept separate from execution results.
-use std::collections::BTreeSet;
+//! Repository coordinator relationships, observed activity and service claims.
+use std::collections::{BTreeSet, HashMap};
 
 use nostr::prelude::{Coordinate, Event, Kind, PublicKey, Timestamp};
 use serde::Serialize;
 
-use super::{
-    controls::was_service_requested_at, kinds::validate_service_control, total_order_position,
-};
+use super::{controls::open_requests, kinds::validate_service_control, total_order_position};
 
 #[derive(Debug, Serialize)]
 pub struct ServiceRow {
@@ -14,6 +12,8 @@ pub struct ServiceRow {
     pub repository: String,
     pub service: &'static str,
     pub request: &'static str,
+    pub request_event: Option<String>,
+    pub request_created_at: Option<u64>,
     pub advertised_ready: bool,
     pub status_event: Option<String>,
     pub status_created_at: Option<u64>,
@@ -21,7 +21,44 @@ pub struct ServiceRow {
     pub advertisement_event: Option<String>,
     pub readiness_event: Option<String>,
     pub control_events: Vec<String>,
+    /// All observed controls, newest first, with current maintainer
+    /// attribution.
+    pub request_history: Vec<RequestHistoryEntry>,
+    pub activity: ServiceActivity,
 }
+#[derive(Debug, Serialize)]
+pub struct RequestHistoryEntry {
+    pub event_id: String,
+    pub author: PublicKey,
+    pub created_at: u64,
+    pub action: &'static str,
+    pub maintainer: bool,
+}
+
+/// Activity is bounded by publication time, not a claim of complete history.
+pub const ACTIVITY_WINDOW_SECS: u64 = 30 * 86400;
+
+#[derive(Debug, Default, Serialize)]
+pub struct ServiceActivity {
+    pub runs_observed: usize,
+    pub maintainer_directed_runs: usize,
+    pub running: usize,
+    pub concluded: usize,
+    pub stale: usize,
+    pub latest: Option<RecentRun>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentRun {
+    pub run_id: String,
+    pub event_id: String,
+    pub workflow: String,
+    pub commit: String,
+    pub status: String,
+    pub reported_at: u64,
+    pub classification: Option<&'static str>,
+}
+
 fn values<'a>(e: &'a Event, name: &'a str) -> impl Iterator<Item = &'a [String]> {
     e.tags
         .iter()
@@ -147,6 +184,26 @@ pub fn summarize(
         .iter()
         .filter_map(|e| validate_service_control(e).ok())
         .collect();
+    let mut runs = super::events::group_workflow_runs(events.iter().copied()).runs;
+    runs.retain(|r| {
+        r.container_created_at().as_secs() >= now.as_secs().saturating_sub(ACTIVITY_WINDOW_SECS)
+            && r.repositories.iter().any(|r| roots.contains(&r.coordinate))
+    });
+    let repository = super::resolve::RepositoryContext {
+        confirmed_maintainers: maintainers.to_vec(),
+        coordinates: roots.to_vec(),
+        grasp_domains: Vec::new(),
+    };
+    let quoted = events.iter().map(|e| (e.id, (*e).clone())).collect();
+    let profiles = HashMap::new();
+    let context = super::resolve::resolve_cache_tier(&super::resolve::CiInputs::new(
+        &repository,
+        &runs,
+        &controls,
+        &quoted,
+        &profiles,
+        now,
+    ));
     let mut rows = Vec::new();
     for root in roots {
         let authors: BTreeSet<_> = events
@@ -158,6 +215,11 @@ pub fn summarize(
                     .iter()
                     .filter(|c| c.repository.coordinate == *root)
                     .map(|c| c.coordinator),
+            )
+            .chain(
+                runs.iter()
+                    .filter(|r| r.repositories.iter().any(|r| r.coordinate == *root))
+                    .map(|r| r.coordinator),
             )
             .collect();
         for author in authors {
@@ -185,13 +247,8 @@ pub fn summarize(
                 .iter()
                 .filter(|c| c.coordinator == author && c.repository.coordinate == *root)
                 .collect();
-            let requested = was_service_requested_at(
-                &controls,
-                &author,
-                std::slice::from_ref(root),
-                maintainers,
-                now,
-            );
+            let open = open_requests(&controls, &author, root, maintainers, now);
+            let requested = open.iter().any(|r| maintainers.contains(&r.author));
             let historical_request = relevant
                 .iter()
                 .any(|c| c.is_request && maintainers.contains(&c.author));
@@ -204,6 +261,30 @@ pub fn summarize(
             } else {
                 "none_observed"
             };
+            let mut history = relevant.clone();
+            history
+                .sort_by_key(|c| std::cmp::Reverse(total_order_position(c.created_at, c.event_id)));
+            history.dedup_by_key(|c| c.event_id);
+            let request_history = history
+                .into_iter()
+                .map(|c| RequestHistoryEntry {
+                    event_id: c.event_id.to_hex(),
+                    author: c.author,
+                    created_at: c.created_at.as_secs(),
+                    action: if c.is_request { "start" } else { "stop" },
+                    maintainer: maintainers.contains(&c.author),
+                })
+                .collect();
+            // Date the latest still-open maintainer request, not a request
+            // superseded by a stop. Historical rows date their last request.
+            let dated_request = if requested { &open } else { &relevant }
+                .iter()
+                .copied()
+                .filter(|c| {
+                    c.is_request
+                        && (!(requested || historical_request) || maintainers.contains(&c.author))
+                })
+                .max_by_key(|c| total_order_position(c.created_at, c.event_id));
             let service = match status {
                 Some(e) if deleted(e, &events, now) => "withdrawn",
                 Some(e) if !status_shape(e, root) => "invalid_status",
@@ -212,14 +293,64 @@ pub fn summarize(
                 Some(_) => "acting",
                 None => "no_status_observed",
             };
-            if status.is_none() && relevant.is_empty() && !advertised_ready {
+            let mut activity = ServiceActivity::default();
+            let mut observed: Vec<_> = runs
+                .iter()
+                .filter(|r| {
+                    r.coordinator == author && r.repositories.iter().any(|r| r.coordinate == *root)
+                })
+                .collect();
+            observed.sort_by_key(|r| {
+                total_order_position(r.container_created_at(), r.container_event_id())
+            });
+            for run in &observed {
+                activity.runs_observed += 1;
+                if context.run_resolution(run).classification()
+                    == Some(super::trust::TrustClassification::MaintainerDirected)
+                {
+                    activity.maintainer_directed_runs += 1;
+                }
+                match run.state(now) {
+                    super::events::RunState::Running => activity.running += 1,
+                    super::events::RunState::Concluded(_) => activity.concluded += 1,
+                    super::events::RunState::Stale => activity.stale += 1,
+                }
+            }
+            activity.latest = observed.last().map(|run| RecentRun {
+                run_id: run.run_id.clone(),
+                event_id: run.container_event_id().to_hex(),
+                workflow: run.workflow_path.clone(),
+                commit: run.commit().to_owned(),
+                status: match run.state(now) {
+                    super::events::RunState::Running => run
+                        .progress
+                        .as_ref()
+                        .map_or("running", |p| p.status.as_str())
+                        .to_owned(),
+                    super::events::RunState::Concluded(c) => c.to_string(),
+                    super::events::RunState::Stale => "stale".to_owned(),
+                },
+                reported_at: run.container_created_at().as_secs(),
+                classification: context
+                    .run_resolution(run)
+                    .classification()
+                    .map(|c| c.as_str()),
+            });
+            if status.is_none()
+                && relevant.is_empty()
+                && !advertised_ready
+                && activity.runs_observed == 0
+            {
                 continue;
             }
             rows.push(ServiceRow {
+                activity,
                 coordinator: author,
                 repository: root.to_string(),
                 service,
                 request,
+                request_event: dated_request.map(|c| c.event_id.to_hex()),
+                request_created_at: dated_request.map(|c| c.created_at.as_secs()),
                 advertised_ready,
                 status_event: status.map(|e| e.id.to_hex()),
                 status_created_at: status.map(|e| e.created_at.as_secs()),
@@ -230,9 +361,19 @@ pub fn summarize(
                     .filter(|e| ready(e, root, now))
                     .map(|e| e.id.to_hex()),
                 control_events: relevant.iter().map(|c| c.event_id.to_hex()).collect(),
+                request_history,
             });
         }
     }
+    rows.sort_by(|a, b| {
+        b.activity
+            .latest
+            .as_ref()
+            .map(|r| r.reported_at)
+            .cmp(&a.activity.latest.as_ref().map(|r| r.reported_at))
+            .then_with(|| a.coordinator.cmp(&b.coordinator))
+            .then_with(|| a.repository.cmp(&b.repository))
+    });
     rows
 }
 
@@ -251,6 +392,102 @@ mod tests {
     fn t(a: &str, b: impl ToString) -> Vec<String> {
         vec![a.into(), b.to_string()]
     }
+    #[test]
+    fn activity_discovers_coordinators_counts_attempts_and_keeps_idle_relationships() {
+        use super::super::kinds::{
+            ProgressStatus,
+            test_events::{service_control, workflow_progress, workflow_result},
+        };
+        let owner = Keys::generate();
+        let foreign = Keys::generate();
+        let active = Keys::generate();
+        let idle = Keys::generate();
+        let unrelated = Keys::generate();
+        let now = ACTIVITY_WINDOW_SECS + 1000;
+        let root =
+            Coordinate::new(Kind::GitRepoAnnouncement, owner.public_key()).identifier("ngit");
+        let result = workflow_result(&active, &owner, "recent", now - 10);
+        let events = vec![
+            result.clone(),
+            workflow_progress(
+                &active,
+                &owner,
+                "recent",
+                ProgressStatus::InProgress,
+                now - 20,
+                now + 100,
+            ),
+            workflow_progress(
+                &active,
+                &owner,
+                "live",
+                ProgressStatus::Queued,
+                now - 5,
+                now + 100,
+            ),
+            workflow_result(&active, &owner, "old", 999),
+            workflow_result(&unrelated, &foreign, "foreign", now - 1),
+            workflow_result(&unrelated, &owner, "future", now + 1),
+            service_control(&owner, &idle, &owner, true, 500),
+        ];
+        let rows = summarize(
+            &events,
+            &[root],
+            &[owner.public_key()],
+            Timestamp::from_secs(now),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].coordinator, active.public_key());
+        assert_eq!(rows[0].activity.runs_observed, 2);
+        assert_eq!(rows[0].activity.running, 1);
+        assert_eq!(rows[0].activity.concluded, 1);
+        assert_eq!(rows[0].activity.latest.as_ref().unwrap().status, "queued");
+        assert_eq!(rows[0].request, "none_observed");
+        assert_eq!(rows[1].coordinator, idle.public_key());
+        assert_eq!(rows[1].request, "maintainer_requested");
+        assert_eq!(rows[1].activity.runs_observed, 0);
+    }
+
+    #[test]
+    fn request_age_tracks_open_requests_and_does_not_reuse_stopped_history() {
+        use super::super::kinds::test_events::service_control;
+        let owner = Keys::generate();
+        let coordinator = Keys::generate();
+        let root =
+            Coordinate::new(Kind::GitRepoAnnouncement, owner.public_key()).identifier("ngit");
+        let first = service_control(&owner, &coordinator, &owner, true, 100);
+        let stop = service_control(&owner, &coordinator, &owner, false, 200);
+        let later = service_control(&owner, &coordinator, &owner, true, 300);
+        let mut events = vec![first.clone(), stop];
+        let rows = summarize(
+            &events,
+            std::slice::from_ref(&root),
+            &[owner.public_key()],
+            Timestamp::from_secs(250),
+        );
+        assert_eq!(rows[0].request, "previously_requested");
+        assert_eq!(rows[0].request_created_at, Some(100));
+        events.push(later.clone());
+        let rows = summarize(
+            &events,
+            &[root],
+            &[owner.public_key()],
+            Timestamp::from_secs(400),
+        );
+        assert_eq!(rows[0].request, "maintainer_requested");
+        assert_eq!(rows[0].request_created_at, Some(300));
+        assert_eq!(rows[0].request_event, Some(later.id.to_hex()));
+        assert_eq!(
+            rows[0]
+                .request_history
+                .iter()
+                .map(|h| (h.action, h.created_at))
+                .collect::<Vec<_>>(),
+            vec![("start", 300), ("stop", 200), ("start", 100)]
+        );
+        assert!(rows[0].request_history.iter().all(|h| h.maintainer));
+    }
+
     #[test]
     fn requests_readiness_and_acting_are_independent_and_expire() {
         let owner = Keys::generate();

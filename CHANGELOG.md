@@ -52,9 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ci service status` shows which coordinators report acting for this repository,
-  maintainer request history and advertised readiness, with expiry and evidence
-  references kept distinct from request publication.
+- `ci service status` shows coordinators with observed workflow runs in the last
+  30 days, their latest outcome and age, and dated maintainer relationships.
+  Requested coordinators with no recent observed runs remain visible. Standing requests,
+  authorization of individual runs, service claims and advertised readiness
+  remain distinct, with evidence and observation bounds available in JSON.
+  Relationship
+  and acting claims precede activity, with an inspection tip last. A single start
+  uses a simple request age; repeated starts or stops show the latest three
+  maintainer requests newest first, with full observed history in JSON. Advertised
+  availability stays in JSON when an acting claim already communicates service.
 
 - `ci status --watch` streams workflow and job updates until interrupted, without
   a timeout. `--json` emits decoded events as JSON Lines; stopping observation

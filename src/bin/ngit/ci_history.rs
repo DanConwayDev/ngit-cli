@@ -233,8 +233,12 @@ pub(crate) fn age(timestamp: u64, now: u64) -> String {
         format!("{}h ago", seconds / 3600)
     } else if seconds < 604_800 {
         format!("{}d ago", seconds / 86400)
-    } else {
+    } else if seconds < 30 * 86400 {
         format!("{}w ago", seconds / 604_800)
+    } else if seconds < 365 * 86400 {
+        format!("{}mo ago", seconds / (30 * 86400))
+    } else {
+        format!("{}y ago", seconds / (365 * 86400))
     }
 }
 pub fn context_label(context: Option<&ngit::ci::kinds::TriggerContext>) -> String {
@@ -275,6 +279,8 @@ mod tests {
         assert_eq!(age(0, 1200), "20m ago");
         assert_eq!(age(0, 172_800), "2d ago");
         assert_eq!(age(0, 1_209_600), "2w ago");
+        assert_eq!(age(0, 90 * 86400), "3mo ago");
+        assert_eq!(age(0, 365 * 86400), "1y ago");
         assert_eq!(age(200, 100), "at a future timestamp");
     }
 }
