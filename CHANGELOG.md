@@ -181,6 +181,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update nostr/nostr-sdk to 0.45.6 — upstream fix for a signature-verification cache issue; ngit ingests relay events through this path, so clients should update
 ### Fixed
 
+- Remote signer progress stays aligned and refreshes in place while the
+  interactive pairing menu reads keys in raw terminal mode, instead of
+  appending repeated headings and drifting relay lines sideways.
+
 - Pairing a new remote signer profile falls back to JSON storage when the OS
   credential store is unavailable. Failed named-profile storage now stops before
   offering a plaintext fallback that could discard the new connection and bind

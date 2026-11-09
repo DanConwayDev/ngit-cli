@@ -3,7 +3,10 @@ use console::Term;
 use tokio::time::Instant;
 
 use super::{Indicator, RelayLine, Report};
-use crate::{output_mode::ProgressPolicy, remote_signer::RetryStatus};
+use crate::{
+    output_mode::{ProgressPolicy, write_terminal_line},
+    remote_signer::RetryStatus,
+};
 
 /// Own the complete terminal report, including its waiting spinner and
 /// countdown. Redirected output keeps reports as an append-only history of
@@ -76,10 +79,10 @@ impl<'a> CountdownLine<'a> {
     pub(super) fn show_final(&mut self, report: Report) -> Result<()> {
         self.clear()?;
         for line in report.body_lines() {
-            self.term.write_line(&line)?;
+            write_terminal_line(self.term, &line)?;
         }
         if !report.action.is_empty() {
-            self.term.write_line(&report.action)?;
+            write_terminal_line(self.term, &report.action)?;
         }
         Ok(())
     }
@@ -144,11 +147,11 @@ impl<'a> CountdownLine<'a> {
     fn paint(&mut self, retry: Option<RetryStatus>, deadline: Instant) -> Result<()> {
         let size = self.term.size();
         for line in &self.body {
-            self.term.write_line(line)?;
+            write_terminal_line(self.term, line)?;
         }
         self.write_action(retry, deadline)?;
         if let Some(tip) = &self.tip {
-            self.term.write_line(tip)?;
+            write_terminal_line(self.term, tip)?;
         }
         // A resize during output can mix wrapping widths; do not claim those rows.
         self.size = (self.term.size() == size).then_some(size);
@@ -162,7 +165,7 @@ impl<'a> CountdownLine<'a> {
             } else {
                 log_action(action, retry)
             };
-            self.term.write_line(&self.rendered_action)?;
+            write_terminal_line(self.term, &self.rendered_action)?;
         }
         Ok(())
     }

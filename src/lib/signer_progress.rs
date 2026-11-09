@@ -13,7 +13,7 @@ use nostr_sdk::relay::{EventSendStatus, RelayStatus};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{
-    output_mode::TransientLine,
+    output_mode::{TransientLine, write_progress_line},
     remote_signer::{ConnectProgress, NostrConnect, RetryStatus},
 };
 
@@ -534,9 +534,9 @@ async fn run_remote_operation_inner<T>(
                         if public_key_request && listening.is_some() && !expanded && !policy.quiet {
                             clear_line()?;
                             countdown.clear()?;
-                            eprintln!("{}", console::Style::new().for_stderr().bold().apply_to(
+                            write_progress_line(&term, &console::Style::new().for_stderr().bold().apply_to(
                                 PUBLIC_KEY_APPROVAL_GUIDANCE
-                            ));
+                            ).to_string())?;
                         }
                         let outcomes = matches!(event, ConnectProgress::Sent { .. } | ConnectProgress::Ready { .. } | ConnectProgress::SubscriptionUnavailable { .. });
                         let failed = state.update(event);
@@ -556,7 +556,7 @@ async fn run_remote_operation_inner<T>(
                     Err(RecvError::Lagged(_)) => {
                         let report = state.report(connect, description, false).await;
                         countdown.clear()?;
-                        if !policy.quiet { eprintln!("Signer progress updates were missed; request acceptance may be unknown."); }
+                        if !policy.quiet { write_progress_line(&term, "Signer progress updates were missed; request acceptance may be unknown.")?; }
                         countdown.show(report, state.pending_retry(), deadline_at)?;
                     }
                     Err(RecvError::Closed) => events_open = false,

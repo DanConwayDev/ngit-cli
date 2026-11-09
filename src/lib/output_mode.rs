@@ -104,9 +104,26 @@ pub fn is_verbose() -> bool {
 
 pub fn write_progress_line(term: &Term, message: &str) -> Result<()> {
     if !is_quiet() {
-        term.write_line(message)?;
+        write_terminal_line(term, message)?;
     }
     Ok(())
+}
+
+/// Terminal input can be in raw mode while another task renders progress.
+/// Explicit carriage returns keep each line at column zero even when the
+/// terminal driver is not translating newlines. Redirected output stays
+/// LF-only.
+pub(crate) fn write_terminal_line(term: &Term, message: &str) -> Result<()> {
+    term.write_str(&terminated_line(message, term.is_term()))?;
+    Ok(())
+}
+
+fn terminated_line(message: &str, terminal: bool) -> String {
+    if terminal {
+        format!("{}\r\n", message.replace('\n', "\r\n"))
+    } else {
+        format!("{message}\n")
+    }
 }
 
 /// A status line that knows whether it was rendered, so quiet mode can never
@@ -120,7 +137,7 @@ impl<'a> TransientLine<'a> {
     pub fn write(term: &'a Term, message: &str) -> Result<Self> {
         let rendered = !is_quiet();
         if rendered {
-            term.write_line(message)?;
+            write_terminal_line(term, message)?;
         }
         Ok(Self { term, rendered })
     }
@@ -136,6 +153,53 @@ impl<'a> TransientLine<'a> {
 #[cfg(test)]
 mod tests {
     use super::{OutputMode, ProgressPolicy};
+
+    #[test]
+    fn progress_lines_keep_raw_terminal_rows_aligned() {
+        // Model raw terminal output: LF advances the row but preserves the
+        // column. A long relay line also wraps, as in a narrow pairing screen.
+        for translate_lf in [false, true] {
+            let mut column = 0;
+            let mut rows = 0;
+            for message in [
+                "Waiting",
+                "relay.example awaiting signer",
+                "Approve\nin signer",
+            ] {
+                for byte in super::terminated_line(message, true).bytes() {
+                    match byte {
+                        b'\r' => column = 0,
+                        b'\n' => {
+                            rows += 1;
+                            if translate_lf {
+                                column = 0;
+                            }
+                            assert_eq!(column, 0, "next line would drift sideways");
+                        }
+                        _ => {
+                            if column == 20 {
+                                rows += 1;
+                                column = 0;
+                            }
+                            column += 1;
+                        }
+                    }
+                }
+            }
+            // Four logical lines and one wrapped row: the renderer can safely
+            // clear exactly these rows on its next animation frame.
+            assert_eq!(rows, 5);
+            assert_eq!(column, 0);
+        }
+    }
+
+    #[test]
+    fn redirected_progress_preserves_plain_newlines() {
+        assert_eq!(
+            super::terminated_line("Waiting\nrelay", false),
+            "Waiting\nrelay\n"
+        );
+    }
 
     #[test]
     fn json_and_pipes_never_animate_regardless_of_verbosity() {
