@@ -1458,7 +1458,7 @@ async fn branch_history_is_latest_related_tip_and_never_current_evidence() -> Re
     }
     let (_, stale) = ci_status(&a.publisher, &[]).await?;
     assert_eq!(stale["ci"]["state"], "stale");
-    assert_eq!(stale["history"]["previous_tip"]["commit"], second);
+    assert!(stale["history"]["previous_tip"].is_null());
     let mut queued_progress = CiProgress::running(a.now - 120);
     queued_progress.status = "queued".into();
     let queued = CiRunSpec::new(
@@ -1476,7 +1476,7 @@ async fn branch_history_is_latest_related_tip_and_never_current_evidence() -> Re
         .await?;
     let (_, queued) = ci_status(&a.publisher, &[]).await?;
     assert_eq!(runs(&queued)[0]["status"], "queued");
-    assert_eq!(queued["history"]["previous_tip"]["commit"], second);
+    assert!(queued["history"]["previous_tip"].is_null());
     let pending = CiRunSpec::new(
         &a.published,
         "local-run",
@@ -1492,7 +1492,7 @@ async fn branch_history_is_latest_related_tip_and_never_current_evidence() -> Re
         .await?;
     let (_, running) = ci_status(&a.publisher, &[]).await?;
     assert_eq!(running["ci"]["state"], "running");
-    assert_eq!(running["history"]["previous_tip"]["commit"], second);
+    assert!(running["history"]["previous_tip"].is_null());
     let done = CiRunSpec::new(
         &a.published,
         "local-run",

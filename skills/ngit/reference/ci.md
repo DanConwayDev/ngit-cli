@@ -439,16 +439,14 @@ uses retained repository state plus first-parent ancestry; cached Git remote
 refs alone are not treated as refreshed publication evidence. Ambiguous,
 missing, behind or divergent history is labelled rather than guessed.
 
-Only the newest related previous tip with CI evidence is shown, with one
-concise latest-attempt summary per coordinator/workflow/context. It has no
-job/step tree and never fills gaps in current results. Its heading says it
-does not cover the current tip and `Tip: ngit ci status <full-commit>` selects
-that exact commit. Full hashes remain usable even as refs move.
-
-Previous-tip context disappears when all observed current attempts are
-terminal (including failure); no evidence and stale progress are not completion.
+Only when the current tip has no CI run evidence, the newest related previous
+tip is shown as a muted short-commit/workflow/outcome/age line per workflow.
+There is no job/step tree or command hint. Workflow basenames are shortened
+unless that would make distinct paths ambiguous. Current queued, running,
+stale or finished runs suppress this fallback in both status and human watch.
+Historical results never fill gaps in current results.
 Explicit commit targets do not infer previous tips. Explicit PR targets may
 show the previous published revision. JSON keeps this under `history.previous_tip`,
 separate from current results and trust gates, and marks history as incomplete.
-Human watch includes this context only in its initial summary; subsequent
-updates and JSON Lines remain pinned to the original current target.
+Human watch removes the fallback as soon as current-tip run evidence arrives.
+Both the human view and JSON Lines remain pinned to the original current target.

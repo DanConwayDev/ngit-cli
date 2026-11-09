@@ -133,23 +133,28 @@ impl History {
             }
         }
         if let Some(previous) = &self.previous_tip {
-            let _ = writeln!(
-                output,
-                "{}",
-                style(format!(
-                    "Previous tip {} — does not cover the current tip:",
-                    previous.commit
-                ))
-                .dim()
-            );
             for run in &previous.workflows {
-                output.push_str(&run.render(false, Timestamp::now()));
+                let name = run.workflow.rsplit('/').next().unwrap_or(&run.workflow);
+                let label = if previous.workflows.iter().any(|other| {
+                    other.workflow != run.workflow
+                        && other.workflow.rsplit('/').next() == Some(name)
+                }) {
+                    &run.workflow
+                } else {
+                    name
+                };
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    style(format!(
+                        "Previous tip {} · {label}: {} · {}",
+                        crate::ci_projection::short(&previous.commit),
+                        run.status,
+                        age(run.timestamp, Timestamp::now().as_secs())
+                    ))
+                    .dim()
+                );
             }
-            let _ = writeln!(
-                output,
-                "{}",
-                style(format!("Tip: `{}`", previous.command)).dim()
-            );
         }
         if let Some(notice) = &self.notice {
             if self
@@ -189,12 +194,7 @@ pub async fn load(
         earlier_attempts: earlier(&selected.current, Timestamp::now()),
         ..History::default()
     };
-    let latest = latest_attempts(&selected.current);
-    if !latest.is_empty()
-        && latest
-            .iter()
-            .all(|r| matches!(r.state(Timestamp::now()), RunState::Concluded(_)))
-    {
+    if !selected.current.is_empty() {
         return Ok(history);
     }
     if !scope.automatic && matches!(target, Target::Commit { .. }) {

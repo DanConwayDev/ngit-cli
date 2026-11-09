@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ci status --watch` refreshes this coloured report inline without taking over
   the terminal. Active-step elapsed estimates tick every second until replaced
   by final durations. Redirected output receives snapshots on events.
-  Previous-tip summaries omit coordinators and routine branch-coverage notes;
-  historical summaries and navigation tips are muted. `--watch --json`
+  Previous-tip results appear only when current-tip CI is absent, as muted
+  short-commit/workflow/outcome/age lines without a heading or command hint.
+  Historical summaries and navigation tips are muted. `--watch --json`
   streams compact snapshots and semantic updates using run/allocation ID
   prefixes, with full identities and workflow paths in the initial snapshots. Changed steps are complete replacements, other tag changes
   preserve duplicates, and unchanged renewals are suppressed. `--full-events`
