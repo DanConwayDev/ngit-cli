@@ -1211,3 +1211,54 @@ as a count; `ci inspect <ID> --json` retains individual outcomes and reasons.
 Conditions and dependencies are retained in `declared_jobs` JSON without local
 evaluation, matrix expansion or predicting a success path. Missing events never
 turn into inferred queued or skipped states.
+
+### Selecting execution resources and environments
+
+Native `ci trigger` and `ci rerun` accept per-job overrides for that request;
+they do not edit workflow YAML. JOB is the key under `jobs`, not its display
+name. For example, request at least 8 GiB RAM and four vCPUs for `build`:
+
+```bash
+ngit ci trigger "$COORDINATOR" HEAD --workflow .ngit/nix/workflows/ci.yml \
+  --require 'build=memory-mib:gte:8192' \
+  --require 'build=vcpus:gte:4'
+```
+
+`--require JOB=PATH:OP:JSON` is repeatable. Resource paths are literal,
+case-sensitive keys; `memory-mib` is MiB and `vcpus` is a count. Environment
+paths use `env` followed by a JSON Pointer, for example:
+
+```bash
+--require 'build=env/configuration/guest/job-uid:eq:0'
+--require 'build=env/configuration/guest/no-new-privileges:eq:false'
+```
+
+Operators are `eq`, `gte`, `lte` and `contains`. Bounds require integers;
+`eq` and `contains` accept integers, booleans or strings. Preserve JSON quotes
+for a string, for example `--require 'build=some-resource:eq:"value"'`.
+Comparisons do not coerce types. JSON Pointer keys escape `/` as `~1` and `~`
+as `~0`; the wire path escapes literal `:` as `%3A` and `%` as `%25`.
+
+Each named path replaces its whole previous constraint for that job, including
+bounds inherited from coordinator, workflow or job settings. Other paths and
+jobs keep their requirements. To set both bounds, repeat the flag with `gte`
+and `lte`. Duplicate job/path/operator triples are rejected. Conditions select
+compatible offerings; they do not change guest configuration or bypass provider
+approval, isolation or secret rules. An unmatched request is not proof that
+resources have been allocated.
+
+To select an exact installed environment:
+
+```bash
+--environment "build=$ENVIRONMENT_SHA256"
+--environment "build=$ENVIRONMENT_SHA256,$MANIFEST_URL"
+```
+
+The hash is the 64-character lowercase SHA-256 of the environment manifest,
+not an image name, Git commit or environment-variable name. The optional URL
+must name that digest. Obtain pins from a provider offering (kind 39845 `x`
+tag) or an existing job's environment evidence through `ci inspect <ID> --json`;
+explicit `ci inspect --kind 39845 --author <PROVIDER> --json` is available for
+provider diagnostics. No automatic provider/environment chooser exists yet.
+Pins select installed environments, do not request image installation, and do
+not remove other requirements. Omitted pins retain the normal selection.

@@ -1462,10 +1462,28 @@ pub enum LogTailMode {
 
 #[derive(clap::Args, Default)]
 pub struct CiExecutionSelection {
-    /// Pin a native job's environment: JOB=SHA256[,MANIFEST-URL] (repeatable)
+    /// Pin a native job's installed environment: JOB=SHA256[,MANIFEST-URL]
+    ///
+    /// JOB is its YAML key. SHA256 is the lowercase environment manifest hash,
+    /// obtained from a provider offering or job evidence using ci inspect.
+    /// Repeat for other jobs. The optional URL must name the same digest.
+    /// This selects an installed environment; it does not install an image
+    /// or remove resource requirements. Omitted jobs keep their normal pins.
     #[arg(long, value_name = "JOB=SHA256[,URL]")]
     pub environment: Vec<String>,
-    /// Replace a native job's resource predicate: JOB=PATH:OP:JSON (repeatable)
+    /// Override a native job's resource/environment requirement (repeatable)
+    ///
+    /// JOB is its YAML key. PATH is a resource name or env/JSON-pointer.
+    /// OP is eq, gte, lte or contains. JSON is an integer, boolean or quoted
+    /// string; gte/lte require integers. Each path replaces its whole inherited
+    /// constraint for that job; other paths and jobs are unchanged.
+    ///
+    /// Examples: --require 'build=memory-mib:gte:8192' (8 GiB RAM),
+    /// --require 'build=vcpus:gte:4',
+    /// --require 'build=env/configuration/guest/job-uid:eq:0'.
+    /// Repeat gte/lte to set both bounds. Preserve JSON string quotes, e.g.
+    /// --require 'build=some-resource:eq:"value"'. Duplicate job/path/operator
+    /// triples are rejected. Requirements select offerings, not guest settings.
     #[arg(long = "require", value_name = "JOB=PATH:OP:JSON")]
     pub requirements: Vec<String>,
     /// Compatibility flag; fresh manual triggers already rerun dependencies

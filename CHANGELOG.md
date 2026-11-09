@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- CI status collapses unstarted jobs, labels declared dependencies and conditions,
-  and summarizes unreported conditional steps and finished skipped steps.
+- `ci status` shows workflow, job and step progress, including completed jobs
+  before the workflow finishes, step durations, artifact counts and output links.
+  Verified workflow definitions supply expected jobs, steps and dependencies;
+  unstarted jobs and conditional paths stay compact without predicting outcomes.
+  JSON includes detailed execution evidence, outputs and dependency bindings.
 
 - Standing CI controls are now `ci service request` and `ci service stop`.
   The old commands remain compatible and warn on stderr that they are deprecated.
@@ -28,40 +31,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ci service status` separates repository acting claims, request history and
-  advertised readiness; bare `ci inspect` now requires an explicit target/filter.
+- `ci service status` shows which coordinators report acting for this repository,
+  maintainer request history and advertised readiness, with expiry and evidence
+  references kept distinct from request publication.
 
-- `ci secrets` publishes encrypted atomic set/remove updates using an
-  advertised coordinator inbox, without exposing values or claiming acceptance.
+- `ci status --watch` streams workflow and job updates until interrupted, without
+  a timeout. `--json` emits decoded events as JSON Lines; stopping observation
+  does not cancel CI.
 
-- `ci status --watch` streams distinct workflow/job updates without a timeout.
-  JSON Lines preserve event fields; Ctrl-C stops observation without cancelling CI.
+- `ci inspect <ID>` provides detailed workflow, job and service evidence, with
+  decoded or raw signed JSON and explicit filters for protocol diagnosis.
+  `--artifacts` retrieves and verifies artifact manifests without downloading
+  their listed files.
 
-- `ci inspect` provides decoded or raw evidence and exact quoted results;
-  `--artifacts` explicitly retrieves and verifies manifests, not their files.
+- `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt from a
+  completed result, retaining external dependency bindings. Status identifies
+  reused job results and preserves distinct executions such as matrix instances.
+  Native trigger and rerun requests also support per-job environment pins and
+  resource requirements.
 
-- Status shows step durations and artifact counts/links, with expected jobs
-  from verified workflow blobs and bounded listings for large outputs.
-
-- Status reads live provider progress and completed jobs before aggregate
-  completion, matching exact allocation references and respecting expiry.
-
-- Native trigger and rerun controls accept per-job environment and resource
-  overrides, validating the pinned workflow before publication.
-
-- `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt
-  from a completed result while retaining external dependency bindings.
-
-- Rerun results retain exact original job identities and expose reuse; quoted
-  instances of the same job are not silently collapsed.
-
-- Status JSON includes workflow dependencies and detailed job execution
-  evidence, with strict validation of conflicting claims and pinned URLs.
+- `ci secrets` publishes encrypted atomic set/remove updates to an advertised
+  coordinator inbox without exposing secret values. Publication does not imply
+  coordinator acceptance.
 
 - CI status supports workflows triggered by issue opening, reopening or
   closing, and by release publication. Results for distinct issue actions or
   release publications remain separate even at the same Git commit.
-
 
 - Accept `ngit ci trigger --rerun-dependencies` for native Nix workflows.
   Current ngit-ci reruns the entire dependency graph on ordinary manual
