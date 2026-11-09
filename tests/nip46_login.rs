@@ -342,8 +342,12 @@ async fn same_npub_remote_signers_respect_distinct_profiles() -> Result<()> {
     )?;
     let first_uri = first_remote.bunker_uri().to_string();
     let second_uri = second_remote.bunker_uri().to_string();
-    let first_task = tokio::spawn(async move { first_remote.serve(ApproveAll).await });
-    let second_task = tokio::spawn(async move { second_remote.serve(ApproveAll).await });
+    let first_counts = Arc::new(RequestCounts::default());
+    let second_counts = Arc::new(RequestCounts::default());
+    let first_actions = CountRequests(first_counts.clone());
+    let second_actions = CountRequests(second_counts.clone());
+    let first_task = tokio::spawn(async move { first_remote.serve(first_actions).await });
+    let second_task = tokio::spawn(async move { second_remote.serve(second_actions).await });
     wait_until_signer_ready(&relay_url, first_remote_keys.public_key()).await;
     wait_until_signer_ready(&relay_url, second_remote_keys.public_key()).await;
 
@@ -357,6 +361,8 @@ async fn same_npub_remote_signers_respect_distinct_profiles() -> Result<()> {
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("default")
+    .with_grasp_server("repo")
     .build()
     .await?;
     let first_repo = harness.fresh_repo()?;
@@ -461,6 +467,87 @@ async fn same_npub_remote_signers_respect_distinct_profiles() -> Result<()> {
     assert_eq!(dedicated["npub_default"], false);
     assert_eq!(dedicated["scopes"], serde_json::json!(["local"]));
     assert_eq!(dedicated["active"], true);
+
+    // Save another name for the second connection without changing the
+    // first connection selected in this repository. Exercise the real Git
+    // remote-helper handoff: event pubkeys alone cannot distinguish sessions
+    // that sign for the same npub, so observe requests at both signers.
+    let (_, published) = harness
+        .publish_repo(test_harness::PublishRepoOpts::default())
+        .await?;
+    let mut contributor = harness
+        .clone_published_repo(&published, test_harness::CloneLogin::None)
+        .await?;
+    contributor.set_env("NGIT_SECRET_STORAGE", "file");
+    contributor.set_env(
+        "NGIT_KEYRING_FILE",
+        credentials.path().to_str().context("credential path")?,
+    );
+    contributor
+        .git_ok(
+            ["config", "nostr.signer", "primary"],
+            "select primary connection",
+        )
+        .await?;
+    let config_path = contributor.dir().join(".git/config");
+    let previous_config = std::fs::read(&config_path)?;
+    let output = contributor
+        .ngit([
+            "account",
+            "login",
+            "dedicated",
+            "--profile",
+            "push-only",
+            "--no-activate",
+            "--offline",
+        ])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&config_path)?, previous_config);
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/profile-only"],
+            "create proposal branch",
+        )
+        .await?;
+    std::fs::write(contributor.dir().join("profile.txt"), "explicit profile\n")?;
+    contributor
+        .git_ok(["add", "profile.txt"], "stage change")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "test profile selection", "--no-gpg-sign"],
+            "commit change",
+        )
+        .await?;
+    let first_before = first_counts.sign_event.load(Ordering::SeqCst);
+    let second_before = second_counts.sign_event.load(Ordering::SeqCst);
+    contributor
+        .nostr_push_with_git_flags(
+            ["-c", "nostr.signer=push-only"],
+            ["origin", "pr/profile-only"],
+        )
+        .await?;
+    assert_eq!(first_counts.sign_event.load(Ordering::SeqCst), first_before);
+    assert!(second_counts.sign_event.load(Ordering::SeqCst) > second_before);
+    assert_eq!(
+        contributor.config("nostr.signer").await?.as_deref(),
+        Some("primary")
+    );
+    let proposals = harness
+        .grasp("repo")
+        .events(Filter::new().kind(test_harness::KIND_PULL_REQUEST))
+        .await?;
+    assert!(
+        proposals
+            .iter()
+            .any(|event| event.pubkey == user_keys.public_key())
+    );
 
     first_task.abort();
     second_task.abort();
@@ -1112,15 +1199,20 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
 /// is used: emitting the URI must mean ngit is ready to receive the response.
 #[tokio::test]
 async fn nostrconnect_cli_pairs_without_terminal_input() -> Result<()> {
-    assert_nostrconnect_cli_pairing(true).await
+    assert_nostrconnect_cli_pairing(true, false).await
 }
 
 #[tokio::test]
 async fn nostrconnect_cli_rejection_preserves_existing_login() -> Result<()> {
-    assert_nostrconnect_cli_pairing(false).await
+    assert_nostrconnect_cli_pairing(false, false).await
 }
 
-async fn assert_nostrconnect_cli_pairing(approve: bool) -> Result<()> {
+#[tokio::test]
+async fn nostrconnect_cli_saves_profile_without_activation() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true, true).await
+}
+
+async fn assert_nostrconnect_cli_pairing(approve: bool, no_activate: bool) -> Result<()> {
     use std::process::Stdio;
 
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1141,11 +1233,15 @@ async fn assert_nostrconnect_cli_pairing(approve: bool) -> Result<()> {
         "seed previous login",
     )
     .await?;
+    let local_config = repo.dir().join(".git/config");
+    let previous_local = std::fs::read(&local_config)?;
+    let global_config = repo.dir().join("global-config");
+    std::fs::write(&global_config, "[nostr]\n\tsigner = global-profile\n")?;
+    let previous_global = std::fs::read(&global_config)?;
     let mut command = repo.ngit([
         "account",
         "login",
         "--nostrconnect",
-        "--local",
         "--offline",
         "--profile",
         "agent",
@@ -1153,9 +1249,15 @@ async fn assert_nostrconnect_cli_pairing(approve: bool) -> Result<()> {
         relay_url.as_str(),
         "--json",
     ]);
+    command.arg(if no_activate {
+        "--no-activate"
+    } else {
+        "--local"
+    });
     command
         .env("NGIT_SECRET_STORAGE", "file")
         .env("NGIT_KEYRING_FILE", credentials.path())
+        .env("GIT_CONFIG_GLOBAL", &global_config)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1234,7 +1336,27 @@ async fn assert_nostrconnect_cli_pairing(approve: bool) -> Result<()> {
     }
     assert!(output.status.success(), "{diagnostics}");
     assert_eq!(document["command_status"], "ok");
-    let stored = export_stored_signer(&repo, credentials.path()).await?;
+    if no_activate {
+        assert_eq!(std::fs::read(&local_config)?, previous_local);
+        assert_eq!(std::fs::read(&global_config)?, previous_global);
+    }
+    let exported = repo
+        .ngit(["--signer", "agent", "account", "export-keys", "--json"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&exported.stdout)?;
+    let stored = nbunksec::decode(
+        document["nbunksec"]
+            .as_str()
+            .context("missing saved connection")?,
+    )?;
     let NostrConnectUri::Bunker {
         remote_signer_public_key,
         ..

@@ -18,10 +18,13 @@ use crate::{
     cli::SignerParams,
     client::{Client, Connect},
     git::Repo,
-    login::fresh::{fresh_login_or_signup, login_with_bunker_url, login_with_nostrconnect},
+    login::fresh::{
+        LoginTarget, fresh_login_or_signup, login_with_bunker_url, login_with_nostrconnect,
+    },
 };
 
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
     /// stored account to activate (full npub, profile, or exact Nostr display
     /// name)
@@ -43,6 +46,10 @@ pub struct SubCommandArgs {
     /// set a repository-specific login that overrides the default account
     #[arg(long, action)]
     local: bool,
+
+    /// save a named profile without changing the local or global login
+    #[arg(long, requires = "alias", conflicts_with = "local")]
+    no_activate: bool,
 
     /// don't fetch user metadata and relay list from relays
     #[arg(long, action)]
@@ -88,6 +95,7 @@ pub struct SubCommandArgs {
     alias: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<()> {
     if command_args.nostrconnect {
         // This explicit flow never reads stdin, even through the `connect`
@@ -119,6 +127,12 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
     }
 
     let git_repo = discover_login_repo(command_args.local)?;
+    anyhow::ensure!(
+        !command_args.no_activate
+            || credential_store::policy(&git_repo.as_ref())
+                != credential_store::SecretStorage::GitConfig,
+        "--no-activate requires auto or file secret storage; use --secret-storage auto"
+    );
 
     let (signer_for_login, selected_by, selected_alias) = resolve_login_selection(
         git_repo.as_ref(),
@@ -146,7 +160,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         )))
     };
 
-    let (proceed, log_in_locally_only) = if command_args.nostrconnect {
+    let (proceed, log_in_locally_only) = if command_args.nostrconnect || command_args.no_activate {
         (true, command_args.local)
     } else {
         choose_login_scope(
@@ -158,12 +172,18 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         .await?
     };
     if proceed {
-        let save_local = log_in_locally_only || command_args.local;
+        let target = if command_args.no_activate {
+            LoginTarget::ProfileOnly
+        } else if log_in_locally_only || command_args.local {
+            LoginTarget::Local
+        } else {
+            LoginTarget::Global
+        };
         if command_args.nostrconnect {
             login_with_nostrconnect(
                 &git_repo.as_ref(),
                 client.as_ref(),
-                save_local,
+                target,
                 &command_args.signer_relays,
                 login_alias,
             )
@@ -173,7 +193,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
                 &git_repo.as_ref(),
                 client.as_ref(),
                 bunker_url,
-                save_local,
+                target,
                 &command_args.signer_relays,
                 login_alias,
             )
@@ -183,7 +203,7 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
                 &git_repo.as_ref(),
                 client.as_ref(),
                 signer_for_login,
-                save_local,
+                target,
                 &command_args.signer_relays,
                 login_alias,
                 selected_by.as_deref(),
@@ -545,6 +565,18 @@ mod tests {
     use ngit::login::SignerInfo;
 
     use super::{implicit_alias_selection, login_scope_choice, login_scope_prompt};
+
+    #[test]
+    fn no_activate_requires_a_profile_and_excludes_local_selection() {
+        use clap::Parser;
+        let args = ["ngit", "account", "login", "--no-activate"];
+        assert!(crate::cli::Cli::try_parse_from(args).is_err());
+        let mut args = args.to_vec();
+        args.extend(["--profile", "ci"]);
+        assert!(crate::cli::Cli::try_parse_from(&args).is_ok());
+        args.push("--local");
+        assert!(crate::cli::Cli::try_parse_from(&args).is_err());
+    }
 
     #[test]
     fn nostrconnect_accepts_profiles_and_json_without_interaction() {

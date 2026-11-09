@@ -13,6 +13,7 @@ ngit account login --nsec-file /private/key --profile alice
 ngit account login --nbunksec-file /private/connection --profile alice   # store an established NIP-46 session
 ngit account login --bunker-url bunker://...    # pair a remote signer
 ngit account login --local -i --profile alice     # pair a fresh signer and assign or replace this profile
+ngit account login -i --profile ci --no-activate  # save a profile for explicit use without selecting it
 ngit account login -i --secret-storage file        # bypass the OS store; `git-config` stores plaintext and must be explicit
 ngit account create --name "Alice" --json
 ngit account export-keys --secret               # print only the nsec or nbunksec; --json adds the npub

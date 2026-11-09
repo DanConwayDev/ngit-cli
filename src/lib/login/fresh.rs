@@ -42,12 +42,21 @@ use crate::{
     remote_signer::NostrConnect,
 };
 
+/// Where a successful login persists its selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginTarget {
+    Global,
+    Local,
+    /// Store a named profile without selecting it in Git config.
+    ProfileOnly,
+}
+
 pub async fn fresh_login_or_signup(
     git_repo: &Option<&Repo>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     signer_info: Option<SignerInfo>,
-    save_local: bool,
+    target: LoginTarget,
     signer_relays: &[String],
     alias: Option<&str>,
     selected_by: Option<&str>,
@@ -67,16 +76,19 @@ pub async fn fresh_login_or_signup(
             .await?;
             break (signer, user_ref.public_key, signer_info, source);
         }
+        let mut choices = vec![
+            "secret key (nsec / ncryptsec)".to_string(),
+            "nostr connect (remote signer)".to_string(),
+        ];
+        if target != LoginTarget::ProfileOnly {
+            choices.push("create account".to_string());
+        }
+        choices.push("help".to_string());
         match Interactor::default().choice(
             PromptChoiceParms::default()
                 .with_prompt("login to nostr")
                 .with_default(0)
-                .with_choices(vec![
-                    "secret key (nsec / ncryptsec)".to_string(),
-                    "nostr connect (remote signer)".to_string(),
-                    "create account".to_string(),
-                    "help".to_string(),
-                ])
+                .with_choices(choices)
                 .dont_report(),
         )? {
             0 => match get_fresh_nsec_signer().await {
@@ -89,7 +101,7 @@ pub async fn fresh_login_or_signup(
                 Ok(None) => continue,
                 Err(e) => return Err(e.context("failed to connect to remote signer")),
             },
-            2 => match signup(client).await {
+            2 if target != LoginTarget::ProfileOnly => match signup(client).await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
                 Err(e) => {
@@ -115,20 +127,36 @@ pub async fn fresh_login_or_signup(
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
-    let mut saved_source = git_config_source(!save_local);
+    let mut saved_source = git_config_source(target != LoginTarget::Local);
     let mut receipts = CredentialStorageReceipts::default();
-    if let SignerInfo::Selection { selector } = &signer_info {
+    if target == LoginTarget::ProfileOnly {
+        save_profile_without_activation(git_repo, &signer_info, alias, &npub, &mut receipts)?;
+        saved_source = SignerInfoSource::CommandLineArguments;
+    } else if let SignerInfo::Selection { selector } = &signer_info {
         // account login resolves selections before calling this function, but
         // library callers may still supply one. Persist the separately
         // resolved npub so an alias can never be copied into `nostr.npub`.
         if let Some(alias) = alias {
-            save_signer_alias_into(git_repo, alias, &npub, None, !save_local, &mut receipts)?;
+            save_signer_alias_into(
+                git_repo,
+                alias,
+                &npub,
+                None,
+                target != LoginTarget::Local,
+                &mut receipts,
+            )?;
         } else {
-            save_signer_selection(git_repo, selector, &npub, !save_local)?;
+            save_signer_selection(git_repo, selector, &npub, target != LoginTarget::Local)?;
         }
     } else {
-        saved_source =
-            save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
+        saved_source = save_to_git_config(
+            git_repo,
+            &signer_info,
+            target != LoginTarget::Local,
+            alias,
+            &mut receipts,
+        )
+        .await?;
         if saved_source != SignerInfoSource::CommandLineArguments {
             let saved_globally = saved_source == SignerInfoSource::GitGlobal;
             if let Some(alias) = alias {
@@ -165,7 +193,7 @@ pub async fn fresh_login_or_signup(
         false,
     )
     .await?;
-    print_logged_in_as(&user_ref, client.is_none(), &saved_source, alias)?;
+    report_login(&user_ref, client.is_none(), &saved_source, alias, target)?;
     Ok((signer, user_ref, saved_source))
 }
 
@@ -178,7 +206,7 @@ pub async fn login_with_bunker_url(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     bunker_url: &str,
-    save_local: bool,
+    target: LoginTarget,
     signer_relays: &[String],
     alias: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
@@ -186,7 +214,7 @@ pub async fn login_with_bunker_url(
         .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
 
     let (app_key, _) = generate_nostr_connect_app(client, signer_relays)?;
-    login_with_connect_uri(git_repo, client, &app_key, &url, save_local, alias).await
+    login_with_connect_uri(git_repo, client, &app_key, &url, target, alias).await
 }
 
 /// Start client-initiated pairing without reading terminal input or displaying
@@ -196,7 +224,7 @@ pub async fn login_with_nostrconnect(
     git_repo: &Option<&Repo>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
-    save_local: bool,
+    target: LoginTarget,
     signer_relays: &[String],
     alias: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
@@ -204,7 +232,7 @@ pub async fn login_with_nostrconnect(
     if url.relays().is_empty() {
         bail!("no signer relays configured; provide --signer-relay <url>");
     }
-    login_with_connect_uri(git_repo, client, &app_key, &url, save_local, alias).await
+    login_with_connect_uri(git_repo, client, &app_key, &url, target, alias).await
 }
 
 async fn login_with_connect_uri(
@@ -213,7 +241,7 @@ async fn login_with_connect_uri(
     #[cfg(not(test))] client: Option<&Client>,
     app_key: &Keys,
     url: &NostrConnectUri,
-    save_local: bool,
+    target: LoginTarget,
     alias: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let printer = Arc::new(Mutex::new(Printer::default()));
@@ -241,8 +269,19 @@ async fn login_with_connect_uri(
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
     let mut receipts = CredentialStorageReceipts::default();
-    let source =
-        save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
+    let source = if target == LoginTarget::ProfileOnly {
+        save_profile_without_activation(git_repo, &signer_info, alias, &npub, &mut receipts)?;
+        SignerInfoSource::CommandLineArguments
+    } else {
+        save_to_git_config(
+            git_repo,
+            &signer_info,
+            target != LoginTarget::Local,
+            alias,
+            &mut receipts,
+        )
+        .await?
+    };
     if source != SignerInfoSource::CommandLineArguments {
         if let Some(alias) = alias {
             let credential = receipts
@@ -277,7 +316,7 @@ async fn login_with_connect_uri(
     )
     .await?;
 
-    print_logged_in_as(&user_ref, client.is_none(), &source, alias)?;
+    report_login(&user_ref, client.is_none(), &source, alias, target)?;
     Ok((signer, user_ref, source))
 }
 
@@ -1102,27 +1141,19 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
     }
 }
 
-/// Persist an alias in both the selected git-config scope and, when enabled,
-/// the credential store. Git config remains a portable account selector for
-/// repository directories mounted into environments with a different store.
-fn save_signer_alias_into(
+/// Store the machine-wide alias and its receipt without changing Git config.
+fn store_profile_alias(
     git_repo: &Option<&Repo>,
     alias: &str,
     npub: &str,
     credential: Option<&str>,
-    global: bool,
     receipts: &mut CredentialStorageReceipts,
-) -> Result<()> {
-    use crate::login::credential_store::{self, SecretStorage};
-
-    let alias = credential_store::normalize_alias(alias)?;
-    let npub = PublicKey::parse(npub)
-        .context("cannot save signer alias for an invalid npub")?
-        .to_bech32()?;
+) -> Result<bool> {
+    use credential_store::SecretStorage;
     let policy = credential_store::policy(git_repo);
     let credential_backed = policy != SecretStorage::GitConfig;
     receipts.alias = credential_backed
-        .then(|| credential_store::store_alias(&alias, &npub, credential, policy))
+        .then(|| credential_store::store_alias(alias, npub, credential, policy))
         .transpose()
         .context("failed to save signer alias in the credential store")?
         .map(|(entry, backend)| CredentialStorageReport {
@@ -1132,6 +1163,64 @@ fn save_signer_alias_into(
             os_fallback: policy == SecretStorage::Auto
                 && backend == credential_store::Backend::File,
         });
+
+    Ok(credential_backed)
+}
+
+fn save_profile_without_activation(
+    git_repo: &Option<&Repo>,
+    signer_info: &SignerInfo,
+    alias: Option<&str>,
+    npub: &str,
+    receipts: &mut CredentialStorageReceipts,
+) -> Result<()> {
+    let alias = alias.context("saving without activation requires a named profile")?;
+    anyhow::ensure!(
+        credential_store::policy(git_repo) != credential_store::SecretStorage::GitConfig,
+        "--no-activate requires auto or file secret storage; use --secret-storage auto"
+    );
+    protect_secrets(git_repo, signer_info, Some(alias), receipts)?;
+    let receipt = receipts
+        .secret
+        .as_ref()
+        .context("cannot save this profile without activation: no credential was stored")?;
+    let credential = credential_store::is_bunker_signer_entry_name(&receipt.entry)
+        .then(|| receipt.entry.clone());
+    store_profile_alias(git_repo, alias, npub, credential.as_deref(), receipts)?;
+    Ok(())
+}
+
+fn report_login(
+    user_ref: &UserRef,
+    offline: bool,
+    source: &SignerInfoSource,
+    alias: Option<&str>,
+    target: LoginTarget,
+) -> Result<()> {
+    if target == LoginTarget::ProfileOnly {
+        let alias = alias.context("saving without activation requires a named profile")?;
+        eprintln!("signer profile '{alias}' saved without changing the active login");
+        eprintln!("use --signer {alias} or git -c nostr.signer={alias} for one command");
+        Ok(())
+    } else {
+        print_logged_in_as(user_ref, offline, source, alias)
+    }
+}
+
+/// Persist an alias in the selected Git-config scope and credential store.
+fn save_signer_alias_into(
+    git_repo: &Option<&Repo>,
+    alias: &str,
+    npub: &str,
+    credential: Option<&str>,
+    global: bool,
+    receipts: &mut CredentialStorageReceipts,
+) -> Result<()> {
+    let alias = credential_store::normalize_alias(alias)?;
+    let npub = PublicKey::parse(npub)
+        .context("cannot save signer alias for an invalid npub")?
+        .to_bech32()?;
+    let credential_backed = store_profile_alias(git_repo, &alias, &npub, credential, receipts)?;
 
     let global = global && std::env::var("NGITTEST").is_err();
     let scope = if global {

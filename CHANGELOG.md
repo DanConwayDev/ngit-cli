@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `account login --profile NAME --no-activate` saves a signer profile without
+  changing the local or global login. Use `--signer NAME` or
+  `git -c nostr.signer=NAME` to select it for a single command.
+
 - `ci status` summarizes workflow and job progress, expanding failed jobs into
   steps and a boxed three-line log preview. `ci inspect` details the same HEAD
   or an explicit `--target`, with coloured outcomes, artifacts, output links and trust

@@ -98,6 +98,21 @@ fred` reactivates it without requiring the nsec or bunker URL again.
 login and assigns the resulting connection to `fred`, replacing that alias's
 previous signer connection while leaving the bare-npub default intact.
 
+To save a profile for explicit use without selecting it locally or globally:
+
+```bash
+ngit account login -i --profile snode-ci --no-activate
+git -c nostr.signer=snode-ci push
+```
+
+`--no-activate` also works with `--nostrconnect`, `--bunker-url`, imported keys
+or connections, and existing account selectors. It requires `--profile`,
+conflicts with `--local`, and uses `auto` or `file` credential storage rather
+than Git config. No Git-config selection or alias mapping is written. On a
+machine without an OS credential store, `auto` saves the profile and connection
+in `credentials.json`. Replacing a profile still changes the connection used
+by commands that already select that profile.
+
 A bare npub selects the identity's default credential when one exists. If the
 default has been removed and exactly one alias-specific connection remains,
 the npub and that alias both select the remaining connection. More than one

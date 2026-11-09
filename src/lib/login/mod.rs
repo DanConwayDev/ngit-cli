@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
-use fresh::fresh_login_or_signup;
+use fresh::{LoginTarget, fresh_login_or_signup};
 use nostr::prelude::{PublicKey, Timestamp, ToBech32};
 
 #[cfg(not(test))]
@@ -54,7 +54,8 @@ pub async fn login_or_signup(
         Err(error) if matches!(signer_info, Some(SignerInfo::Selection { .. })) => Err(error),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
-            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
+            fresh_login_or_signup(git_repo, client, None, LoginTarget::Global, &[], None, None)
+                .await
         }
         Err(error)
             if matches!(
@@ -63,7 +64,8 @@ pub async fn login_or_signup(
             ) =>
         {
             eprintln!("{error}; please log in again");
-            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
+            fresh_login_or_signup(git_repo, client, None, LoginTarget::Global, &[], None, None)
+                .await
         }
         Err(error) => Err(error),
     }

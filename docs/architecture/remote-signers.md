@@ -6,6 +6,9 @@ Run `ngit account login --nostrconnect --profile phone` to start a fresh
 connection. Add `--local` for a repository-specific selection and repeat
 `--signer-relay wss://relay.example.com` to choose signer relays. Stored profiles
 are still reactivated with `ngit account login phone`.
+Add `--no-activate` to save the named connection without changing either login
+scope, then select it explicitly with `--signer phone` or
+`git -c nostr.signer=phone`.
 
 The command prints one `nostrconnect: nostrconnect://...` line on stderr after
 at least one relay confirms the response subscription with EOSE. It then waits
