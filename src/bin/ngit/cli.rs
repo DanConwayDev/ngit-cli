@@ -1477,6 +1477,7 @@ pub struct CiExecutionSelection {
 #[allow(clippy::struct_excessive_bools)] // Independent CLI switches.
 pub struct CiInspectArgs {
     /// Exact workflow, job or service event ID (hex or nevent)
+    #[arg(required_unless_present_any = ["event", "kinds", "author"])]
     pub id: Option<String>,
     /// Include the original signed event instead of decoding its tags
     #[arg(long)]
@@ -1523,6 +1524,14 @@ pub struct CiSecretsArgs {
 
 #[derive(Subcommand)]
 pub enum CiServiceCommands {
+    /// Show repository service claims, maintainer requests and advertised
+    /// candidates
+    Status {
+        /// Read cached evidence only; missing history is not proof of stopped
+        /// service
+        #[arg(long)]
+        offline: bool,
+    },
     /// ask a coordinator to run CI for this repository
     #[command(
         long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\

@@ -523,6 +523,9 @@ async fn main() {
                     .await
                 }
                 CiCommands::Service { command } => match command {
+                    cli::CiServiceCommands::Status { offline } => {
+                        sub_commands::ci_service::launch(*offline, signer_params).await
+                    }
                     cli::CiServiceCommands::Request {
                         coordinator,
                         offline,

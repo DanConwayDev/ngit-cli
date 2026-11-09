@@ -34,3 +34,5 @@ pub mod sync;
 pub mod whoami;
 
 pub mod ci_watch;
+
+pub mod ci_service;

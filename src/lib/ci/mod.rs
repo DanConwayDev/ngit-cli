@@ -47,4 +47,5 @@ pub fn total_order_position(
     (created_at, Reverse(event_id))
 }
 
+pub mod service;
 pub mod watch;

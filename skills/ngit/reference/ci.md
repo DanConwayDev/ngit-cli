@@ -118,8 +118,8 @@ these from a timed skip. Unavailable or mismatched YAML falls back to reported
 execution evidence. Native explicit-step jobs publish live progress; current
 act and simple native run/build jobs do not promise equivalent live steps.
 
-`ci inspect --json` discovers coordinator/provider/service metadata; filter
-with --kind, --author or --event.
+`ci inspect <ID> --json` inspects exact evidence. Explicit --kind or --author
+filters support protocol diagnosis; use `ci service status` for discovery.
 
 `ci inspect <ID>` accepts an exact workflow, job or service event ID or
 nevent, including an expired event when explicitly selected. It follows exact
@@ -189,3 +189,29 @@ same channel; pairing, sanitizing and sealing remain coordinator responsibilitie
 `ci service request` and `ci service stop` manage standing repository service.
 The older `ci request` and `ci stop` commands remain compatible, but emit a
 deprecation warning on stderr. Their signed events and JSON results are unchanged.
+
+### Repository service status
+
+`ngit ci service status` shows coordinator evidence for this repository,
+separately from `ci status` execution results. Each row identifies the exact
+repository perspective, coordinator, service claim and maintainer-request state.
+A live kind-39844 acting claim requires a live kind-19843 advertisement. Expired,
+withdrawn or unavailable evidence is labelled; absence never proves stopped
+service or operator configuration. Requests are reduced with maintainer-wide
+and author-local Stop rules and current confirmed maintainer authority.
+
+Candidates come from matching kind-19844 request-readiness lists (`a` for an
+exact repository, `p` for its root owner), also requiring a live advertisement.
+Unrelated coordinator and provider advertisements are not listed. Readiness
+is a discovery hint, not a promise of acceptance. A newer list that removes
+this repository supersedes its previous readiness claim.
+
+`--offline` reads cached evidence. JSON includes separate service/request
+states, evidence event IDs, relay failures and `history_complete: false`.
+Relays may prune expired, replaced or deleted evidence; this is an observed
+history, not an authoritative archive. An acting claim does not prove a live
+network connection or that a particular workflow is eligible.
+
+Bare `ci inspect` requires a target. Use `ci inspect <ID>` for evidence;
+explicit `--kind` or `--author` filters remain available for protocol diagnosis.
+Use `ci service status` for repository discovery.

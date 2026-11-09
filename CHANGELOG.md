@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ci service status` separates repository acting claims, request history and
+  advertised readiness; bare `ci inspect` now requires an explicit target/filter.
+
 - `ci secrets` publishes encrypted atomic set/remove updates using an
   advertised coordinator inbox, without exposing values or claiming acceptance.
 
