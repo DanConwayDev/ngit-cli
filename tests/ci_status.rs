@@ -1207,3 +1207,82 @@ async fn workflow_reports_queue_and_running_jobs_without_provider_snapshots() ->
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn earlier_attempts_are_inspectable_but_never_make_a_queued_rerun_green() -> Result<()> {
+    let a = arrange("ci-attempt-history").await?;
+    let head = a.publisher.rev_parse("HEAD").await?;
+    let first = CiRunSpec::new(
+        &a.published,
+        "old-success",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 600,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW));
+    let mut queued = CiProgress::running(a.now);
+    queued.status = "queued".into();
+    let second = CiRunSpec::new(
+        &a.published,
+        "queued-rerun",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(queued);
+    let old = build_ci_run(&a.coordinator, &first)?;
+    let old_id = old.result.as_ref().context("result")?.id;
+    let mut events = old.all();
+    events.extend(build_ci_run(&a.coordinator, &second)?.all());
+    a.harness.publish_ci_events(&a.ci_relay, &events).await?;
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(runs(&json).len(), 1);
+    assert_eq!(runs(&json)[0]["status"], "queued");
+    let previous = &json["history"]["earlier_attempts"];
+    assert_eq!(previous.as_array().context("history")?.len(), 1);
+    assert_eq!(previous[0]["event"], old_id.to_hex());
+    assert_eq!(previous[0]["event_type"], "result");
+    assert_eq!(previous[0]["time_kind"], "reported");
+    assert!(previous[0]["timestamp"].is_u64());
+    let (output, _) =
+        ci_status(&a.publisher, &["--require-ci-trust", "maintainer-directed"]).await?;
+    assert!(!output.status.success());
+    let inspection = a
+        .publisher
+        .ngit(["ci", "inspect", &old_id.to_hex(), "--json", "--offline"])
+        .output()
+        .await?;
+    assert!(
+        inspection.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspection.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn independent_branch_contexts_at_one_commit_are_not_retries() -> Result<()> {
+    let a = arrange("ci-context-attempts").await?;
+    let head = a.publisher.rev_parse("HEAD").await?;
+    for (id, branch) in [
+        ("main-run", "refs/heads/main"),
+        ("release-run", "refs/heads/release"),
+    ] {
+        let spec = CiRunSpec::new(&a.published, id, &head, CiTrigger::push(branch), a.now)
+            .workflow("ci.yml", workflow_hash(WORKFLOW));
+        a.harness
+            .publish_ci_run(&a.ci_relay, &a.coordinator, &spec)
+            .await?;
+    }
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(runs(&json).len(), 2);
+    assert!(
+        json["history"]["earlier_attempts"]
+            .as_array()
+            .context("attempts")?
+            .is_empty()
+    );
+    Ok(())
+}

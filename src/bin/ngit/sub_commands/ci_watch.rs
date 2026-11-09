@@ -70,6 +70,9 @@ async fn observe(
         )
         .await?;
         report.print(target, crate::cli::LogTailMode::None);
+        crate::ci_history::load(path, reference, target)
+            .await?
+            .print();
     }
     for event in initial {
         if matches_target(target, reference, &event)

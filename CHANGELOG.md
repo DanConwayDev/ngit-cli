@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Verified workflow definitions supply expected jobs, steps and dependencies;
   unstarted jobs and conditional paths stay compact without predicting outcomes.
   JSON includes detailed execution evidence, outputs and dependency bindings.
+  Earlier attempts are listed separately with relative times and exact-event
+  inspection commands; they never contribute to the current result.
 
 - Standing CI controls are now `ci service request` and `ci service stop`.
   The old commands remain compatible and warn on stderr that they are deprecated.

@@ -84,13 +84,7 @@ impl WorkflowRun {
     /// one commit.
     #[must_use]
     pub fn activity_context(&self) -> Option<&super::kinds::TriggerContext> {
-        self.common().context.as_ref().filter(|context| {
-            matches!(
-                context,
-                super::kinds::TriggerContext::Issue { .. }
-                    | super::kinds::TriggerContext::Release { .. }
-            )
-        })
+        self.common().context.as_ref()
     }
 
     /// The event id of the run's container, preferring the immutable result.

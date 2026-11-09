@@ -29,6 +29,7 @@ mod output;
 // Declared after `output` so the stdout-guarding `println!` macro is in
 // scope for it.
 mod ci_event_view;
+mod ci_history;
 mod ci_plan;
 mod ci_projection;
 mod push_bookkeeping;

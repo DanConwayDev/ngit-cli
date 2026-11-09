@@ -277,3 +277,13 @@ explicit `ci inspect --kind 39845 --author <PROVIDER> --json` is available for
 provider diagnostics. No automatic provider/environment chooser exists yet.
 Pins select installed environments, do not request image installation, and do
 not remove other requirements. Omitted pins retain the normal selection.
+
+`ci status` details the latest attempt per coordinator, workflow and trigger
+context. Earlier attempts on the same tip appear as concise history rows with
+status, a labelled relative timestamp and a copyable `ci inspect <event-ID>`
+command. Running older attempts remain visible: rerunning does not cancel them.
+Results use “reported” time because the protocol has no distinct workflow finish
+timestamp; explicit start/queue times are labelled accordingly. JSON keeps
+absolute timestamps, their meaning and result/progress event types in `history`.
+History never contributes to the current conclusion or trust gate. Watch keeps
+its event-stream contract, with history only in the initial human summary.

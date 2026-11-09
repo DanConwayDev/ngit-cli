@@ -113,17 +113,17 @@ pub async fn launch(
     )
     .await?;
 
+    let history = crate::ci_history::load(git_repo_path, &repo_ref, &target).await?;
     let gate = require_ci_trust.and_then(|floor| report.gate_failure(floor));
 
     if json {
-        crate::output::set_value(report.to_json(
-            &target,
-            repo_ref.relays.first(),
-            log_tail,
-            gate.as_deref(),
-        ));
+        let mut document =
+            report.to_json(&target, repo_ref.relays.first(), log_tail, gate.as_deref());
+        document["history"] = serde_json::to_value(&history)?;
+        crate::output::set_value(document);
     }
     report.print(&target, log_tail);
+    history.print();
 
     if let Some(reason) = gate {
         println!("{reason}");
