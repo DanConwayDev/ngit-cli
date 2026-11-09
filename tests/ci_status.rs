@@ -925,11 +925,11 @@ async fn require_ci_trust_gates_on_the_weakest_current_run() -> Result<()> {
     .await?;
     assert!(out.status.success());
 
-    // The offline tier reads the same cache but skips the domain ladder, so
-    // its coverage is partial.
+    // The cached signed request establishes authority without optional
+    // domain checks, so this view has complete relevant evidence.
     let (out, offline) = ci_status(&arranged.publisher, &["--offline"]).await?;
     assert!(out.status.success());
-    assert_eq!(offline["ci"]["coverage"], "partial");
+    assert_eq!(offline["ci"]["coverage"], "complete");
     assert_eq!(runs(&offline).len(), 1, "the cache tier still has the run");
     assert_eq!(runs(&offline)[0]["classification"], "maintainer-directed");
 

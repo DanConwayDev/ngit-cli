@@ -126,8 +126,8 @@ source integrity.
 - `resolve.rs` — assembly with **two tiers**:
   - *cache tier*: evidence computable from the local nostr cache alone
     (control-history reduction, quote validation when the quoted event is
-    cached). Used by `pr list`. Coverage is `partial` when domain checks were
-    skipped.
+    cached). Used by `pr list`. Coverage is `partial` when relevant identity
+    evidence remains unresolved, not merely because domain checks were skipped.
   - *full tier*: additionally fetch missing quoted events and perform NIP-05
     domain verification. Used by `pr view`, `ci status`, and a merge with an
     explicit CI trust gate.
@@ -328,10 +328,10 @@ reference left open:
   costs a lookup and never a wrong answer. The cache is optional at every
   call site (`Option<&Nip05Cache>`) and its directory and TTLs are
   injectable, so tests never touch the user's cache or the clock.
-- **Cache-tier coverage is partial whenever there is a signer to describe.**
-  The domain ladder is skipped there by definition. A view with no signers
-  has nothing to leave unchecked, so it stays complete rather than
-  displaying a caveat about evidence that does not exist.
+- **Cache-tier coverage reflects unresolved evidence.**
+  Signed requests and accepted provider delegation need no optional domain
+  checks. Unknown signers, unavailable quotes and incomplete repository
+  inputs still leave coverage partial.
 - **Control history is filtered to the confirmed-member coordinate set once.**
   `resolve` reduces `CiInputs::controls` to the controls naming a coordinate
   in that set before anything reads them, so a Service Request for a
@@ -423,9 +423,9 @@ reference left open:
   handed to `resolve`, which filters them to the confirmed-member coordinate set.
 - **The full tier fetches missing quotes from the repository relays plus the
   quote's own relay hint**, and verifies NIP-05 through the WP2 machinery
-  and its TTL cache. Coverage is routinely `partial` in practice — a GRASP
-  host that serves no NIP-05 document is an unsettled lookup, not a negative
-  claim — so the caveat is expected rather than exceptional.
+  and its TTL cache. Signers with established operational relationships or
+  maintainer direction need no domain checks. For unresolved signers, missing
+  NIP-05 documents remain unsettled evidence rather than negative claims.
 - **CI signers' kind-0 profiles are fetched by this command.** A coordinator
   or compute provider is not a repository contributor, so the repository
   fetch never asks for its profile and the signer-declared `nip05` route
@@ -532,11 +532,8 @@ reference left open:
   evidence. It is ngit's own wording, not one of the canonical
   gitworkshop strings.
 - **The list path expresses no coverage caveat in human output.**
-  Cache-tier coverage is partial for every row that has a signer at all
-  (WP2), so a `Context incomplete` line would appear beside every row and
-  distinguish nothing. Coverage is reported per row in JSON, and the
-  detail surfaces — where the domain ladder actually runs, and where the
-  caveat therefore means something — print it.
+  Coverage is reported per row in JSON; detailed views explain missing
+  evidence separately from execution outcomes.
 - **The list JSON carries fields, not the glyph.** Every row has a `ci`
   object — `state`, `conclusion`, `classification`, `trust_floor_met`,
   `coverage`, `revision_matched` — including rows with no CI, so a consumer
@@ -1298,3 +1295,9 @@ show the previous published revision. JSON keeps this under `history.previous_ti
 separate from current results and trust gates, and marks history as incomplete.
 Human watch includes this context only in its initial summary; subsequent
 updates and JSON Lines remain pinned to the original current target.
+
+Coverage gaps distinguish repository inputs, quoted events, skipped identity
+checks and failed identity lookups. Signed evidence is validated before selecting
+NIP-05 candidates. Delegation applies only to accepted job events; unaccepted
+providers still require independent evidence. Missing optional domain evidence
+does not negate verified maintainer authorization.

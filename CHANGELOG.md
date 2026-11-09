@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI trust coverage distinguishes missing requests, repository reads and identity
+  evidence. Optional NIP-05 lookups are skipped when signed evidence already
+  establishes the relationship, avoiding unrelated Git-server identity failures
+  for maintainer-authorized runs.
+
 - `ci status` shows workflow, job and step progress, including completed jobs
   before the workflow finishes, step durations, artifact counts and output links.
   Verified workflow definitions supply expected jobs, steps and dependencies;
