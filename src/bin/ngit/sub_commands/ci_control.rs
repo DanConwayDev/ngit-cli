@@ -880,6 +880,8 @@ pub async fn launch_secrets(
     {
         bail!("secret provisioning requires the signer's own confirmed repository announcement");
     }
+    let confirmation_watch =
+        SecretConfirmationWatch::new(&prepared, &inbox.relays, coordinator, &repository).await?;
     let relay_hint = prepared
         .repo_ref
         .relays
@@ -899,6 +901,7 @@ pub async fn launch_secrets(
         bail!("coordinator secret key expired while signing; retry with a fresh advertisement");
     }
     let event_id = event.id;
+    let update_time = event.created_at;
     let mut relays = inbox.relays.clone();
     for relay in &prepared.repo_ref.relays {
         if !relays.contains(relay) {
@@ -927,14 +930,13 @@ pub async fn launch_secrets(
             "no advertised secret inbox accepted the update; retry after checking coordinator connectivity"
         );
     }
-    if crate::output::is_json() {
-        crate::output::set_value(
-            serde_json::json!({"command_status": "ok", "entity": "ci", "action": "secret-update-published", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "coordinator": coordinator.to_bech32()?, "repository": naddr(&repository, prepared.relay_hint()), "set": values.0.keys().collect::<Vec<_>>(), "remove": args.remove}),
-        );
-    }
-    println!(
-        "Encrypted secret update published; inspect coordinator repository status (kind 39844) for accepted names and update times."
-    );
+    // Keep only names while waiting; plaintext has no further purpose.
+    let set_names = values.0.keys().cloned().collect::<Vec<_>>();
+    drop(values);
+    let confirmation = confirmation_watch
+        .wait(&prepared, args, update_time, &set_names)
+        .await;
+    confirmation_watch.report(&prepared, args, event_id, &set_names, confirmation)?;
     Ok(())
 }
 
@@ -1006,4 +1008,224 @@ fn read_secret_values(args: &crate::cli::CiSecretsArgs) -> Result<ngit::ci::secr
         values.0.insert(name.clone(), value);
     }
     Ok(values)
+}
+
+/// Match gitworkshop's pending-change checks against a fresh signed inventory.
+/// Removal has no per-name receipt: absence in a new snapshot is the available
+/// evidence, not an acknowledgement of this exact update event ID.
+fn secret_update_confirmed(
+    status: &Event,
+    baseline: &[nostr::prelude::EventId],
+    author: PublicKey,
+    created_at: nostr::prelude::Timestamp,
+    set: &[String],
+    remove: &[String],
+    now: nostr::prelude::Timestamp,
+) -> bool {
+    if baseline.contains(&status.id)
+        || status.created_at < created_at
+        || status.tags.iter().any(|tag| {
+            let tag = tag.as_slice();
+            tag[0] == "expiration"
+                && tag
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_none_or(|expiration| expiration <= now.as_secs())
+        })
+    {
+        return false;
+    }
+    let inventory = status
+        .tags
+        .iter()
+        .map(Tag::as_slice)
+        .filter(|tag| tag[0] == "secret")
+        .collect::<Vec<_>>();
+    set.iter().all(|name| {
+        inventory.iter().any(|tag| {
+            tag.get(1) == Some(name)
+                && tag.get(2) == Some(&author.to_hex())
+                && tag
+                    .get(3)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|time| time >= created_at.as_secs())
+        })
+    }) && remove
+        .iter()
+        .all(|name| !inventory.iter().any(|tag| tag.get(1) == Some(name)))
+}
+
+struct SecretConfirmationWatch {
+    relays: Vec<String>,
+    filter: nostr::prelude::Filter,
+    baseline: Vec<nostr::prelude::EventId>,
+    coordinator: PublicKey,
+    repository: String,
+}
+
+impl SecretConfirmationWatch {
+    async fn new(
+        prepared: &Prepared,
+        inboxes: &[RelayUrl],
+        coordinator: PublicKey,
+        repository: &Coordinate,
+    ) -> Result<Self> {
+        use nostr::prelude::Filter;
+        let mut status_relays = inboxes.iter().map(ToString::to_string).collect::<Vec<_>>();
+        status_relays.extend(prepared.repo_ref.relays.iter().map(ToString::to_string));
+        status_relays.sort();
+        status_relays.dedup();
+        let status_filter = Filter::new()
+            .kind(Kind::Custom(39844))
+            .author(coordinator)
+            .custom_tag(
+                nostr::prelude::SingleLetterTag::from_char('a')?,
+                repository.to_string(),
+            );
+        let baseline = prepared
+            .client
+            .get_events(status_relays.clone(), vec![status_filter.clone()])
+            .await?;
+        Ok(Self {
+            relays: status_relays,
+            filter: status_filter,
+            baseline: baseline.iter().map(|e| e.id).collect(),
+            coordinator,
+            repository: repository.to_string(),
+        })
+    }
+    fn report(
+        &self,
+        prepared: &Prepared,
+        args: &crate::cli::CiSecretsArgs,
+        event_id: nostr::prelude::EventId,
+        set_names: &[String],
+        confirmation: Option<nostr::prelude::EventId>,
+    ) -> Result<()> {
+        let repository: Coordinate = self.repository.parse()?;
+        if crate::output::is_json() {
+            crate::output::set_value(
+                serde_json::json!({"command_status": "ok", "entity": "ci", "action": "secret-update-published", "event": crate::output::event_id_to_nevent(event_id, prepared.repo_ref.relays.first()), "coordinator": self.coordinator.to_bech32()?, "repository": naddr(&repository, prepared.relay_hint()), "set": set_names, "remove": args.remove,
+                "confirmation": if confirmation.is_some() { "accepted" } else { "pending" },
+                "confirmation_event": confirmation.map(|id| id.to_hex())}),
+            );
+        }
+        if confirmation.is_some() {
+            println!("Coordinator confirmed the secret update.");
+        } else {
+            println!(
+                "Encrypted secret update delivered; coordinator confirmation is still pending (not a rejection)."
+            );
+            println!(
+                "Check with: ngit ci inspect --kind 39844 --author {} --json",
+                self.coordinator.to_bech32()?
+            );
+        }
+        Ok(())
+    }
+
+    async fn wait(
+        &self,
+        prepared: &Prepared,
+        args: &crate::cli::CiSecretsArgs,
+        update_time: nostr::prelude::Timestamp,
+        set_names: &[String],
+    ) -> Option<nostr::prelude::EventId> {
+        use nostr::prelude::Timestamp;
+        if args.confirmation_timeout == 0 {
+            None
+        } else {
+            eprintln!("Encrypted secret update delivered; waiting for coordinator confirmation...");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(args.confirmation_timeout),
+                async {
+                    loop {
+                        if let Ok(events) = prepared
+                            .client
+                            .get_events(self.relays.clone(), vec![self.filter.clone()])
+                            .await
+                        {
+                            let latest = events
+                                .iter()
+                                .filter(|event| {
+                                    event.kind == Kind::Custom(39844)
+                                        && event.pubkey == self.coordinator
+                                        && event.verify().is_ok()
+                                        && event.tags.iter().any(|tag| {
+                                            let tag = tag.as_slice();
+                                            tag[0] == "a" && tag.get(1) == Some(&self.repository)
+                                        })
+                                })
+                                .max_by_key(|event| {
+                                    ngit::ci::total_order_position(event.created_at, event.id)
+                                });
+                            if let Some(status) = latest {
+                                if secret_update_confirmed(
+                                    status,
+                                    &self.baseline,
+                                    prepared.user_pubkey,
+                                    update_time,
+                                    set_names,
+                                    &args.remove,
+                                    Timestamp::now(),
+                                ) {
+                                    return status.id;
+                                }
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                },
+            )
+            .await
+            .ok()
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_confirmation_tests {
+    use nostr::prelude::{Keys, Timestamp, event::FinalizeEvent};
+
+    use super::*;
+
+    #[test]
+    fn confirmation_requires_fresh_inventory_and_matching_origin() {
+        let keys = Keys::generate();
+        let author = Keys::generate().public_key();
+        let time = Timestamp::from_secs(100);
+        let status = EventBuilder::new(Kind::Custom(39844), "")
+            .custom_created_at(time)
+            .tags([
+                Tag::custom("secret", ["TOKEN".into(), author.to_hex(), "100".into()]),
+                Tag::custom("expiration", ["200"]),
+            ])
+            .finalize(&keys)
+            .unwrap();
+        let set = vec!["TOKEN".to_owned()];
+        let check = |baseline: &[nostr::prelude::EventId],
+                     who,
+                     at,
+                     set: &[String],
+                     remove: &[String],
+                     now| {
+            secret_update_confirmed(
+                &status,
+                baseline,
+                who,
+                Timestamp::from_secs(at),
+                set,
+                remove,
+                Timestamp::from_secs(now),
+            )
+        };
+        assert!(check(&[], author, 100, &set, &["OLD".into()], 100));
+        assert!(!check(&[status.id], author, 100, &set, &[], 100));
+        assert!(!check(&[], keys.public_key(), 100, &set, &[], 100));
+        assert!(!check(&[], author, 101, &set, &[], 101));
+        assert!(!check(&[], author, 100, &set, &[], 200));
+        assert!(!check(&[], author, 100, &[], &set, 100));
+        assert!(!check(&[], author, 100, &["OTHER".into()], &[], 100));
+        assert!(check(&[], author, 100, &[], &["OLD".into()], 100));
+    }
 }

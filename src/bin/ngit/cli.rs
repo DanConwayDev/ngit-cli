@@ -1545,6 +1545,11 @@ pub struct CiSecretsArgs {
     /// Set NAME from the environment variable NAME (repeatable)
     #[arg(long, value_name = "NAME")]
     pub set_from_env: Vec<String>,
+    /// Seconds to wait for coordinator confirmation (0 publishes without
+    /// waiting). Relay delivery succeeds independently; JSON confirmation
+    /// remains pending if no matching status arrives before this deadline.
+    #[arg(long, default_value_t = 90)]
+    pub confirmation_timeout: u64,
     /// Remove a secret name (repeatable)
     #[arg(long, value_name = "NAME")]
     pub remove: Vec<String>,

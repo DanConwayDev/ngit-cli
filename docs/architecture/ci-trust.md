@@ -1207,9 +1207,17 @@ kind-29846 event. Publication requires acknowledgement from an advertised inbox;
 repository relays also receive the encrypted event. An expired key during
 signing is rejected. No secret values are written to ngit's cache.
 
-JSON reports `secret-update-published` with names only. Relay acceptance is not
-coordinator acceptance: inspect kind-39844 status for names, origin and accepted
-update times. `WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
+JSON retains `secret-update-published` with names only and adds `confirmation`
+(`accepted` or `pending`) and `confirmation_event`. After relay delivery, ngit
+waits up to 90 seconds for a new signed coordinator status (kind 39844) for this
+repository. Sets require matching names, maintainer origin and update timestamps;
+removals require absence from the new inventory, as in gitworkshop. This is
+inventory evidence, not an exact update-ID receipt or proof a credential works.
+Use `--confirmation-timeout SECONDS` to change the wait, or `0` to publish only.
+A deadline leaves confirmation pending, not rejected; exit zero still means
+publication succeeded. Automation requiring acceptance must check `confirmation`.
+Inspect kind 39844 to check later; do not republish just because the wait expired.
+`WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
 same channel; pairing, sanitizing and sealing remain coordinator responsibilities.
 
 `ci service request` and `ci service stop` manage standing repository service.

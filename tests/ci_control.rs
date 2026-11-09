@@ -963,30 +963,59 @@ async fn secrets_use_advertised_inbox_without_exposing_values() -> Result<()> {
     }).await??;
     let file = arranged.publisher.dir().join("secret-values.json");
     std::fs::write(&file, r#"{"DEPLOY_TOKEN":"synthetic-secret-value"}"#)?;
-    let json = ngit_json_ok(
-        &arranged.publisher,
-        &[
-            "ci",
-            "secrets",
-            &coordinator,
-            "--set-file",
-            file.to_str().context("fixture path")?,
-        ],
-    )
-    .await?;
-    assert_eq!(json["action"], "secret-update-published");
-    assert!(!json.to_string().contains("synthetic-secret-value"));
-    let update = tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(notification) = notifications.next().await {
-            if let ClientNotification::Event { event, .. } = notification {
-                if event.kind == Kind::Custom(29846) {
-                    return Ok::<_, anyhow::Error>(event);
+    let command = async {
+        ngit_json_ok(
+            &arranged.publisher,
+            &[
+                "ci",
+                "secrets",
+                &coordinator,
+                "--set-file",
+                file.to_str().context("fixture path")?,
+                "--confirmation-timeout",
+                "10",
+            ],
+        )
+        .await
+    };
+    let acknowledge = async {
+        let update = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(notification) = notifications.next().await {
+                if let ClientNotification::Event { event, .. } = notification {
+                    if event.kind == Kind::Custom(29846) {
+                        return Ok::<_, anyhow::Error>(event);
+                    }
                 }
             }
-        }
-        bail!("secret update did not arrive")
-    })
-    .await??;
+            bail!("secret update did not arrive")
+        })
+        .await??;
+        let repository = tag_values(&update, "a")[0].clone();
+        let receipt = EventBuilder::new(Kind::Custom(39844), "")
+            .custom_created_at(update.created_at)
+            .tags([
+                Tag::identifier(&repository),
+                Tag::custom("a", [repository]),
+                Tag::custom(
+                    "secret",
+                    [
+                        "DEPLOY_TOKEN".into(),
+                        update.pubkey.to_hex(),
+                        update.created_at.as_secs().to_string(),
+                    ],
+                ),
+            ])
+            .finalize(&arranged.coordinator)?;
+        arranged
+            .harness
+            .publish_ci_events(&arranged.ci_relay, &[receipt])
+            .await?;
+        Ok::<_, anyhow::Error>(update)
+    };
+    let (json, update) = tokio::try_join!(command, acknowledge)?;
+    assert_eq!(json["action"], "secret-update-published");
+    assert_eq!(json["confirmation"], "accepted");
+    assert!(!json.to_string().contains("synthetic-secret-value"));
     update.verify()?;
     let sender = PublicKey::from_hex(&tag_values(&update, "sender")[0])?;
     let plaintext = nip44::decrypt(recipient.secret_key(), &sender, &update.content)?;
@@ -996,6 +1025,21 @@ async fn secrets_use_advertised_inbox_without_exposing_values() -> Result<()> {
     assert_eq!(payload["created_at"], update.created_at.as_secs());
     assert_eq!(tag_values(&update, "e"), vec![ad.id.to_hex()]);
     assert_ne!(sender, update.pubkey);
+    let pending = ngit_json_ok(
+        &arranged.publisher,
+        &[
+            "ci",
+            "secrets",
+            &coordinator,
+            "--remove",
+            "DEPLOY_TOKEN",
+            "--confirmation-timeout",
+            "0",
+        ],
+    )
+    .await?;
+    assert_eq!(pending["confirmation"], "pending");
+    assert!(pending["confirmation_event"].is_null());
     wire.disconnect().await;
     Ok(())
 }

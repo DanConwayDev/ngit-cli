@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ci secrets` waits for coordinator inventory confirmation after encrypted
+  delivery, matching gitworkshop's checks for updated and removed names. Human
+  output and JSON distinguish accepted updates from pending confirmation;
+  `--confirmation-timeout` controls the wait (90 seconds by default).
+
 - `account login --profile NAME --no-activate` saves a signer profile without
   changing the local or global login. Use `--signer NAME` or
   `git -c nostr.signer=NAME` to select it for a single command.
