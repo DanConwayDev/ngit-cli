@@ -424,7 +424,13 @@ non-default stored account.
 
 ### Named signer profiles
 
-`account login --profile NAME` names or reactivates a signer profile. The old
+`account login --profile NAME` names or reactivates a signer profile.
+Reactivating a saved profile selects its existing connection; it does not pair
+again or change its relays. To replace the connection while keeping the current
+default, use `account login --nostrconnect --profile NAME --no-activate
+--signer-relay URL`. `--signer-relay` is rejected outside new nostrconnect
+pairing (including the interactive pairing flow). A `--bunker-url` uses the
+relays supplied in that URL. The old
 `--alias` spelling remains accepted for scripts. Existing alias names and
 credential bindings are unchanged; no migration or re-pairing is needed.
 A signer profile is distinct from the account’s public Nostr display name.

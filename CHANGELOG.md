@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reject `account login --signer-relay` when reactivating saved credentials
+  or importing a bunker URL, instead of silently ignoring the relay and changing
+  the default account. The error explains fresh pairing without activation.
+
 - Account logout and credential deletion work with file-backed profiles when
   a session bus exists but no Secret Service is installed. Locked stores, failed
   activation and unreachable buses still fail before deletion.

@@ -100,3 +100,71 @@ async fn imported_profile_does_not_activate_inside_or_outside_repository() -> Re
     assert_eq!(std::fs::read(global.path())?, global_before);
     Ok(())
 }
+
+#[tokio::test]
+async fn ignored_pairing_relay_is_rejected_before_changing_login_or_credentials() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let key = Keys::generate();
+    let nsec = key.secret_key().to_bech32()?;
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--nsec",
+            &nsec,
+            "--profile",
+            "existing",
+            "--offline",
+        ])
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_path = repo.dir().join(".git/config");
+    let config_before = std::fs::read(&config_path)?;
+    let credentials_before = std::fs::read(credentials.path())?;
+    for selector in [
+        vec!["--profile", "existing"],
+        vec!["existing"],
+        vec!["--signer", "existing"],
+        vec!["--nsec", &nsec],
+        vec!["--bunker-url", "bunker://invalid"],
+    ] {
+        let mut args = vec![
+            "account",
+            "login",
+            "--signer-relay",
+            "ws://127.0.0.1:1",
+            "--offline",
+            "--json",
+        ];
+        args.extend(selector);
+        let output = repo
+            .ngit(args)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .output()
+            .await?;
+        assert!(!output.status.success(), "unused relay option was accepted");
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(document["command_status"], "error");
+        let diagnostic = String::from_utf8(output.stderr)?;
+        assert!(diagnostic.contains("--nostrconnect") && diagnostic.contains("--no-activate"));
+        assert_eq!(std::fs::read(&config_path)?, config_before);
+        assert!(
+            std::fs::read(credentials.path())? == credentials_before,
+            "refused login changed credentials"
+        );
+    }
+    Ok(())
+}
