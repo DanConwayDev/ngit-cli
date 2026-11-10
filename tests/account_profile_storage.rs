@@ -100,3 +100,127 @@ async fn imported_profile_does_not_activate_inside_or_outside_repository() -> Re
     assert_eq!(std::fs::read(global.path())?, global_before);
     Ok(())
 }
+
+#[tokio::test]
+async fn ignored_pairing_relay_is_rejected_before_changing_login_or_credentials() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let key = Keys::generate();
+    let nsec = key.secret_key().to_bech32()?;
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--nsec",
+            &nsec,
+            "--profile",
+            "existing",
+            "--offline",
+        ])
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_path = repo.dir().join(".git/config");
+    let config_before = std::fs::read(&config_path)?;
+    let credentials_before = std::fs::read(credentials.path())?;
+    for selector in [
+        vec!["--profile", "existing"],
+        vec!["existing"],
+        vec!["--signer", "existing"],
+        vec!["--nsec", &nsec],
+        vec!["--bunker-url", "bunker://invalid"],
+    ] {
+        let mut args = vec![
+            "account",
+            "login",
+            "--signer-relay",
+            "ws://127.0.0.1:1",
+            "--offline",
+            "--json",
+        ];
+        args.extend(selector);
+        let output = repo
+            .ngit(args)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .output()
+            .await?;
+        assert!(!output.status.success(), "unused relay option was accepted");
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(document["command_status"], "error");
+        let diagnostic = String::from_utf8(output.stderr)?;
+        assert!(diagnostic.contains("--nostrconnect") && diagnostic.contains("--no-activate"));
+        assert_eq!(std::fs::read(&config_path)?, config_before);
+        assert!(
+            std::fs::read(credentials.path())? == credentials_before,
+            "refused login changed credentials"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_os_store_cannot_reassign_an_indexed_profile() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let directory = tempfile::tempdir()?;
+    let credentials = directory.path().join("credentials.json");
+    let registry = directory.path().join("credentials.json.accounts");
+    let original = Keys::generate().public_key().to_bech32()?;
+    let replacement = Keys::generate();
+    // The public index remembers a binding whose secret is in an inaccessible
+    // OS store. There is deliberately no fallback copy of that binding.
+    std::fs::write(&credentials, b"{}")?;
+    let index = serde_json::to_vec(&serde_json::json!({
+        "accounts": [&original], "aliases": {"existing": &original},
+    }))?;
+    std::fs::write(&registry, &index)?;
+    let config_path = repo.dir().join(".git/config");
+    let config = std::fs::read(&config_path)?;
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--nsec",
+            &replacement.secret_key().to_bech32()?,
+            "--profile",
+            "existing",
+            "--no-activate",
+            "--secret-storage",
+            "file",
+            "--offline",
+            "--json",
+        ])
+        .env("NGIT_KEYRING_FILE", &credentials)
+        .env("NGIT_TEST_OS_STORE_UNAVAILABLE", "true")
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "indexed profile was reassigned while its backend was inaccessible"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("choose a new profile name"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&credentials)?, b"{}");
+    assert_eq!(std::fs::read(&registry)?, index);
+    assert_eq!(std::fs::read(&config_path)?, config);
+    Ok(())
+}

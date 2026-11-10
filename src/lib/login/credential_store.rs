@@ -24,6 +24,56 @@ pub const POLICY_ENV: &str = "NGIT_SECRET_STORAGE";
 /// adopters who opted out via `NGIT_CREDENTIAL_STORE=false` stay opted out.
 pub const LEGACY_POLICY_ENV: &str = "NGIT_CREDENTIAL_STORE";
 
+/// Serialize a JSON read/modify/replace using a separate, stable inode. Locking
+/// the JSON file itself would stop protecting it after its atomic replacement.
+/// The returned handle releases the OS lock on drop, including process exit.
+fn lock_json_update(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::{
+        fs,
+        time::{Duration, Instant},
+    };
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        directory.mode(0o700);
+        options.mode(0o600);
+    }
+    directory
+        .create(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let file = options
+        .open(&lock_path)
+        .with_context(|| format!("failed to open update lock for {}", path.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(fs::TryLockError::WouldBlock) => bail!(
+                "another process is updating {}; wait for that account operation to finish, then retry",
+                path.display()
+            ),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("failed to lock {} for update", path.display()));
+            }
+        }
+    }
+}
+
 /// Where `ngit account login` / `account create` store fresh secrets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretStorage {
@@ -202,7 +252,7 @@ impl fmt::Display for LookupError {
                 f,
                 "credential '{name}' was not found in the credential store"
             ),
-            Self::Unavailable(error) => write!(f, "credential store is unavailable: {error}"),
+            Self::Unavailable(error) => write!(f, "credential store is unavailable: {error:#}"),
             Self::Invalid(error) => write!(f, "invalid credential-store entry: {error}"),
         }
     }
@@ -652,9 +702,23 @@ pub fn ensure_alias_available(alias: &str, npub: &str) -> Result<()> {
                     }
                 );
             }
-            // An unavailable OS store must not disable the documented file
-            // fallback. If it later recovers, normal read precedence applies.
-            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(LookupError::Unavailable(error)) if backend == Backend::Os => {
+                // A locked keyring can conceal an existing binding. Do not
+                // claim to reassign a known profile in the fallback: the old
+                // OS mapping would regain precedence when the store recovers.
+                if account_registry::read()?
+                    .aliases
+                    .get(&alias)
+                    .is_some_and(|known| known != &npub)
+                {
+                    return Err(error.context(format!(
+                        "cannot reuse signer profile '{alias}' for a different account while the OS credential store is unavailable; unlock it and remove the old profile, or choose a new profile name"
+                    )));
+                }
+            }
+            // New profiles and the same identity retain file fallback support.
+            Err(LookupError::Missing(_)) => {}
+            Err(LookupError::Unavailable(error)) => return Err(error),
             Err(error @ LookupError::Invalid(_)) => return Err(anyhow!(error)),
         }
     }
@@ -846,7 +910,7 @@ fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String
     if policy == SecretStorage::File && !os_store_disabled() {
         match os_store::get_value(name) {
             Ok(existing) => ensure_unshadowed_file_value(name, value, Some(&existing))?,
-            Err(OsError::NoEntry | OsError::Store(_)) => {}
+            Err(OsError::NoEntry | OsError::Store(_) | OsError::Initialization(_)) => {}
             Err(OsError::Corrupt) => {
                 bail!(
                     "OS credential '{name}' contains invalid data and would shadow the new file-store entry; remove it before using --secret-storage file"
@@ -930,7 +994,9 @@ fn retrieve_value_from(name: &str, backend: Backend) -> std::result::Result<Stri
             Err(OsError::Corrupt) => Err(LookupError::Invalid(format!(
                 "OS credential '{name}' contains invalid text"
             ))),
-            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+            Err(error @ (OsError::Store(_) | OsError::Initialization(_))) => {
+                Err(LookupError::Unavailable(anyhow!(error)))
+            }
         },
         Backend::File => match file_store::get_value(name) {
             Ok(Some(value)) => Ok(value),
@@ -1036,7 +1102,9 @@ pub fn retrieve_from(name: &str, backend: Backend) -> std::result::Result<Keys, 
                 "OS credential '{name}' does not match its npub"
             ))),
             Err(OsError::NoEntry) => Err(LookupError::Missing(name.to_string())),
-            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+            Err(error @ (OsError::Store(_) | OsError::Initialization(_))) => {
+                Err(LookupError::Unavailable(anyhow!(error)))
+            }
         },
         Backend::File => match file_store::get_value(name) {
             Ok(Some(value)) => {
@@ -1281,7 +1349,7 @@ pub fn forget_entries(entries: &[String]) -> Result<usize> {
                 Ok(_) | Err(OsError::NoEntry | OsError::Corrupt) => {}
                 Err(error) => {
                     return Err(anyhow!(error)
-                        .context("cannot verify OS credentials before deletion; nothing changed"));
+                        .context("cannot check the OS credential store; nothing changed. Unlock or reconnect the credential store and retry, or use --keep-credentials to clear only the login selection"));
                 }
             }
         }
@@ -1326,10 +1394,10 @@ pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<Str
 }
 
 fn forget_from_os(name: &str) -> Result<bool> {
-    if !os_store_disabled() && os_store::session_backend_absent() {
+    if !os_store_disabled() && os_store::backend_absent() {
         static NOTICE: std::sync::Once = std::sync::Once::new();
         NOTICE.call_once(|| eprintln!(
-            "no session bus configured: removing file-store entries only; OS keyrings in other sessions are not checked"
+            "no OS credential service available in this session: removing file-store entries only; keyrings in other sessions are not checked"
         ));
         return Ok(false);
     }
@@ -1442,6 +1510,8 @@ enum OsError {
     Corrupt,
     /// The store itself could not be reached or used.
     Store(KeyringError),
+    /// The keyring crate retains its initialization result for this process.
+    Initialization(&'static KeyringError),
 }
 
 impl fmt::Display for OsError {
@@ -1452,7 +1522,10 @@ impl fmt::Display for OsError {
                 f,
                 "OS credential store entry does not contain a nostr secret key"
             ),
-            Self::Store(error) => write!(f, "{error}"),
+            Self::Store(_) | Self::Initialization(_) => write!(
+                f,
+                "cannot access the OS credential store; unlock it or restore its session service, then retry"
+            ),
         }
     }
 }
@@ -1461,6 +1534,7 @@ impl std::error::Error for OsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::Initialization(error) => Some(*error),
             Self::NoEntry | Self::Corrupt => None,
         }
     }
@@ -1545,6 +1619,7 @@ mod account_registry {
 
     fn update(mut change: impl FnMut(&mut Registry) -> Result<bool>) -> Result<()> {
         let path = path()?;
+        let _lock = super::lock_json_update(&path)?;
         let mut registry = read_at(&path)?;
         if change(&mut registry)? {
             write_at(&path, &registry)?;
@@ -1641,23 +1716,81 @@ mod os_store {
     use super::{KeyringError, OsError};
 
     fn entry(name: &str) -> Result<Entry, OsError> {
-        // No session bus is configured in a headless Unix environment. Do not
-        // confuse this with a configured bus/service that failed or is locked.
-        if session_backend_absent() {
+        // A headless Unix session may have no bus or no Secret Service. Do
+        // not confuse either with a configured service that failed or is locked.
+        if backend_absent() {
             return Err(OsError::NoEntry);
         }
         Entry::new(super::SERVICE, name).map_err(|error| {
             if matches!(error, KeyringError::NoDefaultStore) {
                 if let Err(cause) = Entry::store_status() {
-                    return OsError::Store(KeyringError::PlatformFailure(Box::new(
-                        std::io::Error::other(format!(
-                            "credential backend initialization failed: {cause}"
-                        )),
-                    )));
+                    return OsError::Initialization(cause);
                 }
             }
             OsError::Store(error)
         })
+    }
+
+    pub(super) fn backend_absent() -> bool {
+        session_backend_absent() || Entry::store_status().as_ref().is_err_and(service_absent)
+    }
+
+    // Only a typed ServiceUnknown response during backend initialization proves
+    // that this bus has neither a running nor an activatable Secret Service.
+    // Transport errors, locked collections and failed activation remain errors.
+    fn service_absent(error: &KeyringError) -> bool {
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+            while let Some(error) = cause {
+                if let Some(zbus::Error::MethodError(name, _, _)) =
+                    error.downcast_ref::<zbus::Error>()
+                {
+                    return name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown";
+                }
+                if matches!(
+                    error.downcast_ref::<zbus::fdo::Error>(),
+                    Some(zbus::fdo::Error::ServiceUnknown(_))
+                ) {
+                    return true;
+                }
+                cause = error.source();
+            }
+        }
+        #[cfg(not(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        )))]
+        let _ = error;
+        false
+    }
+
+    #[cfg(all(
+        test,
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    #[test]
+    fn only_typed_missing_service_is_absent() {
+        assert!(service_absent(&KeyringError::PlatformFailure(Box::new(
+            zbus::fdo::Error::ServiceUnknown("no service".into())
+        ))));
+        for error in [
+            zbus::fdo::Error::AccessDenied("locked".into()),
+            zbus::fdo::Error::NoReply("transport failed".into()),
+            zbus::fdo::Error::SpawnChildExited("activation failed".into()),
+        ] {
+            assert!(!service_absent(&KeyringError::PlatformFailure(Box::new(
+                error
+            ))));
+        }
+        assert!(!service_absent(&KeyringError::PlatformFailure(Box::new(
+            std::io::Error::other("org.freedesktop.DBus.Error.ServiceUnknown")
+        ))));
+        assert!(!service_absent(&KeyringError::NoDefaultStore));
     }
 
     pub(super) fn session_backend_absent() -> bool {
@@ -1836,6 +1969,7 @@ mod file_store {
     }
 
     pub(super) fn set_at(path: &Path, name: &str, keys: &Keys) -> Result<()> {
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         values.insert(entry_key(name), keys.secret_key().to_secret_hex());
         write(path, &values)
@@ -1848,6 +1982,10 @@ mod file_store {
     }
 
     pub(super) fn delete_at(path: &Path, name: &str) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         if values.remove(&entry_key(name)).is_none() {
             return Ok(false);
@@ -1857,6 +1995,7 @@ mod file_store {
     }
 
     pub(super) fn set_value_at(path: &Path, name: &str, value: &str) -> Result<()> {
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         values.insert(entry_key(name), value.to_string());
         write(path, &values)

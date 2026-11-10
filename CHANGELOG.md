@@ -45,7 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `account logout --all` removes all known saved profiles and credentials and
   clears current-repository and non-local Git login configuration, including
   conditional includes and Windows ProgramData configuration. It does not scan
-  other repositories or revoke access at remote signers.
+  other repositories or revoke access at remote signers. `--keep-credentials`
+  clears selections without accessing saved secrets, including locked keyrings.
 - Configure relay timeouts through `nostr.relay-timeout-secs` and
   `nostr.relay-connect-timeout-secs`, or `NGIT_RELAY_TIMEOUT_SECS` and
   `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults remain 45 seconds and the smaller
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Credential-store failures include recovery guidance and the underlying cause.
 - Accept an explicit default branch in `ngit send --target-branch` and Git
   push `target-branch=` options, retaining it as the PR target.
 - Share relay destination selection between PR admission and ordinary event
@@ -140,6 +142,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent account imports and deletions preserve unrelated credentials and
+  public-index updates in JSON storage.
+- Refuse to reassign a known signer alias/profile to another identity while its
+  OS credential store is inaccessible, preventing an unexpected identity switch
+  when the keyring unlocks. New profiles still support file fallback.
+- Reject unused `account login --signer-relay` options when selecting saved
+  credentials or importing a bunker URL, with guidance for fresh pairing.
 - Resolve abbreviated local commit IDs in `--base` and Git push `base=`
   options before interpreting them as PR event prefixes.
 - Named remote-signer profiles can use JSON storage when the OS credential store
@@ -150,9 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overrides.
 - Incomplete local login selections block signing rather than silently using the
   global identity. Account inventory reports unavailable selections accurately.
-- File-store logout works on headless Unix systems without a session bus. OS-store
-  access is checked before deletion; failed deletion does not leave profile
-  removal markers. Git include cleanup follows symlink-relative paths without
+- File-store logout works on headless Unix systems without a session bus or
+  installed Secret Service. Locked or unreachable OS stores block deletion;
+  failed deletion does not leave profile removal markers. Git include cleanup
+  follows symlink-relative paths without
   modifying unrelated configuration files.
 - Bare clone/fetch consumers, including Nix source caches, can load existing
   signers and discover proposal refs. Automatic PR branch visibility remains

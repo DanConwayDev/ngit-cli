@@ -160,6 +160,8 @@ tests deliberately do, to cover the global login scope. Before the
 sandbox existed, such a test logged the developer out of their own
 machine and left its throwaway account in their real `~/.gitconfig`.
 `tests/account_global_config_scope.rs` is the regression test.
+For real credential-store testing, the account lifecycle coverage matrix,
+and the disposable NixOS keyring VM, see [account testing](account-testing.md).
 
 ### Relay-injection mechanism: per-spawn env vars
 

@@ -14,11 +14,18 @@ instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 (0700 directory, 0600 file on unix). Updates write and flush a complete
 replacement beside the file before atomically replacing it on Unix and
 Windows, so interruption cannot leave a partially written credential file.
+Each JSON read/modify/replace holds an OS lock on a separate `.lock` file,
+including public-index updates. This prevents independent ngit processes from
+losing each other's entries. Locks release automatically when the owning process
+exits; acquisition has a 30-second deadline with retry guidance. The empty lock
+files may remain after logout. This is not a cross-store transaction, and older
+ngit versions or external editors that ignore the lock cannot participate in it.
 
 On Unix systems using D-Bus, an unset `DBUS_SESSION_BUS_ADDRESS` and a missing
 session-bus socket (`$XDG_RUNTIME_DIR/bus`, or `/run/user/<uid>/bus`) mean no
-OS backend is configured in that environment. File-backed credentials can be
-removed there, including named profiles. Deletion reports that only file-store
+OS backend is configured in that environment. A running bus that reports no
+running or activatable Secret Service is also an absent backend. File-backed
+credentials can be removed there, including named profiles. Deletion reports that only file-store
 entries are being removed. This does not delete credentials in
 an OS keyring belonging to another desktop session. A configured but unreachable
 bus, a locked keyring, and backend initialization failures remain errors;
@@ -84,6 +91,12 @@ This lets two aliases select different NIP-46 sessions for one npub without
 exposing either session's secret. Older versions ignore the companion and fall
 back to the identity's default signer. Git config likewise keeps only the
 portable alias-to-npub mapping.
+
+When an OS store is inaccessible, its public account index still protects
+known profile names from reassignment to a different identity. Unlock the
+store and remove the old profile, or use a new name. Otherwise an older OS
+mapping could silently take precedence again after recovery. New profile
+names and reusing the same identity retain file fallback support.
 
 Aliases are resolved from the OS credential store first, then
 `credentials.json`, then local, global, and system Git config. The JSON store
@@ -423,7 +436,13 @@ non-default stored account.
 
 ### Named signer profiles
 
-`account login --profile NAME` names or reactivates a signer profile. The old
+`account login --profile NAME` names or reactivates a signer profile.
+Reactivating a saved profile selects its existing connection; it does not pair
+again or change its relays. To replace the connection while keeping the current
+default, use `account login --nostrconnect --profile NAME --no-activate
+--signer-relay URL`. `--signer-relay` is rejected outside new nostrconnect
+pairing (including the interactive pairing flow). A `--bunker-url` uses the
+relays supplied in that URL. The old
 `--alias` spelling remains accepted for scripts. Existing alias names and
 credential bindings are unchanged; no migration or re-pairing is needed.
 A signer profile is distinct from the account’s public Nostr display name.
@@ -436,3 +455,9 @@ selection intact. A global login preserves repository-local overrides; use
 `account logout --local` removes the repository override and its credentials,
 then inherits the global selection. Add `--keep-credentials` to retain the
 connection for reuse. Shared credentials may also be used by other repositories.
+
+`account logout --all --keep-credentials` does not need to read saved secrets
+to clear login selections. It works while the OS store is locked; the final
+inventory reports accounts that cannot currently be checked. Legacy plaintext
+keys still require successful preservation before their Git configuration is
+removed, and legacy remote connections still require export first.
