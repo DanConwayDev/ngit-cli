@@ -224,3 +224,57 @@ async fn unavailable_os_store_cannot_reassign_an_indexed_profile() -> Result<()>
     assert_eq!(std::fs::read(&config_path)?, config);
     Ok(())
 }
+
+#[tokio::test]
+async fn missing_profile_login_explains_creation_before_relay_validation() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    repo.git_ok(
+        ["config", "nostr.signer", "current"],
+        "seed current selection",
+    )
+    .await?;
+    let config = repo.dir().join(".git/config");
+    let before = std::fs::read(&config)?;
+    let credentials = NamedTempFile::new()?;
+    for stored in ["{}", r#"{"nostr/forgotten-profile:dcdev":"removed"}"#] {
+        std::fs::write(credentials.path(), stored)?;
+        for interactive in [false, true] {
+            for with_relay in [false, true] {
+                let mut args = vec!["account", "login", "dcdev", "--offline"];
+                if interactive {
+                    args.push("-i");
+                }
+                if with_relay {
+                    args.extend(["--signer-relay", "ws://127.0.0.1:1"]);
+                }
+                let mut command = repo.ngit(args);
+                command
+                    .env("NGIT_KEYRING_FILE", credentials.path())
+                    .kill_on_drop(true);
+                let output =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+                        .await
+                        .context("missing profile login prompted or contacted a signer")??;
+                assert!(!output.status.success());
+                let diagnostic = String::from_utf8(output.stderr)?;
+                assert!(
+                    diagnostic.contains("no existing credentials") && diagnostic.contains("dcdev"),
+                    "{diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("ngit account login -i --profile dcdev"),
+                    "{diagnostic}"
+                );
+                assert_eq!(std::fs::read(&config)?, before);
+                assert!(std::fs::read(credentials.path())? == stored.as_bytes());
+            }
+        }
+    }
+    Ok(())
+}

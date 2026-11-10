@@ -676,11 +676,16 @@ pub(crate) fn reactivate_profile(alias: &str) -> Result<()> {
 pub fn ensure_profile_not_forgotten(alias: &str) -> Result<()> {
     let alias = normalize_alias(alias)?;
     if file_store::get_value(&format!("{FORGOTTEN_PROFILE_PREFIX}{alias}"))?.is_some() {
-        bail!(
-            "signer profile '{alias}' was removed; pair it again with `ngit account login -i --profile {alias}`"
-        );
+        bail!("{}", missing_profile_credentials_message(&alias));
     }
     Ok(())
+}
+
+/// Recovery for a normalized profile name whose saved credentials are absent.
+pub(crate) fn missing_profile_credentials_message(alias: &str) -> String {
+    format!(
+        "no existing credentials found for profile '{alias}'; run `ngit account login -i --profile {alias}` to supply credentials"
+    )
 }
 
 /// Credential-store aliases are machine-wide because they take precedence

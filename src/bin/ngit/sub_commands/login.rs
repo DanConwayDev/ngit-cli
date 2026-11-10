@@ -115,14 +115,6 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         .transpose()?;
     let account_selection = positional_account_selection(command_args);
     let signer_info = account_selection.as_ref().or(signer.info.as_ref());
-    anyhow::ensure!(
-        command_args.signer_relays.is_empty()
-            || command_args.nostrconnect
-            || (!Interactor::is_non_interactive()
-                && signer_info.is_none()
-                && command_args.bunker_url.is_none()),
-        "--signer-relay is only used for new nostrconnect pairing; it cannot change a saved connection. Use `account login --nostrconnect --profile NAME --no-activate --signer-relay URL` to replace a profile without changing the default login. For --bunker-url, use the relays in the bunker URL"
-    );
     // Early validation: check if we have required parameters in non-interactive
     // mode
     if Interactor::is_non_interactive()
@@ -151,6 +143,14 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         !Interactor::is_non_interactive(),
     )
     .await?;
+    anyhow::ensure!(
+        command_args.signer_relays.is_empty()
+            || command_args.nostrconnect
+            || (!Interactor::is_non_interactive()
+                && signer_info.is_none()
+                && command_args.bunker_url.is_none()),
+        "--signer-relay is only used for new nostrconnect pairing; it cannot change a saved connection. Use `account login --nostrconnect --profile NAME --no-activate --signer-relay URL` to replace a profile without changing the default login. For --bunker-url, use the relays in the bunker URL"
+    );
     let login_alias = alias.as_deref().or(selected_alias.as_deref());
     let validated_npub = validate_signer_before_switch(
         signer_for_login.as_ref(),

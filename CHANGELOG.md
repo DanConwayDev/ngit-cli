@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Credential-store failures include recovery guidance and the underlying cause.
+  Login reports missing profiles before incompatible relay options and shows
+  how to supply credentials for the named profile.
 - Accept an explicit default branch in `ngit send --target-branch` and Git
   push `target-branch=` options, retaining it as the PR target.
 - Share relay destination selection between PR admission and ordinary event

@@ -53,8 +53,9 @@ impl std::fmt::Display for SignerAliasNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "signer alias '{}' is not defined in the OS credential store, credentials.json, or git config",
-            self.alias
+            "signer alias '{}' is not defined. {}",
+            self.alias,
+            credential_store::missing_profile_credentials_message(&self.alias)
         )
     }
 }
@@ -634,6 +635,12 @@ fn select_credentialed_profile(
 ) -> Result<ResolvedSelection> {
     let candidates = cached_profile_candidates(selector, events);
     if candidates.is_empty() {
+        if let Ok(alias) = credential_store::normalize_alias(selector) {
+            bail!(
+                "{}",
+                credential_store::missing_profile_credentials_message(&alias)
+            );
+        }
         bail!(
             "no cached profile is named '{selector}'; profiles enter ngit's cache when their account logs in. Select the signer with `--signer <npub>` or a signer alias instead"
         );
