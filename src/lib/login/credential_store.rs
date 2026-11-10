@@ -652,9 +652,23 @@ pub fn ensure_alias_available(alias: &str, npub: &str) -> Result<()> {
                     }
                 );
             }
-            // An unavailable OS store must not disable the documented file
-            // fallback. If it later recovers, normal read precedence applies.
-            Err(LookupError::Missing(_) | LookupError::Unavailable(_)) => {}
+            Err(LookupError::Unavailable(error)) if backend == Backend::Os => {
+                // A locked keyring can conceal an existing binding. Do not
+                // claim to reassign a known profile in the fallback: the old
+                // OS mapping would regain precedence when the store recovers.
+                if account_registry::read()?
+                    .aliases
+                    .get(&alias)
+                    .is_some_and(|known| known != &npub)
+                {
+                    return Err(error.context(format!(
+                        "cannot reuse signer profile '{alias}' for a different account while the OS credential store is unavailable; unlock it and remove the old profile, or choose a new profile name"
+                    )));
+                }
+            }
+            // New profiles and the same identity retain file fallback support.
+            Err(LookupError::Missing(_)) => {}
+            Err(LookupError::Unavailable(error)) => return Err(error),
             Err(error @ LookupError::Invalid(_)) => return Err(anyhow!(error)),
         }
     }

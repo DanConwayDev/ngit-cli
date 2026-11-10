@@ -168,3 +168,59 @@ async fn ignored_pairing_relay_is_rejected_before_changing_login_or_credentials(
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn unavailable_os_store_cannot_reassign_an_indexed_profile() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let directory = tempfile::tempdir()?;
+    let credentials = directory.path().join("credentials.json");
+    let registry = directory.path().join("credentials.json.accounts");
+    let original = Keys::generate().public_key().to_bech32()?;
+    let replacement = Keys::generate();
+    // The public index remembers a binding whose secret is in an inaccessible
+    // OS store. There is deliberately no fallback copy of that binding.
+    std::fs::write(&credentials, b"{}")?;
+    let index = serde_json::to_vec(&serde_json::json!({
+        "accounts": [&original], "aliases": {"existing": &original},
+    }))?;
+    std::fs::write(&registry, &index)?;
+    let config_path = repo.dir().join(".git/config");
+    let config = std::fs::read(&config_path)?;
+    let output = repo
+        .ngit([
+            "account",
+            "login",
+            "--nsec",
+            &replacement.secret_key().to_bech32()?,
+            "--profile",
+            "existing",
+            "--no-activate",
+            "--secret-storage",
+            "file",
+            "--offline",
+            "--json",
+        ])
+        .env("NGIT_KEYRING_FILE", &credentials)
+        .env("NGIT_TEST_OS_STORE_UNAVAILABLE", "true")
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "indexed profile was reassigned while its backend was inaccessible"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("choose a new profile name"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&credentials)?, b"{}");
+    assert_eq!(std::fs::read(&registry)?, index);
+    assert_eq!(std::fs::read(&config_path)?, config);
+    Ok(())
+}

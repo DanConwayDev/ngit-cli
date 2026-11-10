@@ -620,6 +620,34 @@ async fn production_secret_service_mixed_storage_and_locked_deletion() -> Result
     ) = reply.body().deserialize()?;
     assert!(locked.contains(&collection));
     let output = probe
+        .run(
+            &[
+                "account",
+                "login",
+                "--nsec-file",
+                home.join("beta").to_str().unwrap(),
+                "--profile",
+                "alpha",
+                "--no-activate",
+                "--secret-storage",
+                "file",
+                "--offline",
+                "--json",
+            ],
+            false,
+        )
+        .await?;
+    assert!(
+        !output.status.success(),
+        "locked OS profile was rebound to a different identity"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("choose a new profile name"));
+    assert_eq!(
+        probe.snapshot()?,
+        before,
+        "refused profile reassignment changed saved state"
+    );
+    let output = probe
         .run(&["account", "logout", "--all", "--forget", "--json"], false)
         .await?;
     assert!(

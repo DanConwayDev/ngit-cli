@@ -86,6 +86,12 @@ exposing either session's secret. Older versions ignore the companion and fall
 back to the identity's default signer. Git config likewise keeps only the
 portable alias-to-npub mapping.
 
+When an OS store is inaccessible, its public account index still protects
+known profile names from reassignment to a different identity. Unlock the
+store and remove the old profile, or use a new name. Otherwise an older OS
+mapping could silently take precedence again after recovery. New profile
+names and reusing the same identity retain file fallback support.
+
 Aliases are resolved from the OS credential store first, then
 `credentials.json`, then local, global, and system Git config. The JSON store
 is the direct fallback for systems where the OS credential store is
