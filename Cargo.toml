@@ -75,6 +75,11 @@ zeroize = "1.9.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Inspect Secret Service's typed D-Bus error without treating a locked or
+# unreachable keyring as absent. Already used by keyring's Unix backend.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus = "5.19"
+
 [target.'cfg(target_os = "android")'.dependencies]
 webpki-root-certs = "1.0.11"
 

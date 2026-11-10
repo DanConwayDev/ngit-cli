@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Account logout and credential deletion work with file-backed profiles when
+  a session bus exists but no Secret Service is installed. Locked stores, failed
+  activation and unreachable buses still fail before deletion.
+
 - Accept an explicit default branch in `ngit send --target-branch` and Git
   push `target-branch=` options, retaining it as the PR target.
 - Share relay destination selection between PR admission and ordinary event

@@ -17,8 +17,9 @@ Windows, so interruption cannot leave a partially written credential file.
 
 On Unix systems using D-Bus, an unset `DBUS_SESSION_BUS_ADDRESS` and a missing
 session-bus socket (`$XDG_RUNTIME_DIR/bus`, or `/run/user/<uid>/bus`) mean no
-OS backend is configured in that environment. File-backed credentials can be
-removed there, including named profiles. Deletion reports that only file-store
+OS backend is configured in that environment. A running bus that reports no
+running or activatable Secret Service is also an absent backend. File-backed
+credentials can be removed there, including named profiles. Deletion reports that only file-store
 entries are being removed. This does not delete credentials in
 an OS keyring belonging to another desktop session. A configured but unreachable
 bus, a locked keyring, and backend initialization failures remain errors;

@@ -1281,7 +1281,7 @@ pub fn forget_entries(entries: &[String]) -> Result<usize> {
                 Ok(_) | Err(OsError::NoEntry | OsError::Corrupt) => {}
                 Err(error) => {
                     return Err(anyhow!(error)
-                        .context("cannot verify OS credentials before deletion; nothing changed"));
+                        .context("cannot check the OS credential store; nothing changed. Unlock or reconnect the credential store and retry, or use --keep-credentials to clear only the login selection"));
                 }
             }
         }
@@ -1326,10 +1326,10 @@ pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<Str
 }
 
 fn forget_from_os(name: &str) -> Result<bool> {
-    if !os_store_disabled() && os_store::session_backend_absent() {
+    if !os_store_disabled() && os_store::backend_absent() {
         static NOTICE: std::sync::Once = std::sync::Once::new();
         NOTICE.call_once(|| eprintln!(
-            "no session bus configured: removing file-store entries only; OS keyrings in other sessions are not checked"
+            "no OS credential service available in this session: removing file-store entries only; keyrings in other sessions are not checked"
         ));
         return Ok(false);
     }
@@ -1641,9 +1641,9 @@ mod os_store {
     use super::{KeyringError, OsError};
 
     fn entry(name: &str) -> Result<Entry, OsError> {
-        // No session bus is configured in a headless Unix environment. Do not
-        // confuse this with a configured bus/service that failed or is locked.
-        if session_backend_absent() {
+        // A headless Unix session may have no bus or no Secret Service. Do
+        // not confuse either with a configured service that failed or is locked.
+        if backend_absent() {
             return Err(OsError::NoEntry);
         }
         Entry::new(super::SERVICE, name).map_err(|error| {
@@ -1658,6 +1658,68 @@ mod os_store {
             }
             OsError::Store(error)
         })
+    }
+
+    pub(super) fn backend_absent() -> bool {
+        session_backend_absent() || Entry::store_status().as_ref().is_err_and(service_absent)
+    }
+
+    // Only a typed ServiceUnknown response during backend initialization proves
+    // that this bus has neither a running nor an activatable Secret Service.
+    // Transport errors, locked collections and failed activation remain errors.
+    fn service_absent(error: &KeyringError) -> bool {
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+            while let Some(error) = cause {
+                if let Some(zbus::Error::MethodError(name, _, _)) =
+                    error.downcast_ref::<zbus::Error>()
+                {
+                    return name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown";
+                }
+                if matches!(
+                    error.downcast_ref::<zbus::fdo::Error>(),
+                    Some(zbus::fdo::Error::ServiceUnknown(_))
+                ) {
+                    return true;
+                }
+                cause = error.source();
+            }
+        }
+        #[cfg(not(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        )))]
+        let _ = error;
+        false
+    }
+
+    #[cfg(all(
+        test,
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    #[test]
+    fn only_typed_missing_service_is_absent() {
+        assert!(service_absent(&KeyringError::PlatformFailure(Box::new(
+            zbus::fdo::Error::ServiceUnknown("no service".into())
+        ))));
+        for error in [
+            zbus::fdo::Error::AccessDenied("locked".into()),
+            zbus::fdo::Error::NoReply("transport failed".into()),
+            zbus::fdo::Error::SpawnChildExited("activation failed".into()),
+        ] {
+            assert!(!service_absent(&KeyringError::PlatformFailure(Box::new(
+                error
+            ))));
+        }
+        assert!(!service_absent(&KeyringError::PlatformFailure(Box::new(
+            std::io::Error::other("org.freedesktop.DBus.Error.ServiceUnknown")
+        ))));
+        assert!(!service_absent(&KeyringError::NoDefaultStore));
     }
 
     pub(super) fn session_backend_absent() -> bool {
