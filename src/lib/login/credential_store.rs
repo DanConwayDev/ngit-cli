@@ -24,6 +24,56 @@ pub const POLICY_ENV: &str = "NGIT_SECRET_STORAGE";
 /// adopters who opted out via `NGIT_CREDENTIAL_STORE=false` stay opted out.
 pub const LEGACY_POLICY_ENV: &str = "NGIT_CREDENTIAL_STORE";
 
+/// Serialize a JSON read/modify/replace using a separate, stable inode. Locking
+/// the JSON file itself would stop protecting it after its atomic replacement.
+/// The returned handle releases the OS lock on drop, including process exit.
+fn lock_json_update(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::{
+        fs,
+        time::{Duration, Instant},
+    };
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        directory.mode(0o700);
+        options.mode(0o600);
+    }
+    directory
+        .create(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    let file = options
+        .open(&lock_path)
+        .with_context(|| format!("failed to open update lock for {}", path.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(fs::TryLockError::WouldBlock) => bail!(
+                "another process is updating {}; wait for that account operation to finish, then retry",
+                path.display()
+            ),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("failed to lock {} for update", path.display()));
+            }
+        }
+    }
+}
+
 /// Where `ngit account login` / `account create` store fresh secrets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretStorage {
@@ -1569,6 +1619,7 @@ mod account_registry {
 
     fn update(mut change: impl FnMut(&mut Registry) -> Result<bool>) -> Result<()> {
         let path = path()?;
+        let _lock = super::lock_json_update(&path)?;
         let mut registry = read_at(&path)?;
         if change(&mut registry)? {
             write_at(&path, &registry)?;
@@ -1918,6 +1969,7 @@ mod file_store {
     }
 
     pub(super) fn set_at(path: &Path, name: &str, keys: &Keys) -> Result<()> {
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         values.insert(entry_key(name), keys.secret_key().to_secret_hex());
         write(path, &values)
@@ -1930,6 +1982,10 @@ mod file_store {
     }
 
     pub(super) fn delete_at(path: &Path, name: &str) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         if values.remove(&entry_key(name)).is_none() {
             return Ok(false);
@@ -1939,6 +1995,7 @@ mod file_store {
     }
 
     pub(super) fn set_value_at(path: &Path, name: &str, value: &str) -> Result<()> {
+        let _lock = super::lock_json_update(path)?;
         let mut values = read(path)?;
         values.insert(entry_key(name), value.to_string());
         write(path, &values)

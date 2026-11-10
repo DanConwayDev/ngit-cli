@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Concurrent account imports and deletions no longer overwrite unrelated
+  credentials or public-index updates in JSON storage. Updates use bounded
+  process locks alongside atomic replacement.
+
 - Credential-store failures explain how to restore access and retain the
   backend cause without repeatedly wrapping the initialization error.
 

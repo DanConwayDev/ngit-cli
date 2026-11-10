@@ -14,6 +14,12 @@ instead: a JSON file at `<ngit-data-dir>/credentials.json` (on Linux
 (0700 directory, 0600 file on unix). Updates write and flush a complete
 replacement beside the file before atomically replacing it on Unix and
 Windows, so interruption cannot leave a partially written credential file.
+Each JSON read/modify/replace holds an OS lock on a separate `.lock` file,
+including public-index updates. This prevents independent ngit processes from
+losing each other's entries. Locks release automatically when the owning process
+exits; acquisition has a 30-second deadline with retry guidance. The empty lock
+files may remain after logout. This is not a cross-store transaction, and older
+ngit versions or external editors that ignore the lock cannot participate in it.
 
 On Unix systems using D-Bus, an unset `DBUS_SESSION_BUS_ADDRESS` and a missing
 session-bus socket (`$XDG_RUNTIME_DIR/bus`, or `/run/user/<uid>/bus`) mean no
