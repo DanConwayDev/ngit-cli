@@ -305,7 +305,25 @@ genuine upload or post-upload-verification shortfall produces the final
 per-server copy warning.
 
 `--verbose` also retains each per-server outcome and failure message. `--json`
-keeps stdout machine-readable and does not draw progress bars.
+keeps stdout as one final result document and does not draw progress bars.
+Blossom progress is flushed as JSON Lines on stderr during release, nsite and
+container publication (unless `--quiet` is set). Each record has
+`type: "progress"`, `operation: "blossom"`, `schema_version: 1` and an `event`
+object with a snake-case `kind` and milestone-specific fields. Placement events
+identify `filename` and the full `server` URL; upload requests include `attempt`
+and `total_bytes`. Throttled `uploaded_bytes` records contain cumulative
+`bytes_sent`, `total_bytes`, `percent` and `attempt`; counters reset for each
+request. They are emitted at 10% steps or on the next byte event after 15 seconds,
+not as a heartbeat while stalled. `upload_body_finished` means the request body
+was sent, not that storage or publication succeeded. `placement_finished` reports
+the server outcome; the final stdout result and exit status remain authoritative
+for the whole command.
+
+Stderr still includes plain-text diagnostics from other components, including
+remote signer messages. Consumers should parse individual stderr lines as JSON
+and select the envelope above, tolerating other lines and future event fields.
+Keep stdout and stderr separate; do not feed combined output to a single-document
+JSON parser. Without `--json`, captured stderr receives plain progress lines.
 
 Each asset has exactly one source:
 

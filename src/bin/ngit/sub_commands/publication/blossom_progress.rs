@@ -292,7 +292,7 @@ impl BlossomUploadProgress {
         // indicatif draws nothing on a stderr that is not a terminal, so logs,
         // CI, scripts and agents get append-only lines instead. `--json` keeps
         // stdout as one document and hides the bars, but still reports
-        // progress on stderr as plain lines.
+        // progress on stderr as JSON lines.
         let quiet = is_quiet();
         let bars = !json_output && !quiet && std::io::stderr().is_terminal();
         let draw_target = if bars {
@@ -300,7 +300,7 @@ impl BlossomUploadProgress {
         } else {
             ProgressDrawTarget::hidden()
         };
-        let lines = (!quiet && !bars).then(BlossomProgressLines::stderr);
+        let lines = (!quiet && !bars).then(|| BlossomProgressLines::stderr(json_output));
         Self::with_draw_target(draw_target, bars, bars && is_verbose(), lines)
     }
 

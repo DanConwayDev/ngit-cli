@@ -1,4 +1,4 @@
-//! Plain, append-only Blossom progress for non-interactive stderr.
+//! Append-only text or JSON Blossom progress for non-interactive stderr.
 //!
 //! indicatif draws nothing when stderr is not a terminal (log files, CI,
 //! scripts, coding agents) and the bar renderer is hidden entirely for
@@ -18,11 +18,12 @@ use reqwest::Url;
 
 /// Report bytes sent at least every this many percent of the body.
 const PERCENT_STEP: u64 = 10;
-/// Report bytes sent at least this often while a body is still transferring.
+/// Report on the next byte event after this interval (not a heartbeat).
 const REPORT_INTERVAL: Duration = Duration::from_secs(15);
 
 struct PlainUpload {
     total_bytes: u64,
+    attempt: usize,
     sent: u64,
     next_percent: u64,
     last_report: Instant,
@@ -32,11 +33,14 @@ pub(super) struct BlossomProgressLines {
     out: Mutex<Box<dyn Write + Send>>,
     uploads: Mutex<HashMap<(String, String), PlainUpload>>,
     report_interval: Duration,
+    json: bool,
 }
 
 impl BlossomProgressLines {
-    pub(super) fn stderr() -> Self {
-        Self::with_writer(Box::new(std::io::stderr()), REPORT_INTERVAL)
+    pub(super) fn stderr(json: bool) -> Self {
+        let mut lines = Self::with_writer(Box::new(std::io::stderr()), REPORT_INTERVAL);
+        lines.json = json;
+        lines
     }
 
     pub(super) fn with_writer(out: Box<dyn Write + Send>, report_interval: Duration) -> Self {
@@ -44,6 +48,7 @@ impl BlossomProgressLines {
             out: Mutex::new(out),
             uploads: Mutex::new(HashMap::new()),
             report_interval,
+            json: false,
         }
     }
 
@@ -67,6 +72,10 @@ impl BlossomProgressLines {
     /// `batch_scope` is the batch numbering after any outer sequential-file
     /// scope has been applied; it is used only for batch start/finish lines.
     pub(super) fn update(&self, event: &BlossomProgressEvent, batch_scope: (usize, usize)) {
+        if self.json {
+            self.update_json(event, batch_scope);
+            return;
+        }
         match event {
             BlossomProgressEvent::PresenceChecksStarted { blobs, servers, .. } => {
                 self.line(&format!(
@@ -160,6 +169,76 @@ impl BlossomProgressLines {
         }
     }
 
+    fn json_record(&self, event: &serde_json::Value) {
+        self.line(
+            &serde_json::json!({
+                "type": "progress", "operation": "blossom", "schema_version": 1,
+                "event": event,
+            })
+            .to_string(),
+        );
+    }
+
+    fn update_json(&self, event: &BlossomProgressEvent, batch_scope: (usize, usize)) {
+        match event {
+            BlossomProgressEvent::UploadedBytes {
+                filename,
+                server,
+                bytes,
+                ..
+            } => {
+                self.uploaded_bytes(filename, server, *bytes);
+                return;
+            }
+            BlossomProgressEvent::UploadRequestStarted {
+                filename,
+                server,
+                attempt,
+                max_attempts,
+                total_bytes,
+                ..
+            } => self.upload_started(filename, server, *attempt, *max_attempts, *total_bytes),
+            BlossomProgressEvent::PlacementFinished {
+                filename, server, ..
+            } => {
+                self.uploads
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&(filename.clone(), server.to_string()));
+            }
+            _ => {}
+        }
+        // Serialize the event fields, not the human message. JSON escaping also
+        // keeps filenames and server diagnostics containing newlines in one record.
+        let Ok(mut record) = serde_json::to_value(event) else {
+            // Progress must not fail publication if a future event cannot serialize.
+            return;
+        };
+        if matches!(
+            event,
+            BlossomProgressEvent::UploadBatchStarted { .. }
+                | BlossomProgressEvent::UploadBatchFinished { .. }
+        ) {
+            record["batch"] = batch_scope.0.into();
+            record["batches"] = batch_scope.1.into();
+        }
+        if let BlossomProgressEvent::UploadBodyFinished {
+            filename, server, ..
+        } = event
+        {
+            if let Some(upload) = self
+                .uploads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&(filename.clone(), server.to_string()))
+            {
+                record["bytes_sent"] = upload.sent.into();
+                record["total_bytes"] = upload.total_bytes.into();
+            }
+        }
+        self.json_record(&record);
+    }
+
     fn upload_started(
         &self,
         filename: &str,
@@ -175,11 +254,15 @@ impl BlossomProgressLines {
                 (filename.to_owned(), server.to_string()),
                 PlainUpload {
                     total_bytes,
+                    attempt,
                     sent: 0,
                     next_percent: PERCENT_STEP,
                     last_report: Instant::now(),
                 },
             );
+        if self.json {
+            return;
+        }
         let attempt = if attempt > 1 {
             format!(" (attempt {attempt}/{max_attempts})")
         } else {
@@ -233,17 +316,29 @@ impl BlossomProgressLines {
             if percent < 100 && (crossed_step || interval_elapsed) {
                 upload.next_percent = (percent / PERCENT_STEP + 1) * PERCENT_STEP;
                 upload.last_report = Instant::now();
-                Some(format!(
-                    "{}/{} sent ({percent}%)",
-                    HumanBytes(upload.sent),
-                    HumanBytes(upload.total_bytes)
-                ))
+                Some((upload.sent, upload.total_bytes, percent, upload.attempt))
             } else {
                 None
             }
         };
-        if let Some(report) = report {
-            self.placement_line(filename, server, &report);
+        if let Some((sent, total, percent, attempt)) = report {
+            if self.json {
+                self.json_record(&serde_json::json!({
+                    "kind": "uploaded_bytes", "filename": filename, "server": server,
+                    "attempt": attempt, "bytes_sent": sent, "total_bytes": total,
+                    "percent": percent,
+                }));
+            } else {
+                self.placement_line(
+                    filename,
+                    server,
+                    &format!(
+                        "{}/{} sent ({percent}%)",
+                        HumanBytes(sent),
+                        HumanBytes(total)
+                    ),
+                );
+            }
         }
     }
 }
@@ -330,6 +425,57 @@ mod tests {
             },
             (1, 1),
         );
+    }
+
+    #[test]
+    fn json_progress_is_throttled_and_resets_bytes_on_retry() {
+        let (mut lines, captured) = lines_with_interval(Duration::from_secs(3600));
+        lines.json = true;
+        let server = Url::parse("https://blossom.example/").unwrap();
+        // Drive the public event boundary, which selects JSON instead of text.
+        let request = |attempt| BlossomProgressEvent::UploadRequestStarted {
+            batch: 1,
+            batches: 1,
+            filename: "app.tar.gz".into(),
+            server: server.clone(),
+            attempt,
+            max_attempts: 3,
+            total_bytes: 1000,
+            additional_bytes: 0,
+        };
+        lines.update(&request(1), (1, 1));
+        send(&lines, &server, 1);
+        send(&lines, &server, 99);
+        lines.update(&request(2), (1, 1));
+        send(&lines, &server, 100);
+        lines.update(
+            &BlossomProgressEvent::PlacementFinished {
+                filename: "app.tar.gz".into(),
+                server: server.clone(),
+                status: BlossomServerStatus::Failed,
+                message: Some("first line\nsecond line".into()),
+            },
+            (0, 0),
+        );
+        let records: Vec<serde_json::Value> = captured
+            .lines()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 5);
+        for record in &records {
+            assert_eq!(record["type"], "progress");
+            assert_eq!(record["operation"], "blossom");
+            assert_eq!(record["schema_version"], 1);
+            assert_eq!(record["event"]["server"], server.as_str());
+        }
+        assert_eq!(records[0]["event"]["kind"], "upload_request_started");
+        assert_eq!(records[1]["event"]["bytes_sent"], 100);
+        assert_eq!(records[3]["event"]["bytes_sent"], 100);
+        assert_eq!(records[3]["event"]["attempt"], 2);
+        assert_eq!(records[4]["event"]["status"], "failed");
+        assert_eq!(records[4]["event"]["message"], "first line\nsecond line");
+        assert!(lines.uploads.lock().unwrap().is_empty());
     }
 
     #[test]

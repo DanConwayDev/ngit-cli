@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ngit release publish`, `ngit nsite deploy` and `ngit container` now print
   plain Blossom upload progress lines when stderr is not a terminal (log files,
-  CI, scripts, coding agents) or when `--json` is used. Each asset and server
-  reports when it starts, how many bytes have been sent (every 10% or 15
-  seconds), retries, and when it finishes or fails. Previously the upload was
-  silent until the final replication summary, so a large upload looked like a
+  CI, scripts, coding agents). With `--json`, these updates are structured JSON
+  Lines on stderr; other diagnostics remain text. Each asset and server
+  reports when it starts, how many bytes have been sent (at 10% steps or on
+  the next byte event after 15 seconds), retries, and when it finishes or fails.
+  Previously the upload was silent until the final replication summary, so it looked like a
   stalled signer. Interactive terminals keep the existing progress bars, and
   `--json` stdout is unchanged.
 
