@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `account logout --all --keep-credentials` can clear login selections while
+  the OS credential store is locked or unavailable; saved credentials and their
+  public index remain intact.
+
 - Refuse to reassign a known signer profile to another identity while its OS
   credential store is inaccessible, preventing a fallback alias from silently
   switching identities again when the keyring unlocks. New profiles still work

@@ -237,3 +237,39 @@ async fn all_resolves_includes_beside_a_symlink_without_touching_target_siblings
     assert!(std::fs::symlink_metadata(&global)?.is_symlink());
     Ok(())
 }
+
+#[tokio::test]
+async fn keep_credentials_clears_selections_when_the_os_store_is_unavailable() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let file = repo.dir().join("credentials.json");
+    let registry = repo.dir().join("credentials.json.accounts");
+    let global = repo.dir().join("global-config");
+    let npub = Keys::generate().public_key().to_bech32()?;
+    std::fs::write(&file, b"{}")?;
+    let index = serde_json::to_vec(&json!({"accounts": [&npub], "aliases": {"locked": &npub}}))?;
+    std::fs::write(&registry, &index)?;
+    git2::Config::open(&global)?.set_str("nostr.signer", "locked")?;
+    let mut command = repo.ngit(["account", "logout", "--all", "--keep-credentials", "--json"]);
+    command
+        .env_remove("NGITTEST")
+        .env("NGIT_KEYRING_FILE", &file)
+        .env("NGIT_TEST_OS_STORE_UNAVAILABLE", "true")
+        .env("GIT_CONFIG_GLOBAL", &global)
+        .env("NGIT_SECRET_STORAGE", "file")
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output()).await??;
+    success(&output);
+    assert_eq!(std::fs::read(&file)?, b"{}");
+    assert_eq!(std::fs::read(&registry)?, index);
+    assert!(
+        git2::Config::open(&global)?
+            .get_string("nostr.signer")
+            .is_err()
+    );
+    let document: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(document["accounts"], json!([]));
+    assert_eq!(document["unavailable_logins"], json!([]));
+    assert_eq!(document["unavailable_accounts"][0]["npub"], npub);
+    Ok(())
+}

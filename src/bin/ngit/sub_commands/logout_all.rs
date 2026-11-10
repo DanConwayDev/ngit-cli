@@ -26,10 +26,17 @@ struct ConfigFile {
     values: BTreeMap<String, Vec<Zeroizing<String>>>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn launch(args: &SubCommandArgs, repo: Option<&Repo>) -> Result<()> {
     reject_environment_login()?;
     let configs = config_files(repo)?;
-    let mut entries = credential_store::all_entries()?;
+    // Retention clears selections without accessing saved secrets. In
+    // particular, a locked keyring must not prevent deselecting its account.
+    let mut entries = if args.keep_credentials {
+        Vec::new()
+    } else {
+        credential_store::all_entries()?
+    };
     let mut remote_keys = BTreeSet::new();
     let mut identity_keys = BTreeSet::new();
     let mut plaintext_keys = Vec::new();

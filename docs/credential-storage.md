@@ -449,3 +449,9 @@ selection intact. A global login preserves repository-local overrides; use
 `account logout --local` removes the repository override and its credentials,
 then inherits the global selection. Add `--keep-credentials` to retain the
 connection for reuse. Shared credentials may also be used by other repositories.
+
+`account logout --all --keep-credentials` does not need to read saved secrets
+to clear login selections. It works while the OS store is locked; the final
+inventory reports accounts that cannot currently be checked. Legacy plaintext
+keys still require successful preservation before their Git configuration is
+removed, and legacy remote connections still require export first.

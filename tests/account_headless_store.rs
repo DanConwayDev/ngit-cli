@@ -660,6 +660,35 @@ async fn production_secret_service_mixed_storage_and_locked_deletion() -> Result
         "locked-store failure changed saved state"
     );
 
+    let retained = probe
+        .run(
+            &["account", "logout", "--all", "--keep-credentials", "--json"],
+            false,
+        )
+        .await?;
+    assert!(
+        retained.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retained.stderr)
+    );
+    let result: Value = serde_json::from_slice(&retained.stdout)?;
+    assert!(
+        result["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account["active"] == false)
+    );
+    let after = probe.snapshot()?;
+    assert_eq!(
+        after[..2],
+        before[..2],
+        "retention changed credentials or index"
+    );
+    assert!(!std::fs::read_to_string(home.join(".gitconfig"))?.contains("signer ="));
+    // Restore only this test's public selection for the subsequent deletion.
+    std::fs::write(home.join(".gitconfig"), &before[2])?;
+
     // Re-open the persisted keyring as a new desktop session would.
     daemon.kill().await?;
     daemon.wait().await?;
