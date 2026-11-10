@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Credential-store failures explain how to restore access and retain the
+  backend cause without repeatedly wrapping the initialization error.
+
 - `account logout --all --keep-credentials` can clear login selections while
   the OS credential store is locked or unavailable; saved credentials and their
   public index remain intact.

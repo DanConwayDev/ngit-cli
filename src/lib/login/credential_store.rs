@@ -202,7 +202,7 @@ impl fmt::Display for LookupError {
                 f,
                 "credential '{name}' was not found in the credential store"
             ),
-            Self::Unavailable(error) => write!(f, "credential store is unavailable: {error}"),
+            Self::Unavailable(error) => write!(f, "credential store is unavailable: {error:#}"),
             Self::Invalid(error) => write!(f, "invalid credential-store entry: {error}"),
         }
     }
@@ -860,7 +860,7 @@ fn store_value(name: &str, value: &str, policy: SecretStorage) -> Result<(String
     if policy == SecretStorage::File && !os_store_disabled() {
         match os_store::get_value(name) {
             Ok(existing) => ensure_unshadowed_file_value(name, value, Some(&existing))?,
-            Err(OsError::NoEntry | OsError::Store(_)) => {}
+            Err(OsError::NoEntry | OsError::Store(_) | OsError::Initialization(_)) => {}
             Err(OsError::Corrupt) => {
                 bail!(
                     "OS credential '{name}' contains invalid data and would shadow the new file-store entry; remove it before using --secret-storage file"
@@ -944,7 +944,9 @@ fn retrieve_value_from(name: &str, backend: Backend) -> std::result::Result<Stri
             Err(OsError::Corrupt) => Err(LookupError::Invalid(format!(
                 "OS credential '{name}' contains invalid text"
             ))),
-            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+            Err(error @ (OsError::Store(_) | OsError::Initialization(_))) => {
+                Err(LookupError::Unavailable(anyhow!(error)))
+            }
         },
         Backend::File => match file_store::get_value(name) {
             Ok(Some(value)) => Ok(value),
@@ -1050,7 +1052,9 @@ pub fn retrieve_from(name: &str, backend: Backend) -> std::result::Result<Keys, 
                 "OS credential '{name}' does not match its npub"
             ))),
             Err(OsError::NoEntry) => Err(LookupError::Missing(name.to_string())),
-            Err(error @ OsError::Store(_)) => Err(LookupError::Unavailable(anyhow!(error))),
+            Err(error @ (OsError::Store(_) | OsError::Initialization(_))) => {
+                Err(LookupError::Unavailable(anyhow!(error)))
+            }
         },
         Backend::File => match file_store::get_value(name) {
             Ok(Some(value)) => {
@@ -1456,6 +1460,8 @@ enum OsError {
     Corrupt,
     /// The store itself could not be reached or used.
     Store(KeyringError),
+    /// The keyring crate retains its initialization result for this process.
+    Initialization(&'static KeyringError),
 }
 
 impl fmt::Display for OsError {
@@ -1466,7 +1472,10 @@ impl fmt::Display for OsError {
                 f,
                 "OS credential store entry does not contain a nostr secret key"
             ),
-            Self::Store(error) => write!(f, "{error}"),
+            Self::Store(_) | Self::Initialization(_) => write!(
+                f,
+                "cannot access the OS credential store; unlock it or restore its session service, then retry"
+            ),
         }
     }
 }
@@ -1475,6 +1484,7 @@ impl std::error::Error for OsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
+            Self::Initialization(error) => Some(*error),
             Self::NoEntry | Self::Corrupt => None,
         }
     }
@@ -1663,11 +1673,7 @@ mod os_store {
         Entry::new(super::SERVICE, name).map_err(|error| {
             if matches!(error, KeyringError::NoDefaultStore) {
                 if let Err(cause) = Entry::store_status() {
-                    return OsError::Store(KeyringError::PlatformFailure(Box::new(
-                        std::io::Error::other(format!(
-                            "credential backend initialization failed: {cause}"
-                        )),
-                    )));
+                    return OsError::Initialization(cause);
                 }
             }
             OsError::Store(error)

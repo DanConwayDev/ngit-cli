@@ -275,23 +275,23 @@ async fn production_headless_key_retention_aliasing_and_explicit_deletion() -> R
             .await?,
     );
     let before_failure = probe.snapshot()?;
-    assert!(
-        !probe
-            .run(
-                &[
-                    "account",
-                    "logout",
-                    "--profile",
-                    "second",
-                    "--forget",
-                    "--json"
-                ],
-                true
-            )
-            .await?
-            .status
-            .success()
-    );
+    let failure = probe
+        .run(
+            &[
+                "account",
+                "logout",
+                "--profile",
+                "second",
+                "--forget",
+                "--json",
+            ],
+            true,
+        )
+        .await?;
+    assert!(!failure.status.success());
+    let diagnostic = String::from_utf8_lossy(&failure.stderr);
+    assert!(diagnostic.contains("unlock it or restore its session service"));
+    assert!(!diagnostic.contains("credential backend initialization failed"));
     assert!(
         probe.snapshot()? == before_failure,
         "failed deletion changed credentials, registry, or Git config"
