@@ -32,6 +32,7 @@ pub mod remote_signer;
 pub mod repo_lookup;
 pub mod repo_ref;
 pub mod repo_state;
+pub mod reporting;
 pub mod self_update;
 pub mod signer;
 pub mod signer_progress;

@@ -105,7 +105,12 @@ pub fn error_document(error: &anyhow::Error) -> serde_json::Value {
 
 pub fn finish_error(error: &anyhow::Error) {
     if is_stream() {
-        eprintln!("CI watch stopped: {error:#}");
+        ngit::reporting::diagnostic(
+            "error",
+            "stream_stopped",
+            &format!("{error:#}"),
+            serde_json::json!({}),
+        );
         return;
     }
     let mut value = JSON_OUTPUT
@@ -134,6 +139,18 @@ pub fn finish_error(error: &anyhow::Error) {
     std::println!("{rendered}");
 }
 
+// Human result summaries are redundant once the command has a JSON document.
+// Earlier operational messages remain visible as structured diagnostics.
+pub fn human_message(message: &str) {
+    let has_result = JSON_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if !has_result {
+        ngit::reporting::message("info", "command_message", message);
+    }
+}
+
 // Keep human-facing command output visible in JSON mode without allowing it to
 // precede or follow the final machine-readable document on stdout. The remote
 // helper module is declared before these macros, so its protocol stdout is not
@@ -141,14 +158,14 @@ pub fn finish_error(error: &anyhow::Error) {
 macro_rules! println {
     () => {{
         if crate::output::is_json() {
-            std::eprintln!();
+            // JSON has no blank presentation lines.
         } else {
             std::println!();
         }
     }};
     ($($arg:tt)*) => {{
         if crate::output::is_json() {
-            std::eprintln!($($arg)*);
+            crate::output::human_message(&format!($($arg)*));
         } else {
             std::println!($($arg)*);
         }
@@ -158,9 +175,18 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => {{
         if crate::output::is_json() {
-            std::eprint!($($arg)*);
+            crate::output::human_message(&format!($($arg)*));
         } else {
             std::print!($($arg)*);
         }
+    }};
+}
+
+// Modules declared before output (notably the Git remote helper) retain their
+// protocol-specific output. This fallback is for command diagnostics, not UI.
+macro_rules! eprintln {
+    () => {{ if !crate::output::is_json() { std::eprintln!(); } }};
+    ($($arg:tt)*) => {{
+        ngit::reporting::message("info", "command_diagnostic", &format!($($arg)*));
     }};
 }

@@ -1114,7 +1114,9 @@ fn hint_plaintext_secret(git_repo: &Option<&Repo>) {
     {
         return;
     }
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "hint: this login's nostr secret is stored in plaintext in git config; run `ngit account login` to move it into a credential store, or set `git config --global nostr.secret-storage git-config` to keep it there and silence this hint."
     );
 }

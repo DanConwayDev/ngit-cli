@@ -63,7 +63,7 @@ pub async fn login_or_signup(
                 Some(credential_store::LookupError::Missing(_))
             ) =>
         {
-            eprintln!("{error}; please log in again");
+            crate::report_message!("info", "account_diagnostic", "{error}; please log in again");
             fresh_login_or_signup(git_repo, client, None, LoginTarget::Global, &[], None, None)
                 .await
         }
@@ -135,16 +135,24 @@ fn print_logged_in_as(
 ) -> Result<()> {
     if is_verbose() {
         if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
-            eprintln!("failed to find profile...");
+            crate::report_message!("info", "account_diagnostic", "failed to find profile...");
         } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
-            eprintln!("failed to extract account name from account metadata...");
+            crate::report_message!(
+                "info",
+                "account_diagnostic",
+                "failed to extract account name from account metadata..."
+            );
         } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
-            eprintln!(
+            crate::report_message!(
+                "info",
+                "account_diagnostic",
                 "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
             );
         }
     }
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         logged_in_message(&user_ref.metadata.name, source, alias)
     );

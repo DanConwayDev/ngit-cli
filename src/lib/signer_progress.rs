@@ -3,6 +3,7 @@
 
 mod countdown;
 mod input;
+mod json;
 use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use anyhow::Result;
@@ -444,6 +445,8 @@ async fn run_remote_operation_inner<T>(
     mut listening: Option<impl FnMut()>,
     allow_resend: bool,
 ) -> Result<T> {
+    let mut json_progress =
+        crate::output_mode::is_json().then(|| json::JsonProgress::new(description));
     let mut deadline_at = tokio::time::Instant::now() + SIGNER_TIMEOUT;
     let _monitor =
         wait_for_signer_until(deadline_at, async { Ok(connect.lock_operation().await) }).await?;
@@ -456,7 +459,11 @@ async fn run_remote_operation_inner<T>(
     let term = console::Term::stderr();
     let policy = crate::output_mode::progress_policy();
     let mut countdown = CountdownLine::new(&term, policy);
-    let mut line = Some(TransientLine::write(&term, description)?);
+    let mut line = if json_progress.is_some() {
+        None
+    } else {
+        Some(TransientLine::write(&term, description)?)
+    };
     let mut clear_line = || -> Result<()> {
         if let Some(line) = line.take() {
             if term.is_term() {
@@ -484,6 +491,14 @@ async fn run_remote_operation_inner<T>(
             biased;
             _ = &mut observer, if observing => observing = false,
             result = &mut operation => {
+                if let Some(progress) = &mut json_progress {
+                    while let Ok(event) = events.try_recv() {
+                        progress.update(&event);
+                        state.update(event);
+                    }
+                    let error = result.as_ref().err().map(|error| format!("{error:#}"));
+                    progress.finish(error.as_deref());
+                }
                 drop(input.take());
                 if result.is_err() {
                     while let Ok(event) = events.try_recv() { state.update(event); }
@@ -508,6 +523,7 @@ async fn run_remote_operation_inner<T>(
             event = events.recv(), if events_open => {
                 match event {
                     Ok(event) => {
+                        if let Some(progress) = &mut json_progress { progress.update(&event); }
                         let listener_ready = listener_callback_ready(&event, listening.is_some(), listened);
                         if listener_ready {
                             clear_line()?;
@@ -531,7 +547,7 @@ async fn run_remote_operation_inner<T>(
                         }
                         let request_started = matches!(&event, ConnectProgress::Request { .. });
                         let public_key_request = matches!(&event, ConnectProgress::Request { method: nostr::nips::nip46::NostrConnectMethod::GetPublicKey, .. });
-                        if public_key_request && listening.is_some() && !expanded && !policy.quiet {
+                        if public_key_request && listening.is_some() && !expanded && !policy.quiet && json_progress.is_none() {
                             clear_line()?;
                             countdown.clear()?;
                             write_progress_line(&term, &console::Style::new().for_stderr().bold().apply_to(
@@ -556,13 +572,17 @@ async fn run_remote_operation_inner<T>(
                     Err(RecvError::Lagged(_)) => {
                         let report = state.report(connect, description, false).await;
                         countdown.clear()?;
-                        if !policy.quiet { write_progress_line(&term, "Signer progress updates were missed; request acceptance may be unknown.")?; }
+                        if json_progress.is_some() {
+                            crate::reporting::diagnostic("warning", "signer_progress_lagged",
+                                "Signer progress updates were missed; request acceptance may be unknown.", serde_json::json!({}));
+                        } else if !policy.quiet { write_progress_line(&term, "Signer progress updates were missed; request acceptance may be unknown.")?; }
                         countdown.show(report, state.pending_retry(), deadline_at)?;
                     }
                     Err(RecvError::Closed) => events_open = false,
                 }
             }
             _ = &mut deadline => {
+                if let Some(progress) = &mut json_progress { progress.finish(Some("signer response timed out")); }
                 drop(input.take());
                 state.finished = true;
                 let report = state.report(connect, description, false).await;

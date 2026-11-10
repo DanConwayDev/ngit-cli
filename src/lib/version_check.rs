@@ -174,7 +174,9 @@ pub async fn print_update_notice_if_available(git_repo_path: Option<&Path>) -> R
             "ngit v{} is available; you have v{}. Run `ngit update` for details",
             update.version, update.current
         );
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "update_notice",
             "{}",
             Style::new()
                 .fg(UPDATE_NOTICE_COLOR)

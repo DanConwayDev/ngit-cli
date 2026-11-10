@@ -143,8 +143,8 @@ pub struct Cli {
     /// Most commands emit one document. `ci status --watch` streams compact
     /// snapshots/changes as JSON Lines; --full-events emits complete events.
     ///
-    /// Progress stays on stderr as plain state changes without terminal
-    /// redraws.
+    /// Signer and relay progress is compact JSON Lines on stderr, without
+    /// terminal redraws. Git/subprocess output may still contain plain text.
     #[arg(long, global = true, conflicts_with = "interactive")]
     pub json: bool,
 }

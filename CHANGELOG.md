@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--json` streams compact signer and relay progress as JSON Lines on stderr,
+  with immediate waits, retries and failures, aggregate relay outcomes and
+  throttled count samples. Shared diagnostics are structured and redundant human
+  result summaries are suppressed. Explicit signer pairing emits an actionable
+  URI record even with `--quiet`. Final stdout results remain unchanged; Git
+  and external-process output are not yet fully structured.
+
 - `ci status --watch` monitors workflow and job progress in an inline terminal
   view without taking over the screen. It exits after all observed workflows
   conclude and 10 seconds pass without updates; pending work or missing evidence

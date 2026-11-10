@@ -319,9 +319,11 @@ was sent, not that storage or publication succeeded. `placement_finished` report
 the server outcome; the final stdout result and exit status remain authoritative
 for the whole command.
 
-Stderr still includes plain-text diagnostics from other components, including
-remote signer messages. Consumers should parse individual stderr lines as JSON
-and select the envelope above, tolerating other lines and future event fields.
+Signer and relay progress also use compact JSON Lines, with separate operation
+IDs; shared notices and errors use diagnostic records. See the
+[progress contract](architecture/progress-output.md). Git operations and external
+processes may still emit text. Consumers should select the envelope above and
+tolerate other record types, future fields and remaining plain-text paths.
 Keep stdout and stderr separate; do not feed combined output to a single-document
 JSON parser. Without `--json`, captured stderr receives plain progress lines.
 

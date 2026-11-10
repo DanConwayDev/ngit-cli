@@ -1199,20 +1199,29 @@ async fn fresh_login_replaces_default_but_preserves_named_connections() -> Resul
 /// is used: emitting the URI must mean ngit is ready to receive the response.
 #[tokio::test]
 async fn nostrconnect_cli_pairs_without_terminal_input() -> Result<()> {
-    assert_nostrconnect_cli_pairing(true, false).await
+    assert_nostrconnect_cli_pairing(true, false, false).await
 }
 
 #[tokio::test]
 async fn nostrconnect_cli_rejection_preserves_existing_login() -> Result<()> {
-    assert_nostrconnect_cli_pairing(false, false).await
+    assert_nostrconnect_cli_pairing(false, false, false).await
 }
 
 #[tokio::test]
 async fn nostrconnect_cli_saves_profile_without_activation() -> Result<()> {
-    assert_nostrconnect_cli_pairing(true, true).await
+    assert_nostrconnect_cli_pairing(true, true, false).await
 }
 
-async fn assert_nostrconnect_cli_pairing(approve: bool, no_activate: bool) -> Result<()> {
+#[tokio::test]
+async fn nostrconnect_cli_quiet_preserves_pairing_action() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true, false, true).await
+}
+
+async fn assert_nostrconnect_cli_pairing(
+    approve: bool,
+    no_activate: bool,
+    quiet: bool,
+) -> Result<()> {
     use std::process::Stdio;
 
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1249,6 +1258,9 @@ async fn assert_nostrconnect_cli_pairing(approve: bool, no_activate: bool) -> Re
         relay_url.as_str(),
         "--json",
     ]);
+    if quiet {
+        command.arg("--quiet");
+    }
     command.arg(if no_activate {
         "--no-activate"
     } else {
@@ -1269,10 +1281,19 @@ async fn assert_nostrconnect_cli_pairing(approve: bool, no_activate: bool) -> Re
     let uri = tokio::time::timeout(READY_DEADLINE, async {
         while let Some(line) = stderr.next_line().await? {
             startup_diagnostics.push(line.clone());
-            if let Some((prefix, value)) = line.split_once(": ") {
-                if prefix.eq_ignore_ascii_case("nostrconnect") {
-                    return NostrConnectUri::parse(value).map_err(anyhow::Error::from);
-                }
+            let record: serde_json::Value = serde_json::from_str(&line)
+                .with_context(|| format!("non-JSON pairing diagnostic: {line}"))?;
+            if record["type"] == "action_required" && record["action"] == "signer_pairing" {
+                assert!(
+                    child.try_wait()?.is_none(),
+                    "pairing must be reported before completion"
+                );
+                return NostrConnectUri::parse(
+                    record["details"]["uri"]
+                        .as_str()
+                        .context("missing pairing URI")?,
+                )
+                .map_err(anyhow::Error::from);
             }
         }
         anyhow::bail!("login ended without emitting a pairing URI")
@@ -1314,6 +1335,24 @@ async fn assert_nostrconnect_cli_pairing(approve: bool, no_activate: bool) -> Re
         .context("noninteractive pairing did not complete")??;
     signer_task.abort();
     let diagnostics = stderr_task.await??;
+    for line in diagnostics.lines() {
+        let _: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("non-JSON signer diagnostic: {line}"))?;
+    }
+    assert!(
+        diagnostics.lines().count() < 30,
+        "excessive signer reporting: {diagnostics}"
+    );
+    if quiet {
+        for line in startup_diagnostics
+            .iter()
+            .map(String::as_str)
+            .chain(diagnostics.lines())
+        {
+            let record: serde_json::Value = serde_json::from_str(line)?;
+            assert_ne!(record["type"], "progress");
+        }
+    }
     let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     if !approve {
         assert!(
