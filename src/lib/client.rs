@@ -5996,30 +5996,17 @@ async fn send_events_with_cache_path(
         bail!("repository-only publication requires at least one repository relay")
     }
 
-    let my_write_relays = if repo_relay_only {
-        vec![]
-    } else {
-        my_write_relays
-    };
-
-    // Only include default relays as fallback when there are no repo relays
-    // (bootstrapping case, e.g. new account signup). When repo relays exist,
-    // trust the repo and user relay configuration.
-    let fallback = [
-        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
-            client.get_relay_default_set().clone()
-        } else {
-            vec![]
-        },
-        if !repo_relay_only && events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
-            client.get_blaster_relays().clone()
-        } else {
-            vec![]
-        },
-    ]
-    .concat();
-    let mut relays: Vec<&str> = vec![];
-
+    let targets = publication_targets(
+        &repo_read_relays,
+        &my_write_relays,
+        client.get_relay_default_set(),
+        client.get_blaster_relays(),
+        repo_relay_only,
+        events
+            .iter()
+            .any(|event| event.kind == Kind::GitRepoAnnouncement),
+    );
+    let my_write_relays = targets.write_relays;
     if private_repository {
         client.nip42_register_private_repo_relays(repo_read_relays.clone());
     } else {
@@ -6032,37 +6019,13 @@ async fn send_events_with_cache_path(
             .collect(),
     );
 
-    let repo_read_relays = repo_read_relays
+    let repo_read_relays = targets.repo_relays;
+    let fallback = targets.fallback;
+    let relays = targets
+        .relays
         .iter()
-        .map(|r| r.to_string())
-        .collect::<Vec<String>>();
-
-    let all = &[
-        repo_read_relays.clone(),
-        my_write_relays.clone(),
-        fallback.clone(),
-    ]
-    .concat();
-    // add duplicates first
-    for r in &repo_read_relays {
-        let r_clean = remove_trailing_slash(r);
-        if !my_write_relays
-            .iter()
-            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
-            .count()
-            > 1
-            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
-        {
-            relays.push(r);
-        }
-    }
-
-    for r in all {
-        let r_clean = remove_trailing_slash(r);
-        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
-            relays.push(r);
-        }
-    }
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     let events_description = describe_events(&events);
     let already_attempted = !early_receipts.is_empty()
@@ -6257,6 +6220,87 @@ async fn send_events_with_cache_path(
     )?;
 
     Ok(relay_results)
+}
+
+/// Publication destinations and their roles, shared by proposal admission and
+/// ordinary publication. Keep routing separate from transport and receipts.
+pub(crate) struct PublicationTargets {
+    pub(crate) relays: Vec<String>,
+    repo_relays: Vec<String>,
+    write_relays: Vec<String>,
+    fallback: Vec<String>,
+}
+
+pub(crate) fn publication_targets(
+    repo_read_relays: &[RelayUrl],
+    my_write_relays: &[String],
+    default_relays: &[String],
+    blaster_relays: &[String],
+    repo_relay_only: bool,
+    includes_announcement: bool,
+) -> PublicationTargets {
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        my_write_relays.to_vec()
+    };
+
+    // Only include default relays as fallback when there are no repo relays
+    // (bootstrapping case, e.g. new account signup). When repo relays exist,
+    // trust the repo and user relay configuration.
+    let fallback = [
+        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
+            default_relays.to_vec()
+        } else {
+            vec![]
+        },
+        if !repo_relay_only && includes_announcement {
+            blaster_relays.to_vec()
+        } else {
+            vec![]
+        },
+    ]
+    .concat();
+    let mut relays: Vec<&str> = vec![];
+
+    let repo_read_relays = repo_read_relays
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<Vec<String>>();
+
+    let all = &[
+        repo_read_relays.clone(),
+        my_write_relays.clone(),
+        fallback.clone(),
+    ]
+    .concat();
+    // add duplicates first
+    for r in &repo_read_relays {
+        let r_clean = remove_trailing_slash(r);
+        if !my_write_relays
+            .iter()
+            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
+            .count()
+            > 1
+            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
+        {
+            relays.push(r);
+        }
+    }
+
+    for r in all {
+        let r_clean = remove_trailing_slash(r);
+        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
+            relays.push(r);
+        }
+    }
+
+    PublicationTargets {
+        relays: relays.into_iter().map(str::to_owned).collect(),
+        repo_relays: repo_read_relays,
+        write_relays: my_write_relays,
+        fallback,
+    }
 }
 
 fn repository_only_routing(
@@ -7324,6 +7368,74 @@ mod private_repository_tests {
     fn signed(keys: &Keys, builder: EventBuilder) -> Event {
         keys.sign_event(builder.finalize_unsigned(keys.public_key()))
             .unwrap()
+    }
+
+    #[test]
+    fn publication_targets_preserve_roles_and_deduplicate_destinations() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        let writes = vec!["wss://repo.example".into(), "wss://writer.example".into()];
+        let targets = publication_targets(
+            std::slice::from_ref(&repo),
+            &writes,
+            &["wss://default.example".into()],
+            &[
+                "wss://writer.example/".into(),
+                "wss://blaster.example".into(),
+            ],
+            false,
+            true,
+        );
+        assert_eq!(
+            targets.relays,
+            vec![
+                repo.to_string(),
+                writes[1].clone(),
+                "wss://blaster.example".into()
+            ]
+        );
+        assert_eq!(targets.repo_relays, vec![repo.to_string()]);
+        assert_eq!(targets.write_relays, writes);
+        assert!(
+            !targets
+                .fallback
+                .iter()
+                .any(|url| url.contains("default.example"))
+        );
+    }
+
+    #[test]
+    fn publication_targets_restrict_private_and_repository_only_fanout() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        for repos in [vec![], vec![repo.clone()]] {
+            let targets = publication_targets(
+                &repos,
+                &["wss://writer.example".into()],
+                &["wss://default.example".into()],
+                &["wss://blaster.example".into()],
+                true,
+                true,
+            );
+            assert_eq!(
+                targets.relays,
+                repos.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            assert!(targets.write_relays.is_empty());
+            assert!(targets.fallback.is_empty());
+        }
+    }
+
+    #[test]
+    fn publication_targets_use_defaults_only_without_configured_destinations() {
+        let defaults = vec!["wss://default.example".into()];
+        let blasters = vec!["wss://blaster.example".into()];
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, defaults);
+        let writes = vec!["wss://writer.example".into()];
+        let targets = publication_targets(&[], &writes, &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, writes);
+        assert!(targets.fallback.is_empty());
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, true);
+        assert_eq!(targets.relays, [defaults, blasters].concat());
     }
 
     #[test]

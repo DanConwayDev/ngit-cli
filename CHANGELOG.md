@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Share relay destination selection between PR admission and ordinary event
+  publication to keep repository-only routing and fallback policy consistent.
 - Fetch and cache NIP-11 relay information during standard event fetching to
   detect relay capabilities. When a known GRASP implementation lacking purgatory
   (such as Pyramid) is used as a PR hint server, push Git data before publishing

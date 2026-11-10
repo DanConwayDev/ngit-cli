@@ -20,8 +20,8 @@ use crate::{
     cli_interactor::count_lines_per_msg_vec,
     client::{
         Connect, EarlyPublicationError, ProposalPublicationReceipt,
-        get_all_proposal_patch_pr_pr_update_events_from_cache, save_event_in_local_cache,
-        sign_draft_event,
+        get_all_proposal_patch_pr_pr_update_events_from_cache, publication_targets,
+        save_event_in_local_cache, sign_draft_event,
     },
     git::{
         Repo, RepoActions,
@@ -643,16 +643,22 @@ fn repository_is_private(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
 }
 
 fn early_staging_permitted(git_repo: &Repo, repo_ref: &RepoRef, paired_relay: &RelayUrl) -> bool {
-    let locally_private = repository_is_private(git_repo, repo_ref);
-    let repo_relay_only = locally_private
+    staging_relay_is_permitted(
+        proposal_repository_only_routing(git_repo, repo_ref),
+        &repo_ref.relays,
+        paired_relay,
+    )
+}
+
+fn proposal_repository_only_routing(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
+    repository_is_private(git_repo, repo_ref)
         || std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
         || git_repo
             .git_repo
             .config()
             .ok()
             .and_then(|config| config.get_bool("nostr.repo-relay-only").ok())
-            .unwrap_or(false);
-    staging_relay_is_permitted(repo_relay_only, &repo_ref.relays, paired_relay)
+            .unwrap_or(false)
 }
 
 fn staging_relay_is_permitted(
@@ -1507,29 +1513,20 @@ async fn push_proposal_in_phases(
     // including repository-only and private routing. These targets join the
     // GRASP admissions in this same fanout, not a third post-Git phase.
     let user_relays = user_ref.relays.write();
-    let ordinary_relays = repo_ref
+    let targets = publication_targets(
+        &repo_ref.relays,
+        &user_relays,
+        client.get_relay_default_set(),
+        &[],
+        proposal_repository_only_routing(git_repo, repo_ref),
+        false,
+    );
+    for relay in targets
         .relays
         .iter()
-        .cloned()
-        .chain(
-            user_relays
-                .iter()
-                .filter_map(|url| RelayUrl::parse(url).ok()),
-        )
-        .chain(if repo_ref.relays.is_empty() && user_relays.is_empty() {
-            client
-                .get_relay_default_set()
-                .iter()
-                .filter_map(|url| RelayUrl::parse(url).ok())
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        });
-    for relay in ordinary_relays {
-        if early_staging_permitted(git_repo, repo_ref, &relay)
-            && !outcomes.contains_key(&relay)
-            && !relays.contains(&relay)
-        {
+        .filter_map(|url| RelayUrl::parse(url).ok())
+    {
+        if !outcomes.contains_key(&relay) && !relays.contains(&relay) {
             relays.push(relay);
         }
     }
