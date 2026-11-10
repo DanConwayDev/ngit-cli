@@ -203,6 +203,8 @@ enum RelayProgressMode {
     Detailed,
     LogConcise,
     LogDetailed,
+    Json,
+    JsonDetailed,
     Hidden,
 }
 
@@ -278,6 +280,39 @@ impl RelayLog {
     }
 }
 
+struct RelayJson {
+    progress: crate::reporting::Progress,
+    succeeded: usize,
+    failed: usize,
+    detailed: bool,
+}
+
+impl RelayJson {
+    fn outcome(&mut self, relay: &str, message: &str, success: bool) {
+        if success {
+            self.succeeded += 1;
+        } else {
+            self.failed += 1;
+        }
+        if !success || self.detailed {
+            self.progress.update(if success { "relay_completed" } else { "relay_failed" },
+                serde_json::json!({"relay": relay, "reason": if success { None } else { Some(plain_relay_progress(message)) }}));
+        }
+        self.progress
+            .sample(serde_json::json!({"succeeded":self.succeeded, "failed":self.failed}));
+    }
+    fn finish(&mut self, has_errors: bool) {
+        self.progress.finish(
+            if has_errors {
+                "incomplete"
+            } else {
+                "completed"
+            },
+            serde_json::json!({"succeeded":self.succeeded, "failed":self.failed}),
+        );
+    }
+}
+
 fn plain_relay_progress(text: &str) -> String {
     console::strip_ansi_codes(text)
         .split_whitespace()
@@ -290,12 +325,14 @@ fn plain_relay_progress(text: &str) -> String {
 /// Normal commands start with one concise spinner and reveal per-relay rows
 /// only after the shared delay. Partial failures remain transient once the
 /// operation completes; an unavailable required relay set retains its
-/// diagnostics. Verbose terminals retain details. JSON and pipes emit plain
-/// transition records, while quiet and explicitly silent reports stay hidden.
+/// diagnostics. Verbose terminals retain details. JSON emits compact typed
+/// outcomes; pipes receive plain transitions. Quiet and silent reports stay
+/// hidden.
 pub struct RelayProgressReporter {
     details: Option<MultiProgress>,
     mode: RelayProgressMode,
     log: Option<Arc<Mutex<RelayLog>>>,
+    json: Option<Arc<Mutex<RelayJson>>>,
     _spinner_multi: Option<MultiProgress>,
     spinner: Option<ProgressBar>,
     heading: Option<ProgressBar>,
@@ -319,6 +356,7 @@ pub struct RelayProgressHandle {
     details: MultiProgress,
     mode: RelayProgressMode,
     log: Option<Arc<Mutex<RelayLog>>>,
+    json: Option<Arc<Mutex<RelayJson>>>,
     reveal_state: Option<Arc<BarRevealState>>,
 }
 
@@ -333,7 +371,7 @@ impl RelayProgressHandle {
                 .unwrap()
                 .start(&progress_bar.prefix())
             {
-                eprintln!("{line}");
+                crate::report_message!("info", "relay_diagnostic", "{line}");
             }
         }
         self.details.add(progress_bar)
@@ -345,7 +383,10 @@ impl RelayProgressHandle {
         }
     }
 
-    fn finish_bar(&self, progress_bar: &ProgressBar, message: String, success: bool) {
+    fn finish_bar(&self, relay: &str, progress_bar: &ProgressBar, message: String, success: bool) {
+        if let Some(json) = &self.json {
+            json.lock().unwrap().outcome(relay, &message, success);
+        }
         if let Some(log) = &self.log {
             if let Some(line) = log.lock().unwrap().finish(
                 &progress_bar.prefix(),
@@ -353,7 +394,7 @@ impl RelayProgressHandle {
                 success,
                 self.mode == RelayProgressMode::LogDetailed,
             ) {
-                eprintln!("{line}");
+                crate::report_message!("info", "relay_diagnostic", "{line}");
             }
         }
         finish_bar(progress_bar, message, &self.reveal_state);
@@ -361,28 +402,63 @@ impl RelayProgressHandle {
 }
 
 impl RelayProgressReporter {
-    fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
+    fn new(
+        operation: &str,
+        metadata: serde_json::Value,
+        heading_message: impl Into<String>,
+        animate: bool,
+        silent: bool,
+    ) -> Self {
         let heading_message = heading_message.into();
         let mut policy = progress_policy();
         policy.animate &= animate;
-        let mode = RelayProgressMode::from_policy(policy, silent);
-        Self::with_mode(heading_message, mode)
+        let mode = if crate::output_mode::is_json() && !policy.quiet && !silent {
+            if policy.detailed {
+                RelayProgressMode::JsonDetailed
+            } else {
+                RelayProgressMode::Json
+            }
+        } else {
+            RelayProgressMode::from_policy(policy, silent)
+        };
+        Self::with_mode(operation, metadata, heading_message, mode)
     }
 
     /// Construct the standard relay-fetch report used by non-silent commands.
     pub fn fetching() -> Self {
-        Self::new(RELAY_FETCH_HEADING, true, false)
+        Self::new(
+            "relay_fetch",
+            serde_json::json!({"unit":"relay_checks"}),
+            RELAY_FETCH_HEADING,
+            true,
+            false,
+        )
     }
 
     /// Construct a hidden reporter for alternative [`Connect`]
     /// implementations and queries which own no terminal UI.
     pub fn hidden() -> Self {
-        Self::with_mode(String::new(), RelayProgressMode::Hidden)
+        Self::with_mode(
+            "relay_fetch",
+            serde_json::json!({}),
+            String::new(),
+            RelayProgressMode::Hidden,
+        )
     }
 
-    fn with_mode(heading_message: String, mode: RelayProgressMode) -> Self {
+    fn with_mode(
+        operation: &str,
+        metadata: serde_json::Value,
+        heading_message: String,
+        mode: RelayProgressMode,
+    ) -> Self {
         if mode.logs() {
-            eprintln!("{}", plain_relay_progress(&heading_message));
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "{}",
+                plain_relay_progress(&heading_message)
+            );
         }
         let (spinner_multi, spinner) = if mode == RelayProgressMode::Concise {
             let multi = MultiProgress::new();
@@ -448,6 +524,18 @@ impl RelayProgressReporter {
             log: mode
                 .logs()
                 .then(|| Arc::new(Mutex::new(RelayLog::default()))),
+            json: matches!(
+                mode,
+                RelayProgressMode::Json | RelayProgressMode::JsonDetailed
+            )
+            .then(|| {
+                Arc::new(Mutex::new(RelayJson {
+                    progress: crate::reporting::Progress::new(operation, metadata),
+                    succeeded: 0,
+                    failed: 0,
+                    detailed: mode == RelayProgressMode::JsonDetailed,
+                }))
+            }),
             _spinner_multi: spinner_multi,
             spinner,
             heading,
@@ -465,6 +553,7 @@ impl RelayProgressReporter {
             details: self.details.as_ref().unwrap().clone(),
             mode: self.mode,
             log: self.log.clone(),
+            json: self.json.clone(),
             reveal_state: self.reveal_state.clone(),
         }
     }
@@ -478,9 +567,19 @@ impl RelayProgressReporter {
         if let Some(handle) = self.timer_handle.take() {
             handle.abort();
         }
+        if let Some(json) = &self.json {
+            json.lock().unwrap().finish(has_errors);
+            self.finished = true;
+            return Ok(());
+        }
         if let Some(log) = &self.log {
             let summary = concise_summary.unwrap_or_else(|| log.lock().unwrap().summary());
-            eprintln!("{}", plain_relay_progress(&summary));
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "{}",
+                plain_relay_progress(&summary)
+            );
             self.finished = true;
             return Ok(());
         }
@@ -852,7 +951,11 @@ impl Connect for Client {
             .filter_map(|relay| match RelayUrl::parse(relay) {
                 Ok(url) => Some(url),
                 Err(error) => {
-                    eprintln!("warning: skipping invalid relay url {relay}: {error}");
+                    crate::report_message!(
+                        "info",
+                        "relay_diagnostic",
+                        "warning: skipping invalid relay url {relay}: {error}"
+                    );
                     None
                 }
             })
@@ -870,7 +973,11 @@ impl Connect for Client {
         // mistake an outage for absent events consult their own caches or
         // use get_events_per_relay directly
         if !relay_results.is_empty() && relay_results.iter().all(Result::is_err) {
-            eprintln!("warning: no relay responded while fetching events; continuing without them");
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "warning: no relay responded while fetching events; continuing without them"
+            );
         }
         Ok(get_dedup_events(relay_results))
     }
@@ -932,14 +1039,14 @@ impl Connect for Client {
                         let message =
                             style_progress_bar_with_error(relay.url(), &pb, &anyhow!("{reason}"));
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message, false);
+                            progress.finish_bar(relay.url().as_str(), pb, message, false);
                         }
                         bail!("{reason}");
                     }
                     if let Err(error) = ensure_onion_url_reachable(relay.url().as_str()) {
                         let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message, false);
+                            progress.finish_bar(relay.url().as_str(), pb, message, false);
                         }
                         return Err(error);
                     }
@@ -952,7 +1059,7 @@ impl Connect for Client {
                             }
                             let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                             if let Some(pb) = &pb {
-                                progress.finish_bar(pb, message, false);
+                                progress.finish_bar(relay.url().as_str(), pb, message, false);
                             }
                             Err(error)
                         }
@@ -964,7 +1071,7 @@ impl Connect for Client {
                                     format!("{} events", res.len()),
                                     relay.url()
                                 ));
-                                progress.finish_bar(pb, String::new(), true);
+                                progress.finish_bar(relay.url().as_str(), pb, String::new(), true);
                             }
                             Ok(res)
                         }
@@ -1214,7 +1321,7 @@ impl Connect for Client {
                                 &anyhow!("{reason}"),
                             );
                             if let Some(ref bar) = pb {
-                                progress.finish_bar(bar, msg, false);
+                                progress.finish_bar(relay_url.as_str(), bar, msg, false);
                             }
                             bail!("{reason}");
                         }
@@ -1292,7 +1399,7 @@ impl Connect for Client {
                                     &error,
                                 );
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, msg, false);
+                                    progress.finish_bar(relay_url.as_str(), bar, msg, false);
                                 }
                                 Err(error)
                             }
@@ -1301,7 +1408,7 @@ impl Connect for Client {
                                 // by fetch_all_from_relay; finish it through
                                 // the deferred mechanism.
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, String::new(), true);
+                                    progress.finish_bar(relay_url.as_str(), bar, String::new(), true);
                                 }
                                 Ok(res)
                             }
@@ -2767,7 +2874,9 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Cache
 
 fn use_in_memory_global_cache(error: anyhow::Error) -> Arc<dyn NostrDatabase> {
     if !GLOBAL_CACHE_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
             "warning: {error:#}\n\
              continuing with an in-memory global cache; set NGIT_CACHE_DIR to a writable directory \
              to enable persistent caching"
@@ -3425,7 +3534,11 @@ pub fn save_repository_privacy_to_git_config(git_repo_path: &Path, private: bool
         Ok(())
     })();
     if let Err(error) = result {
-        eprintln!("warning: failed to record repository privacy in git config: {error:#}");
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
+            "warning: failed to record repository privacy in git config: {error:#}"
+        );
     }
 }
 
@@ -3449,7 +3562,11 @@ pub async fn warn_if_invited_as_maintainer(git_repo_path: &Path, repo_ref: &Repo
     };
 
     if invited_as_maintainer && !INVITED_MAINTAINER_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!("warning: you are invited as a maintainer, consider running `ngit repo accept`.");
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
+            "warning: you are invited as a maintainer, consider running `ngit repo accept`."
+        );
     }
 }
 
@@ -5237,7 +5354,7 @@ async fn fetching_with_report_policy_outcome(
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
     // stdout.
-    if print_summary {
+    if print_summary && !crate::output_mode::is_json() {
         let term = console::Term::stderr();
         if outcome.report.to_string().is_empty() {
             write_progress_line(&term, "no updates")?;
@@ -5606,7 +5723,7 @@ fn merge_early_publication_receipts(
                 for receipt in matching.iter().filter(|receipt| {
                     receipt.relay.as_str().trim_end_matches('/') == relay
                 }) {
-                    eprintln!(
+                    crate::report_message!("info", "relay_diagnostic",
                         "warning: later relay fanout did not confirm proposal event {}; using its Git-committed early acceptance on {} (no other event or relay acceptance is implied)",
                         receipt.event.id, relay
                     );
@@ -5644,7 +5761,9 @@ fn merge_early_publication_receipts(
     if !partially_covered.is_empty() {
         partially_covered.sort();
         partially_covered.dedup();
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
             "warning: early publication plus Git acceptance covers only part of this event batch: {}; the close/other events still need relay publication",
             partially_covered.join(", ")
         );
@@ -6039,6 +6158,8 @@ async fn send_events_with_cache_path(
             })
         });
     let progress_reporter = RelayProgressReporter::new(
+        "relay_publish",
+        serde_json::json!({"unit":"relay_batches", "events":events.len(), "relays":relays.len()}),
         if already_attempted {
             format!("Reporting publication results for {events_description}...")
         } else {
@@ -6142,7 +6263,7 @@ async fn send_events_with_cache_path(
                     if let Some(reason) = &receipt.outcome.error {
                         error = Some(reason.clone());
                         pb.set_style(pb_after_style_failed.clone());
-                        progress.finish_bar(&pb, reason.clone(), false);
+                        progress.finish_bar(relay, &pb, reason.clone(), false);
                         break;
                     }
                     pb.inc(1);
@@ -6162,7 +6283,7 @@ async fn send_events_with_cache_path(
                             .for_stderr()
                             .red()
                             .to_string();
-                        progress.finish_bar(&pb, msg, false);
+                        progress.finish_bar(relay, &pb, msg, false);
                         error = Some(reason);
                         break;
                     }
@@ -6170,7 +6291,7 @@ async fn send_events_with_cache_path(
             }
             if error.is_none() {
                 pb.set_style(pb_after_style_succeeded.clone());
-                progress.finish_bar(&pb, String::new(), true);
+                progress.finish_bar(relay, &pb, String::new(), true);
             }
             RelayPublishOutcome {
                 relay: relay_clean.to_string(),
@@ -6656,6 +6777,30 @@ mod tests {
     }
 
     #[test]
+    fn json_relay_report_summarizes_successes_and_preserves_failures() {
+        let (progress, bytes) = crate::reporting::tests::progress("relay_publish");
+        let mut report = RelayJson {
+            progress,
+            succeeded: 0,
+            failed: 0,
+            detailed: false,
+        };
+        for _ in 0..100 {
+            report.outcome("wss://healthy", "", true);
+        }
+        assert_eq!(crate::reporting::tests::records(&bytes).len(), 1);
+        report.outcome("wss://offline", "connection failed", false);
+        report.finish(true);
+        let records = crate::reporting::tests::records(&bytes);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1]["state"], "relay_failed");
+        assert_eq!(records[1]["details"]["relay"], "wss://offline");
+        assert_eq!(records[2]["state"], "incomplete");
+        assert_eq!(records[2]["details"]["succeeded"], 100);
+        assert_eq!(records[2]["details"]["failed"], 1);
+    }
+
+    #[test]
     fn relay_logs_preserve_failures_without_repeating_unchanged_details() {
         let mut log = RelayLog::default();
         assert!(log.finish("wss://healthy", "", true, false).is_none());
@@ -6686,7 +6831,12 @@ mod tests {
             RelayProgressMode::LogConcise,
             RelayProgressMode::LogDetailed,
         ] {
-            let reporter = RelayProgressReporter::with_mode("Checking relays".into(), mode);
+            let reporter = RelayProgressReporter::with_mode(
+                "relay_fetch",
+                serde_json::json!({}),
+                "Checking relays".into(),
+                mode,
+            );
             assert!(reporter.spinner.is_none());
             assert!(reporter.heading.is_none());
             assert!(reporter.timer_handle.is_none());
@@ -6694,7 +6844,7 @@ mod tests {
             assert!(reporter.details.as_ref().unwrap().is_hidden());
             let handle = reporter.handle();
             let bar = handle.add(ProgressBar::new(1).with_prefix("wss://relay"));
-            handle.finish_bar(&bar, String::new(), true);
+            handle.finish_bar("wss://relay", &bar, String::new(), true);
             assert_eq!(reporter.log.as_ref().unwrap().lock().unwrap().succeeded, 1);
             reporter.finish(false, false, None).unwrap();
         }
@@ -6719,6 +6869,7 @@ mod tests {
             details: Some(progress),
             mode: RelayProgressMode::Concise,
             log: None,
+            json: None,
             _spinner_multi: None,
             spinner: None,
             heading: None,
@@ -8742,7 +8893,11 @@ impl Client {
         let mut streams = Vec::new();
         for url in relays {
             if let Err(error) = self.connect(url).await {
-                eprintln!("CI watch: cannot connect to {url}: {error:#}");
+                crate::report_message!(
+                    "info",
+                    "relay_diagnostic",
+                    "CI watch: cannot connect to {url}: {error:#}"
+                );
                 continue;
             }
             if let Some(relay) = self.client.relay(url).await? {
@@ -8801,7 +8956,7 @@ impl Client {
         );
         let result = self.client.subscribe(target).with_id(id).await?;
         for (relay, reason) in &result.failed {
-            eprintln!("CI watch: {relay}: {reason}");
+            crate::report_message!("info", "relay_diagnostic", "CI watch: {relay}: {reason}");
         }
         anyhow::ensure!(
             !result.success.is_empty(),

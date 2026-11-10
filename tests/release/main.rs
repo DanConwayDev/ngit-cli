@@ -115,14 +115,26 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
     .await?;
     server.finish().await?;
 
-    let fetch_summaries = stderr
+    let records = stderr
         .lines()
-        .filter(|line| *line == "no updates" || line.starts_with("updates: "))
-        .count();
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let fetches: Vec<_> = records
+        .iter()
+        .filter(|record| record["operation"] == "relay_fetch")
+        .collect();
     ensure!(
-        fetch_summaries == 1,
-        "release publish emitted {fetch_summaries} fetch summaries:\n{stderr}"
+        !fetches.is_empty(),
+        "release publish did not report relay fetching"
     );
+    for fetch in fetches {
+        ensure!(
+            records
+                .iter()
+                .any(|record| record["id"] == fetch["id"] && record["state"] == "completed"),
+            "relay fetch lacks its final outcome"
+        );
+    }
 
     ensure!(output["result"]["application_operation"] == "created");
     ensure!(
@@ -721,9 +733,13 @@ async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
     .await?;
     // stdout remains exactly one JSON document (parsed by the helper), while
     // captured stderr exposes structured upload milestones alongside diagnostics.
-    let progress: Vec<Value> = stderr
+    let records: Vec<Value> = stderr
         .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("non-JSON publication stderr: {stderr}"))?;
+    let progress: Vec<Value> = records
+        .into_iter()
         .filter(|record| record["type"] == "progress" && record["operation"] == "blossom")
         .collect();
     for server in [primary.base_url_with_slash(), mirror.base_url_with_slash()] {

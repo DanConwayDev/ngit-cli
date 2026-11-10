@@ -11,8 +11,8 @@ for the command to finish.
 | --- | --- |
 | Normal terminal | Concise initially, expanding after five seconds where supported; live animation |
 | Verbose terminal | Detailed immediately, with final diagnostics retained |
-| JSON | Blossom emits JSON Lines; other components still emit plain state changes. No animations or cursor clearing, even in a PTY |
-| JSON with verbose | Additional detail where supported; the same mixed stderr formats and no animations or cursor clearing |
+| JSON | Signer, relay and Blossom progress use JSON Lines, alongside structured shared diagnostics; Git and external processes may still emit text. No animations or cursor clearing |
+| JSON with verbose | Additional relay outcomes and signer transport evidence as JSON; no animations or cursor clearing |
 | Redirected output | Append-only progress at the selected verbosity; no timed refreshes |
 | Quiet | No nonessential progress; actionable failures remain available |
 
@@ -35,10 +35,57 @@ a later disconnect does not change it. A pending signer report instead tracks
 current response-listening readiness, because the command still needs a reply.
 This distinction is independent of the output policy.
 
+## Signer and relay JSON stream
+
+Signer operations and relay fetching/publishing use a shared synchronized,
+flushed JSON Lines writer. The same network operations drive both renderers;
+JSON changes presentation, not signing, retry, timeout or publication policy.
+A short relay operation normally emits only its start and final aggregate.
+Successful relay outcomes are individual records only with `--verbose`.
+Failures are emitted promptly with relay identity and reason. Routine aggregate
+samples are event-driven, at most once per ten seconds across this shared
+reporter; there are no spinner ticks or unchanged heartbeats.
+
+```json
+{"type":"progress","schema_version":1,"id":"p1","operation":"relay_publish","state":"started","details":{"events":2,"relays":3,"unit":"relay_batches"}}
+{"type":"progress","id":"p1","state":"completed","details":{"succeeded":3,"failed":0}}
+```
+
+IDs are invocation-local. Metadata and schema version appear at the start;
+subsequent records reference the ID. Consumers should tolerate unknown fields
+and states. Relay fetch counts are completed checks, not unique relay totals.
+`incomplete` retains unsuccessful relay outcomes; it does not necessarily mean
+the command failed. A dropped unfinished operation reports `interrupted`.
+The final stdout result and exit status remain authoritative.
+
+Signer starts include the operation description. `waiting_for_response` and
+`retrying` include a short request number, method, and available attempt/timeout
+information. Routine listener chatter is suppressed; listener failures remain
+visible. `request_delivery` distinguishes relay acceptance from unconfirmed
+sends. Only validated operation completion produces `completed`; receiving a
+response alone does not establish success. No signing/encryption payloads or
+protocol request IDs are included.
+
+Explicit pairing emits `type: "action_required"`, `action: "signer_pairing"`
+and `details.uri` before waiting. This URI is sensitive pairing data, emitted
+only for that requested flow. It remains available with `--quiet`, which
+suppresses ordinary progress. Shared diagnostics use `type: "diagnostic"`,
+`schema_version: 1`, `level`, `code`, `message` and `details`. Transitional
+message diagnostics provide text context, not a domain-specific parsing API.
+
+This rollout covers the shared diagnostic boundary, signer/pairing and relay
+renderers. It preserves Blossom's existing envelope and cadence. Downloads,
+self-update phases, CI confirmation phases and remaining direct output paths
+are follow-up work. Git operation and subprocess reporting belongs to the
+parallel-Git-push worktree. Consequently, `--json` does not yet promise JSON-only
+stderr for every command, external program, or argument/help/version path.
+
 ## JSON API review (2026-11-10)
 
 This is a source review of the command model and output boundaries at
-`8c9d0566`, after PR `01ae4c14`. The recommendations below are not implemented.
+`8c9d0566`, after PR `01ae4c14`. The findings below describe that baseline; the shared diagnostic, signer/pairing
+and relay portions are now implemented as documented above. Remaining items
+are migration targets.
 It covers the shared paths behind account, repository, PR, issue, sync,
 publication, CI and update commands. It does not claim an exhaustive runtime
 trace of every command or third-party subprocess. No changes to signing,

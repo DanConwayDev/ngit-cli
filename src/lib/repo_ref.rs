@@ -3359,7 +3359,9 @@ pub fn print_selected_repo(resolved: &ResolvedRepoCoordinate) {
         .coordinate
         .to_bech32()
         .unwrap_or_else(|_| "<invalid naddr>".to_string());
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "repository_diagnostic",
         "{}",
         dim.apply_to(format!(
             "target repository: {} (source: {})",
@@ -3452,7 +3454,9 @@ async fn get_repo_coordinate_from_user_prompt(
     // TODO: present list of events filter by root_commit
     // TODO: fallback to search based on identifier
     let dim = Style::new().color256(247);
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "repository_diagnostic",
         "{}",
         dim.apply_to(
             "hint: https://gitworkshop.dev/search lists repositories and their nostr address"
@@ -3470,7 +3474,11 @@ async fn get_repo_coordinate_from_user_prompt(
             {
                 nostr_url.coordinate
             } else {
-                eprintln!("not a valid naddr or git nostr remote URL starting nostr://");
+                crate::report_message!(
+                    "info",
+                    "repository_diagnostic",
+                    "not a valid naddr or git nostr remote URL starting nostr://"
+                );
                 continue;
             };
             let mut lookup = crate::repo_lookup::RepositoryLookup::new(
@@ -3535,12 +3543,17 @@ async fn get_repo_coordinate_from_user_prompt(
             match get_repo_ref_from_cache(Some(git_repo_path), &coordinate).await {
                 Ok(repo_ref) => {
                     if !is_quiet() {
-                        eprintln!("repository found");
+                        crate::report_message!("info", "repository_diagnostic", "repository found");
                     }
                     break (coordinate, repo_ref);
                 }
                 Err(error) if error.is::<crate::client::MissingRepoAnnouncement>() => {
-                    eprintln!("{}", lookup.explain(error));
+                    crate::report_message!(
+                        "info",
+                        "repository_diagnostic",
+                        "{}",
+                        lookup.explain(error)
+                    );
                 }
                 Err(error) => return Err(error),
             }
@@ -3575,7 +3588,11 @@ fn set_or_create_git_remote_with_nostr_url(
     if git_repo.git_repo.remote_set_url(name, &url).is_err() {
         git_repo.git_repo.remote(name, &url)?;
     }
-    eprintln!("set git remote \"{name}\" to {url}");
+    crate::report_message!(
+        "info",
+        "repository_diagnostic",
+        "set git remote \"{name}\" to {url}"
+    );
     Ok(())
 }
 

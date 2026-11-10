@@ -4,8 +4,8 @@
 //! (`src/lib/client.rs`) used to print its `no updates` / `updates: X`
 //! summary to **stdout** via `println!`, landing immediately before the
 //! JSON array the command emits. That made `ngit issue list --json | jq .`
-//! fail to parse. The summary now goes to stderr, so stdout carries only
-//! the JSON document.
+//! fail to parse. Progress now uses JSON Lines on stderr, so stdout carries
+//! only the JSON document.
 //!
 //! ## Shape
 //!
@@ -77,9 +77,19 @@ async fn issue_json_stdout_is_valid_when_relay_updates_are_reported() -> Result<
         "JSON progress must not emit terminal controls"
     );
     let create_stderr = String::from_utf8_lossy(&create.stderr);
+    let records = create_stderr
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
     assert!(
-        create_stderr.contains("updates:") || create_stderr.contains("no updates"),
-        "test did not exercise relay update reporting:\n{create_stderr}"
+        records
+            .iter()
+            .any(|record| record["operation"] == "relay_fetch")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["operation"] == "relay_publish")
     );
 
     let create_stdout = String::from_utf8_lossy(&create.stdout).to_string();

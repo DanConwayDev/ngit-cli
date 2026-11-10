@@ -104,7 +104,11 @@ pub fn is_verbose() -> bool {
 
 pub fn write_progress_line(term: &Term, message: &str) -> Result<()> {
     if !is_quiet() {
-        write_terminal_line(term, message)?;
+        if is_json() {
+            crate::reporting::message("info", "progress_message", message);
+        } else {
+            write_terminal_line(term, message)?;
+        }
     }
     Ok(())
 }
@@ -137,7 +141,7 @@ impl<'a> TransientLine<'a> {
     pub fn write(term: &'a Term, message: &str) -> Result<Self> {
         let rendered = !is_quiet();
         if rendered {
-            write_terminal_line(term, message)?;
+            write_progress_line(term, message)?;
         }
         Ok(Self { term, rendered })
     }

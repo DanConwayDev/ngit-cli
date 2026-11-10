@@ -94,7 +94,7 @@ async fn main() {
     ngit::output_mode::set_terminal_recovery_enabled(!cli.json);
     set_output_mode(if cli.quiet {
         OutputMode::Quiet
-    } else if cli.verbose || std::env::var("NGITTEST").is_ok() {
+    } else if cli.verbose || (!cli.json && std::env::var("NGITTEST").is_ok()) {
         OutputMode::Verbose
     } else {
         OutputMode::Normal
@@ -161,8 +161,9 @@ async fn main() {
         Err(err) => {
             if cli.json {
                 output::finish_error(&err);
+            } else {
+                eprintln!("Error: {err:?}");
             }
-            eprintln!("Error: {err:?}");
             std::process::exit(1);
         }
     };
@@ -671,7 +672,9 @@ async fn main() {
             // Already printed styled output to stderr
             std::process::exit(1);
         }
-        eprintln!("Error: {err:?}");
+        if !cli.json {
+            eprintln!("Error: {err:?}");
+        }
         std::process::exit(1);
     }
     if cli.json {

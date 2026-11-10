@@ -781,7 +781,9 @@ pub async fn warn_if_maintainer(
     let Some(message) = warning_message(&status) else {
         return Ok(());
     };
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "skill_notice",
         "{}",
         Style::new()
             .fg(Color::Color256(214))

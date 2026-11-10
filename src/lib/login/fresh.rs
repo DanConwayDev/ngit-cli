@@ -105,7 +105,11 @@ pub async fn fresh_login_or_signup(
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
                 Err(e) => {
-                    eprintln!("error getting fresh signer from signup: {e}");
+                    crate::report_message!(
+                        "info",
+                        "account_diagnostic",
+                        "error getting fresh signer from signup: {e}"
+                    );
                     continue;
                 }
             },
@@ -253,7 +257,14 @@ async fn login_with_connect_uri(
     let (signer, user_public_key, bunker_uri) =
         listen_for_remote_signer_when_listening(app_key, url, printer, || {
             if matches!(url, NostrConnectUri::Client { .. }) {
-                eprintln!("nostrconnect: {url}");
+                if crate::output_mode::is_json() {
+                    crate::reporting::action_required(
+                        "signer_pairing",
+                        serde_json::json!({"uri":url.to_string()}),
+                    );
+                } else {
+                    crate::report_message!("info", "account_diagnostic", "nostrconnect: {url}");
+                }
             }
         })
         .await?;
@@ -424,7 +435,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
 }
 
 pub fn show_prompt_success(label: &str, value: &str) {
-    eprintln!("{}", {
+    crate::report_message!("info", "account_diagnostic", "{}", {
         let mut s = String::new();
         let _ = ColorfulTheme::default().format_input_prompt_selection(&mut s, label, value);
         s
@@ -432,7 +443,7 @@ pub fn show_prompt_success(label: &str, value: &str) {
 }
 
 fn show_prompt_error(label: &str, value: &str) {
-    eprintln!("{}", {
+    crate::report_message!("info", "account_diagnostic", "{}", {
         let mut s = String::new();
         let _ = ColorfulTheme::default().format_error(
             &mut s,
@@ -552,7 +563,9 @@ pub async fn get_fresh_nip46_signer(
                         // leave it in place (the user may still be mid-scan) and
                         // print a clear green marker so it's obvious we've moved
                         // on to a connected signer.
-                        eprintln!(
+                        crate::report_message!(
+                            "info",
+                            "account_diagnostic",
                             "{}",
                             Style::new()
                                 .for_stderr()
@@ -669,23 +682,31 @@ pub fn generate_nostr_connect_app(
 /// the user can use whichever their signer app supports.
 fn display_nostr_connect(url: &NostrConnectUri) -> Result<()> {
     let dim = Style::new().for_stderr().color256(247);
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         Style::new().for_stderr().bold().apply_to("nostr connect")
     );
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         dim.apply_to("scan QR code in signer app (eg. Amber):")
     );
     for line in generate_qr(&url.to_string())? {
-        eprintln!("{line}");
+        crate::report_message!("info", "account_diagnostic", "{line}");
     }
-    eprintln!();
-    eprintln!(
+    crate::report_message!("info", "account_diagnostic", "");
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         dim.apply_to("or copy this connection string into your signer:")
     );
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         Style::new()
             .for_stderr()
@@ -693,14 +714,19 @@ fn display_nostr_connect(url: &NostrConnectUri) -> Result<()> {
             .cyan()
             .apply_to(url.to_string())
     );
-    eprintln!();
+    crate::report_message!("info", "account_diagnostic", "");
     let relays = url
         .relays()
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    eprintln!("{}", dim.apply_to(format!("signer relays: {relays}")));
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{}",
+        dim.apply_to(format!("signer relays: {relays}"))
+    );
     Ok(())
 }
 
@@ -720,15 +746,32 @@ enum ConnectMenuChoice {
 fn print_connect_menu_options() {
     let bold = Style::new().for_stderr().bold();
     let dim = Style::new().for_stderr().color256(247);
-    eprintln!();
-    eprintln!(
+    crate::report_message!("info", "account_diagnostic", "");
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{} {}",
         bold.apply_to("waiting for signer to connect…"),
         dim.apply_to("(scan the QR code or copy the connection string above)")
     );
-    eprintln!("{} manually enter bunker:// url", bold.apply_to("[1]"));
-    eprintln!("{} change signer relays", bold.apply_to("[2]"));
-    eprintln!("{} cancel", bold.apply_to("[3]"));
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} manually enter bunker:// url",
+        bold.apply_to("[1]")
+    );
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} change signer relays",
+        bold.apply_to("[2]")
+    );
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} cancel",
+        bold.apply_to("[3]")
+    );
 }
 
 /// Block until either the signer connects (the `done` flag is set by the
@@ -1025,22 +1068,42 @@ async fn save_to_git_config(
             }
         }
 
-        eprintln!("Error: {error:?}");
+        crate::report_message!("info", "account_diagnostic", "Error: {error:?}");
         match signer_info {
             SignerInfo::Nsec { nsec, .. } => {
-                eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config nostr.nsec to: {nsec}"
+                );
             }
             SignerInfo::Bunker {
                 bunker_uri,
                 bunker_app_key,
                 ..
             } => {
-                eprintln!("consider manually setting git config as follows:");
-                eprintln!("nostr.bunker-uri: {bunker_uri}");
-                eprintln!("nostr.bunker-app-key: {bunker_app_key}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config as follows:"
+                );
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "nostr.bunker-uri: {bunker_uri}"
+                );
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "nostr.bunker-app-key: {bunker_app_key}"
+                );
             }
             SignerInfo::Selection { selector } => {
-                eprintln!("consider manually setting git config nostr.signer to: {selector}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config nostr.signer to: {selector}"
+                );
             }
         }
         if global {
@@ -1073,12 +1136,16 @@ async fn save_to_git_config(
                             if user_ref.public_key == get_pubkey_from_signer_info(signer_info)? {
                                 return Ok(SignerInfoSource::GitGlobal);
                             } else {
-                                eprintln!(
+                                crate::report_message!(
+                                    "info",
+                                    "account_diagnostic",
                                     "global git config hasn't been updated with different npub"
                                 );
                             }
                         } else {
-                            eprintln!(
+                            crate::report_message!(
+                                "info",
+                                "account_diagnostic",
                                 "global git config hasn't been updated with nostr login values"
                             );
                         }
@@ -1199,8 +1266,16 @@ fn report_login(
 ) -> Result<()> {
     if target == LoginTarget::ProfileOnly {
         let alias = alias.context("saving without activation requires a named profile")?;
-        eprintln!("signer profile '{alias}' saved without changing the active login");
-        eprintln!("use --signer {alias} or git -c nostr.signer={alias} for one command");
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
+            "signer profile '{alias}' saved without changing the active login"
+        );
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
+            "use --signer {alias} or git -c nostr.signer={alias} for one command"
+        );
         Ok(())
     } else {
         print_logged_in_as(user_ref, offline, source, alias)
@@ -1256,9 +1331,12 @@ fn print_credential_storage(
     );
     // this runs from the receipts guard's Drop, possibly mid-unwind, where
     // an eprintln! panic on a closed stderr would abort the process
-    let mut stderr = std::io::stderr().lock();
     for message in credential_storage_messages(secret, alias, &file_store) {
-        let _ = writeln!(stderr, "{message}");
+        if crate::output_mode::is_json() {
+            crate::reporting::message("info", "credential_storage", &message);
+        } else {
+            let _ = writeln!(std::io::stderr().lock(), "{message}");
+        }
     }
 }
 
@@ -1410,7 +1488,9 @@ fn protect_secrets(
     }
     let policy = credential_store::policy(git_repo);
     if policy == SecretStorage::GitConfig {
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
             "{} will be stored in Git config in plaintext (secret-storage policy: git-config)",
             signer_storage_subject(signer_info)
         );
@@ -1728,7 +1808,7 @@ async fn signup(
         SignerInfoSource,
     )>,
 > {
-    eprintln!("create account");
+    crate::report_message!("info", "account_diagnostic", "create account");
     loop {
         let name = Interactor::default()
             .input(
@@ -1771,7 +1851,9 @@ async fn signup(
         .await?;
 
         show_prompt_success("user display name", &name);
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
             "to login to other nostr clients eg. gitworkshop.dev with this account run `ngit export-keys` at any time to reveal your nostr account secret"
         );
         break Ok(Some((

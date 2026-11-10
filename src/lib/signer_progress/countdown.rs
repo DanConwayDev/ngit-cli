@@ -14,6 +14,7 @@ use crate::{
 pub(super) struct CountdownLine<'a> {
     term: &'a Term,
     policy: ProgressPolicy,
+    json: bool,
     last_report: Option<String>,
     body: Vec<String>,
     animated_relays: Vec<(usize, RelayLine)>,
@@ -29,6 +30,7 @@ impl<'a> CountdownLine<'a> {
         Self {
             term,
             policy,
+            json: crate::output_mode::is_json(),
             last_report: None,
             body: Vec::new(),
             animated_relays: Vec::new(),
@@ -46,7 +48,7 @@ impl<'a> CountdownLine<'a> {
         retry: Option<RetryStatus>,
         deadline: Instant,
     ) -> Result<()> {
-        if self.policy.quiet {
+        if self.json || self.policy.quiet {
             return Ok(());
         }
         let key = report_key(&report, retry);
@@ -77,6 +79,9 @@ impl<'a> CountdownLine<'a> {
     }
 
     pub(super) fn show_final(&mut self, report: Report) -> Result<()> {
+        if self.json {
+            return Ok(());
+        }
         self.clear()?;
         for line in report.body_lines() {
             write_terminal_line(self.term, &line)?;
@@ -315,6 +320,7 @@ mod tests {
         let display = CountdownLine {
             term: &term,
             policy: ProgressPolicy::new(crate::output_mode::OutputMode::Normal, false, true),
+            json: false,
             last_report: None,
             body: vec!["Waiting".to_string()],
             animated_relays: Vec::new(),
