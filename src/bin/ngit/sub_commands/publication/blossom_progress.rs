@@ -15,6 +15,8 @@ use ngit::{
 };
 use reqwest::Url;
 
+use super::blossom_progress_lines::BlossomProgressLines;
+
 const BLOSSOM_UPLOAD_ROW_TEMPLATE: &str = "     [{elapsed_precise}] {prefix:28} [{bar:22}] {bytes}/{total_bytes} {bytes_per_sec} {wide_msg}";
 const BLOSSOM_PHASE_ROW_TEMPLATE: &str =
     "   {spinner} [{elapsed_precise}] {prefix:28} — {wide_msg}";
@@ -28,6 +30,7 @@ const DETAILED_UPLOAD_BLOB_LIMIT: usize = 3;
 
 pub(crate) struct BlossomUploadProgress {
     log_policy: Option<ProgressPolicy>,
+    lines: Option<BlossomProgressLines>,
     multi: MultiProgress,
     heading: ProgressBar,
     render_to_stderr: bool,
@@ -294,9 +297,14 @@ impl BlossomUploadProgress {
         };
         let mut progress = Self::with_draw_target(draw_target, policy.animate, policy.detailed)?;
         if !policy.animate {
-            Arc::get_mut(&mut progress)
-                .ok_or_else(|| anyhow::anyhow!("new progress must have a single owner"))?
-                .log_policy = Some(policy);
+            let progress = Arc::get_mut(&mut progress)
+                .ok_or_else(|| anyhow::anyhow!("new progress must have a single owner"))?;
+            if policy.quiet {
+                // Keep main's failure diagnostics even when progress is suppressed.
+                progress.log_policy = Some(policy);
+            } else {
+                progress.lines = Some(BlossomProgressLines::stderr(json_output));
+            }
         }
         Ok(progress)
     }
@@ -334,6 +342,7 @@ impl BlossomUploadProgress {
         let heading = multi.add(ProgressBar::new_spinner().with_style(heading_style.clone()));
         Ok(Arc::new(Self {
             log_policy: None,
+            lines: None,
             multi,
             heading,
             render_to_stderr,
@@ -1173,14 +1182,35 @@ fn blossom_log_line(
     Some(format!("Blossom: {line}"))
 }
 
-impl BlossomProgress for BlossomUploadProgress {
-    fn update(&self, event: &BlossomProgressEvent) {
+impl BlossomUploadProgress {
+    fn update_log_progress(&self, event: &BlossomProgressEvent) -> bool {
+        if let Some(lines) = &self.lines {
+            let scope = match event {
+                BlossomProgressEvent::UploadBatchStarted { batch, batches, .. }
+                | BlossomProgressEvent::UploadBatchFinished { batch, batches } => self
+                    .sequential_file_scope()
+                    .filter(|_| *batch == 1 && *batches == 1)
+                    .map_or((*batch, *batches), |scope| (scope.index, scope.total)),
+                _ => (0, 0),
+            };
+            lines.update(event, scope);
+            return true;
+        }
         if let Some(policy) = self.log_policy {
             if let Some(line) =
                 blossom_log_line(event, policy, self.sequential_file_scope().as_ref())
             {
                 eprintln!("{line}");
             }
+            return true;
+        }
+        false
+    }
+}
+
+impl BlossomProgress for BlossomUploadProgress {
+    fn update(&self, event: &BlossomProgressEvent) {
+        if self.update_log_progress(event) {
             return;
         }
         match event {

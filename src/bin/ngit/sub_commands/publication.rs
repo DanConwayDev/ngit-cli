@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::cli::SignerParams;
 
 mod blossom_progress;
+mod blossom_progress_lines;
 
 pub(crate) use blossom_progress::BlossomUploadProgress;
 
