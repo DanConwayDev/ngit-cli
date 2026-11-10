@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Fetch and cache NIP-11 relay information during standard event fetching to
+  detect relay capabilities. When a known GRASP implementation lacking purgatory
+  (such as Pyramid) is used as a PR hint server, push Git data before publishing
+  its PR event to prevent retention of duplicate PR events.
+
 - PRs and PR updates now send the signed event to the selected hint's GRASP
   relay before pushing its Git data. If either step fails, ngit tries the next
   candidate with a newly signed event and its clone hint. Once the hint works,

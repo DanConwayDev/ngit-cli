@@ -613,6 +613,10 @@ fn record_attempt_failures(failures: &mut Vec<String>, responses: &[(String, Res
                 failures.push(format!(
                     "event-first relay publication failure before Git push to {server}: {reason}"
                 ));
+            } else if reason.contains("relay publication failed after Git push") {
+                failures.push(format!(
+                    "relay publication after Git push to {server} failed: {reason}"
+                ));
             } else {
                 failures.push(format!("Git push to {server} failed: {reason}"));
             }
@@ -1311,7 +1315,7 @@ async fn push_proposal_in_phases(
     let mut result = ProposalPushResult::default();
     let mut anchor = None;
     for (index, server) in servers.iter().enumerate() {
-        let draft = generate_unsigned_pr_or_update_event(
+        let mut draft = generate_unsigned_pr_or_update_event(
             git_repo,
             repo_ref,
             &user_ref.public_key,
@@ -1327,52 +1331,67 @@ async fn push_proposal_in_phases(
             ordering_reference.as_ref(),
         )
         .await?;
-        let event = sign_proposal_event(draft, signer, root_proposal).await?;
-        // A failed or timed-out attempt may still be visible on its relay.
-        // Order subsequent attempts after it, including GRASP-06 fallback,
-        // without putting unserved proposals into the local cache.
-        *ordering_reference = Some(event.clone());
-        let receipt = if let Some(relay) = server
+        // Event IDs depend on the unsigned payload, not its signature. The
+        // Git-first path can establish this exact ref without asking the signer.
+        let draft_id = draft.id();
+        let paired_relay = server
             .paired_relay
             .as_ref()
-            .filter(|relay| early_staging_permitted(git_repo, repo_ref, relay))
-        {
-            match stage_signed_proposal_event_for_client(
-                client,
-                &event,
-                relay,
-                repository_is_private(git_repo, repo_ref),
-                signer,
-            )
-            .await
-            {
-                Ok(outcome) => Some(ProposalPublicationReceipt {
-                    event: event.clone(),
-                    relay: relay.clone(),
-                    outcome,
-                }),
-                Err(EarlyPublicationError::Signing(error)) => return Err(error),
-                Err(EarlyPublicationError::Publication(error)) => {
-                    term.write_line(&format!(
-                        "push: hint relay admission failed for {}: {error:#}",
-                        server.clone_url
-                    ))?;
-                    responses.push((
-                        server.clone_url.clone(),
-                        Err(error.context("early relay publication failed")),
-                    ));
-                    continue;
+            .filter(|relay| early_staging_permitted(git_repo, repo_ref, relay));
+        // Purgatory is required by GRASP. This is a temporary exception for
+        // cached Pyramid implementations, which expose unserved PRs immediately.
+        // Never block on NIP-11 here: first encounters retain event-first order.
+        let git_first =
+            paired_relay.is_some_and(crate::relay_information::cached_hint_needs_git_first);
+        let mut receipt = None;
+        let signed_event = if git_first {
+            None
+        } else {
+            let event = sign_proposal_event(draft.clone(), signer, root_proposal).await?;
+            // A failed or timed-out publication may still be visible. Keep
+            // subsequent candidates (including GRASP-06 fallback) newer.
+            *ordering_reference = Some(event.clone());
+            Some(event)
+        };
+        if let Some(event) = &signed_event {
+            if let Some(relay) = paired_relay {
+                match stage_signed_proposal_event_for_client(
+                    client,
+                    event,
+                    relay,
+                    repository_is_private(git_repo, repo_ref),
+                    signer,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        receipt = Some(ProposalPublicationReceipt {
+                            event: event.clone(),
+                            relay: relay.clone(),
+                            outcome,
+                        })
+                    }
+                    Err(EarlyPublicationError::Signing(error)) => return Err(error),
+                    Err(EarlyPublicationError::Publication(error)) => {
+                        term.write_line(&format!(
+                            "push: hint relay admission failed for {}: {error:#}",
+                            server.clone_url
+                        ))?;
+                        responses.push((
+                            server.clone_url.clone(),
+                            Err(error.context("early relay publication failed")),
+                        ));
+                        continue;
+                    }
                 }
             }
-        } else {
-            None
-        };
+        }
         let refspec = format!(
             "{tip}:{}",
             git_ref
                 .as_deref()
                 .unwrap_or("refs/nostr/<event-id>")
-                .replace("<event-id>", &event.id.to_string())
+                .replace("<event-id>", &draft_id.to_string())
         );
         if repo_ref.private {
             prepare_private_git_auth(std::slice::from_ref(&server.clone_url), signer).await?;
@@ -1395,6 +1414,48 @@ async fn push_proposal_in_phases(
                         git_server_display_url(&server.clone_url)
                     ),
                 )?;
+                let event = match signed_event {
+                    Some(event) => event,
+                    None => {
+                        let event = sign_proposal_event(draft, signer, root_proposal).await?;
+                        *ordering_reference = Some(event.clone());
+                        event
+                    }
+                };
+                if git_first {
+                    // Only publish this candidate once its advertised Git data
+                    // is usable; a rejected Git push leaves no visible PR.
+                    let relay = paired_relay.expect("Git-first requires a paired relay");
+                    match stage_signed_proposal_event_for_client(
+                        client,
+                        &event,
+                        relay,
+                        repository_is_private(git_repo, repo_ref),
+                        signer,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            receipt = Some(ProposalPublicationReceipt {
+                                event: event.clone(),
+                                relay: relay.clone(),
+                                outcome,
+                            })
+                        }
+                        Err(EarlyPublicationError::Signing(error)) => return Err(error),
+                        Err(EarlyPublicationError::Publication(error)) => {
+                            term.write_line(&format!(
+                                "push: hint relay publication failed after Git push to {}: {error:#}",
+                                server.clone_url
+                            ))?;
+                            responses.push((
+                                server.clone_url.clone(),
+                                Err(error.context("relay publication failed after Git push")),
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 responses.push((server.clone_url.clone(), Ok(())));
                 save_event_in_local_cache(git_repo.get_path()?, &event)
                     .await

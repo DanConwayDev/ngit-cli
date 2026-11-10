@@ -1327,3 +1327,210 @@ async fn replica_git_failure_does_not_suppress_patch_close() -> Result<()> {
     );
     Ok(())
 }
+
+// Seed a cache written by an earlier CLI process; no repository-local state is
+// involved. Old entries remain authoritative while a refresh is attempted.
+fn cached_pyramid(relay: &RelayUrl, fetched_at: u64) -> Result<tempfile::TempDir> {
+    let directory = tempfile::tempdir()?;
+    let cache = directory.path().join("relay-information");
+    std::fs::create_dir_all(&cache)?;
+    let key = bitcoin_hashes::sha256::Hash::hash(relay.as_str().as_bytes());
+    std::fs::write(
+        cache.join(format!("{key}.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "relay": relay.as_str(),
+            "fetched_at": fetched_at,
+            "attempted_at": fetched_at,
+            "document": {
+                "software": "https://github.com/fiatjaf/pyramid",
+                "version": "v1.4.4"
+            }
+        }))?,
+    )?;
+    Ok(directory)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_cached_pyramid_hint_pushes_git_before_publishing() -> Result<()> {
+    let arrangement = arrange(IDENTIFIER, true).await?;
+    let recorder = GraspRecorder::start(arrangement.harness.grasp("repo"), false).await?;
+    let relay = RelayUrl::parse(&recorder.url().replacen("http://", "ws://", 1))?;
+    let cache = cached_pyramid(&relay, 1)?;
+    let clone_url = format!(
+        "{}/{}/{}.git",
+        recorder.url(),
+        arrangement.maintainer_npub,
+        IDENTIFIER
+    );
+    let output = send_pr_command(&arrangement, &clone_url, true)
+        .env("NGIT_CACHE_DIR", cache.path())
+        .output()
+        .await?;
+    ensure!(output.status.success(), "{}", command_output(&output));
+    let event = returned_pr(&arrangement, &output).await?;
+    let observations = recorder.observations();
+    let git = observations
+        .iter()
+        .position(|entry| matches!(entry, GraspObservation::ReceivePackBody))
+        .context("no Git transfer")?;
+    let offered = observations
+        .iter()
+        .position(|entry| matches!(entry, GraspObservation::ProposalOffered(id) if *id == event.id))
+        .context("no PR publication")?;
+    assert!(
+        git < offered,
+        "cached Pyramid hint must be served before publication: {observations:?}"
+    );
+    assert_eq!(tag_values(&event, "clone"), vec![clone_url]);
+    assert_eq!(
+        arrangement
+            .harness
+            .grasp("repo")
+            .read_nostr_ref(&arrangement.maintainer_npub, IDENTIFIER, &event.id.to_hex())
+            .await?,
+        arrangement.tip
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_pyramid_git_failure_never_publishes_an_abandoned_hint() -> Result<()> {
+    let arrangement = arrange(IDENTIFIER, true).await?;
+    let recorder = GraspRecorder::start_with_mode(
+        arrangement.harness.grasp("repo"),
+        GraspRelayMode::RejectGit,
+    )
+    .await?;
+    let relay = RelayUrl::parse(&recorder.url().replacen("http://", "ws://", 1))?;
+    let cache = cached_pyramid(&relay, Timestamp::now().as_secs())?;
+    let clone_url = format!(
+        "{}/{}/{}.git",
+        recorder.url(),
+        arrangement.maintainer_npub,
+        IDENTIFIER
+    );
+    let output = send_pr_command(&arrangement, &clone_url, true)
+        .env("NGIT_CACHE_DIR", cache.path())
+        .output()
+        .await?;
+    ensure!(output.status.success(), "{}", command_output(&output));
+    let observations = recorder.observations();
+    assert!(observations.contains(&GraspObservation::GitRequestRejected));
+    assert!(
+        !observations
+            .iter()
+            .any(|entry| matches!(entry, GraspObservation::ProposalOffered(_))),
+        "failed Pyramid hint leaked an abandoned PR: {observations:?}"
+    );
+    let event = returned_pr(&arrangement, &output).await?;
+    assert!(!tag_values(&event, "clone").contains(&clone_url));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pyramid_signer_refusal_follows_successful_git_and_stops_publication() -> Result<()> {
+    pyramid_signing_waits_for_git(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_pyramid_hint_is_tried_before_requesting_a_signature() -> Result<()> {
+    pyramid_signing_waits_for_git(true).await
+}
+
+async fn pyramid_signing_waits_for_git(reject_git: bool) -> Result<()> {
+    let arrangement = arrange(IDENTIFIER, true).await?;
+    let recorder = GraspRecorder::start_with_mode(
+        arrangement.harness.grasp("repo"),
+        if reject_git {
+            GraspRelayMode::RejectGit
+        } else {
+            GraspRelayMode::Forward
+        },
+    )
+    .await?;
+    let relay = RelayUrl::parse(&recorder.url().replacen("http://", "ws://", 1))?;
+    let cache = cached_pyramid(&relay, Timestamp::now().as_secs())?;
+    let signer_relay = RelayUrl::parse(arrangement.harness.relay("default").url())?;
+    let remote_signer_keys = Keys::generate();
+    let remote_signer = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: remote_signer_keys.clone(),
+            user: arrangement.contributor_keys.clone(),
+        },
+        [signer_relay.clone()],
+        None,
+        None,
+    )?;
+    let bunker_uri = remote_signer.bunker_uri().to_string();
+    let sign_requests = Arc::new(RemoteSignRequests::default());
+    let actions = RejectProposalSignatures(Arc::clone(&sign_requests));
+    let signer_task = tokio::spawn(async move { remote_signer.serve(actions).await });
+    wait_for_remote_signer(&signer_relay, remote_signer_keys.public_key()).await?;
+    let app_keys = Keys::generate();
+    let clone_url = format!(
+        "{}/{}/{}.git",
+        recorder.url(),
+        arrangement.maintainer_npub,
+        IDENTIFIER
+    );
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        arrangement
+            .contributor
+            .ngit([
+                "--bunker-uri",
+                &bunker_uri,
+                "--bunker-app-key",
+                &app_keys.secret_key().to_secret_hex(),
+                "send",
+                "HEAD~1",
+                "--force-pr",
+                "--title",
+                "deferred signing",
+                "--description",
+                "sign after the Pyramid hint works",
+                "--git-server",
+                &clone_url,
+                "--json",
+            ])
+            .env("NGIT_CACHE_DIR", cache.path())
+            .output(),
+    )
+    .await??;
+    signer_task.abort();
+    assert!(!output.status.success(), "signer refusal must remain fatal");
+    assert_eq!(
+        sign_requests.0.load(Ordering::SeqCst),
+        1,
+        "failed Pyramid hints must not request a signature; a later refusal must not retry"
+    );
+    let observations = recorder.observations();
+    assert!(
+        observations.contains(if reject_git {
+            &GraspObservation::GitRequestRejected
+        } else {
+            &GraspObservation::ReceivePackBody
+        }),
+        "signing ran before Git: {observations:?}"
+    );
+    assert!(
+        !observations
+            .iter()
+            .any(|entry| matches!(entry, GraspObservation::ProposalOffered(_))),
+        "refused proposal was published: {observations:?}"
+    );
+    let cached = ngit::client::get_events_from_local_cache(
+        arrangement.contributor.dir(),
+        vec![
+            Filter::new()
+                .author(arrangement.contributor_keys.public_key())
+                .kind(KIND_PULL_REQUEST),
+        ],
+    )
+    .await?;
+    assert!(
+        cached.is_empty(),
+        "unsigned or refused proposal entered cache"
+    );
+    Ok(())
+}

@@ -41,12 +41,16 @@ pub enum GraspObservation {
     ProposalRejected(EventId),
     ReceivePackBody,
     GitRequestRejected,
+    Nip11Requested,
+    Nip11Cancelled,
+    EventRequest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraspRelayMode {
     Forward,
     RejectGit,
+    StallNip11,
     Reject,
     RejectAfterGate,
     Unreachable,
@@ -206,6 +210,15 @@ async fn serve_connection(
 ) -> Result<()> {
     let prefix = read_http_head(&mut client).await?;
     let lowercase_head = String::from_utf8_lossy(&prefix).to_ascii_lowercase();
+    if mode == GraspRelayMode::StallNip11
+        && lowercase_head.contains("accept: application/nostr+json")
+    {
+        record(&observations, GraspObservation::Nip11Requested);
+        let mut buffer = [0; 1024];
+        while client.read(&mut buffer).await? != 0 {}
+        record(&observations, GraspObservation::Nip11Cancelled);
+        return Ok(());
+    }
     if lowercase_head.starts_with("get ") && lowercase_head.contains("upgrade: websocket") {
         if mode == GraspRelayMode::Unreachable {
             bail!("paired relay is unreachable in this fixture");
@@ -260,6 +273,9 @@ async fn serve_websocket(
                 let Some(message) = message else { break };
                 let message = message?;
                 if let Message::Text(text) = &message {
+                    if serde_json::from_str::<Value>(text).ok().is_some_and(|value| value[0] == "REQ") {
+                        record(&observations, GraspObservation::EventRequest);
+                    }
                     if let Some((event_id, kind)) = proposal_from_client_json(text) {
                         record(&observations, GraspObservation::ProposalOffered(event_id));
                         let payload: Value = serde_json::from_str(text)?;

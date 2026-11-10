@@ -1012,6 +1012,14 @@ impl Connect for Client {
         let mut observed_generations = cache_generations();
         let mut cache_restarts = 0;
 
+        let relay_information =
+            Arc::new(crate::relay_information::RelayInformationRefreshes::default());
+        if let Some(coordinate) = selected_maintainer_coordinate {
+            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                relay_information.start(&repo_ref.relays);
+            }
+        }
+
         let mut request = create_relays_request(
             git_repo_path,
             selected_maintainer_coordinate,
@@ -1131,6 +1139,7 @@ impl Connect for Client {
                     let search = request.announcement_search.clone();
                     let searched_relay = request.selected_relay.clone();
                     let peers = round_progress.clone();
+                    let relay_information = Arc::clone(&relay_information);
                     let scope = request.scope;
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
@@ -1300,6 +1309,11 @@ impl Connect for Client {
                     };
                     async move {
                         let result = fetch.await;
+                        if let Some(coordinate) = selected_maintainer_coordinate {
+                            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                                relay_information.start(&repo_ref.relays);
+                            }
+                        }
                         let search_result = search.zip(searched_relay).map(|(search, relay)| {
                             let outcome = search.result.lock().unwrap().clone().unwrap_or_else(|| {
                                 AnnouncementSearchResult::Failed(result.as_ref().err()
@@ -1336,6 +1350,9 @@ impl Connect for Client {
                     None
                 };
             let selected_announcement_resolved = selected_repo_ref.is_some();
+            if let Some(repo_ref) = &selected_repo_ref {
+                relay_information.start(&repo_ref.relays);
+            }
             if !request.lock_repository_relays {
                 if let Some(repo_ref) = &selected_repo_ref {
                     if repo_ref.private {
@@ -2696,7 +2713,7 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<CacheDatabase>
     })
 }
 
-fn get_global_cache_dir() -> Result<PathBuf> {
+pub(crate) fn get_global_cache_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("NGIT_CACHE_DIR") {
         return Ok(PathBuf::from(path));
     }
