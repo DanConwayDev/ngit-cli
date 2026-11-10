@@ -28,7 +28,10 @@ use ngit::{
         ProposalBaseInference, commits_after_base, infer_proposal_base,
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
-    push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
+    push::{
+        ProposalPushResult,
+        select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts,
+    },
     repo_ref, repo_state,
     signer::NgitSigner,
     utils::{
@@ -48,7 +51,7 @@ use repo_ref::RepoRef;
 use repo_state::RepoState;
 
 use crate::state_transaction::{
-    LiveOps, StateTransaction, StateTransactionFailure, publish_events_to_relays,
+    LiveOps, StateTransaction, StateTransactionFailure, publish_proposal_events_to_relays,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -169,6 +172,7 @@ pub(super) async fn run_push(
             other_events,
             my_write_relays,
             repo_relay_only,
+            early_publication_receipts,
         } = create_events_and_proposals(
             git_repo,
             repo_ref,
@@ -202,13 +206,14 @@ pub(super) async fn run_push(
 
             if git_state_refspecs.is_empty() {
                 if !other_events.is_empty() {
-                    publish_events_to_relays(
+                    publish_proposal_events_to_relays(
                         &mut ops,
                         &repo_ref.relays,
                         other_events,
                         &my_write_relays,
                         repo_relay_only,
                         None,
+                        &early_publication_receipts,
                     )
                     .await?;
                 }
@@ -251,13 +256,14 @@ pub(super) async fn run_push(
 
             if git_data_accepted {
                 if !other_events.is_empty() {
-                    publish_events_to_relays(
+                    publish_proposal_events_to_relays(
                         &mut ops,
                         &repo_ref.relays,
                         other_events,
                         &my_write_relays,
                         repo_relay_only,
                         None,
+                        &early_publication_receipts,
                     )
                     .await?;
                 }
@@ -361,6 +367,7 @@ struct PushEventsPlan {
     other_events: Vec<Event>,
     my_write_relays: Vec<String>,
     repo_relay_only: bool,
+    early_publication_receipts: Vec<client::ProposalPublicationReceipt>,
 }
 
 fn mark_refspec_pushed(
@@ -476,6 +483,7 @@ async fn create_events_and_proposals(
                 other_events: vec![],
                 my_write_relays: vec![],
                 repo_relay_only: false,
+                early_publication_receipts: vec![],
             });
         }
     }
@@ -610,7 +618,7 @@ async fn create_events_and_proposals(
             .context("invalid default branch commit in repository state")?,
     };
 
-    let (proposal_events, rejected_proposal_refspecs) = process_proposal_refspecs(
+    let (mut proposal_result, rejected_proposal_refspecs) = process_proposal_refspecs(
         client,
         git_repo,
         repo_ref,
@@ -625,9 +633,8 @@ async fn create_events_and_proposals(
         proposal_options,
     )
     .await?;
-    for e in proposal_events {
-        events.push(e);
-    }
+    events.append(&mut proposal_result.events);
+    let early_publication_receipts = proposal_result.receipts;
 
     // TODO check whether tip of each branch pushed is on at least one git server
     // before broadcasting the nostr state
@@ -656,6 +663,7 @@ async fn create_events_and_proposals(
         other_events: events,
         my_write_relays,
         repo_relay_only,
+        early_publication_receipts,
     })
 }
 
@@ -749,11 +757,11 @@ async fn process_proposal_refspecs(
     git_server: Option<&str>,
     default_branch: &ProposalDefaultBranch<'_>,
     proposal_options: &super::ProposalOptions,
-) -> Result<(Vec<Event>, Vec<String>)> {
-    let mut events = vec![];
+) -> Result<(ProposalPushResult, Vec<String>)> {
+    let mut result = ProposalPushResult::default();
     let mut rejected_proposal_refspecs = vec![];
     if proposal_refspecs.is_empty() {
-        return Ok((events, rejected_proposal_refspecs));
+        return Ok((result, rejected_proposal_refspecs));
     }
     // Ref advertisements do not transfer objects. A maintainer may have
     // advanced the destination since this contributor last fetched, so obtain
@@ -879,7 +887,7 @@ async fn process_proposal_refspecs(
                             "cannot update proposal from '{from}': no commits after {default_label}.\nChoose a base before the commits you want to propose, then repeat this force push with -o base=<commit-or-ref>. Alternatively, run ngit send --in-reply-to <PR-ID> --base <commit-or-ref> from the proposal branch to update the same PR."
                         );
                     }
-                    for patch in generate_patches_or_pr_event_or_pr_updates(
+                    let pushed = generate_patches_or_pr_event_or_pr_updates(
                         client,
                         git_repo,
                         repo_ref,
@@ -895,10 +903,9 @@ async fn process_proposal_refspecs(
                         &proposal_metadata,
                         patches.first(),
                     )
-                    .await?
-                    {
-                        events.push(patch);
-                    }
+                    .await?;
+                    result.events.extend(pushed.events);
+                    result.receipts.extend(pushed.receipts);
                 } else {
                     // fast forward push
                     let tip_patch = patches.first().unwrap();
@@ -926,7 +933,7 @@ async fn process_proposal_refspecs(
                             || git_repo.are_commits_too_big_for_patches(&ahead)
                             || git_repo.do_commits_contain_submodules(&ahead)
                         {
-                            for event in generate_patches_or_pr_event_or_pr_updates(
+                            let pushed = generate_patches_or_pr_event_or_pr_updates(
                                 client,
                                 git_repo,
                                 repo_ref,
@@ -942,10 +949,9 @@ async fn process_proposal_refspecs(
                                 &proposal_metadata,
                                 patches.first(),
                             )
-                            .await?
-                            {
-                                events.push(event);
-                            }
+                            .await?;
+                            result.events.extend(pushed.events);
+                            result.receipts.extend(pushed.receipts);
                         } else {
                             for (i, commit) in ahead.iter().enumerate() {
                                 let new_patch = generate_patch_event(
@@ -966,7 +972,7 @@ async fn process_proposal_refspecs(
                                 )
                                 .await
                                 .context("failed to make patch event from commit")?;
-                                events.push(new_patch.clone());
+                                result.events.push(new_patch.clone());
                                 parent_patch = new_patch;
                             }
                         }
@@ -1058,7 +1064,7 @@ async fn process_proposal_refspecs(
                     "cannot create proposal from '{from}': no commits after {default_label}.\nTo choose a different base, run ngit send --base <commit-or-ref> from the proposal branch, or repeat this push with -o base=<commit-or-ref>. The base should be the commit before the changes you want to propose."
                 );
             }
-            for event in generate_patches_or_pr_event_or_pr_updates(
+            let pushed = generate_patches_or_pr_event_or_pr_updates(
                 client,
                 git_repo,
                 repo_ref,
@@ -1074,14 +1080,13 @@ async fn process_proposal_refspecs(
                 &proposal_metadata,
                 None,
             )
-            .await?
-            {
-                events.push(event);
-            }
+            .await?;
+            result.events.extend(pushed.events);
+            result.receipts.extend(pushed.receipts);
         }
     }
 
-    Ok((events, rejected_proposal_refspecs))
+    Ok((result, rejected_proposal_refspecs))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1101,7 +1106,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
     default_branch: &ProposalDefaultBranch<'_>,
     proposal_metadata: &ngit::push::ProposalMetadata,
     ordering_reference: Option<&Event>,
-) -> Result<Vec<Event>> {
+) -> Result<ProposalPushResult> {
     let parent_is_pr = root_proposal.is_some_and(|proposal| proposal.kind.eq(&KIND_PULL_REQUEST));
     let commits_too_big = git_repo.are_commits_too_big_for_patches(ahead);
     let has_submodules = git_repo.do_commits_contain_submodules(ahead);
@@ -1133,7 +1138,7 @@ async fn generate_patches_or_pr_event_or_pr_updates(
         } else {
             default_branch.merge_base(git_repo, tip)?
         };
-        select_servers_push_refs_and_generate_pr_or_pr_update_event(
+        select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts(
             client,
             git_repo,
             repo_ref,
@@ -1176,6 +1181,10 @@ async fn generate_patches_or_pr_event_or_pr_updates(
             ordering_reference,
         )
         .await
+        .map(|events| ProposalPushResult {
+            events,
+            receipts: vec![],
+        })
     }
 }
 

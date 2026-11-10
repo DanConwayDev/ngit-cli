@@ -72,6 +72,7 @@
 
 mod all_git_servers_down;
 mod combined_default_push;
+mod event_first;
 mod ff_update;
 mod force_update_stale_origin_main;
 mod fork_origin;

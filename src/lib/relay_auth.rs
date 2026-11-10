@@ -24,7 +24,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use futures::StreamExt;
@@ -36,6 +36,7 @@ use nostr_sdk::{
         DefaultWebsocketTransport, WebSocketSink, WebSocketStream, WebSocketTransport,
     },
 };
+use tokio::sync::Notify;
 
 use crate::signer::NgitSigner;
 
@@ -272,16 +273,241 @@ impl WebSocketTransport for DemandAuthTransport {
     }
 }
 
+/// A local deadline for optional public-repository NIP-42 signing. This is a
+/// retryable destination failure, distinct from an explicit signer refusal.
+#[derive(Debug)]
+pub(crate) struct AuthSigningTimeout;
+
+impl std::fmt::Display for AuthSigningTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("relay AUTH signing exceeded its publication deadline")
+    }
+}
+
+impl std::error::Error for AuthSigningTimeout {}
+
+async fn with_auth_signing_deadline(
+    timeout: Option<std::time::Duration>,
+    operation: impl Future<Output = anyhow::Result<Event>>,
+) -> anyhow::Result<Event> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, operation)
+            .await
+            .map_err(|_| anyhow::Error::new(AuthSigningTimeout))?,
+        None => operation.await,
+    }
+}
+
+/// Auth-signing state for a one-shot isolated publication.
+///
+/// Ordinary shared clients do not install this capture. Early GRASP publication
+/// uses it to distinguish a remote signer failure from a relay failure and to
+/// stop the relay accepting new auth work before draining an in-flight human
+/// signature. Public publication AUTH has its own short signing deadline;
+/// private publication retains the signer's native interaction deadline.
+/// Network waiting is independently bounded by the publication watchdog.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AuthSigningCapture {
+    inner: Arc<AuthSigningCaptureInner>,
+}
+
+#[derive(Debug, Default)]
+struct AuthSigningCaptureInner {
+    state: Mutex<AuthSigningState>,
+    idle: Notify,
+    failed: Notify,
+    activity: Notify,
+}
+
+#[derive(Debug, Default)]
+struct AuthSigningState {
+    running: usize,
+    activity_generation: u64,
+    closing: bool,
+    error: Option<anyhow::Error>,
+}
+
+impl AuthSigningCapture {
+    /// Mark the isolated relay as closing and wait for any signing operation
+    /// already started by its authenticator. A signer which has not started is
+    /// prevented from starting by [`AuthSigningOperation::begin`].
+    pub(crate) async fn close_and_drain(&self) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .closing = true;
+        loop {
+            let idle = self.inner.idle.notified();
+            if self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .running
+                == 0
+            {
+                return;
+            }
+            idle.await;
+        }
+    }
+
+    /// Bound network waiting while allowing an active human-backed signature
+    /// to use its configured AUTH deadline (native for private repositories).
+    /// A completed signature grants a fresh
+    /// network budget for the AUTH acknowledgement and EVENT retry.
+    pub(crate) async fn network_timeout(&self, budget: std::time::Duration) {
+        loop {
+            let changed = self.inner.activity.notified();
+            let (signing, generation) = {
+                let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                (state.running > 0, state.activity_generation)
+            };
+            if signing {
+                changed.await;
+            } else {
+                tokio::select! {
+                    () = tokio::time::sleep(budget) => {
+                        let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                        // Signing can start and finish between polls, including
+                        // when both the timer and activity notification are ready.
+                        if state.running == 0 && state.activity_generation == generation {
+                            return;
+                        }
+                    },
+                    () = changed => {},
+                }
+            }
+        }
+    }
+
+    pub(crate) fn take_error(&self) -> Option<anyhow::Error> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .error
+            .take()
+    }
+
+    pub(crate) async fn wait_for_signing_failure(&self) {
+        loop {
+            let failed = self.inner.failed.notified();
+            if self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .error
+                .is_some()
+            {
+                return;
+            }
+            failed.await;
+        }
+    }
+
+    pub(crate) async fn signing_failed(&self) -> anyhow::Error {
+        self.wait_for_signing_failure().await;
+        self.take_error()
+            .expect("captured auth failure must remain available to its observer")
+    }
+
+    fn begin(&self) -> Option<AuthSigningOperation> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closing {
+            return None;
+        }
+        state.running += 1;
+        state.activity_generation = state.activity_generation.wrapping_add(1);
+        self.inner.activity.notify_one();
+        drop(state);
+        Some(AuthSigningOperation {
+            capture: self.clone(),
+            finished: false,
+        })
+    }
+
+    fn fail(&self, error: anyhow::Error) {
+        {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.error.is_none() {
+                state.error = Some(error);
+            }
+        }
+        // Store a permit when the send path has not started watching. This
+        // covers signer refusal before the SDK's EVENT waiter subscription.
+        self.inner.failed.notify_one();
+    }
+
+    fn finish(&self) {
+        let became_idle = {
+            let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.running = state.running.saturating_sub(1);
+            state.activity_generation = state.activity_generation.wrapping_add(1);
+            state.running == 0
+        };
+        if became_idle {
+            self.inner.activity.notify_one();
+            self.inner.idle.notify_one();
+        }
+    }
+}
+
+struct AuthSigningOperation {
+    capture: AuthSigningCapture,
+    finished: bool,
+}
+
+impl AuthSigningOperation {
+    fn begin(capture: &AuthSigningCapture) -> Option<Self> {
+        capture.begin()
+    }
+
+    fn fail(mut self, error: anyhow::Error) {
+        self.capture.fail(error);
+        self.finished = true;
+        self.capture.finish();
+    }
+}
+
+impl Drop for AuthSigningOperation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.capture.finish();
+        }
+    }
+}
+
 /// A NIP-42 authenticator that signs only for pre-classified relays and only
 /// with a signer explicitly attached by the command.
 #[derive(Debug)]
 pub struct PolicyAuthenticator {
     policy: Arc<RelayAuthPolicy>,
+    signing_capture: Option<AuthSigningCapture>,
+    auth_signing_timeout: Option<std::time::Duration>,
 }
 
 impl PolicyAuthenticator {
     pub fn new(policy: Arc<RelayAuthPolicy>) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            signing_capture: None,
+            auth_signing_timeout: None,
+        }
+    }
+
+    pub(crate) fn with_signing_capture(
+        policy: Arc<RelayAuthPolicy>,
+        signing_capture: AuthSigningCapture,
+        auth_signing_timeout: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            policy,
+            signing_capture: Some(signing_capture),
+            auth_signing_timeout,
+        }
     }
 }
 
@@ -319,10 +545,34 @@ impl Authenticator for PolicyAuthenticator {
             let builder =
                 ClientAuthentication::new(challenge, relay_url.clone()).into_event_builder();
             let description = format!("relay authentication for {relay_url}");
-            signer
-                .sign_event_builder_with_description(builder, &description)
-                .await
-                .map_err(|error| NostrSdkError::policy(format!("{error:#}")))
+            let operation = self
+                .signing_capture
+                .as_ref()
+                .and_then(AuthSigningOperation::begin);
+            if self.signing_capture.is_some() && operation.is_none() {
+                return Err(NostrSdkError::policy(format!(
+                    "isolated publication to {relay_url} is closing; no NIP-42 signing was started"
+                )));
+            }
+            let result = with_auth_signing_deadline(
+                self.auth_signing_timeout,
+                signer.sign_event_builder_with_description(builder, &description),
+            )
+            .await;
+            match (operation, result) {
+                (Some(operation), Err(error)) => {
+                    let rendered = format!("{error:#}");
+                    operation.fail(error);
+                    Err(NostrSdkError::policy(rendered))
+                }
+                (Some(operation), result) => {
+                    drop(operation);
+                    result.map_err(|error| NostrSdkError::policy(format!("{error:#}")))
+                }
+                (None, result) => {
+                    result.map_err(|error| NostrSdkError::policy(format!("{error:#}")))
+                }
+            }
         })
     }
 }
@@ -339,6 +589,52 @@ mod tests {
 
     fn attach_keys(policy: &RelayAuthPolicy, keys: &Keys) {
         policy.set_signer(Arc::new(NgitSigner::Keys(keys.clone())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn public_auth_signing_has_a_short_retryable_deadline() {
+        let operation = with_auth_signing_deadline(
+            Some(std::time::Duration::from_secs(2)),
+            std::future::pending(),
+        );
+        tokio::pin!(operation);
+        assert!(futures::poll!(&mut operation).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(operation.await.unwrap_err().is::<AuthSigningTimeout>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn private_auth_signing_retains_the_native_approval_window() {
+        use nostr::prelude::{EventBuilder, FinalizeEvent};
+        let event = EventBuilder::new(Kind::Authentication, "approval")
+            .finalize(&Keys::generate())
+            .unwrap();
+        let (approve, approved) = tokio::sync::oneshot::channel();
+        let operation = with_auth_signing_deadline(None, async { anyhow::Ok(approved.await?) });
+        tokio::pin!(operation);
+        assert!(futures::poll!(&mut operation).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+        assert!(futures::poll!(&mut operation).is_pending());
+        approve.send(event.clone()).unwrap();
+        assert_eq!(operation.await.unwrap(), event);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_deadline_pauses_only_while_signing_is_active() {
+        use std::time::Duration;
+        let capture = AuthSigningCapture::default();
+        let deadline = capture.network_timeout(Duration::from_secs(2));
+        tokio::pin!(deadline);
+        assert!(futures::poll!(&mut deadline).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let signature = capture.begin().unwrap();
+        assert!(futures::poll!(&mut deadline).is_pending());
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(futures::poll!(&mut deadline).is_pending());
+        drop(signature);
+        assert!(futures::poll!(&mut deadline).is_pending());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(futures::poll!(&mut deadline).is_ready());
     }
 
     #[test]

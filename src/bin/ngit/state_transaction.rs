@@ -38,8 +38,8 @@ use anyhow::{Context, Result};
 use console::Term;
 use ngit::{
     client::{
-        Client, RelayPublishOutcome, publish_events_without_caching, save_event_in_local_cache,
-        send_events,
+        Client, ProposalPublicationReceipt, RelayPublishOutcome, publish_events_without_caching,
+        save_event_in_local_cache, send_events, send_events_with_proposal_receipts,
     },
     git::{Repo, RepoActions, nostr_url::NostrUrlDecoded},
     push::push_to_remote,
@@ -734,6 +734,58 @@ pub async fn publish_events_to_relays(
     }
 
     ops.publish_events(events, write_relays, repo_relays).await
+}
+
+/// Publish a proposal batch with the exact early-publication receipts produced
+/// by the same push operation. Target selection remains identical to
+/// [`publish_events_to_relays`]; receipts only preserve acceptance already
+/// observed on an early paired relay when every event in the batch is covered.
+pub async fn publish_proposal_events_to_relays(
+    ops: &mut LiveOps<'_>,
+    repo_relays: &[RelayUrl],
+    events: Vec<Event>,
+    my_write_relays: &[String],
+    repo_relay_only: bool,
+    excluded_relays: Option<&[RelayUrl]>,
+    receipts: &[ProposalPublicationReceipt],
+) -> Result<Vec<(String, bool)>> {
+    if events.is_empty() {
+        return Ok(vec![]);
+    }
+    if receipts.is_empty() {
+        return publish_events_to_relays(
+            ops,
+            repo_relays,
+            events,
+            my_write_relays,
+            repo_relay_only,
+            excluded_relays,
+        )
+        .await;
+    }
+
+    let (repo_relays, write_relays) = relay_publish_targets(
+        repo_relays,
+        my_write_relays,
+        repo_relay_only,
+        excluded_relays,
+    );
+
+    if should_skip_empty_relay_publish(&repo_relays, &write_relays, excluded_relays) {
+        return Ok(vec![]);
+    }
+
+    send_events_with_proposal_receipts(
+        ops.client,
+        Some(ops.git_repo.get_path()?),
+        events,
+        write_relays,
+        repo_relays,
+        receipts,
+        true,
+        false,
+    )
+    .await
 }
 
 fn relay_publish_targets(

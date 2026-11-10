@@ -17,6 +17,13 @@ use crate::remote_signer::NostrConnect;
 pub enum NgitSigner {
     Keys(Keys),
     Connect(Arc<NostrConnect>),
+    /// Deterministic remote-signer refusal used by isolated relay lifecycle
+    /// tests. Production binaries never contain this standing test double.
+    #[cfg(test)]
+    Rejecting {
+        keys: Keys,
+        reason: &'static str,
+    },
 }
 
 fn validate_remote_signed_event(
@@ -52,6 +59,8 @@ impl NgitSigner {
                 )
                 .await
             }
+            #[cfg(test)]
+            Self::Rejecting { keys, .. } => Ok(keys.public_key()),
         }
     }
 
@@ -82,6 +91,8 @@ impl NgitSigner {
                 let event = c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e))?;
                 validate_remote_signed_event(expected_public_key, expected_event_id, event)
             }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
@@ -101,6 +112,8 @@ impl NgitSigner {
             let public_key = match self {
                 Self::Keys(keys) => keys.public_key(),
                 Self::Connect(connect) => connect.get_public_key_async().await?,
+                #[cfg(test)]
+                Self::Rejecting { keys, .. } => keys.public_key(),
             };
             let unsigned = builder.finalize_unsigned(public_key);
             self.sign_event_inner(unsigned).await
@@ -113,19 +126,19 @@ impl NgitSigner {
         description: &str,
         operation: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        if !self.is_remote() {
-            return operation.await;
+        match self {
+            Self::Keys(_) => operation.await,
+            #[cfg(test)]
+            Self::Rejecting { .. } => operation.await,
+            Self::Connect(connect) => {
+                crate::signer_progress::run_remote_operation(
+                    connect,
+                    &remote_signing_message(description),
+                    operation,
+                )
+                .await
+            }
         }
-
-        let Self::Connect(connect) = self else {
-            unreachable!()
-        };
-        crate::signer_progress::run_remote_operation(
-            connect,
-            &remote_signing_message(description),
-            operation,
-        )
-        .await
     }
 
     pub async fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String> {
@@ -146,6 +159,8 @@ impl NgitSigner {
                 )
                 .await
             }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
@@ -167,13 +182,20 @@ impl NgitSigner {
                 )
                 .await
             }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
     /// True when this is a remote (NIP-46) signer — used to show progress
     /// messages.
     pub fn is_remote(&self) -> bool {
-        matches!(self, Self::Connect(_))
+        match self {
+            Self::Connect(_) => true,
+            #[cfg(test)]
+            Self::Rejecting { .. } => true,
+            Self::Keys(_) => false,
+        }
     }
 }
 
@@ -186,6 +208,8 @@ impl std::fmt::Debug for NgitSigner {
         match self {
             Self::Keys(k) => write!(f, "NgitSigner::Keys({})", k.public_key()),
             Self::Connect(_) => write!(f, "NgitSigner::Connect"),
+            #[cfg(test)]
+            Self::Rejecting { .. } => write!(f, "NgitSigner::Rejecting"),
         }
     }
 }
