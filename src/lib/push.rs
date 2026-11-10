@@ -6,30 +6,36 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use auth_git2::GitAuthenticator;
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Term;
 use nostr::prelude::{
+    RelayUrl,
     event::{Event, EventBuilder, Kind, Tag, UnsignedEvent},
     key::PublicKey,
 };
 
 use crate::{
     cli_interactor::count_lines_per_msg_vec,
-    client::{Connect, get_all_proposal_patch_pr_pr_update_events_from_cache, sign_draft_event},
+    client::{
+        Connect, EarlyPublicationError, ProposalPublicationReceipt,
+        get_all_proposal_patch_pr_pr_update_events_from_cache, publication_targets,
+        save_event_in_local_cache, sign_draft_event,
+    },
     git::{
         Repo, RepoActions,
         nostr_url::{CloneUrl, NostrUrlDecoded, ServerProtocol},
         oid_to_shorthand_string, remote_helper,
     },
-    git_events::{KIND_PULL_REQUEST_UPDATE, generate_unsigned_pr_or_update_event},
+    git_events::generate_unsigned_pr_or_update_event,
     git_http_auth::{authorization_for_url, prepare_private_git_auth},
     login::user::UserRef,
     output_mode::{ProgressPolicy, is_quiet, progress_policy, write_progress_line},
     repo_ref::{
-        RepoRef, format_grasp_server_url_as_grasp06_prs_url, is_grasp_server_clone_url,
-        is_grasp_server_in_list, normalize_grasp_server_url,
+        RepoRef, extract_npub, format_grasp_server_url_as_grasp06_prs_url,
+        format_grasp_server_url_as_relay_url, is_grasp_server_clone_url, is_grasp_server_in_list,
+        normalize_grasp_server_url,
     },
     utils::{
         Direction, get_short_git_server_name, get_write_protocols_to_try,
@@ -505,8 +511,172 @@ impl<'a> PushReporter<'a> {
     }
 }
 
+/// Events and exact, operation-scoped publication receipts produced by a
+/// successful proposal push. Public compatibility selectors discard receipts;
+/// the CLI/internal selector passes them only to its immediate late fanout.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct ProposalPushResult {
+    pub events: Vec<Event>,
+    pub receipts: Vec<ProposalPublicationReceipt>,
+}
+
+#[derive(Clone, Copy)]
+enum ProposalStagingDelivery {
+    EventFirst,
+    LegacyOnly,
+}
+
+/// One proposal push destination and its event-publication pairing.
+///
+/// `relay_origin` is deliberately retained separately from `clone_url`: a
+/// GRASP-06 `/prs/<npub>/...` clone URL cannot be normalized back to the relay
+/// without accidentally retaining the `/prs` path segment.
+#[derive(Clone, Debug)]
+struct ProposalServer {
+    clone_url: String,
+    paired_relay: Option<RelayUrl>,
+}
+
+impl ProposalServer {
+    /// Preserve the original public helper's push-then-sign behavior. Raw
+    /// string URLs have no authenticated client or authoritative relay-origin
+    /// context with which to opt into early publication safely.
+    fn legacy(clone_url: String) -> Self {
+        Self {
+            clone_url,
+            paired_relay: None,
+        }
+    }
+
+    fn new(clone_url: String) -> Result<Self> {
+        let relay_origin = extract_npub(&clone_url)
+            .ok()
+            .and_then(|npub| {
+                clone_url
+                    .find(&format!("/prs/{npub}/"))
+                    .map(|position| clone_url[..position].to_string())
+            })
+            .unwrap_or_else(|| clone_url.clone());
+        Self::with_relay_origin(clone_url, &relay_origin)
+    }
+
+    fn with_relay_origin(clone_url: String, relay_origin: &str) -> Result<Self> {
+        let paired_relay = if is_grasp_server_clone_url(&clone_url) {
+            Some(RelayUrl::parse(&format_grasp_server_url_as_relay_url(
+                relay_origin,
+            )?)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            clone_url,
+            paired_relay,
+        })
+    }
+}
+
+fn add_repo_server_candidate(
+    to_try: &mut Vec<ProposalServer>,
+    failures: &mut Vec<String>,
+    url: &str,
+) {
+    if to_try.iter().any(|server| server.clone_url == url) {
+        return;
+    }
+    match ProposalServer::new(url.to_string()) {
+        Ok(server) => to_try.push(server),
+        Err(error) => {
+            let reason = format!("{url}: failed to derive its paired GRASP relay: {error:#}");
+            eprintln!("warning: skipping repository server {reason}");
+            failures.push(reason);
+        }
+    }
+}
+
+fn fallback_proposal_server(
+    server: &str,
+    public_key: &PublicKey,
+    identifier: &str,
+) -> Result<ProposalServer> {
+    let prs_url = format_grasp_server_url_as_grasp06_prs_url(server, public_key, identifier)
+        .with_context(|| format!("invalid fallback GRASP server URL {server}"))?;
+    ProposalServer::with_relay_origin(prs_url, server)
+        .with_context(|| format!("failed to derive fallback {server}'s paired GRASP relay"))
+}
+
+fn record_attempt_failures(failures: &mut Vec<String>, responses: &[(String, Result<()>)]) {
+    for (server, response) in responses {
+        if let Err(error) = response {
+            let reason = format!("{error:#}");
+            if reason.contains("early relay publication failed") {
+                failures.push(format!(
+                    "event-first relay publication failure before Git push to {server}: {reason}"
+                ));
+            } else if reason.contains("relay publication failed after Git push") {
+                failures.push(format!(
+                    "relay publication after Git push to {server} failed: {reason}"
+                ));
+            } else {
+                failures.push(format!("Git push to {server} failed: {reason}"));
+            }
+        }
+    }
+}
+
+fn selector_failure(message: String, failures: &[String]) -> anyhow::Error {
+    if failures.is_empty() {
+        anyhow!(message)
+    } else {
+        anyhow!("{message}\nattempt failures:\n{}", failures.join("\n"))
+    }
+}
+
+fn repository_is_private(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
+    repo_ref.private
+        || git_repo
+            .git_repo
+            .config()
+            .ok()
+            .and_then(|config| config.get_bool("nostr.private").ok())
+            .unwrap_or(false)
+}
+
+fn early_staging_permitted(git_repo: &Repo, repo_ref: &RepoRef, paired_relay: &RelayUrl) -> bool {
+    staging_relay_is_permitted(
+        proposal_repository_only_routing(git_repo, repo_ref),
+        &repo_ref.relays,
+        paired_relay,
+    )
+}
+
+fn proposal_repository_only_routing(git_repo: &Repo, repo_ref: &RepoRef) -> bool {
+    repository_is_private(git_repo, repo_ref)
+        || std::env::var("NGIT_REPO_RELAY_ONLY").is_ok()
+        || git_repo
+            .git_repo
+            .config()
+            .ok()
+            .and_then(|config| config.get_bool("nostr.repo-relay-only").ok())
+            .unwrap_or(false)
+}
+
+fn staging_relay_is_permitted(
+    repository_restricted: bool,
+    configured_relays: &[RelayUrl],
+    paired_relay: &RelayUrl,
+) -> bool {
+    !repository_restricted
+        || configured_relays.iter().any(|configured| {
+            configured.as_str().trim_end_matches('/') == paired_relay.as_str().trim_end_matches('/')
+        })
+}
+
+/// Select proposal Git servers and stage eligible signed events before Git,
+/// returning the exact early-publication receipts for the immediate fanout.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
+pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts(
     #[cfg(test)] client: &crate::client::MockConnect,
     #[cfg(not(test))] client: &crate::client::Client,
     git_repo: &Repo,
@@ -522,13 +692,59 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     term: &Term,
     git_server_push_options: &[&str],
     git_server: Option<&str>,
-) -> Result<Vec<Event>> {
+) -> Result<ProposalPushResult> {
+    select_servers_push_refs_and_generate_pr_or_pr_update_event_with_delivery(
+        client,
+        git_repo,
+        repo_ref,
+        tip,
+        first_commit,
+        merge_base,
+        proposal_metadata,
+        user_ref,
+        root_proposal,
+        title_description_overide,
+        signer,
+        term,
+        git_server_push_options,
+        git_server,
+        ProposalStagingDelivery::EventFirst,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn select_servers_push_refs_and_generate_pr_or_pr_update_event_with_delivery(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &crate::client::Client,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    tip: &Sha1Hash,
+    first_commit: &Sha1Hash,
+    merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
+    user_ref: &UserRef,
+    root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
+    signer: &Arc<crate::NgitSigner>,
+    term: &Term,
+    git_server_push_options: &[&str],
+    git_server: Option<&str>,
+    staging_delivery: ProposalStagingDelivery,
+) -> Result<ProposalPushResult> {
     if let Some(git_server) = git_server {
         remote_helper::validate_git_server_argument(git_server)?;
     }
 
+    let staging_client = match staging_delivery {
+        ProposalStagingDelivery::EventFirst => Some(client),
+        ProposalStagingDelivery::LegacyOnly => None,
+    };
+
     let mut to_try = vec![];
     let mut tried = vec![];
+    let mut selection_failures = vec![];
+    let mut ordering_reference = None;
     let repo_grasps = repo_ref.grasp_servers();
 
     // Determine whether the user-supplied server is a direct clone URL
@@ -543,7 +759,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
     // before the repo's own servers and its URL appears in the PR clone hint.
     if let Some(server) = git_server {
         if user_server_is_direct_url {
-            to_try.push(server.to_string());
+            to_try.push(ProposalServer::new(server.to_string())?);
         } else {
             // GRASP base URL — format as the GRASP-06 /prs/ contributor endpoint.
             let prs_url = format_grasp_server_url_as_grasp06_prs_url(
@@ -551,7 +767,7 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
                 &user_ref.public_key,
                 &repo_ref.identifier,
             )?;
-            to_try.push(prs_url);
+            to_try.push(ProposalServer::with_relay_origin(prs_url, server)?);
         }
     }
 
@@ -572,12 +788,17 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
         );
     }
 
-    // Append repo GRASP servers after the user-specified server.
     for url in &repo_ref.git_server {
-        if let Ok(normalized) = normalize_grasp_server_url(url) {
-            if repo_grasps.contains(&normalized) && !to_try.contains(url) {
-                to_try.push(url.clone());
+        match normalize_grasp_server_url(url) {
+            Ok(normalized) if repo_grasps.contains(&normalized) => {
+                add_repo_server_candidate(&mut to_try, &mut selection_failures, url);
             }
+            Err(_) if is_grasp_server_clone_url(url) => {
+                // A malformed GRASP-shaped URL cannot appear in grasp_servers;
+                // still record its formatting failure before later candidates.
+                add_repo_server_candidate(&mut to_try, &mut selection_failures, url);
+            }
+            _ => {}
         }
     }
 
@@ -585,24 +806,28 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
 
     // --- Primary path: try user-specified server (if any) then repo grasp servers
     // ---
-    let (primary_events, _server_responses) = push_refs_and_generate_pr_or_pr_update_event(
-        git_repo,
-        repo_ref,
-        tip,
-        first_commit,
-        merge_base,
-        proposal_metadata,
-        user_ref,
-        root_proposal,
-        title_description_overide,
-        &to_try,
-        git_ref.clone(),
-        signer,
-        term,
-        git_server_push_options,
-    )
-    .await?;
-    tried.extend(to_try);
+    let (primary_events, primary_responses) =
+        push_refs_and_generate_pr_or_pr_update_event_with_client(
+            staging_client,
+            &mut ordering_reference,
+            git_repo,
+            repo_ref,
+            tip,
+            first_commit,
+            merge_base,
+            proposal_metadata,
+            user_ref,
+            root_proposal,
+            title_description_overide,
+            &to_try,
+            git_ref.clone(),
+            signer,
+            term,
+            git_server_push_options,
+        )
+        .await?;
+    record_attempt_failures(&mut selection_failures, &primary_responses);
+    tried.extend(to_try.iter().map(|server| server.clone_url.clone()));
 
     let events = if let Some(events) = primary_events {
         events
@@ -656,79 +881,168 @@ pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
 
         if all_candidates.is_empty() {
             if repo_grasps.is_empty() {
-                bail!(
+                return Err(selector_failure(
                     "failed to push PR: the repository has no grasp servers configured and your \
                      user server list is empty. Add a server to your profile to enable \
-                     pushing PRs.{git_server_hint}"
-                )
+                     pushing PRs."
+                        .to_string()
+                        + &git_server_hint,
+                    &selection_failures,
+                ));
             }
-            bail!(
+            return Err(selector_failure(
                 "failed to push PR: the repository's grasp servers are down or not accepting \
                  the push right now, and your user server list is empty or all listed \
                  servers were also unreachable. Add a server to your profile and try \
-                 again.{git_server_hint}"
-            )
+                 again."
+                    .to_string()
+                    + &git_server_hint,
+                &selection_failures,
+            ));
         }
 
         eprintln!(
             "repository servers are down or not accepting your PR right now, pushing to servers in your user server list instead"
         );
 
-        let mut fallback_events: Option<Vec<Event>> = None;
+        let mut fallback_servers = Vec::new();
         for server in all_candidates {
-            let prs_url = format_grasp_server_url_as_grasp06_prs_url(
-                &server,
-                &user_ref.public_key,
-                &repo_ref.identifier,
-            )?;
-            let (events, _) = push_refs_and_generate_pr_or_pr_update_event(
-                git_repo,
-                repo_ref,
-                tip,
-                first_commit,
-                merge_base,
-                proposal_metadata,
-                user_ref,
-                root_proposal,
-                title_description_overide,
-                std::slice::from_ref(&prs_url),
-                git_ref.clone(),
-                signer,
-                term,
-                git_server_push_options,
-            )
-            .await?;
+            match fallback_proposal_server(&server, &user_ref.public_key, &repo_ref.identifier) {
+                Ok(server) => fallback_servers.push(server),
+                Err(error) => {
+                    let reason = format!("{server}: {error:#}");
+                    eprintln!("warning: skipping malformed fallback server {reason}");
+                    selection_failures.push(reason);
+                }
+            }
+        }
+        let mut fallback_events: Option<ProposalPushResult> = None;
+        // Keep the established first-success GRASP-06 fallback policy.
+        for candidates in fallback_servers.chunks(1) {
+            let (events, attempt_responses) =
+                push_refs_and_generate_pr_or_pr_update_event_with_client(
+                    staging_client,
+                    &mut ordering_reference,
+                    git_repo,
+                    repo_ref,
+                    tip,
+                    first_commit,
+                    merge_base,
+                    proposal_metadata,
+                    user_ref,
+                    root_proposal,
+                    title_description_overide,
+                    candidates,
+                    git_ref.clone(),
+                    signer,
+                    term,
+                    git_server_push_options,
+                )
+                .await?;
+            record_attempt_failures(&mut selection_failures, &attempt_responses);
             if let Some(events) = events {
                 fallback_events = Some(events);
                 break;
             }
-            tried.push(prs_url);
+            tried.extend(candidates.iter().map(|server| server.clone_url.clone()));
         }
 
         fallback_events.ok_or_else(|| {
-            anyhow::anyhow!(
+            selector_failure(
                 "failed to push PR: repository servers are down or not accepting the push, \
                  and all fallback servers in your user server list were also unreachable \
-                 or rejected the push.{git_server_hint}"
+                 or rejected the push."
+                    .to_string()
+                    + &git_server_hint,
+                &selection_failures,
             )
         })?
     };
 
-    if !is_quiet() {
-        eprintln!(
-            "posting {}",
-            if events.iter().any(|e| e.kind.eq(&Kind::GitStatusClosed)) {
-                "proposal revision as new PR event, and a close status for the old patch"
-            } else if events.iter().any(|e| e.kind.eq(&KIND_PULL_REQUEST_UPDATE)) {
-                "proposal revision as PR update event"
-            } else {
-                "proposal as PR event"
+    if staging_client.is_some() && repo_ref.is_authorized_maintainer(&user_ref.public_key) {
+        let event = events
+            .events
+            .first()
+            .context("proposal push returned no event")?;
+        let refspec = format!("{tip}:refs/nostr/{}", event.id);
+        for clone_url in repo_ref
+            .git_server
+            .iter()
+            .filter(|url| !is_grasp_server_clone_url(url) && git_server != Some(url.as_str()))
+        {
+            if repo_ref.private {
+                prepare_private_git_auth(std::slice::from_ref(clone_url), signer).await?;
             }
-        );
+            if let Err(error) = push_proposal_ref(
+                git_repo,
+                repo_ref,
+                clone_url,
+                &refspec,
+                term,
+                git_server_push_options,
+            )
+            .await
+            {
+                term.write_line(&format!(
+                    "push: failed to replicate proposal to {}: {error:#}",
+                    git_server_display_url(clone_url)
+                ))?;
+            }
+        }
     }
     Ok(events)
 }
 
+/// Select proposal Git servers with the original public push-then-sign
+/// behavior. This receipt-free API deliberately creates no early relay
+/// transports. The internal receipt-carrying selector opts CLI operations into
+/// event-first delivery and scopes its evidence to the immediate fanout.
+#[allow(clippy::too_many_arguments)]
+pub async fn select_servers_push_refs_and_generate_pr_or_pr_update_event(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &crate::client::Client,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    tip: &Sha1Hash,
+    first_commit: &Sha1Hash,
+    merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
+    user_ref: &UserRef,
+    root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
+    signer: &Arc<crate::NgitSigner>,
+    term: &Term,
+    git_server_push_options: &[&str],
+    git_server: Option<&str>,
+) -> Result<Vec<Event>> {
+    Ok(
+        select_servers_push_refs_and_generate_pr_or_pr_update_event_with_delivery(
+            client,
+            git_repo,
+            repo_ref,
+            tip,
+            first_commit,
+            merge_base,
+            proposal_metadata,
+            user_ref,
+            root_proposal,
+            title_description_overide,
+            signer,
+            term,
+            git_server_push_options,
+            git_server,
+            ProposalStagingDelivery::LegacyOnly,
+        )
+        .await?
+        .events,
+    )
+}
+
+/// Compatibility entry point preserving the original public API and its
+/// push-then-sign behavior. Callers with raw string URLs do not supply a
+/// publication client or trusted GRASP relay-origin context, so this wrapper
+/// deliberately does not opt them into event-first staging. The receipt-aware
+/// selector carries trusted pairing context explicitly and uses the same core.
 #[allow(clippy::too_many_arguments)]
 pub async fn push_refs_and_generate_pr_or_pr_update_event(
     git_repo: &Repo,
@@ -746,10 +1060,77 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
     term: &Term,
     git_server_push_options: &[&str],
 ) -> Result<(Option<Vec<Event>>, Vec<(String, Result<()>)>)> {
-    let mut responses: Vec<(String, Result<()>)> = vec![];
+    let servers = servers
+        .iter()
+        .map(|url| ProposalServer::legacy(url.clone()))
+        .collect::<Vec<_>>();
+    push_refs_and_generate_pr_or_pr_update_event_with_client(
+        None,
+        &mut None,
+        git_repo,
+        repo_ref,
+        tip,
+        first_commit,
+        merge_base,
+        proposal_metadata,
+        user_ref,
+        root_proposal,
+        title_description_overide,
+        &servers,
+        git_ref,
+        signer,
+        term,
+        git_server_push_options,
+    )
+    .await
+    .map(|(result, responses)| (result.map(|proposal| proposal.events), responses))
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn push_refs_and_generate_pr_or_pr_update_event_with_client(
+    #[cfg(test)] client: Option<&crate::client::MockConnect>,
+    #[cfg(not(test))] client: Option<&crate::client::Client>,
+    ordering_reference: &mut Option<Event>,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    tip: &Sha1Hash,
+    first_commit: &Sha1Hash,
+    merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
+    user_ref: &UserRef,
+    root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
+    servers: &[ProposalServer],
+    git_ref: Option<String>,
+    signer: &Arc<crate::NgitSigner>,
+    term: &Term,
+    git_server_push_options: &[&str],
+) -> Result<(Option<ProposalPushResult>, Vec<(String, Result<()>)>)> {
+    if let Some(client) = client {
+        return push_proposal_in_phases(
+            client,
+            ordering_reference,
+            git_repo,
+            repo_ref,
+            tip,
+            first_commit,
+            merge_base,
+            proposal_metadata,
+            user_ref,
+            root_proposal,
+            title_description_overide,
+            servers,
+            git_ref,
+            signer,
+            term,
+            git_server_push_options,
+        )
+        .await;
+    }
+    let mut responses: Vec<(String, Result<()>)> = vec![];
     let mut unsigned_pr_event: Option<UnsignedEvent> = None;
-    for clone_url in servers {
+    for server in servers {
+        let clone_url = &server.clone_url;
         let display_url = git_server_display_url(clone_url);
         let mut draft_pr_event = if let Some(ref unsigned_pr_event) = unsigned_pr_event {
             unsigned_pr_event.clone()
@@ -791,48 +1172,18 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
 
         let refspec = format!("{tip}:{git_ref_used}");
 
-        // A proposal may target an explicit --git-server, a contributor
-        // fallback, or a GRASP-06 /prs endpoint which is not present in the
-        // repository announcement. Sign the exact repository root immediately
-        // before this Smart HTTP operation so those private endpoints receive
-        // a fresh, correctly scoped credential too.
         if repo_ref.private {
             prepare_private_git_auth(std::slice::from_ref(clone_url), signer).await?;
         }
-
-        let res = if is_grasp_server_clone_url(clone_url) {
-            push_to_remote_url(
-                git_repo,
-                clone_url,
-                None,
-                &[refspec],
-                term,
-                git_server_push_options,
-            )
-        } else {
-            // anticipated only when pushing to user's own repo or a personal-fork with
-            // non-grasp git servers. this is used to extract prefered protocols / ssh
-            // details from nostr url
-            let decoded_nostr_url = {
-                if let Ok(Some((_, decoded_nostr_url))) = git_repo
-                .get_first_nostr_remote_when_in_ngit_binary()
-                .await.context("failed to list git remotes")
-                .context("no `nostr://` remote detected. `ngit sync` must be run from a repo with a nostr remote") {
-                    decoded_nostr_url
-                } else {
-                    repo_ref.to_nostr_git_url(&Some(git_repo))
-                }
-            };
-            push_to_remote(
-                git_repo,
-                clone_url,
-                &decoded_nostr_url,
-                &[refspec],
-                term,
-                false,
-                git_server_push_options,
-            )
-        };
+        let res = push_proposal_ref(
+            git_repo,
+            repo_ref,
+            clone_url,
+            &refspec,
+            term,
+            git_server_push_options,
+        )
+        .await;
 
         match res {
             Err(error) => {
@@ -841,54 +1192,499 @@ pub async fn push_refs_and_generate_pr_or_pr_update_event(
                 ))?;
                 responses.push((clone_url.clone(), Err(anyhow!(error))));
             }
-            Ok(ref_updates) => {
-                if let Some((_, Some(error))) = ref_updates.iter().next() {
-                    term.write_line(&format!(
-                        "push: error sending commit data to {display_url}: {error}"
-                    ))?;
-                    responses.push((clone_url.clone(), Err(anyhow!(error.clone()))));
-                } else {
-                    responses.push((clone_url.clone(), Ok(())));
-                    write_progress_line(term, &format!("push: commit data sent to {display_url}"))?;
-                    unsigned_pr_event = Some(draft_pr_event);
-                }
+            Ok(()) => {
+                responses.push((clone_url.clone(), Ok(())));
+                write_progress_line(term, &format!("push: commit data sent to {display_url}"))?;
+                unsigned_pr_event = Some(draft_pr_event);
             }
         }
     }
     if let Some(unsigned_pr_event) = unsigned_pr_event {
-        let pr_event = sign_draft_event(
-            unsigned_pr_event,
-            signer,
-            if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
-                "Pull Request Replacing Original Patch"
-            } else if root_proposal.is_some() {
-                "Pull Request Update"
-            } else {
-                "Pull Request"
-            }
-            .to_string(),
-        )
-        .await?;
+        let pr_event = sign_proposal_event(unsigned_pr_event, signer, root_proposal).await?;
+        let mut result = ProposalPushResult {
+            events: vec![pr_event],
+            receipts: vec![],
+        };
         if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
-            Ok((
-                Some(vec![
-                    pr_event,
-                    create_close_status_for_original_patch(
-                        git_repo,
-                        signer,
-                        repo_ref,
-                        root_proposal.unwrap(),
-                    )
-                    .await?,
-                ]),
-                responses,
-            ))
-        } else {
-            Ok((Some(vec![pr_event]), responses))
+            result.events.push(
+                create_close_status_for_original_patch(
+                    git_repo,
+                    signer,
+                    repo_ref,
+                    root_proposal.unwrap(),
+                )
+                .await?,
+            );
         }
+        Ok((Some(result), responses))
     } else {
         Ok((None, responses))
     }
+}
+
+async fn push_proposal_ref(
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    clone_url: &str,
+    refspec: &str,
+    term: &Term,
+    git_server_push_options: &[&str],
+) -> Result<()> {
+    let result = if is_grasp_server_clone_url(clone_url) {
+        push_to_remote_url(
+            git_repo,
+            clone_url,
+            None,
+            &[refspec.to_string()],
+            term,
+            git_server_push_options,
+        )
+    } else {
+        // anticipated only when pushing to user's own repo or a personal-fork with
+        // non-grasp git servers. this is used to extract prefered protocols / ssh
+        // details from nostr url
+        let decoded_nostr_url = {
+            if let Ok(Some((_, decoded_nostr_url))) = git_repo
+                .get_first_nostr_remote_when_in_ngit_binary()
+                .await.context("failed to list git remotes")
+                .context("no `nostr://` remote detected. `ngit sync` must be run from a repo with a nostr remote") {
+                    decoded_nostr_url
+                } else {
+                    repo_ref.to_nostr_git_url(&Some(git_repo))
+                }
+        };
+        push_to_remote(
+            git_repo,
+            clone_url,
+            &decoded_nostr_url,
+            &[refspec.to_string()],
+            term,
+            false,
+            git_server_push_options,
+        )
+    };
+
+    let updates = result?;
+    for (_, error) in updates {
+        if let Some(error) = error {
+            return Err(anyhow!(error));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_proposal_in_phases(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &crate::client::Client,
+    ordering_reference: &mut Option<Event>,
+    git_repo: &Repo,
+    repo_ref: &RepoRef,
+    tip: &Sha1Hash,
+    first_commit: &Sha1Hash,
+    merge_base: Option<&Sha1Hash>,
+    proposal_metadata: &ProposalMetadata,
+    user_ref: &UserRef,
+    root_proposal: Option<&Event>,
+    title_description_overide: &Option<(String, String)>,
+    servers: &[ProposalServer],
+    git_ref: Option<String>,
+    signer: &Arc<crate::NgitSigner>,
+    term: &Term,
+    git_server_push_options: &[&str],
+) -> Result<(Option<ProposalPushResult>, Vec<(String, Result<()>)>)> {
+    if servers.is_empty() {
+        return Ok((None, vec![]));
+    }
+    if ordering_reference.is_none() {
+        if let Some(root) = root_proposal {
+            let events = get_all_proposal_patch_pr_pr_update_events_from_cache(
+                git_repo.get_path()?,
+                repo_ref,
+                &root.id,
+            )
+            .await?;
+            *ordering_reference = crate::event_ordering::latest_event(&events).cloned();
+        }
+    }
+    // Establish one usable clone hint before replication. A rejected relay or
+    // failed Git push cannot remain the advertised location: try the next
+    // candidate with a newly signed event containing only its clone URL.
+    //
+    // Preferred future direction: with multiple repository GRASP servers, omit
+    // the explicit clone hint and race each server's EVENT -> Git operation.
+    // The first complete success could unlock fanout without waiting for a
+    // slow hint server; only exhaustion of repository servers would trigger
+    // GRASP-06 fallback. That needs parallel Git transfers and verified
+    // no-hint discovery semantics, so keep selection and Git serial here.
+    let mut responses = vec![];
+    let mut result = ProposalPushResult::default();
+    let mut anchor = None;
+    for (index, server) in servers.iter().enumerate() {
+        let mut draft = generate_unsigned_pr_or_update_event(
+            git_repo,
+            repo_ref,
+            &user_ref.public_key,
+            root_proposal,
+            title_description_overide,
+            tip,
+            first_commit,
+            merge_base,
+            proposal_metadata,
+            &[server.clone_url.as_str()],
+            &[],
+            git_repo.get_path().ok(),
+            ordering_reference.as_ref(),
+        )
+        .await?;
+        // Event IDs depend on the unsigned payload, not its signature. The
+        // Git-first path can establish this exact ref without asking the signer.
+        let draft_id = draft.id();
+        let paired_relay = server
+            .paired_relay
+            .as_ref()
+            .filter(|relay| early_staging_permitted(git_repo, repo_ref, relay));
+        // Purgatory is required by GRASP. This is a temporary exception for
+        // cached Pyramid implementations, which expose unserved PRs immediately.
+        // Never block on NIP-11 here: first encounters retain event-first order.
+        let git_first =
+            paired_relay.is_some_and(crate::relay_information::cached_hint_needs_git_first);
+        let mut receipt = None;
+        let signed_event = if git_first {
+            None
+        } else {
+            let event = sign_proposal_event(draft.clone(), signer, root_proposal).await?;
+            // A failed or timed-out publication may still be visible. Keep
+            // subsequent candidates (including GRASP-06 fallback) newer.
+            *ordering_reference = Some(event.clone());
+            Some(event)
+        };
+        if let Some(event) = &signed_event {
+            if let Some(relay) = paired_relay {
+                match stage_signed_proposal_event_for_client(
+                    client,
+                    event,
+                    relay,
+                    repository_is_private(git_repo, repo_ref),
+                    signer,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        receipt = Some(ProposalPublicationReceipt {
+                            event: event.clone(),
+                            relay: relay.clone(),
+                            outcome,
+                        })
+                    }
+                    Err(EarlyPublicationError::Signing(error)) => return Err(error),
+                    Err(EarlyPublicationError::Publication(error)) => {
+                        term.write_line(&format!(
+                            "push: hint relay admission failed for {}: {error:#}",
+                            server.clone_url
+                        ))?;
+                        responses.push((
+                            server.clone_url.clone(),
+                            Err(error.context("early relay publication failed")),
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
+        let refspec = format!(
+            "{tip}:{}",
+            git_ref
+                .as_deref()
+                .unwrap_or("refs/nostr/<event-id>")
+                .replace("<event-id>", &draft_id.to_string())
+        );
+        if repo_ref.private {
+            prepare_private_git_auth(std::slice::from_ref(&server.clone_url), signer).await?;
+        }
+        match push_proposal_ref(
+            git_repo,
+            repo_ref,
+            &server.clone_url,
+            &refspec,
+            term,
+            git_server_push_options,
+        )
+        .await
+        {
+            Ok(()) => {
+                write_progress_line(
+                    term,
+                    &format!(
+                        "push: commit data sent to {}",
+                        git_server_display_url(&server.clone_url)
+                    ),
+                )?;
+                let event = match signed_event {
+                    Some(event) => event,
+                    None => {
+                        let event = sign_proposal_event(draft, signer, root_proposal).await?;
+                        *ordering_reference = Some(event.clone());
+                        event
+                    }
+                };
+                if git_first {
+                    // Only publish this candidate once its advertised Git data
+                    // is usable; a rejected Git push leaves no visible PR.
+                    let relay = paired_relay.expect("Git-first requires a paired relay");
+                    match stage_signed_proposal_event_for_client(
+                        client,
+                        &event,
+                        relay,
+                        repository_is_private(git_repo, repo_ref),
+                        signer,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            receipt = Some(ProposalPublicationReceipt {
+                                event: event.clone(),
+                                relay: relay.clone(),
+                                outcome,
+                            })
+                        }
+                        Err(EarlyPublicationError::Signing(error)) => return Err(error),
+                        Err(EarlyPublicationError::Publication(error)) => {
+                            term.write_line(&format!(
+                                "push: hint relay publication failed after Git push to {}: {error:#}",
+                                server.clone_url
+                            ))?;
+                            responses.push((
+                                server.clone_url.clone(),
+                                Err(error.context("relay publication failed after Git push")),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                responses.push((server.clone_url.clone(), Ok(())));
+                save_event_in_local_cache(git_repo.get_path()?, &event)
+                    .await
+                    .context("failed to cache the Git-accepted hint proposal event")?;
+                result.receipts.extend(receipt);
+                result.events.push(event.clone());
+                anchor = Some((index, event, refspec));
+                break;
+            }
+            Err(error) => {
+                term.write_line(&format!(
+                    "push: error sending commit data to {}: {error:#}",
+                    server.clone_url
+                ))?;
+                responses.push((server.clone_url.clone(), Err(error)));
+            }
+        }
+    }
+    let Some((anchor_index, event, refspec)) = anchor else {
+        return Ok((None, responses));
+    };
+    let remaining = &servers[anchor_index + 1..];
+
+    // Second stage: publish the confirmed hint's exact event to all remaining
+    // relays at once, then perform the remaining serial Git transfers. Ordinary
+    // relays must not wait for replica Git pushes or another relay's admission.
+    // GRASP rejection affects only that replica; the advertised hint works.
+    // Never use the shared relay pool here: its reconnects must not publish a
+    // rejected or abandoned proposal after the operation has moved on.
+    let mut outcomes: HashMap<_, _> = result
+        .receipts
+        .iter()
+        .map(|receipt| (receipt.relay.clone(), receipt.outcome.clone()))
+        .collect();
+    let mut relays = Vec::new();
+    for server in remaining {
+        if let Some(relay) = server
+            .paired_relay
+            .as_ref()
+            .filter(|relay| early_staging_permitted(git_repo, repo_ref, relay))
+        {
+            if !relays.contains(relay) && !outcomes.contains_key(relay) {
+                relays.push(relay.clone());
+            }
+        }
+    }
+    let replica_relays = relays.iter().cloned().collect::<HashSet<_>>();
+    // Match ordinary publication's repository/user/default target selection,
+    // including repository-only and private routing. These targets join the
+    // GRASP admissions in this same fanout, not a third post-Git phase.
+    let user_relays = user_ref.relays.write();
+    let targets = publication_targets(
+        &repo_ref.relays,
+        &user_relays,
+        client.get_relay_default_set(),
+        &[],
+        proposal_repository_only_routing(git_repo, repo_ref),
+        false,
+    );
+    for relay in targets
+        .relays
+        .iter()
+        .filter_map(|url| RelayUrl::parse(url).ok())
+    {
+        if !outcomes.contains_key(&relay) && !relays.contains(&relay) {
+            relays.push(relay);
+        }
+    }
+    if !relays.is_empty() {
+        write_progress_line(
+            term,
+            "posting proposal to remaining Nostr relays before replicating Git",
+        )?;
+    }
+    let admissions = futures::future::join_all(relays.iter().map(|relay| async {
+        stage_signed_proposal_event_for_client(
+            client,
+            &event,
+            relay,
+            repository_is_private(git_repo, repo_ref),
+            signer,
+        )
+        .await
+    }))
+    .await;
+    for (relay, admission) in relays.into_iter().zip(admissions) {
+        let outcome = match admission {
+            Ok(outcome) => outcome,
+            Err(EarlyPublicationError::Signing(error)) => return Err(error),
+            Err(EarlyPublicationError::Publication(error)) => {
+                crate::client::RelayPublishOutcome::rejected(relay.as_str(), format!("{error:#}"))
+            }
+        };
+        if !replica_relays.contains(&relay) {
+            result.receipts.push(ProposalPublicationReceipt {
+                event: event.clone(),
+                relay: relay.clone(),
+                outcome: outcome.clone(),
+            });
+        }
+        outcomes.insert(relay, outcome);
+    }
+    let mut admitted = vec![];
+    for server in remaining {
+        let receipt = server.paired_relay.as_ref().and_then(|relay| {
+            outcomes
+                .get(relay)
+                .map(|outcome| ProposalPublicationReceipt {
+                    event: event.clone(),
+                    relay: relay.clone(),
+                    outcome: outcome.clone(),
+                })
+        });
+        if let Some(reason) = receipt
+            .as_ref()
+            .and_then(|receipt| receipt.outcome.error.as_ref())
+        {
+            term.write_line(&format!(
+                "push: admission failed for {}: {reason}",
+                server.clone_url
+            ))?;
+            responses.push((
+                server.clone_url.clone(),
+                Err(anyhow!("early relay publication failed: {reason}")),
+            ));
+            result.receipts.extend(receipt);
+        } else {
+            admitted.push((server, receipt));
+        }
+    }
+    // Git destinations retain their original ordering. The selector then
+    // replicates to ordinary Git servers. Exact fanout outcomes prevent the
+    // callers from sending this PR event again after the Git transfers.
+    for (server, receipt) in admitted {
+        if repo_ref.private {
+            prepare_private_git_auth(std::slice::from_ref(&server.clone_url), signer).await?;
+        }
+        let response = push_proposal_ref(
+            git_repo,
+            repo_ref,
+            &server.clone_url,
+            &refspec,
+            term,
+            git_server_push_options,
+        )
+        .await;
+        match &response {
+            Ok(()) => {
+                write_progress_line(
+                    term,
+                    &format!(
+                        "push: commit data sent to {}",
+                        git_server_display_url(&server.clone_url)
+                    ),
+                )?;
+            }
+            Err(error) => {
+                term.write_line(&format!(
+                    "push: error sending commit data to {}: {error:#}",
+                    server.clone_url
+                ))?;
+            }
+        }
+        // Relay acceptance remains valid: this event advertises the working
+        // hint. A replica Git failure must not suppress later close/status events.
+        result.receipts.extend(receipt);
+        responses.push((server.clone_url.clone(), response));
+    }
+    if let Some(root) = root_proposal.filter(|root| root.kind == Kind::GitPatch) {
+        result
+            .events
+            .push(create_close_status_for_original_patch(git_repo, signer, repo_ref, root).await?);
+    }
+    Ok((Some(result), responses))
+}
+
+async fn sign_proposal_event(
+    draft: UnsignedEvent,
+    signer: &Arc<crate::NgitSigner>,
+    root_proposal: Option<&Event>,
+) -> Result<Event> {
+    sign_draft_event(
+        draft,
+        signer,
+        if root_proposal.is_some_and(|proposal| proposal.kind.eq(&Kind::GitPatch)) {
+            "Pull Request Replacing Original Patch"
+        } else if root_proposal.is_some() {
+            "Pull Request Update"
+        } else {
+            "Pull Request"
+        }
+        .to_string(),
+    )
+    .await
+}
+
+#[cfg(not(test))]
+async fn stage_signed_proposal_event_for_client(
+    client: &crate::client::Client,
+    event: &Event,
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<crate::client::RelayPublishOutcome, EarlyPublicationError> {
+    client
+        .stage_signed_proposal_event(event, paired_relay, private_repository, signer)
+        .await
+}
+
+#[cfg(test)]
+async fn stage_signed_proposal_event_for_client(
+    _client: &crate::client::MockConnect,
+    event: &Event,
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<crate::NgitSigner>,
+) -> Result<crate::client::RelayPublishOutcome, EarlyPublicationError> {
+    // Unit tests do not route staging through the mock's shared send_event_to
+    // method. Use the same production direct-Relay port; integration binaries
+    // additionally exercise the configured proactive-auth flag.
+    crate::client::Client::default()
+        .stage_signed_proposal_event(event, paired_relay, private_repository, signer)
+        .await
 }
 
 fn git_server_display_url(url: &str) -> String {
@@ -966,6 +1762,11 @@ async fn create_close_status_for_original_patch(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        ProposalServer, fallback_proposal_server, git_server_display_url,
+        staging_relay_is_permitted,
+    };
+
     #[test]
     fn transfer_logs_preserve_failures_without_repeating_byte_updates() {
         let term = console::Term::buffered_stderr();
@@ -987,7 +1788,73 @@ mod tests {
         assert_eq!(reporter.logged.len(), 2);
     }
 
-    use super::git_server_display_url;
+    #[test]
+    fn restricted_staging_requires_an_authoritative_relay_match() {
+        let declared =
+            super::RelayUrl::parse("ws://example.com/base-path/").expect("valid declared relay");
+        let paired =
+            super::RelayUrl::parse("ws://example.com/base-path").expect("valid paired relay");
+        let undeclared =
+            super::RelayUrl::parse("ws://elsewhere.invalid").expect("valid undeclared relay");
+        assert!(staging_relay_is_permitted(
+            true,
+            std::slice::from_ref(&declared),
+            &paired
+        ));
+        assert!(!staging_relay_is_permitted(
+            true,
+            std::slice::from_ref(&declared),
+            &undeclared
+        ));
+        assert!(!staging_relay_is_permitted(true, &[], &undeclared));
+        assert!(staging_relay_is_permitted(false, &[], &undeclared));
+    }
+
+    #[test]
+    fn malformed_fallback_is_an_isolated_candidate_error() {
+        let public_key = nostr::prelude::Keys::generate().public_key();
+        let error = fallback_proposal_server("", &public_key, "repo")
+            .expect_err("an empty fallback server cannot be normalized");
+        assert!(format!("{error:#}").contains("invalid fallback GRASP server URL"));
+
+        let valid = fallback_proposal_server("https://example.com", &public_key, "repo")
+            .expect("the next valid fallback must remain usable");
+        assert!(valid.clone_url.starts_with("https://example.com/prs/"));
+        assert_eq!(
+            valid.paired_relay.expect("valid GRASP pair").as_str(),
+            "wss://example.com"
+        );
+    }
+
+    #[test]
+    fn proposal_server_derives_relay_from_the_origin_before_prs() {
+        const NPUB: &str = "npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr";
+        for (clone_url, expected_relay) in [
+            (
+                format!("https://example.com/services/grasp/prs/{NPUB}/repo.git"),
+                "wss://example.com/services/grasp",
+            ),
+            (
+                format!("http://example.com/prs/{NPUB}/repo.git"),
+                "ws://example.com",
+            ),
+            (
+                format!("https://example.com/services/grasp/{NPUB}/repo.git"),
+                "wss://example.com/services/grasp",
+            ),
+        ] {
+            let server = ProposalServer::new(clone_url.clone())
+                .unwrap_or_else(|error| panic!("failed to pair {clone_url}: {error}"));
+            assert_eq!(
+                server
+                    .paired_relay
+                    .expect("GRASP server must have a paired relay")
+                    .as_str()
+                    .trim_end_matches('/'),
+                expected_relay
+            );
+        }
+    }
 
     #[test]
     fn helper_urls_do_not_require_grasp_normalization() {

@@ -46,7 +46,7 @@ use nostr_sdk::{
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
     proxy::Proxy,
-    relay::{RelayLimits, RelayNotification, RelayStatus},
+    relay::{Relay, RelayCapabilities, RelayLimits, RelayNotification, RelayOptions, RelayStatus},
 };
 use serde_json::Value;
 
@@ -65,7 +65,10 @@ use crate::{
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
     output_mode::{ProgressPolicy, TransientLine, progress_policy, write_progress_line},
-    relay_auth::{DemandAuthTransport, PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
+    relay_auth::{
+        AuthSigningCapture, AuthSigningTimeout, DemandAuthTransport, PolicyAuthenticator,
+        RelayAuthMode, RelayAuthPolicy,
+    },
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
         announcement_author_declines_moderatorship,
@@ -1009,6 +1012,14 @@ impl Connect for Client {
         let mut observed_generations = cache_generations();
         let mut cache_restarts = 0;
 
+        let relay_information =
+            Arc::new(crate::relay_information::RelayInformationRefreshes::default());
+        if let Some(coordinate) = selected_maintainer_coordinate {
+            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                relay_information.start(&repo_ref.relays);
+            }
+        }
+
         let mut request = create_relays_request(
             git_repo_path,
             selected_maintainer_coordinate,
@@ -1128,6 +1139,7 @@ impl Connect for Client {
                     let search = request.announcement_search.clone();
                     let searched_relay = request.selected_relay.clone();
                     let peers = round_progress.clone();
+                    let relay_information = Arc::clone(&relay_information);
                     let scope = request.scope;
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
@@ -1297,6 +1309,11 @@ impl Connect for Client {
                     };
                     async move {
                         let result = fetch.await;
+                        if let Some(coordinate) = selected_maintainer_coordinate {
+                            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                                relay_information.start(&repo_ref.relays);
+                            }
+                        }
                         let search_result = search.zip(searched_relay).map(|(search, relay)| {
                             let outcome = search.result.lock().unwrap().clone().unwrap_or_else(|| {
                                 AnnouncementSearchResult::Failed(result.as_ref().err()
@@ -1333,6 +1350,9 @@ impl Connect for Client {
                     None
                 };
             let selected_announcement_resolved = selected_repo_ref.is_some();
+            if let Some(repo_ref) = &selected_repo_ref {
+                relay_information.start(&repo_ref.relays);
+            }
             if !request.lock_repository_relays {
                 if let Some(repo_ref) = &selected_repo_ref {
                     if repo_ref.private {
@@ -1674,6 +1694,481 @@ fn author_announcement_discovery_pending(
     announcement_resolved: &AtomicBool,
 ) -> bool {
     is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
+}
+
+/// A failed isolated staging operation, separated by whether the user signer
+/// or the publication transport failed. Signing failures are command-fatal;
+/// only publication failures are eligible for per-server fallback.
+#[derive(Debug)]
+pub(crate) enum EarlyPublicationError {
+    Signing(anyhow::Error),
+    Publication(anyhow::Error),
+}
+
+impl Client {
+    /// Publish an already signed proposal through a fresh direct relay. The
+    /// shared client's pool, declined-auth markers and reconnect tasks are not
+    /// touched, including after rejection or acknowledgement timeout.
+    pub(crate) async fn stage_signed_proposal_event(
+        &self,
+        event: &Event,
+        paired_relay: &RelayUrl,
+        private_repository: bool,
+        signer: &Arc<NgitSigner>,
+    ) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+        publish_signed_proposal_event(
+            event,
+            paired_relay,
+            private_repository,
+            signer,
+            self.proactive_auth,
+            self.relay_timeouts,
+        )
+        .await
+    }
+}
+
+// Private-repository signing retains its native approval window, including
+// explicit manual retries. Only that case disables the SDK's combined timer;
+// its network waits are still bounded by the separate watchdog below.
+const PRIVATE_SIGNING_SDK_TIMEOUT: Duration = Duration::from_secs(366 * 24 * 60 * 60);
+
+fn classify_auth_publication_failure(error: anyhow::Error) -> EarlyPublicationError {
+    if error.is::<AuthSigningTimeout>() {
+        EarlyPublicationError::Publication(error)
+    } else {
+        EarlyPublicationError::Signing(error)
+    }
+}
+
+async fn publish_signed_proposal_event(
+    event: &Event,
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<NgitSigner>,
+    proactive_auth: bool,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+    let (relay, signing_capture) = build_isolated_write_relay(
+        paired_relay,
+        private_repository,
+        signer,
+        proactive_auth,
+        timeouts,
+    )
+    .map_err(EarlyPublicationError::Publication)?;
+    publish_signed_proposal_on_relay(
+        relay,
+        signing_capture,
+        event,
+        paired_relay,
+        timeouts,
+        private_repository,
+    )
+    .await
+}
+
+async fn publish_signed_proposal_on_relay(
+    relay: Relay,
+    signing_capture: AuthSigningCapture,
+    event: &Event,
+    paired_relay: &RelayUrl,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+    private_repository: bool,
+) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+    let connect_timeout = Duration::from_secs(timeouts.connect);
+    let acknowledgement_timeout = Duration::from_secs(timeouts.overall);
+    let sdk_timeout = if private_repository {
+        PRIVATE_SIGNING_SDK_TIMEOUT
+    } else {
+        // Public AUTH signing and the subsequent network acknowledgement each
+        // receive at most one configured relay budget.
+        acknowledgement_timeout.saturating_mul(2)
+    };
+    // Network waiting and active AUTH signing have separate deadlines. Public
+    // AUTH times out and skips this server; private signing uses its native
+    // deadline. A missing challenge never gets a signer-sized network wait.
+    let result = {
+        let operation = async {
+            relay
+                .try_connect()
+                .timeout(connect_timeout)
+                .await
+                .with_context(|| format!("failed to connect to proposal relay {paired_relay}"))?;
+            match relay
+                .send_event(event)
+                .ok_timeout(sdk_timeout)
+                .authentication_timeout(sdk_timeout)
+                .await
+            {
+                Ok(output) if output.id() == &event.id && output.status().is_ack() => Ok(()),
+                Ok(_output) => anyhow::bail!(
+                    "paired relay returned an invalid acknowledgement for proposal event {}",
+                    event.id
+                ),
+                // The paired relay already possesses this exact signed instance.
+                Err(error) if event_rejection_is_duplicate(&error) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        };
+        tokio::pin!(operation);
+
+        // nostr-sdk broadcasts AuthenticationFailed before waiting for EVENT OK.
+        // If that broadcast precedes SendEvent's subscription, preserve the
+        // authenticator's original error rather than misclassifying it as a
+        // network timeout. Observe it independently of that SDK channel.
+        tokio::select! {
+            result = &mut operation => result
+                .with_context(|| format!("proposal relay {paired_relay} publication failed"))
+                .map(|()| RelayPublishOutcome::accepted(paired_relay.as_str().trim_end_matches('/')))
+                .map_err(EarlyPublicationError::Publication),
+            () = signing_capture.network_timeout(acknowledgement_timeout) => {
+                Err(EarlyPublicationError::Publication(anyhow!(
+                    "proposal relay {paired_relay} timed out waiting for publication or authentication"
+                )))
+            }
+            error = signing_capture.signing_failed() => {
+                Err(classify_auth_publication_failure(error))
+            }
+        }
+        // The owning operation future is dropped here, before cleanup below.
+    };
+
+    if matches!(result, Err(EarlyPublicationError::Signing(_))) {
+        // A captured signer error is already fatal. Cancel any other SDK auth
+        // future before draining instead of leaving a second human request
+        // interactive while this operation returns.
+        relay.shutdown();
+    }
+    // Closing prevents new auth signatures and drains an operation already
+    // started. Its own public AUTH/native private deadline still applies.
+    signing_capture.close_and_drain().await;
+    relay.shutdown();
+
+    if !matches!(result, Err(EarlyPublicationError::Signing(_))) {
+        // A send result and signer failure can become ready in either order.
+        // Preserve signer fatality even when the network result won the select.
+        if let Some(error) = signing_capture.take_error() {
+            return Err(classify_auth_publication_failure(error));
+        }
+    }
+    result
+}
+
+fn build_isolated_write_relay(
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<NgitSigner>,
+    proactive_auth: bool,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+) -> Result<(Relay, AuthSigningCapture)> {
+    crate::tls::install_default_crypto_provider();
+    ensure_onion_url_reachable(paired_relay.as_str())?;
+
+    // This is deliberately a new policy and direct Relay, never Client::clone
+    // or the shared send_event_to/add_relay path. Register classification and
+    // the exact signer Arc so restricted/proactive publication cannot silently
+    // become anonymous merely because this policy starts empty.
+    let auth_policy = Arc::new(RelayAuthPolicy::default());
+    if private_repository {
+        auth_policy.register_private_repo_relays([paired_relay.clone()]);
+    } else {
+        auth_policy.register_repo_relays([paired_relay.clone()]);
+    }
+    auth_policy.set_signer(Arc::clone(signer));
+    let signing_capture = AuthSigningCapture::default();
+
+    let mut options = RelayOptions::new()
+        .connect_timeout(Duration::from_secs(timeouts.connect))
+        .reconnect(false)
+        .ping(false)
+        .limits(RelayLimits::disable())
+        .verify_subscriptions(true);
+    if let Some(address) = tor_socks5_proxy_addr() {
+        // Match ordinary ClientBuilder routing: onion-only SOCKS, never an
+        // implicit proxy for a direct clearnet relay.
+        options = options.proxy(Proxy::onion(address));
+    }
+
+    let relay = Relay::builder(paired_relay.clone())
+        .capabilities(RelayCapabilities::WRITE)
+        // Publishing still waits for auth-required before revealing the signer
+        // identity, unless the user explicitly enabled proactive auth.
+        .websocket_transport(DemandAuthTransport::new(proactive_auth))
+        .authenticator(PolicyAuthenticator::with_signing_capture(
+            auth_policy,
+            signing_capture.clone(),
+            (!private_repository).then_some(Duration::from_secs(timeouts.overall)),
+        ))
+        .opts(options)
+        .build();
+    Ok((relay, signing_capture))
+}
+
+#[cfg(test)]
+mod isolated_proposal_tests {
+    use futures::{SinkExt, StreamExt};
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_required_without_a_challenge_has_a_network_deadline() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            while let Some(message) = socket.next().await {
+                let message = message?;
+                if message.is_close() {
+                    break;
+                }
+                if let Ok(raw) = message.to_text() {
+                    let value: serde_json::Value = serde_json::from_str(raw)?;
+                    if value[0] == "EVENT" {
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!([
+                                    "OK",
+                                    value[1]["id"],
+                                    false,
+                                    "auth-required: sign in"
+                                ])
+                                .to_string()
+                                .into(),
+                            ))
+                            .await?;
+                    }
+                }
+            }
+            anyhow::Ok(())
+        });
+        let keys = Keys::generate();
+        let event =
+            EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal").finalize(&keys)?;
+        let signer = Arc::new(NgitSigner::Keys(keys));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_event(
+                &event,
+                &url,
+                false,
+                &signer,
+                false,
+                crate::relay_timeouts::RelayTimeouts {
+                    connect: 1,
+                    overall: 1,
+                },
+            ),
+        )
+        .await
+        .context("missing AUTH challenge bypassed the network deadline")?;
+        assert!(matches!(result, Err(EarlyPublicationError::Publication(_))));
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        Ok(())
+    }
+
+    #[test]
+    fn auth_signing_timeout_skips_a_destination_but_refusal_is_fatal() {
+        assert!(matches!(
+            classify_auth_publication_failure(anyhow::Error::new(AuthSigningTimeout)),
+            EarlyPublicationError::Publication(_)
+        ));
+        assert!(matches!(
+            classify_auth_publication_failure(anyhow!("signer refused")),
+            EarlyPublicationError::Signing(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publication_waits_for_auth_required_before_authenticating() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server_url = url.clone();
+        let keys = Keys::generate();
+        let expected_signer = keys.public_key();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", "publish-only"])
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            let mut authenticated = false;
+            let mut auth_required = false;
+            let mut pending_event = None;
+            while let Some(message) = socket.next().await {
+                let message = message?;
+                if message.is_close() {
+                    break;
+                }
+                let Ok(raw) = message.to_text() else {
+                    continue;
+                };
+                let value: serde_json::Value = serde_json::from_str(raw)?;
+                match value[0].as_str() {
+                    Some("AUTH") => {
+                        assert!(
+                            auth_required,
+                            "publication disclosed identity before auth-required"
+                        );
+                        let auth: Event = serde_json::from_value(value[1].clone())?;
+                        auth.verify()?;
+                        assert_eq!(auth.pubkey, expected_signer);
+                        assert!(nostr::nips::nip42::is_valid_auth_event(
+                            &auth,
+                            &server_url,
+                            "publish-only"
+                        ));
+                        authenticated = true;
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!(["OK", auth.id, true, ""])
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await?;
+                    }
+                    Some("EVENT") => {
+                        if !authenticated {
+                            auth_required = true;
+                            socket
+                                .send(Message::Text(
+                                    serde_json::json!([
+                                        "OK",
+                                        value[1]["id"],
+                                        false,
+                                        "auth-required: publish"
+                                    ])
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await?;
+                        } else {
+                            pending_event = Some(value[1]["id"].clone());
+                        }
+                    }
+                    _ => {}
+                }
+                if authenticated {
+                    if let Some(id) = pending_event.take() {
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!(["OK", id, true, ""]).to_string().into(),
+                            ))
+                            .await?;
+                    }
+                }
+            }
+            assert!(
+                authenticated,
+                "publication never answered the AUTH challenge"
+            );
+            anyhow::Ok(())
+        });
+        let event =
+            EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal").finalize(&keys)?;
+        let signer = Arc::new(NgitSigner::Keys(keys));
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_event(
+                &event,
+                &url,
+                false,
+                &signer,
+                false,
+                crate::relay_timeouts::RelayTimeouts {
+                    connect: 1,
+                    overall: 1,
+                },
+            ),
+        )
+        .await?
+        .map_err(|error| anyhow!("{error:?}"))?;
+        assert!(outcome.accepted_by_relay());
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        Ok(())
+    }
+
+    const SIGNER_REFUSAL: &str = "remote signer deliberately refused isolated NIP-42 AUTH";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_refusal_before_event_wait_is_fatal_and_closes_the_relay() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let relay_url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", "before-event-wait"])
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            // Deliberately send no AuthenticationFailed equivalent and no OK.
+            // The SDK notification which carries that state is transient; the
+            // production capture is what must release the later EVENT waiter.
+            while let Some(message) = socket.next().await {
+                if message?.is_close() {
+                    break;
+                }
+            }
+            anyhow::Ok(())
+        });
+
+        let keys = Keys::generate();
+        let signer = Arc::new(NgitSigner::Rejecting {
+            keys: keys.clone(),
+            reason: SIGNER_REFUSAL,
+        });
+        let timeouts = crate::relay_timeouts::RelayTimeouts {
+            overall: 30,
+            connect: 30,
+        };
+        let connect_timeout = Duration::from_secs(timeouts.connect);
+        let (relay, capture) =
+            build_isolated_write_relay(&relay_url, false, &signer, true, timeouts)?;
+        relay.try_connect().timeout(connect_timeout).await?;
+
+        // Drive a real PolicyAuthenticator from a real relay AUTH challenge,
+        // then start SendEvent only after its error predates that subscription.
+        tokio::time::timeout(Duration::from_secs(5), capture.wait_for_signing_failure())
+            .await
+            .context("PolicyAuthenticator did not capture the AUTH signer refusal")?;
+        let event = EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal")
+            .finalize(&keys)
+            .map_err(|error| anyhow!(error))?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_on_relay(relay, capture, &event, &relay_url, timeouts, false),
+        )
+        .await
+        .context("captured signer refusal was hidden by the SDK authentication wait")?;
+        match result {
+            Err(EarlyPublicationError::Signing(error)) => {
+                assert_eq!(error.to_string(), SIGNER_REFUSAL);
+            }
+            Err(EarlyPublicationError::Publication(error)) => {
+                panic!("signer refusal became a retryable publication failure: {error:#}")
+            }
+            Ok(outcome) => panic!("signer refusal produced relay acceptance: {outcome:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .context("isolated relay did not close after signer refusal")???;
+        Ok(())
+    }
 }
 
 async fn get_events_of(
@@ -2218,7 +2713,7 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<CacheDatabase>
     })
 }
 
-fn get_global_cache_dir() -> Result<PathBuf> {
+pub(crate) fn get_global_cache_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("NGIT_CACHE_DIR") {
         return Ok(PathBuf::from(path));
     }
@@ -5045,6 +5540,124 @@ fn outcomes_to_results(outcomes: Vec<RelayPublishOutcome>) -> Vec<(String, bool)
         .collect()
 }
 
+/// Operation-scoped outcome for an exact signed proposal and publication relay.
+/// The initial hint receipt requires its Git push to succeed; broader fanout
+/// starts only after that hint works. Replica receipts also track their Git
+/// outcome. Retaining all attempted outcomes prevents duplicate publication
+/// after Git replication. No global or filesystem-keyed evidence is retained.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalPublicationReceipt {
+    pub event: Event,
+    pub relay: RelayUrl,
+    pub outcome: RelayPublishOutcome,
+}
+
+/// Merge only receipts supplied by the immediate proposal push operation.
+/// Matching the complete Event (including its signature), not just its id,
+/// prevents another signing instance from consuming this acceptance evidence.
+fn merge_early_publication_receipts(
+    events: &[Event],
+    outcomes: &mut Vec<RelayPublishOutcome>,
+    receipts: &[ProposalPublicationReceipt],
+) {
+    let matching = receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.outcome.accepted_by_relay()
+                && events.iter().any(|event| event == &receipt.event)
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() || outcomes.iter().any(RelayPublishOutcome::accepted_by_relay) {
+        return;
+    }
+
+    let original = outcomes.clone();
+    let mut relays = original
+        .iter()
+        .map(|outcome| outcome.relay.trim_end_matches('/').to_string())
+        .collect::<Vec<_>>();
+    for receipt in &matching {
+        let relay = receipt.relay.as_str().trim_end_matches('/').to_string();
+        if !relays.contains(&relay) {
+            relays.push(relay);
+        }
+    }
+
+    let mut partially_covered = Vec::new();
+    *outcomes = relays
+        .into_iter()
+        .map(|relay| {
+            if let Some(outcome) = original.iter().find(|outcome| {
+                outcome.accepted_by_relay() && outcome.relay.trim_end_matches('/') == relay
+            }) {
+                return outcome.clone();
+            }
+            let missing = events
+                .iter()
+                .filter(|event| {
+                    !matching.iter().any(|receipt| {
+                        receipt.event == **event
+                            && receipt.relay.as_str().trim_end_matches('/') == relay
+                    })
+                })
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                for receipt in matching.iter().filter(|receipt| {
+                    receipt.relay.as_str().trim_end_matches('/') == relay
+                }) {
+                    eprintln!(
+                        "warning: later relay fanout did not confirm proposal event {}; using its Git-committed early acceptance on {} (no other event or relay acceptance is implied)",
+                        receipt.event.id, relay
+                    );
+                }
+                RelayPublishOutcome::accepted(relay)
+            } else {
+                for receipt in matching.iter().filter(|receipt| {
+                    receipt.relay.as_str().trim_end_matches('/') == relay
+                }) {
+                    partially_covered.push(format!("{} on {}", receipt.event.id, relay));
+                }
+                if let Some(outcome) = original
+                    .iter()
+                    .find(|outcome| outcome.relay.trim_end_matches('/') == relay)
+                    .filter(|outcome| outcomes_error_is_useful(outcome))
+                {
+                    outcome.clone()
+                } else {
+                    let missing_ids = missing
+                        .iter()
+                        .map(|event| event.id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    RelayPublishOutcome::rejected(
+                        relay,
+                        format!(
+                            "early relay + Git acceptance covers only part of this batch; events still unfulfilled on this relay: {missing_ids}"
+                        ),
+                    )
+                }
+            }
+        })
+        .collect();
+
+    if !partially_covered.is_empty() {
+        partially_covered.sort();
+        partially_covered.dedup();
+        eprintln!(
+            "warning: early publication plus Git acceptance covers only part of this event batch: {}; the close/other events still need relay publication",
+            partially_covered.join(", ")
+        );
+    }
+}
+
+fn outcomes_error_is_useful(outcome: &RelayPublishOutcome) -> bool {
+    outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| !error.is_empty())
+}
+
 fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()> {
     if outcomes.iter().any(RelayPublishOutcome::accepted_by_relay) {
         return Ok(());
@@ -5068,6 +5681,73 @@ fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()
     bail!(
         "couldn't publish all requested updates to any Nostr relay:\n{failures}\n\nResolve the relay errors above before retrying. Some updates may already have been accepted."
     )
+}
+
+#[cfg(test)]
+mod proposal_receipt_tests {
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys};
+
+    use super::*;
+
+    fn event(keys: &Keys, content: &str) -> Event {
+        EventBuilder::new(Kind::TextNote, content)
+            .finalize(keys)
+            .expect("test event must sign")
+    }
+
+    fn receipt(event: Event, relay: &RelayUrl) -> ProposalPublicationReceipt {
+        ProposalPublicationReceipt {
+            event,
+            relay: relay.clone(),
+            outcome: RelayPublishOutcome::accepted(relay.as_str()),
+        }
+    }
+
+    #[test]
+    fn exact_receipt_preserves_single_event_acceptance_after_late_failure() {
+        let keys = Keys::generate();
+        let proposal = event(&keys, "proposal");
+        let early = RelayUrl::parse("ws://early.example.com").unwrap();
+        let late = "ws://late.example.com";
+        let receipts = vec![receipt(proposal.clone(), &early)];
+        let mut outcomes = vec![RelayPublishOutcome::rejected(late, "offline")];
+
+        merge_early_publication_receipts(std::slice::from_ref(&proposal), &mut outcomes, &receipts);
+
+        assert!(require_publication_acceptance(&outcomes).is_ok());
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| { outcome.relay == early.as_str() && outcome.accepted_by_relay() })
+        );
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.relay == late && outcome.error.as_deref() == Some("offline")
+        }));
+    }
+
+    #[test]
+    fn proposal_receipt_does_not_cover_a_later_close_status() {
+        let keys = Keys::generate();
+        let proposal = event(&keys, "proposal");
+        let close_status = event(&keys, "close status");
+        let early = RelayUrl::parse("ws://early.example.com").unwrap();
+        let late = "ws://late.example.com";
+        let receipts = vec![receipt(proposal.clone(), &early)];
+        let mut outcomes = vec![RelayPublishOutcome::rejected(late, "offline")];
+        let events = vec![proposal, close_status.clone()];
+
+        merge_early_publication_receipts(&events, &mut outcomes, &receipts);
+
+        assert!(require_publication_acceptance(&outcomes).is_err());
+        assert!(outcomes.iter().all(|outcome| !outcome.accepted_by_relay()));
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.relay == early.as_str()
+                && outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(&close_status.id.to_string()))
+        }));
+    }
 }
 
 /// Publish events, requiring at least one relay to accept the entire batch.
@@ -5094,6 +5774,43 @@ pub async fn send_events(
         events,
         my_write_relays,
         repo_read_relays,
+        &[],
+        animate,
+        silent,
+    )
+    .await?;
+    require_publication_acceptance(&outcomes)?;
+    Ok(outcomes_to_results(outcomes))
+}
+
+/// Internal proposal-push fanout carrying that same operation's committed
+/// early-publication receipts. The generic [`send_events`] and
+/// [`send_events_with_results`] APIs deliberately never consult receipts.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn send_events_with_proposal_receipts(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    receipts: &[ProposalPublicationReceipt],
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
+    if events.is_empty() {
+        return Ok(vec![]);
+    }
+    let outcomes = send_events_with_cache_path(
+        client,
+        git_repo_path,
+        git_repo_path,
+        true,
+        events,
+        my_write_relays,
+        repo_read_relays,
+        receipts,
         animate,
         silent,
     )
@@ -5126,6 +5843,7 @@ pub async fn send_events_with_results(
             events,
             my_write_relays,
             repo_read_relays,
+            &[],
             animate,
             silent,
         )
@@ -5187,6 +5905,7 @@ pub async fn publish_events_without_caching(
         events,
         my_write_relays,
         repo_read_relays,
+        &[],
         animate,
         silent,
     )
@@ -5218,6 +5937,7 @@ pub async fn send_public_events(
             events,
             my_write_relays,
             additional_relays,
+            &[],
             animate,
             silent,
         )
@@ -5241,6 +5961,7 @@ async fn send_events_with_cache_path(
     events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
+    early_receipts: &[ProposalPublicationReceipt],
     animate: bool,
     silent: bool,
 ) -> Result<Vec<RelayPublishOutcome>> {
@@ -5275,30 +5996,17 @@ async fn send_events_with_cache_path(
         bail!("repository-only publication requires at least one repository relay")
     }
 
-    let my_write_relays = if repo_relay_only {
-        vec![]
-    } else {
-        my_write_relays
-    };
-
-    // Only include default relays as fallback when there are no repo relays
-    // (bootstrapping case, e.g. new account signup). When repo relays exist,
-    // trust the repo and user relay configuration.
-    let fallback = [
-        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
-            client.get_relay_default_set().clone()
-        } else {
-            vec![]
-        },
-        if !repo_relay_only && events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
-            client.get_blaster_relays().clone()
-        } else {
-            vec![]
-        },
-    ]
-    .concat();
-    let mut relays: Vec<&str> = vec![];
-
+    let targets = publication_targets(
+        &repo_read_relays,
+        &my_write_relays,
+        client.get_relay_default_set(),
+        client.get_blaster_relays(),
+        repo_relay_only,
+        events
+            .iter()
+            .any(|event| event.kind == Kind::GitRepoAnnouncement),
+    );
+    let my_write_relays = targets.write_relays;
     if private_repository {
         client.nip42_register_private_repo_relays(repo_read_relays.clone());
     } else {
@@ -5311,41 +6019,31 @@ async fn send_events_with_cache_path(
             .collect(),
     );
 
-    let repo_read_relays = repo_read_relays
+    let repo_read_relays = targets.repo_relays;
+    let fallback = targets.fallback;
+    let relays = targets
+        .relays
         .iter()
-        .map(|r| r.to_string())
-        .collect::<Vec<String>>();
-
-    let all = &[
-        repo_read_relays.clone(),
-        my_write_relays.clone(),
-        fallback.clone(),
-    ]
-    .concat();
-    // add duplicates first
-    for r in &repo_read_relays {
-        let r_clean = remove_trailing_slash(r);
-        if !my_write_relays
-            .iter()
-            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
-            .count()
-            > 1
-            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
-        {
-            relays.push(r);
-        }
-    }
-
-    for r in all {
-        let r_clean = remove_trailing_slash(r);
-        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
-            relays.push(r);
-        }
-    }
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     let events_description = describe_events(&events);
+    let already_attempted = !early_receipts.is_empty()
+        && relays.iter().all(|relay| {
+            events.iter().all(|event| {
+                early_receipts.iter().any(|receipt| {
+                    receipt.event == *event
+                        && remove_trailing_slash(receipt.relay.as_str())
+                            == remove_trailing_slash(relay)
+                })
+            })
+        });
     let progress_reporter = RelayProgressReporter::new(
-        format!("Publishing {events_description} to nostr relays..."),
+        if already_attempted {
+            format!("Reporting publication results for {events_description}...")
+        } else {
+            format!("Publishing {events_description} to nostr relays...")
+        },
         animate,
         silent,
     );
@@ -5379,7 +6077,7 @@ async fn send_events_with_cache_path(
     })?;
 
     #[allow(clippy::borrow_deref_ref)]
-    let relay_results: Vec<RelayPublishOutcome> = join_all(relays.iter().map(|&relay| {
+    let mut relay_results: Vec<RelayPublishOutcome> = join_all(relays.iter().map(|&relay| {
         let progress = progress.clone();
         let my_write_relays = my_write_relays.clone();
         let repo_read_relays = repo_read_relays.clone();
@@ -5429,6 +6127,27 @@ async fn send_events_with_cache_path(
             pb.inc(0); // need to make pb display intially
             let mut error = None;
             for event in &events {
+                // Do not repeat admission in the final fanout. A Git-backed
+                // acceptance satisfies this event; a failed candidate remains
+                // failed. Other events, such as a patch close status, still
+                // require their own publication.
+                let prior = early_receipts
+                    .iter()
+                    .filter(|receipt| {
+                        receipt.event == *event
+                            && remove_trailing_slash(receipt.relay.as_str()) == relay_clean
+                    })
+                    .min_by_key(|receipt| !receipt.outcome.accepted_by_relay());
+                if let Some(receipt) = prior {
+                    if let Some(reason) = &receipt.outcome.error {
+                        error = Some(reason.clone());
+                        pb.set_style(pb_after_style_failed.clone());
+                        progress.finish_bar(&pb, reason.clone(), false);
+                        break;
+                    }
+                    pb.inc(1);
+                    continue;
+                }
                 match client.send_event_to(cache_path, relay, event.clone()).await {
                     Ok(_) => pb.inc(1),
                     Err(e) => {
@@ -5460,6 +6179,8 @@ async fn send_events_with_cache_path(
         }
     }))
     .await;
+
+    merge_early_publication_receipts(&events, &mut relay_results, early_receipts);
 
     let succeeded_count = relay_results
         .iter()
@@ -5499,6 +6220,87 @@ async fn send_events_with_cache_path(
     )?;
 
     Ok(relay_results)
+}
+
+/// Publication destinations and their roles, shared by proposal admission and
+/// ordinary publication. Keep routing separate from transport and receipts.
+pub(crate) struct PublicationTargets {
+    pub(crate) relays: Vec<String>,
+    repo_relays: Vec<String>,
+    write_relays: Vec<String>,
+    fallback: Vec<String>,
+}
+
+pub(crate) fn publication_targets(
+    repo_read_relays: &[RelayUrl],
+    my_write_relays: &[String],
+    default_relays: &[String],
+    blaster_relays: &[String],
+    repo_relay_only: bool,
+    includes_announcement: bool,
+) -> PublicationTargets {
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        my_write_relays.to_vec()
+    };
+
+    // Only include default relays as fallback when there are no repo relays
+    // (bootstrapping case, e.g. new account signup). When repo relays exist,
+    // trust the repo and user relay configuration.
+    let fallback = [
+        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
+            default_relays.to_vec()
+        } else {
+            vec![]
+        },
+        if !repo_relay_only && includes_announcement {
+            blaster_relays.to_vec()
+        } else {
+            vec![]
+        },
+    ]
+    .concat();
+    let mut relays: Vec<&str> = vec![];
+
+    let repo_read_relays = repo_read_relays
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<Vec<String>>();
+
+    let all = &[
+        repo_read_relays.clone(),
+        my_write_relays.clone(),
+        fallback.clone(),
+    ]
+    .concat();
+    // add duplicates first
+    for r in &repo_read_relays {
+        let r_clean = remove_trailing_slash(r);
+        if !my_write_relays
+            .iter()
+            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
+            .count()
+            > 1
+            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
+        {
+            relays.push(r);
+        }
+    }
+
+    for r in all {
+        let r_clean = remove_trailing_slash(r);
+        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
+            relays.push(r);
+        }
+    }
+
+    PublicationTargets {
+        relays: relays.into_iter().map(str::to_owned).collect(),
+        repo_relays: repo_read_relays,
+        write_relays: my_write_relays,
+        fallback,
+    }
 }
 
 fn repository_only_routing(
@@ -6566,6 +7368,74 @@ mod private_repository_tests {
     fn signed(keys: &Keys, builder: EventBuilder) -> Event {
         keys.sign_event(builder.finalize_unsigned(keys.public_key()))
             .unwrap()
+    }
+
+    #[test]
+    fn publication_targets_preserve_roles_and_deduplicate_destinations() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        let writes = vec!["wss://repo.example".into(), "wss://writer.example".into()];
+        let targets = publication_targets(
+            std::slice::from_ref(&repo),
+            &writes,
+            &["wss://default.example".into()],
+            &[
+                "wss://writer.example/".into(),
+                "wss://blaster.example".into(),
+            ],
+            false,
+            true,
+        );
+        assert_eq!(
+            targets.relays,
+            vec![
+                repo.to_string(),
+                writes[1].clone(),
+                "wss://blaster.example".into()
+            ]
+        );
+        assert_eq!(targets.repo_relays, vec![repo.to_string()]);
+        assert_eq!(targets.write_relays, writes);
+        assert!(
+            !targets
+                .fallback
+                .iter()
+                .any(|url| url.contains("default.example"))
+        );
+    }
+
+    #[test]
+    fn publication_targets_restrict_private_and_repository_only_fanout() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        for repos in [vec![], vec![repo.clone()]] {
+            let targets = publication_targets(
+                &repos,
+                &["wss://writer.example".into()],
+                &["wss://default.example".into()],
+                &["wss://blaster.example".into()],
+                true,
+                true,
+            );
+            assert_eq!(
+                targets.relays,
+                repos.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            assert!(targets.write_relays.is_empty());
+            assert!(targets.fallback.is_empty());
+        }
+    }
+
+    #[test]
+    fn publication_targets_use_defaults_only_without_configured_destinations() {
+        let defaults = vec!["wss://default.example".into()];
+        let blasters = vec!["wss://blaster.example".into()];
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, defaults);
+        let writes = vec!["wss://writer.example".into()];
+        let targets = publication_targets(&[], &writes, &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, writes);
+        assert!(targets.fallback.is_empty());
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, true);
+        assert_eq!(targets.relays, [defaults, blasters].concat());
     }
 
     #[test]

@@ -113,17 +113,9 @@ pub struct PublishRepoOpts {
     /// HTTP URL is appended as a further `--grasp-server <url>` argument
     /// to `ngit init`. The resulting `clone` tag on the announcement
     /// therefore lists URLs in the order `["repo", ...additional_grasp_roles]`.
-    /// That iteration order is also what
-    /// `push_refs_and_generate_pr_or_pr_update_event` (push.rs:735-794)
-    /// uses to build its `to_try` server list, so the **first** clone URL
-    /// is always the "repo" grasp's URL — both for the PR event's own
-    /// `clone` tag and for the underlying `git push` target.
-    ///
-    /// Defaults to empty (single-grasp announcement — the `"repo"` server
-    /// only). Populate when a test needs to exercise multi-grasp behaviour,
-    /// e.g. verifying that every grasp in the announcement receives the PR
-    /// git data even though the PR event's `clone` tag only lists the first
-    /// one.
+    /// CLI proposal pushes select the first server accepting both event and
+    /// Git data as the sole clone hint, then replicate that exact event.
+    /// Defaults to empty (only the "repo" server).
     ///
     /// Requires one `with_grasp_server(role)` call per entry on the harness
     /// builder; panics at lookup time if any role has not been registered.
@@ -136,6 +128,9 @@ pub struct PublishRepoOpts {
     /// Defaults to `false`. The first additional invitation still establishes
     /// the publisher as lead through the normal edit workflow.
     pub assert_self_as_lead: bool,
+    /// Pass `--private` to `ngit init`, making repository privacy part of the
+    /// signed announcement rather than a stale pre-refresh local config bit.
+    pub private: bool,
 }
 
 /// Metadata about a repository that has been published to the grasp via
@@ -319,12 +314,7 @@ impl Harness {
             grasp_url,
             "-d".into(),
         ];
-        // Additional grasp servers are appended in order so the kind-30617
-        // `clone` tag ends up as [repo, ...additional_grasp_roles]. The
-        // iteration order in push_refs_and_generate_pr_or_pr_update_event
-        // (push.rs:735-794) mirrors that order, so the first clone URL
-        // is always the "repo" grasp — both for the PR event's `clone` tag
-        // and for which server's URL is embedded in the generated event.
+        // Preserve announcement order when selecting the proposal clone hint.
         for role in &opts.additional_grasp_roles {
             let url = self.grasp(role).url().to_string();
             init_args.push("--grasp-server".into());
@@ -339,6 +329,9 @@ impl Harness {
         for relay_url in &opts.extra_repo_relays {
             init_args.push("--additional-relay".into());
             init_args.push(relay_url.clone());
+        }
+        if opts.private {
+            init_args.push("--private".into());
         }
         let init = publisher
             .ngit(init_args)

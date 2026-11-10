@@ -4,7 +4,10 @@ use anyhow::{Context, Result, bail};
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Style;
 use ngit::{
-    client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
+    client::{
+        Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events,
+        send_events_with_proposal_receipts,
+    },
     git_events::{
         EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events, tag_value,
     },
@@ -12,7 +15,7 @@ use ngit::{
         ExplicitBase, ProposalBaseInference, commits_after_base, infer_proposal_base,
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
-    push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
+    push::select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts,
     repo_lookup::RepositoryLookup,
     utils::{get_all_proposals, get_open_or_draft_proposals, proposal_tip_is_pr_or_pr_update},
 };
@@ -568,7 +571,7 @@ pub async fn launch(
     // oldest first
     commits.reverse();
 
-    let events = if as_pr {
+    let (events, early_publication_receipts) = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
         let merge_base = if let Some(base) = &proposal_metadata.explicit_base {
@@ -587,7 +590,7 @@ pub async fn launch(
         {
             let push_options_refs: Vec<&str> =
                 args.push_options.iter().map(String::as_str).collect();
-            select_servers_push_refs_and_generate_pr_or_pr_update_event(
+            let pushed = select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts(
                 &client,
                 &git_repo,
                 &repo_ref,
@@ -603,7 +606,8 @@ pub async fn launch(
                 &push_options_refs,
                 args.git_server.as_deref(),
             )
-            .await?
+            .await?;
+            (pushed.events, pushed.receipts)
         }
     } else {
         let ordering_reference = if let Some(root) = root_proposal.as_ref() {
@@ -650,19 +654,33 @@ pub async fn launch(
                 "with"
             }
         );
-        events
+        (events, vec![])
     };
 
-    let _ = send_events(
-        &client,
-        Some(git_repo_path),
-        events.clone(),
-        user_ref.relays.write(),
-        repo_ref.relays.clone(),
-        !cli_args.disable_cli_spinners,
-        false,
-    )
-    .await?;
+    let _ = if early_publication_receipts.is_empty() {
+        send_events(
+            &client,
+            Some(git_repo_path),
+            events.clone(),
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            !cli_args.disable_cli_spinners,
+            false,
+        )
+        .await?
+    } else {
+        send_events_with_proposal_receipts(
+            &client,
+            Some(git_repo_path),
+            events.clone(),
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            &early_publication_receipts,
+            !cli_args.disable_cli_spinners,
+            false,
+        )
+        .await?
+    };
 
     if crate::output::is_json() {
         let result_event = events.first().context("proposal generated no events")?;

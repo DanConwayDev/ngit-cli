@@ -54,6 +54,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Share relay destination selection between PR admission and ordinary event
+  publication to keep repository-only routing and fallback policy consistent.
+- Fetch and cache NIP-11 relay information during standard event fetching to
+  detect relay capabilities. When a known GRASP implementation lacking purgatory
+  (such as Pyramid) is used as a PR hint server, push Git data before publishing
+  its PR event to prevent retention of duplicate PR events.
+
+- PRs and PR updates now send the signed event to the selected hint's GRASP
+  relay before pushing its Git data. If either step fails, ngit tries the next
+  candidate with a newly signed event and its clone hint. Once the hint works,
+  a second stage sends the same event to all remaining Nostr relays, including
+  GRASP relays, before replicating Git to accepting GRASPs and ordinary Git
+  servers. Ordinary relays no longer wait for replica Git pushes. This lets
+  overloaded GRASP servers reject unaccepted pushes cheaply and apply publisher
+  Web-of-Trust policy before receiving a pack. Server selection, one clone hint,
+  serial Git transfers and first-success GRASP-06 fallback are preserved.
+  Failover updates are strictly newer than earlier attempts.
+  Parallel repository-GRASP pushes without an explicit hint are future work.
+  Publication still waits for auth-required before authenticating, unless
+  proactive authentication was explicitly enabled. Public-repository
+  AUTH signing is bounded by the configured relay timeout (45 seconds by default)
+  and a timeout skips that destination; private/GRASP-08 repositories retain the
+  signer's native approval window. Network waits remain bounded in both cases;
+  read connections retain their existing demand-auth policy.
+
 - Bring `ngit ci` up to date with the forthcoming ngit-ci event shapes and
   controls. Status shows workflow, job and live step progress with readable
   timings, short run IDs and ages. Failed jobs include a direct full-log link
