@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Accept an explicit default branch in `ngit send --target-branch` and Git
+  push `target-branch=` options, retaining it as the PR target.
 - Share relay destination selection between PR admission and ordinary event
   publication to keep repository-only routing and fallback policy consistent.
 - Fetch and cache NIP-11 relay information during standard event fetching to

@@ -114,22 +114,10 @@ fn visible_branch_tip_with_known_tip(
 
 /// Validate a proposal target and resolve the newest unambiguous visible tip.
 ///
-/// `reject_default` is used for new proposals, where spelling out the current
-/// default is redundant. Existing proposals retain their immutable target even
-/// if the repository default later changes to that branch.
-pub fn resolve_target_branch_tip(
-    git_repo: &Repo,
-    branch: &str,
-    declared_default: Option<&str>,
-    reject_default: bool,
-) -> Result<Sha1Hash> {
-    resolve_target_branch_tip_with_known_tip(
-        git_repo,
-        branch,
-        declared_default,
-        reject_default,
-        None,
-    )
+/// Explicit targets may name the current default branch; retaining that target
+/// keeps the proposal pinned if the repository default changes later.
+pub fn resolve_target_branch_tip(git_repo: &Repo, branch: &str) -> Result<Sha1Hash> {
+    resolve_target_branch_tip_with_known_tip(git_repo, branch, None)
 }
 
 /// Validate a proposal target and resolve it together with an authoritative
@@ -138,8 +126,6 @@ pub fn resolve_target_branch_tip(
 pub fn resolve_target_branch_tip_with_known_tip(
     git_repo: &Repo,
     branch: &str,
-    declared_default: Option<&str>,
-    reject_default: bool,
     known_tip: Option<Sha1Hash>,
 ) -> Result<Sha1Hash> {
     if branch.is_empty() || !git2::Reference::is_valid_name(&format!("refs/heads/{branch}")) {
@@ -149,14 +135,6 @@ pub fn resolve_target_branch_tip_with_known_tip(
         visible_branch_tip_with_known_tip(git_repo, branch, known_tip)?.with_context(|| {
             format!("target branch '{branch}' does not exist locally or on a remote")
         })?;
-    if reject_default
-        && git_repo
-            .get_default_branch_name(declared_default)?
-            .as_deref()
-            == Some(branch)
-    {
-        bail!("target branch '{branch}' is the repository default; omit target-branch");
-    }
     Ok(tip)
 }
 
@@ -633,7 +611,7 @@ mod tests {
         let git_repo = Repo::from_path(&fixture.dir)?;
 
         assert_eq!(
-            resolve_target_branch_tip(&git_repo, "release/2.x", None, true)?,
+            resolve_target_branch_tip(&git_repo, "release/2.x")?,
             oid_to_sha1(&advanced)
         );
         Ok(())
@@ -653,8 +631,6 @@ mod tests {
             resolve_target_branch_tip_with_known_tip(
                 &git_repo,
                 "release/2.x",
-                None,
-                true,
                 Some(oid_to_sha1(&advanced)),
             )?,
             oid_to_sha1(&advanced)
@@ -677,9 +653,9 @@ mod tests {
         )?;
         let git_repo = Repo::from_path(&fixture.dir)?;
 
-        assert!(resolve_target_branch_tip(&git_repo, "2.x", None, true).is_err());
+        assert!(resolve_target_branch_tip(&git_repo, "2.x").is_err());
         assert_eq!(
-            resolve_target_branch_tip(&git_repo, "release/2.x", None, true)?,
+            resolve_target_branch_tip(&git_repo, "release/2.x")?,
             oid_to_sha1(&tip)
         );
         Ok(())

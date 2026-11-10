@@ -810,12 +810,7 @@ async fn process_proposal_refspecs(
             let effective_root: &Event = pr_upgrade_root.as_ref().unwrap_or(proposal);
             let inherited_target = tag_value(effective_root, "b").ok();
             let target_tips = if let Some(branch) = &inherited_target {
-                vec![resolve_target_branch_tip(
-                    git_repo,
-                    branch,
-                    default_branch.name,
-                    false,
-                )?]
+                vec![resolve_target_branch_tip(git_repo, branch)?]
             } else {
                 default_branch.tips(git_repo, &tip_of_pushed_branch)?
             };
@@ -1012,12 +1007,7 @@ async fn process_proposal_refspecs(
                 );
             }
             let target_tips = if let Some(branch) = &proposal_options.target_branch {
-                vec![resolve_target_branch_tip(
-                    git_repo,
-                    branch,
-                    default_branch.name,
-                    true,
-                )?]
+                vec![resolve_target_branch_tip(git_repo, branch)?]
             } else {
                 default_branch.tips(git_repo, &tip_of_pushed_branch)?
             };

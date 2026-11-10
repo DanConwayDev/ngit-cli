@@ -267,9 +267,7 @@ pub async fn launch(
         .or_else(|| effective_root.and_then(|root| tag_value(root, "b").ok()));
     let target_tip = target_branch
         .as_deref()
-        .map(|branch| {
-            resolve_target_branch_tip(&git_repo, branch, None, args.target_branch.is_some())
-        })
+        .map(|branch| resolve_target_branch_tip(&git_repo, branch))
         .transpose()?;
 
     let head = git_repo.get_head_commit()?;
