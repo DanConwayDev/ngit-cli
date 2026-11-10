@@ -140,6 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve abbreviated local commit IDs in `--base` and Git push `base=`
+  options before interpreting them as PR event prefixes.
 - Named remote-signer profiles can use JSON storage when the OS credential store
   is unavailable, without losing the new connection or binding it to an existing
   default signer. Fresh login replaces the identity's default remote session

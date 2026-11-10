@@ -546,16 +546,18 @@ impl RepoActions for Repo {
     }
 
     fn get_commit_or_tip_of_reference(&self, sha1_or_reference: &str) -> Result<Sha1Hash> {
-        let oid = {
-            if let Ok(oid) = Oid::from_str(sha1_or_reference) {
+        // Oid::from_str accepts abbreviated hex by padding it with zeros.
+        // Resolve abbreviations through Git's object lookup instead.
+        let oid = match Oid::from_str(sha1_or_reference) {
+            Ok(oid) if sha1_or_reference.len() == 40 => {
                 self.git_repo.find_commit(oid)?;
                 oid
-            } else {
-                self.git_repo
-                    .revparse_single(sha1_or_reference)?
-                    .peel_to_commit()?
-                    .id()
             }
+            _ => self
+                .git_repo
+                .revparse_single(sha1_or_reference)?
+                .peel_to_commit()?
+                .id(),
         };
         Ok(oid_to_sha1(&oid))
     }
@@ -1698,6 +1700,25 @@ mod tests {
 
     use super::*;
     use crate::git::test_helpers::{GitTestRepo, generate_repo_ref_event, joe_signature};
+
+    #[test]
+    fn commit_references_resolve_abbreviated_ids_and_reject_non_commits() -> Result<()> {
+        let fixture = GitTestRepo::default();
+        let tip = fixture.populate()?;
+        let repo = Repo::from_path(&fixture.dir)?;
+        let hex = tip.to_string();
+        for reference in [&hex[..8], &hex[..12], &hex, "HEAD", "main"] {
+            assert_eq!(
+                repo.get_commit_or_tip_of_reference(reference)?,
+                oid_to_sha1(&tip)
+            );
+        }
+        let blob = fixture.git_repo.blob(b"not a commit")?.to_string();
+        for reference in [&blob[..8], &blob, "#00000000", "missing-reference"] {
+            assert!(repo.get_commit_or_tip_of_reference(reference).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn remote_helper_path_supports_worktrees_and_bare_repositories() -> Result<()> {
