@@ -151,6 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Correct the spelling of "public key" in the NIP-05 lookup progress message.
 - `ngit release publish`, `ngit nsite deploy` and `ngit container` now print
   plain Blossom upload progress lines when stderr is not a terminal (log files,
   CI, scripts, coding agents). With `--json`, these updates are structured JSON
