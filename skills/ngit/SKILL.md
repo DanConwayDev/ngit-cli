@@ -43,9 +43,5 @@ version exactly: prefer it to remembered syntax, and do not check
 - **`ngit` is not installed.** Say so and offer to install it
   (https://ngit.dev/install) instead of falling back to another tool.
 - **`ngit --help` has no workflow map.** The binary predates workflow help.
-  Use the matching file beside this skill instead (`reference/prs.md`,
-  `reference/issues.md`, `reference/repositories.md`, `reference/ci.md`,
-  `reference/accounts.md`, `reference/sync-config.md`,
-  `reference/containers.md`, `reference/nsites.md`), check its flags against
-  `ngit <command> --help`, and mention that `ngit update` or
-  https://ngit.dev/install would bring the help up to date.
+  Say so and offer to update it (`ngit update`, or https://ngit.dev/install).
+  Until then use `ngit <command> --help` for exact flags.

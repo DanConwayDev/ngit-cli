@@ -255,16 +255,9 @@ async fn init_with_grasp_server_publishes_announcement_and_creates_bare_repo() -
     );
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
     assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
-    assert!(
-        repo.dir()
-            .join(".agents/skills/ngit/reference/prs.md")
-            .is_file()
-    );
-    assert!(
-        repo.dir()
-            .join(".claude/skills/ngit/reference/prs.md")
-            .is_file()
-    );
+    // The skill is a bootstrap for installed help; no references accompany it.
+    assert!(!repo.dir().join(".agents/skills/ngit/reference").exists());
+    assert!(!repo.dir().join(".claude/skills/ngit/reference").exists());
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());

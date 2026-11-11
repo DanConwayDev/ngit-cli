@@ -77,11 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents to use ngit in repositories with a `nostr://` remote and to read the
   workflow guidance in the installed `ngit --help`, including before opening
   or updating a PR with `git push`, instead of repeating commands and feature
-  details that change between releases. The eight reference files are still
-  installed beside it, unchanged, as a fallback for binaries without workflow
-  help. `ngit skill install`, `upgrade`, `status`, reminders and
-  instruction-file handling behave as before; `ngit skill upgrade` replaces
-  an installed 1.28 skill in the usual way.
+  details that change between releases. The reference files are no longer
+  bundled: `ngit skill install` writes only `SKILL.md`, and `ngit skill
+  upgrade` (or `install` over an existing skill) removes the whole
+  `reference/` directory left beside it by earlier versions and leaves the
+  deletion uncommitted for review. An agent whose ngit predates workflow help is told
+  to update it. `ngit skill status`, reminders and instruction-file handling
+  behave as before.
 
 - Credential-store failures include recovery guidance and the underlying cause.
   Login reports missing profiles before incompatible relay options and shows
