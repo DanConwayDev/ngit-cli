@@ -830,6 +830,25 @@ mod tests {
         assert!(version_is_newer("1.0", "1.1"));
         assert!(!version_is_newer("1.1", "1.0"));
     }
+    /// The skill is a bootstrap. Workflow guidance lives in command help
+    /// (`src/bin/ngit/help/`), which changes with the binary; the bundled
+    /// references stay reachable for binaries that predate that help.
+    #[test]
+    fn bundled_skill_routes_to_installed_help_with_reference_fallback() {
+        assert!(CANONICAL_SKILL.contains("`ngit --help`"));
+        assert!(CANONICAL_SKILL.contains("`ngit pr --help` before that\npush"));
+        for (name, _) in REFERENCE_FILES {
+            assert!(
+                CANONICAL_SKILL.contains(&format!("`reference/{name}`")),
+                "skill fallback omits reference/{name}"
+            );
+        }
+        assert!(
+            CANONICAL_SKILL.lines().count() <= 60,
+            "keep the skill a short bootstrap; put workflow guidance in command help"
+        );
+    }
+
     #[test]
     fn bundled_skill_routes_container_publication() {
         assert!(CANONICAL_SKILL.contains("`reference/containers.md`"));

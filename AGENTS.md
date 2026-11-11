@@ -88,6 +88,9 @@ ngit/
   them. Write for an 80-column terminal. Include the command examples an
   agent should copy alongside the rules: concrete examples are what steer
   agents to correct usage.
+- Keep `skills/ngit/SKILL.md` a bootstrap that routes agents to installed
+  help. Do not add commands, flags, or feature details to it; bump
+  `metadata.version` whenever its text changes.
 - Update `CHANGELOG.md` under `Unreleased` in the same commit as each relevant
   behavior, dependency, or security change. Describe the user-facing effect and
   distinguish upstream fixes from demonstrated ngit exposure.

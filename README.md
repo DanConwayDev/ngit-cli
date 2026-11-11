@@ -149,7 +149,11 @@ eg self-hosted, github, codeberg, etc.
 ## Repository-managed skill
 
 Run `ngit skill install` to add repository guidance that teaches coding agents
-to use ngit. The command installs the skill in the Codex and Claude discovery
+to use ngit. The skill is a short bootstrap: it tells agents to use ngit in
+repositories with a `nostr://` remote and to read the workflow guidance in the
+installed `ngit --help`, so it seldom changes when ngit gains features. Bundled
+reference files remain beside it for binaries that predate that help. The
+command installs the skill in the Codex and Claude discovery
 locations and adds a compact pointer to existing `AGENTS.md` or `CLAUDE.md`
 files without creating either file. Use `ngit skill upgrade` to update existing
 copies from the version in the skill metadata; it does not restore a copy that
