@@ -11,6 +11,7 @@ use cli::{
 };
 
 mod cli;
+mod cli_help;
 mod command_input;
 use ngit::{
     cli_interactor::{self, CliError},

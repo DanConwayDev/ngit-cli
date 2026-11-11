@@ -1,0 +1,60 @@
+Workflow notes:
+  `container publish` uploads the blobs reachable from the tagged entries
+  of an OCI image layout to Blossom, then signs an event mapping tags to
+  manifest digests for the current repository. Run it inside that
+  repository as a confirmed maintainer. ngit does not build images or push
+  to registries: export a layout first, for example
+  `podman push myimage oci:/tmp/myimage:latest`. Gateways are read-only:
+
+    docker pull ncontainer.io/<npub>/<repository>:<tag>
+
+    ngit container publish myimage \
+      --layout /tmp/myimage \
+      --blossom-server https://blossom-one.example \
+      --blossom-server https://blossom-two.example \
+      --relay wss://relay.example \
+      --source https://example.com/myimage \
+      --json
+
+  Tags come from `org.opencontainers.image.ref.name` annotations in the
+  layout's `index.json`; filenames and git tags are irrelevant.
+
+  A checked-in `.ngit/containers.yaml` lets `container publish NAME` find
+  its settings. Relative paths resolve from the repository root, and a
+  loaded manifest must define NAME:
+
+    schema: 1
+    publication:
+      blossom_servers: [https://blossom.example]
+      relays: [wss://relay.example]
+    containers:
+      myimage:
+        layout: artifacts/myimage
+        source: https://example.com/myimage
+
+  Command-line layout and metadata override the entry, a command-line
+  Blossom list replaces the configured one, and command-line relays add to
+  the configured ones.
+
+  Publication merges: it updates the tags in the new layout and keeps
+  older tags, server hints, omitted metadata and unknown event tags.
+  --replace publishes only the new layout's tags and drops the rest; use it
+  only when complete replacement was explicitly asked for.
+
+  Without --blossom-server the publisher's published Blossom server list is
+  used; a single server means no redundancy. The event is signed once each
+  blob has at least one confirmed copy, and incomplete replication is
+  reported per server. A total preflight failure or a concurrent-update
+  refusal is safe to retry. Keep a repository relay that holds the current
+  event reachable when changing relay sets, or a publish could omit old
+  tags.
+
+  With --json, success means at least one relay accepted the event: read
+  every `result.relays[].accepted` when full fanout matters. `event_id` is
+  raw hex here, beside the repository `naddr`, unlike the `nevent` IDs of
+  collaboration commands. Failures report per-blob and per-server outcomes
+  and possible orphan blobs under `error.details`.
+
+  Limits: allow temporary disk roughly equal to the largest layer. ngit
+  cannot pull, list or delete remote blobs or tags. Software release assets
+  use `ngit release` instead.

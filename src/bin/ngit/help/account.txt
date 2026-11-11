@@ -1,0 +1,72 @@
+Examples:
+    # every usable signer with npub, aliases, scope and active state
+    ngit account whoami --json --offline
+    # one ngit command, or one git command, as alice
+    ngit --signer alice issue create --subject "Bug" --body "Details" --json
+    git -c nostr.signer=alice push origin pr/topic
+    # make a stored identity this repository's default, or the global one
+    ngit account login --local alice
+    ngit account login alice
+    # interactive login; the secret goes to the credential store
+    ngit account login -i
+    ngit account login --nsec-file /private/key --profile alice
+    # store an established NIP-46 session, or pair a remote signer
+    ngit account login --nbunksec-file /private/connection --profile alice
+    ngit account login --bunker-url bunker://...
+    # save a profile for explicit use without selecting it
+    ngit account login -i --profile ci --no-activate
+    ngit account create --name "Alice" --json
+    # one-shot key for CI; --nbunksec-file for a bunker session
+    ngit --nsec-file /private/key <command>
+    # forget the selected account; report remaining logins
+    ngit account logout --json
+    # retain the remote session for reactivation
+    ngit account logout --keep-credentials
+    # also delete identity nsecs (explicitly destructive)
+    ngit account logout --all --forget
+
+Choosing who signs:
+  --signer and `nostr.signer` accept an alias, an npub or an exact cached
+  profile name, for one command; `account login` changes the default.
+
+  An alias is a profile saved with `login --profile NAME`; a name is the
+  account's cached Nostr display name and must match exactly one account
+  holding stored credentials.
+  Selection fails closed when the selector is missing, ambiguous or backed
+  by invalid credentials; it never falls back to another account. Never
+  export or pass an nsec merely to switch between stored accounts.
+
+Secrets:
+  Secrets go to the OS credential store, else ngit's user-only file store
+  (--secret-storage auto|file|git-config, `NGIT_SECRET_STORAGE`, or
+  `nostr.secret-storage`). Only explicit `git-config` mode writes a
+  plaintext secret to git config. Prefer --nsec-file and --nbunksec-file to
+  inline values: they keep secrets out of process arguments, and work on
+  any command as a one-shot identity for CI.
+
+Remote signers (NIP-46):
+  A fresh pairing needs interactive approval, so unattended runs use an
+  established connection. An nbunksec is one in portable form: it holds no
+  npub, so the identity is resolved from the signer. A fresh login replaces
+  the default remote session for that npub; use --profile NAME to keep
+  several connections for one npub or to replace one named connection. An
+  existing nsec is preserved. --no-activate saves a profile for explicit
+  --signer use without selecting it.
+
+Logging out and deleting keys:
+  Plain `logout` forgets the repository-specific account when one is
+  selected, otherwise the default account. Removing a repository override
+  makes a remaining default account active: read the reported account
+  before signing again. --local and --global restrict the scope.
+  Credentials shared with other repositories go too.
+
+  Deleting an identity nsec fails before any change, without a prompt,
+  unless --forget authorizes it; --keep-credentials clears only the
+  selection. Remote-session credentials need no --forget. `logout <npub>`
+  and `forget-keys <npub>` target every credential and profile of that
+  identity, and `forget-keys` deletes identity keys without further
+  confirmation; `forget-keys signer:<npub>` removes only the default
+  remote session. `logout --all` does not search other repositories or
+  revoke remote signer permissions.
+
+  Guide: https://ngit.dev/accounts

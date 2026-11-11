@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--help` now explains workflows as well as flags. `ngit --help` ends with a
+  map from tasks to the command help that covers them, plus the conventions
+  shared by every command (JSON output, identifiers, signer and repository
+  selection). `ngit pr`, `issue`, `repo`, `ci`, `account`, `sync`, `release`,
+  `container` and `nsite --help` describe their workflow's rules and pitfalls,
+  including steps performed with plain git such as opening a PR by pushing a
+  `pr/` branch, and `ci status`, `inspect`, `secrets`, `service status` and
+  `rerun --help` describe their result and JSON contracts. `-h` stays a
+  compact summary.
+
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and
   throttled count samples. Shared diagnostics are structured and redundant human

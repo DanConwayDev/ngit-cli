@@ -1,0 +1,12 @@
+Workflow notes:
+  A release belongs to an application linked to this repository: create or
+  link the application once with `release app`, then `release publish` each
+  version. A checked-in `.ngit/release.yaml` manifest can hold assets and
+  publication defaults, and is discovered when creating a release. Run
+  `ngit release publish --help` before publishing: it documents version and
+  tag discovery, asset and platform options, and what an edit preserves.
+
+  Container images and static sites have their own commands: see
+  `ngit container --help` and `ngit nsite --help`.
+
+  Guide and manifest examples: https://ngit.dev/releases

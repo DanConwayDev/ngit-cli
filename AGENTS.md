@@ -80,6 +80,14 @@ ngit/
 - Run `cargo clippy` to catch common issues
 - Use `anyhow::Result` for error handling
 - Prefer explicit error messages with context
+- Document a feature's workflow where users and agents look for it: the
+  command's `--help`. Flags and output contracts belong in the clap doc
+  comments; the rules and pitfalls of a whole workflow, including steps done
+  with plain git, belong in the owning command group's notes under
+  `src/bin/ngit/help/`, and the task map in `help/overview.txt` must route to
+  them. Write for an 80-column terminal. Include the command examples an
+  agent should copy alongside the rules: concrete examples are what steer
+  agents to correct usage.
 - Update `CHANGELOG.md` under `Unreleased` in the same commit as each relevant
   behavior, dependency, or security change. Describe the user-facing effect and
   distinguish upstream fixes from demonstrated ngit exposure.

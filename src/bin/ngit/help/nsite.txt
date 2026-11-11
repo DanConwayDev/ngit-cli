@@ -1,0 +1,44 @@
+Examples:
+    # reads nsyte's .nsite/config.json when present
+    ngit nsite publish dist --json
+    ngit nsite publish dist --title "My site" --json      # root site
+    ngit nsite publish dist --id docs \
+      --description-file site-description.txt \
+      --source "nostr://<npub>/<identifier>" \
+      --blossom-server https://blossom.example.com \
+      --blossom-server https://mirror.example.com \
+      --relay wss://relay.example.com --json              # named site
+    ngit --signer <alias> nsite publish dist --json
+    # unattended NIP-46
+    ngit --nbunksec-file /run/secrets/publisher-nbunksec \
+      nsite publish dist --json
+
+Workflow notes:
+  Pass the build output directory, not the source tree. ngit runs no build,
+  applies no ignore files, uploads every regular file, and rejects
+  symlinks, unsafe paths and filenames without extensions. NIP-5A has no
+  logo tag: ship a `favicon.ico` or `favicon.svg` in the build output.
+
+  Without --id the site is the account's root site; --id publishes a named
+  site. `.nsite/config.json` (nsyte's JSON file) is read when present, for
+  `id`, `title`, `description`, `source`, `fallback`, `servers` and
+  `relays`; other nsyte publication options only produce a warning.
+  Explicit options win, and any --blossom-server or --relay replaces that
+  whole configured list. When --source is omitted the site links the
+  selected repository if it is public, never a private one. Without
+  --blossom-server the account's published Blossom server list is used;
+  repeat the option for replication.
+
+  The manifest is signed only after every blob has at least one confirmed
+  copy, so a failed deployment never points the live site at missing
+  content. After a failure rerun the same command: blobs already on a
+  server are confirmed and skipped. An unchanged deployment publishes
+  nothing and reports `result.changed: false`.
+
+  With --json check `command_status`, then `result.changed`,
+  `result.blossom.blobs[].servers[]` for each blob and server,
+  `result.publication.relays[]` (at least one relay must accept) and
+  `warnings[]`. The manifest `event_id` is raw hex. On a Blossom failure
+  read `error.details.blobs` and `error.details.possible_orphan_blobs`.
+
+  Guide: https://ngit.dev/releases/nsites
