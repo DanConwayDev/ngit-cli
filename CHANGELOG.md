@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pr/` branch, and `ci status`, `inspect`, `secrets`, `service status` and
   `rerun --help` describe their result and JSON contracts. `-h` stays a
   compact summary.
+- The CLI reference export includes the workflow notes shown by `--help`.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and

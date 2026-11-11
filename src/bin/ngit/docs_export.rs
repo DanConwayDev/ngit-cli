@@ -212,7 +212,13 @@ fn command_doc(command: &Command, path: &[String]) -> CommandDoc {
         about: styled(command.get_about()),
         long_about: styled(command.get_long_about()),
         before_help: styled(command.get_before_help()),
-        after_help: styled(command.get_after_help()),
+        // Workflow guidance is long help only; the reference pages are the
+        // long form, so prefer it and fall back to the short text.
+        after_help: styled(
+            command
+                .get_after_long_help()
+                .or_else(|| command.get_after_help()),
+        ),
         aliases,
         hidden: command.is_hide_set(),
         subcommand_required: command.is_subcommand_required_set(),
@@ -457,6 +463,22 @@ mod tests {
         );
         for subcommand in command["subcommands"].as_array().unwrap() {
             collect_command_ids(subcommand, ids);
+        }
+    }
+
+    #[test]
+    fn export_includes_workflow_guidance_from_long_help() {
+        let export: Value = serde_json::from_str(&json()).unwrap();
+        for (path, notes) in [
+            (vec![], crate::cli_help::OVERVIEW),
+            (vec!["pr"], crate::cli_help::PR),
+            (vec!["ci", "status"], crate::cli_help::CI_STATUS),
+        ] {
+            assert_eq!(
+                command_at_path(&export["command"], &path)["after_help"],
+                notes,
+                "{path:?}"
+            );
         }
     }
 
