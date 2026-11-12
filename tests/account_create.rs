@@ -1770,9 +1770,16 @@ async fn unknown_profile_name_yields_guidance_and_preserves_the_login() -> Resul
         .await?;
     assert!(output.status.success());
 
-    // both a name-shaped selector and a valid-but-unmapped alias token get
-    // cache guidance rather than a bare alias-not-found error
-    for selector in ["No Such Name", "nosuchname"] {
+    // Display names get cache guidance; valid profile names get a concrete
+    // command to supply the missing credentials.
+    for (selector, guidance, explanation) in [
+        ("No Such Name", "--signer <npub>", "cache"),
+        (
+            "nosuchname",
+            "ngit account login -i --profile nosuchname",
+            "no existing credentials",
+        ),
+    ] {
         let output = repo
             .ngit([
                 "--signer",
@@ -1792,12 +1799,12 @@ async fn unknown_profile_name_yields_guidance_and_preserves_the_login() -> Resul
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("--signer <npub>"),
+            stderr.contains(guidance),
             "missing selector guidance for '{selector}': {stderr}"
         );
         assert!(
-            stderr.to_lowercase().contains("cache"),
-            "missing cache explanation for '{selector}': {stderr}"
+            stderr.to_lowercase().contains(explanation),
+            "missing selection explanation for '{selector}': {stderr}"
         );
         assert_eq!(
             repo.config("nostr.nsec").await?.as_deref(),
