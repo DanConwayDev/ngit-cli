@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh `openssl-sys` to 0.9.118. Downloadable archives still require the
+  separately pinned OpenSSL build because its source-crate constraint is
+  unchanged.
+
 - `ngit release` subcommands no longer define their own `--json` beside the
   global one. The flag is accepted at the same positions and produces the
   same output; these commands now read the global JSON mode, so warnings and
