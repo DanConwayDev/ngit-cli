@@ -66,6 +66,65 @@ starts exits immediately. Forced cancellation still bounds the process lifetime.
 Cargo's own package verification remains enabled. The separate platform archive
 workflow remains responsible for platform release binaries.
 
+## Manual macOS pre-release checks
+
+Before tagging a release, a maintainer can request
+`.ngit/nix/workflows/pre-release.yaml` from the repository's coordinator.
+It requires an available native `aarch64-darwin` provider with at least 8 GiB
+of RAM. Tart providers advertise total disk capacity rather than free scratch
+space, so this workflow does not require a `scratch-mib` capability. Check
+available disk space on the runner before a cold build. The workflow never
+publishes a release and does not run automatically on pushes or pull requests.
+
+Before the first cold run, check the coordinator's job timeout. Its default
+is 1,800 seconds for the entire job, including all builds and tests. A release
+LTO build can consume much of that budget. The operator can configure
+`--job-timeout-secs` or `NGIT_CI_JOB_TIMEOUT_SECS`; consider 7,200 seconds for
+the first run and tune from observed results. This is an initial budget,
+not a measured runtime guarantee. There is no workflow YAML timeout override.
+The 8 GiB memory requirement matches Tart's default but has not yet been
+qualified by a native run of this preflight.
+
+The workflow builds the Apple Silicon Nix package, starts its `ngit` binary,
+runs library and CLI unit tests, and exercises the exact packaged binary pair
+against a local HTTPS Git server. The library tests include Reqwest certificate
+trust and hostname rejection; the Git test checks a trusted clone and rejection
+of an unrelated trust anchor through libgit2. All network fixtures are local.
+
+Use the repository's coordinator public key (shown on its existing CI runs
+by `ngit ci status --json`) and request the exact candidate commit:
+
+```sh
+ngit ci trigger <COORDINATOR> <COMMIT> \
+  --workflow .ngit/nix/workflows/pre-release.yaml
+ngit ci status <COMMIT> --json
+```
+
+The workflow is read and hashed at that commit; it does not first need to exist
+on `main`. However, `ngit ci trigger` emits a commit-context request, not a
+PR-context request. The protocol requires that commit to be reachable from the
+published repository state. A PR announcement alone is not that guarantee.
+Before merging, a maintainer can push the candidate to an ordinary temporary
+branch and trigger its commit, for example:
+
+```sh
+git push origin HEAD:refs/heads/release-check/dependencies
+ngit ci trigger <COORDINATOR> HEAD \
+  --workflow .ngit/nix/workflows/pre-release.yaml \
+  --ref refs/heads/release-check/dependencies
+```
+
+After merging, triggering the published `main` commit works too. `--ref` sets
+run context; it does not publish the ref. Check the specific pre-release
+workflow's final result, not merely the trigger command's successful exit.
+
+These checks cover the Nix package and its Nix-provided OpenSSL on Apple
+Silicon. They do not qualify the separately built universal macOS archive,
+Intel macOS, Windows, Linux archives, or Android. Archive inspection and the
+remaining platform runtime checks still apply. A workflow added to a PR is
+not evidence of a successful macOS run; retain the candidate SHA and actual
+result when a maintainer runs it.
+
 ## OpenSSL in downloadable archives
 
 The Unix archive workflow builds checksum-pinned OpenSSL 3.5.9 LTS with

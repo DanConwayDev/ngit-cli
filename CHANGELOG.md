@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without prompting. `ngit skill status --json` reports every scope in a
   `scopes` object, and install results name their `scope`. Thanks to
   hzrd149.
+- An optional manual macOS pre-release workflow builds the Apple Silicon Nix
+  package and checks its startup, unit tests, and Git HTTPS trust handling
+  before a release is tagged.
+
 - `--help` now explains workflows as well as flags. `ngit --help` ends with a
   map from tasks to the command help that covers them, plus the conventions
   shared by every command (JSON output, identifiers, signer and repository
@@ -109,6 +113,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ngit --customize` documents precedence and scope.
 
 ### Changed
+
+- Build containers with Rust 1.99 on supported Alpine 3.24 and use matching
+  OpenSSL development and static libraries plus an explicit runtime CA bundle.
+
+- Update the isolated Grasp integration-test fixture to v3.1.1, including
+  upstream server security fixes. This does not update deployed relays.
+
+- Refresh Nix package and toolchain inputs, retaining the supported Intel
+  macOS package set and pinned formatter. Declare libgit2 explicitly in
+  package, development, and CI environments as required by current Nixpkgs.
+
+- Refresh `openssl-sys` to 0.9.118. Downloadable archives still require the
+  separately pinned OpenSSL build because its source-crate constraint is
+  unchanged.
 
 - `ngit release` subcommands no longer define their own `--json` beside the
   global one. The flag is accepted at the same positions and produces the
@@ -269,6 +287,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them as genuine `refs/tags/` entries.
 
 ### Security
+
+- Update `libssh2-sys` to 0.3.4 for upstream bounds checks before
+  encrypt-then-MAC SSH packet decryption, avoiding a local source backport.
+
+- Update `rustix` to 1.1.6 for the upstream extended-attribute buffer
+  soundness fix (RUSTSEC-2026-0486).
+
+- Update `libz-sys` to 1.1.33 for the upstream build environment disclosure
+  fix (RUSTSEC-2026-0418) and bundled zlib 1.4. The previously locked `cc`
+  version predates the environment-copying behavior required by the advisory;
+  this update is not evidence that ngit build secrets were disclosed.
 
 - Update nostr/nostr-sdk to 0.45.6 for an upstream signature-verification cache
   fix. ngit ingests relay events through this path, so clients should update.

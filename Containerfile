@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 ARG TARGET=ngit-cli
 
-ARG ALPINE_VERSION="3.21"
-ARG RUST_VERSION="1.95"
+ARG ALPINE_VERSION="3.24"
+ARG RUST_VERSION="1.99"
 ARG BUILD_IMAGE=docker.io/rust:${RUST_VERSION}-alpine${ALPINE_VERSION}
 
 FROM ${BUILD_IMAGE} AS builder
 RUN apk --no-cache add \
-  libressl-dev
+  openssl-dev openssl-libs-static pkgconf
 WORKDIR /src
 COPY . .
 # perform single-architecture build.
@@ -29,7 +29,7 @@ RUN mkdir -p /out/ && \
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS base
 RUN apk --no-cache add \
-  git libcrypto3 libressl
+  git ca-certificates libssl3
 ARG UID=65534
 ARG GID=65534
 RUN mkdir -p /opt/ngit && chown ${UID}:${GID} /opt/ngit
