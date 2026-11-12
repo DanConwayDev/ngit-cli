@@ -53,6 +53,9 @@ async fn identical_paths_share_one_uploaded_blob() -> Result<()> {
     .await?;
     let requests = blossom.finish().await?;
 
+    ensure!(output["format_version"] == 3);
+    ensure!(output["result"]["blossom"].get("blobs").is_none());
+    ensure!(output["result"]["blossom"]["fully_replicated_blobs"] == 3);
     ensure!(output["result"]["file_count"] == 4);
     ensure!(output["result"]["unique_blob_count"] == 3);
     ensure!(output["result"]["changed"] == true);
@@ -144,7 +147,7 @@ async fn publication_succeeds_when_one_of_two_servers_never_answers() -> Result<
     );
     ensure!(!presence_requests(&failing_requests).is_empty());
 
-    let blobs = output["result"]["blossom"]["blobs"]
+    let blobs = output["result"]["blossom"]["problems"]
         .as_array()
         .context("per-blob Blossom results were not an array")?;
     ensure!(blobs.len() == 3);
@@ -152,21 +155,18 @@ async fn publication_succeeds_when_one_of_two_servers_never_answers() -> Result<
         let servers = blob["servers"]
             .as_array()
             .context("per-server Blossom results were not an array")?;
-        ensure!(servers.len() == 2);
-        ensure!(servers[0]["server"] == healthy_root.as_str());
-        ensure!(servers[0]["status"] == "stored");
-        ensure!(servers[0]["presence_check_only"].is_null());
-        ensure!(servers[1]["server"] == failing_root.as_str());
+        ensure!(servers.len() == 1);
+        ensure!(servers[0]["server"] == failing_root.as_str());
         // The circuit breaker turns later queued checks into `not_attempted`
         // once three consecutive transient failures have opened it, so both
         // shapes are legitimate; neither is a confirmed copy.
         ensure!(
-            servers[1]["status"] == "failed" || servers[1]["status"] == "not_attempted",
+            servers[0]["status"] == "failed" || servers[0]["status"] == "not_attempted",
             "unexpected failing-server status: {}",
-            servers[1]["status"]
+            servers[0]["status"]
         );
         ensure!(
-            servers[1]["presence_check_only"] == true,
+            servers[0]["presence_check_only"] == true,
             "a failed preflight must be recorded as presence-only"
         );
     }
@@ -215,7 +215,7 @@ async fn no_confirmed_copy_publishes_no_manifest_event() -> Result<()> {
     let server_root = blossom.base_url_with_slash();
     let requests = blossom.finish().await?;
 
-    ensure!(failure["format_version"] == 2);
+    ensure!(failure["format_version"] == 3);
     ensure!(failure["command_status"] == "error");
     ensure!(failure.get("ok").is_none());
     ensure!(failure["error"]["code"] == "blossom_upload_failed");
@@ -422,6 +422,7 @@ async fn an_accepted_upload_is_verified_before_it_counts_as_stored() -> Result<(
             "--blossom-server",
             blossom.base_url(),
             "--json",
+            "--verbose",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

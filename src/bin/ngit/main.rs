@@ -634,7 +634,7 @@ async fn main() {
                 sub_commands::release::launch(args, signer_params, cli.json).await
             }
             Commands::Nsite(args) => {
-                sub_commands::nsite::launch(args, signer_params, cli.json).await
+                sub_commands::nsite::launch(args, signer_params, cli.json, cli.verbose).await
             }
             Commands::Container(args) => match &args.container_command {
                 ContainerCommands::Publish(args) => {

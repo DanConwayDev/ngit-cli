@@ -114,6 +114,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ngit nsite publish --json` uses format version 3: successful uploads are
+  summarized with replication totals and actionable per-server problems.
+  Use `--verbose` for the full `result.blossom.blobs` array from version 2.
+  Identical preflight warnings are deduplicated.
+
 - Build containers with Rust 1.99 on supported Alpine 3.24 and use matching
   OpenSSL development and static libraries plus an explicit runtime CA bundle.
 

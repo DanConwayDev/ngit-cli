@@ -64,7 +64,8 @@ null; do not borrow the parent address's outcomes or claim it was never queried.
 A completed empty search is evidence about the queried relays, not universal
 absence.
 
-Publication commands retain their version-2 error envelope, putting the same
+Publication commands retain their versioned error envelope (version 3 for
+nsite publication, version 2 for other publications), putting the same
 category in `error.code` and the same evidence in `error.details`. Informational
 repository results use a `lookup` object for failed lookups. Do not replace
 existing command-specific envelopes merely to make errors look identical.

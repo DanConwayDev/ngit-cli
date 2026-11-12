@@ -58,14 +58,15 @@ pub(crate) async fn launch(
     args: &NsiteSubCommandArgs,
     signer: SignerParams<'_>,
     json_output: bool,
+    verbose: bool,
 ) -> Result<()> {
     let result = match &args.nsite_command {
-        NsiteCommands::Publish(args) => publish(args, signer, json_output).await,
+        NsiteCommands::Publish(args) => publish(args, signer, json_output, verbose).await,
     };
     match result {
         Ok(value) if json_output => {
             output::set_value(json!({
-                "format_version": 2,
+                "format_version": 3,
                 "command_status": "ok",
                 "command": "nsite.publish",
                 "repository": value.repository,
@@ -82,7 +83,7 @@ pub(crate) async fn launch(
         Err(error) if json_output => {
             let (code, message, details) = super::publication::error_details(&error);
             output::set_value(json!({
-                "format_version": 2,
+                "format_version": 3,
                 "command_status": "error",
                 "command": "nsite.publish",
                 "repository": null,
@@ -106,6 +107,7 @@ async fn publish(
     args: &NsitePublishArgs,
     signer_params: SignerParams<'_>,
     json_output: bool,
+    verbose: bool,
 ) -> Result<NsiteOutput> {
     let resolved = resolve_publish_settings(args)?;
     if let Some(identifier) = resolved.identifier.as_deref() {
@@ -185,7 +187,7 @@ async fn publish(
             json!({
                 "expected_event_id": previous.as_ref().map(|event| event.id.to_hex()),
                 "current_event_id": current.as_ref().map(|event| event.id.to_hex()),
-                "blossom": blossom_summary(&blossom),
+                "blossom": blossom_summary(&blossom, verbose),
             }),
         ));
     }
@@ -219,7 +221,8 @@ async fn publish(
     };
     let coordinate = manifest_coordinate(author, resolved.identifier.as_deref());
     let npub = author.to_bech32()?;
-    let warnings = std::mem::take(&mut context.warnings);
+    let mut warnings = std::mem::take(&mut context.warnings);
+    deduplicate_warnings(&mut warnings);
     let repository = serde_json::to_value(repository_json(&context))?;
     let result = json!({
         "coordinate": coordinate,
@@ -242,7 +245,7 @@ async fn publish(
             .iter()
             .map(nostr::types::RelayUrl::as_str)
             .collect::<Vec<_>>(),
-        "blossom": blossom_summary(&blossom),
+        "blossom": blossom_summary(&blossom, verbose),
         "publication": publication,
     });
     let site_label = resolved.identifier.as_deref().map_or_else(
@@ -503,22 +506,55 @@ fn manifest_coordinate(author: PublicKey, identifier: Option<&str>) -> String {
     )
 }
 
-fn blossom_summary(result: &BatchUploadResult) -> Value {
+fn deduplicate_warnings(warnings: &mut Vec<WarningJson>) {
+    let mut seen = Vec::new();
+    warnings.retain(|warning| {
+        let key = (&warning.code, &warning.message, &warning.details);
+        if seen.iter().any(|previous: &WarningJson| {
+            (&previous.code, &previous.message, &previous.details) == key
+        }) {
+            false
+        } else {
+            seen.push(warning.clone());
+            true
+        }
+    });
+}
+
+fn blossom_summary(result: &BatchUploadResult, verbose: bool) -> Value {
     let mut stored = 0_usize;
     let mut already_present = 0_usize;
-    for outcome in result.blobs.iter().flat_map(|blob| blob.servers.iter()) {
-        match outcome.status {
-            BlossomServerStatus::Stored => stored += 1,
-            BlossomServerStatus::AlreadyPresent => already_present += 1,
-            _ => {}
+    let mut operations = 0_usize;
+    let mut fully_replicated = 0_usize;
+    let mut problems = Vec::new();
+    for blob in &result.blobs {
+        let mut unconfirmed = Vec::new();
+        for outcome in &blob.servers {
+            operations += 1;
+            match outcome.status {
+                BlossomServerStatus::Stored => stored += 1,
+                BlossomServerStatus::AlreadyPresent => already_present += 1,
+                _ => unconfirmed.push(outcome),
+            }
+        }
+        if unconfirmed.is_empty() {
+            fully_replicated += 1;
+        } else {
+            problems.push(json!({"sha256": blob.sha256, "servers": unconfirmed}));
         }
     }
-    json!({
+    let mut summary = json!({
         "stored": stored,
         "already_present": already_present,
         "confirmed_operations": stored + already_present,
-        "blobs": result.blobs,
-    })
+        "total_operations": operations,
+        "fully_replicated_blobs": fully_replicated,
+        "problems": problems,
+    });
+    if verbose {
+        summary["blobs"] = json!(result.blobs);
+    }
+    summary
 }
 
 fn append_snapshot_warnings(
@@ -710,11 +746,67 @@ mod tests {
             }],
         };
 
-        assert_eq!(blossom_summary(&result)["confirmed_operations"], 1);
+        let compact = blossom_summary(&result, false);
+        assert!(compact.get("blobs").is_none());
+        assert_eq!(compact["fully_replicated_blobs"], 1);
+        assert_eq!(compact["total_operations"], 1);
+        assert_eq!(compact["problems"], json!([]));
+        assert_eq!(blossom_summary(&result, true)["confirmed_operations"], 1);
         assert_eq!(
-            blossom_summary(&result)["blobs"][0]["servers"][0]["status"],
+            blossom_summary(&result, true)["blobs"][0]["servers"][0]["status"],
             "already_present"
         );
+    }
+
+    #[test]
+    fn compact_summary_preserves_unconfirmed_server_details() {
+        let outcome = ngit::blossom::BlossomServerOutcome {
+            server: Url::parse("https://mirror.example").unwrap(),
+            operation: ngit::blossom::BlossomServerOperation::Upload,
+            status: BlossomServerStatus::Unknown,
+            descriptor: None,
+            message: Some("connection lost".into()),
+            presence_check_only: false,
+        };
+        for status in [
+            BlossomServerStatus::Failed,
+            BlossomServerStatus::Unknown,
+            BlossomServerStatus::NotAttempted,
+        ] {
+            let result = BatchUploadResult {
+                blobs: vec![ngit::blossom::BatchBlobUploadOutcome {
+                    sha256: "a".repeat(64),
+                    servers: vec![ngit::blossom::BlossomServerOutcome {
+                        status,
+                        ..outcome.clone()
+                    }],
+                }],
+            };
+            let compact = blossom_summary(&result, false);
+            assert_eq!(compact["fully_replicated_blobs"], 0);
+            assert_eq!(compact["problems"][0]["sha256"], "a".repeat(64));
+            assert_eq!(
+                compact["problems"][0]["servers"][0],
+                json!(result.blobs[0].servers[0])
+            );
+        }
+    }
+
+    #[test]
+    fn warning_deduplication_preserves_changed_preflight_evidence() {
+        let warning = WarningJson {
+            code: "relay_preflight_incomplete".into(),
+            message: "incomplete".into(),
+            details: json!({"completed": 1}),
+        };
+        let changed = WarningJson {
+            details: json!({"completed": 2}),
+            ..warning.clone()
+        };
+        let mut warnings = vec![warning.clone(), changed.clone(), warning];
+        deduplicate_warnings(&mut warnings);
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[1].details, changed.details);
     }
 
     #[test]

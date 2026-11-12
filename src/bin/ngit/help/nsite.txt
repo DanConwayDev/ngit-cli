@@ -36,9 +36,16 @@ Workflow notes:
   nothing and reports `result.changed: false`.
 
   With --json check `command_status`, then `result.changed`,
-  `result.blossom.blobs[].servers[]` for each blob and server,
+  `result.blossom.problems[]` for unconfirmed uploads and server details,
   `result.publication.relays[]` (at least one relay must accept) and
   `warnings[]`. The manifest `event_id` is raw hex. On a Blossom failure
   read `error.details.blobs` and `error.details.possible_orphan_blobs`.
+
+  JSON format_version is 3 (previously 2). Blossom totals include stored,
+  already_present, confirmed_operations, total_operations and
+  fully_replicated_blobs. Identical warnings appear once. Consumers needing
+  the former result.blossom.blobs array must opt in with --verbose:
+    ngit nsite publish dist --json --verbose
+  Upload failures retain full error.details diagnostics without --verbose.
 
   Guide: https://ngit.dev/releases/nsites
