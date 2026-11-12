@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rerun --help` describe their result and JSON contracts. `-h` stays a
   compact summary.
 - The CLI reference export includes the workflow notes shown by `--help`.
+- `--help` is compact: each option takes one line, with no blank lines
+  between options, and its full description is shown by the command that
+  defines it. Global options such as `--repo` and `--signer` are listed
+  once, by `ngit --help` and `ngit -h`; subcommand help points there instead
+  of repeating them, and they are still accepted at every position. `--json`
+  is the exception and stays listed on every command.
+  Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
+  and group help such as `ngit pr --help` about 20% shorter. The CLI
+  reference export is unaffected.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and

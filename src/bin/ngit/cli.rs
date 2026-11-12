@@ -21,7 +21,7 @@ pub struct SignerParams<'a> {
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage}\n{all-args}{after-help}",
+    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
     after_long_help = crate::cli_help::OVERVIEW
 )]
 #[command(propagate_version = true)]

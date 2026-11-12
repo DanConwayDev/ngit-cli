@@ -4,9 +4,8 @@
 
 use std::ffi::OsStr;
 
-use clap::Parser;
 use cli::{
-    AccountCommands, CiCommands, Cli, Commands, ContainerCommands, IssueCommands, LogTailMode,
+    AccountCommands, CiCommands, Commands, ContainerCommands, IssueCommands, LogTailMode,
     PrCommands, SignerParams, customise_template, extract_signer_cli_arguments,
 };
 
@@ -87,7 +86,7 @@ async fn main() {
         return;
     }
 
-    let mut cli = Cli::parse();
+    let mut cli = cli_help::parse();
     output::set_json_mode(cli.json);
     if cli.json {
         console::set_colors_enabled_stderr(false);
@@ -661,7 +660,9 @@ async fn main() {
         }
     } else {
         // Show help when no command is provided
-        Cli::parse_from(["ngit", "--help"]);
+        if let Err(help) = cli_help::try_parse_from(["ngit", "--help"]) {
+            help.exit();
+        }
         std::process::exit(0);
     };
 
