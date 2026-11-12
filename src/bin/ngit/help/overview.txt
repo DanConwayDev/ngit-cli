@@ -14,6 +14,7 @@ Workflows:
     software releases, Zapstore publication              ngit release --help
     OCI container images                                 ngit container --help
     static sites (nsites)                                ngit nsite --help
+    telling coding agents a repository uses ngit         ngit skill --help
     git config and environment settings                  ngit --customize
 
   Plain `git clone`, `fetch`, `pull` and `push` of ordinary branches work on

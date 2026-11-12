@@ -489,7 +489,9 @@ pub enum Commands {
     /// remote refs)
     #[command(after_long_help = crate::cli_help::SYNC)]
     Sync(sub_commands::sync::SubCommandArgs),
-    /// install and update ngit's repository skill for coding agents
+    /// tell coding agents to use ngit: repository instruction, skill and
+    /// reminders
+    #[command(after_long_help = crate::cli_help::SKILL)]
     Skill(SkillArgs),
     /// inspect and update the ngit installation
     Update(UpdateArgs),

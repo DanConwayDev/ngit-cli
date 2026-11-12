@@ -144,9 +144,7 @@ async fn install_updates_existing_claude_without_creating_agents_files() -> Resu
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
     assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join("AGENTS.md").exists());
-    assert!(
-        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".claude/skills/ngit/SKILL.md")
-    );
+    assert!(fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains("`ngit --help`"));
     Ok(())
 }
 

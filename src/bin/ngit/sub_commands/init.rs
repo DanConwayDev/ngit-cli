@@ -2370,7 +2370,9 @@ async fn launch_with_mode(
 
 fn should_suggest_skill(git_repo: &Repo, git_repo_path: &Path) -> bool {
     agent_guidance::reminders_enabled(git_repo).unwrap_or(false)
-        && agent_guidance::status(git_repo_path).is_ok_and(|status| !status.installed)
+        && agent_guidance::status(git_repo_path).is_ok_and(|status| {
+            agent_guidance::warning_for(&status) == Some(agent_guidance::WarningKind::Setup)
+        })
 }
 
 fn print_skill_suggestion() {
@@ -2378,9 +2380,7 @@ fn print_skill_suggestion() {
         "{}",
         Style::new()
             .fg(console::Color::Color256(214))
-            .apply_to(
-                "tip: help coding agents collaborate through ngit by running `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)",
-            )
+            .apply_to(agent_guidance::SETUP_TIP)
             .for_stderr()
     );
 }

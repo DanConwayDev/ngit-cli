@@ -21,6 +21,7 @@ pub const SYNC: &str = include_str!("help/sync.txt");
 pub const RELEASE: &str = include_str!("help/release.txt");
 pub const CONTAINER: &str = include_str!("help/container.txt");
 pub const NSITE: &str = include_str!("help/nsite.txt");
+pub const SKILL: &str = include_str!("help/skill.txt");
 
 pub const CI_STATUS: &str = include_str!("help/ci_status.txt");
 pub const CI_INSPECT: &str = include_str!("help/ci_inspect.txt");
@@ -53,6 +54,7 @@ mod tests {
         (&["release"], RELEASE),
         (&["container"], CONTAINER),
         (&["nsite"], NSITE),
+        (&["skill"], SKILL),
         (&["ci", "status"], CI_STATUS),
         (&["ci", "inspect"], CI_INSPECT),
         (&["ci", "secrets"], CI_SECRETS),
@@ -159,5 +161,24 @@ mod tests {
         assert!(PR.contains("git push -u origin pr/my-feature"));
         assert!(PR.contains("push options cannot carry newlines"));
         assert!(ISSUE.contains("Auto-resolve from commits"));
+    }
+
+    /// The setup reminder sends maintainers to `ngit skill --help` for the
+    /// instruction to copy, so the notes must show it exactly as
+    /// `ngit skill install` appends it and name what silences the reminder.
+    #[test]
+    fn skill_help_shows_the_instruction_that_install_appends() {
+        let instruction = ngit::agent_guidance::HELP_INSTRUCTION;
+        let indented: String = instruction
+            .lines()
+            .map(|line| format!("    {line}\n"))
+            .collect();
+        assert!(SKILL.contains(&indented));
+        for marker in ngit::agent_guidance::HELP_INSTRUCTION_MARKERS {
+            assert!(instruction.contains(marker));
+            assert!(SKILL.contains(&format!("`{marker}`")));
+        }
+        // The reminder no longer names the opt-out itself.
+        assert!(SKILL.contains("ngit skill opt-out --local"));
     }
 }
