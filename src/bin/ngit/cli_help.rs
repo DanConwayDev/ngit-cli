@@ -119,15 +119,20 @@ pub fn command<T: AsRef<OsStr>>(args: &[T]) -> Command {
 }
 
 fn shape_subcommand(mut command: Command, long: bool) -> Command {
-    // A parent lists each subcommand by its `about`, so that stays the short
-    // one and the command's own help shows the long one in its place.
-    let mut about = "{about-with-newline}\n";
+    // A parent lists each subcommand by its one-line `about`, so the
+    // command's own help shows its description, wrapped, as `before_help`.
+    let description = match command.get_long_about() {
+        Some(long_about) if long => Some(long_about),
+        _ => command.get_about(),
+    };
+    let description = description.map(|description| wrap(&description.to_string()));
+    let mut about = "";
+    if let Some(description) = description {
+        command = command.before_help(description);
+        about = "{before-help}";
+    }
     if long {
-        if let Some(long_about) = command.get_long_about().cloned() {
-            command = command.before_help(long_about).long_about(None);
-            about = "{before-help}";
-        }
-        command = fold_long_help(command);
+        command = fold_long_help(command.long_about(None));
     }
     // `--version` reports the same version everywhere, so only the top level
     // lists it.
@@ -142,6 +147,43 @@ fn shape_subcommand(mut command: Command, long: bool) -> Command {
         "{about}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{GLOBAL_OPTIONS_POINTER}{{after-help}}"
     ));
     command.mut_subcommands(|subcommand| shape_subcommand(subcommand, long))
+}
+
+/// Wraps prose at 80 columns, the width the notes are written for. Indented
+/// lines are left alone unless they are list items: an example command must
+/// stay copyable.
+fn wrap(text: &str) -> String {
+    const WIDTH: usize = 80;
+    let mut wrapped = Vec::new();
+    for line in text.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        let marker = body
+            .split_once(' ')
+            .map(|(first, _)| first)
+            .filter(|first| *first == "-" || first.ends_with('.') && first.len() <= 3)
+            .map_or(0, |first| first.len() + 1);
+        if line.chars().count() <= WIDTH || (indent > 0 && marker == 0) {
+            wrapped.push(line.to_string());
+            continue;
+        }
+        let mut current = " ".repeat(indent);
+        for word in body.split(' ') {
+            if current.trim().is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() > WIDTH {
+                wrapped.push(std::mem::replace(
+                    &mut current,
+                    format!("{}{word}", " ".repeat(indent + marker)),
+                ));
+            } else {
+                current.push(' ');
+                current.push_str(word);
+            }
+        }
+        wrapped.push(current);
+    }
+    wrapped.join("\n")
 }
 
 /// Moves a command's notes and long option descriptions into the fields
@@ -400,6 +442,32 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn command_descriptions_are_wrapped_for_80_columns() {
+        for path in command_paths().into_iter().filter(|path| !path.is_empty()) {
+            let path: Vec<&str> = path.iter().map(String::as_str).collect();
+            for flag in ["-h", "--help"] {
+                let help = help(&path, flag);
+                for line in help.lines().take_while(|line| !line.starts_with("Usage:")) {
+                    assert!(
+                        line.chars().count() <= 80 || line.starts_with(' '),
+                        "`{flag}` at {path:?} has a long description line: {line}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            wrap(&format!("  2. {}", "word ".repeat(20).trim_end())),
+            format!(
+                "  2. {}\n     {}",
+                "word ".repeat(15).trim_end(),
+                "word ".repeat(5).trim_end()
+            )
+        );
+        let command = format!("  git push {}", "-o option=value ".repeat(6).trim_end());
+        assert_eq!(wrap(&command), command);
     }
 
     #[test]
