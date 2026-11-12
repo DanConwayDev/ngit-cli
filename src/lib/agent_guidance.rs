@@ -1,9 +1,13 @@
 //! Repository-managed coding-agent guidance.
 //!
-//! The installed `SKILL.md` is the source of truth for status and upgrades.
-//! Existing `AGENTS.md` and `CLAUDE.md` files may receive a compact
-//! install-time pointer, but instruction documents remain user-owned and are
-//! never created, tracked, or upgraded.
+//! The recommended guidance is a short instruction in the root `AGENTS.md` or
+//! `CLAUDE.md` that sends agents to the installed `ngit --help`. Those
+//! documents are user-owned: ngit detects the instruction by two markers and
+//! never creates, tracks or upgrades the files, though `ngit skill install`
+//! appends the instruction to existing ones that do not mention ngit.
+//!
+//! The optional repository skill carries the same routing. The installed
+//! `SKILL.md` is the source of truth for its status and upgrades.
 
 use std::{
     cmp::Ordering,
@@ -22,6 +26,13 @@ pub const CLAUDE_SKILL_PATH: &str = ".claude/skills/ngit/SKILL.md";
 pub const AGENTS_PATH: &str = "AGENTS.md";
 pub const CLAUDE_PATH: &str = "CLAUDE.md";
 pub const REMINDERS_CONFIG_KEY: &str = "nostr.skill-reminders";
+/// Suggested instruction for a root `AGENTS.md` or `CLAUDE.md`. `ngit skill
+/// --help` shows it for maintainers to copy and reword.
+pub const HELP_INSTRUCTION: &str = include_str!("../bin/ngit/help/agent_instruction.txt");
+/// An instruction file that mentions all of these is treated as carrying the
+/// instruction, however it is worded.
+pub const HELP_INSTRUCTION_MARKERS: [&str; 2] = ["ngit --help", "ngit.dev/install"];
+pub const SETUP_TIP: &str = "tip: add an AGENTS.md insert or a skill to tell collaborators' coding agents this repository uses ngit; run `ngit skill --help` for details";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
 
@@ -32,6 +43,8 @@ const LEGACY_REFERENCE_DIR: &str = "reference";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuidanceStatus {
+    /// A root instruction file sends agents to installed help.
+    pub help_instruction: bool,
     pub installed: bool,
     pub installed_version: Option<String>,
     pub bundled_version: String,
@@ -340,15 +353,26 @@ fn read_optional_text(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn policy(skill_path: &str) -> String {
-    format!("- For repository collaboration, use ngit and follow `{skill_path}`.")
+/// Whether a root `AGENTS.md` or `CLAUDE.md` already sends agents to installed
+/// help. One file must mention every marker; the wording around them is the
+/// maintainers' own. Unreadable and non-UTF-8 files count as not carrying it.
+#[must_use]
+pub fn has_help_instruction(root: &Path) -> bool {
+    [AGENTS_PATH, CLAUDE_PATH].iter().any(|relative| {
+        fs::read(root.join(relative)).is_ok_and(|bytes| {
+            let text = String::from_utf8_lossy(&bytes);
+            HELP_INSTRUCTION_MARKERS
+                .iter()
+                .all(|marker| text.contains(marker))
+        })
+    })
 }
 
-fn append_policy(existing: &str, skill_path: &str) -> String {
+fn append_policy(existing: &str) -> String {
     if existing.to_ascii_lowercase().contains("ngit") {
         return existing.to_string();
     }
-    let policy = policy(skill_path);
+    let policy = HELP_INSTRUCTION.trim_end();
     match existing {
         "" => format!("{policy}\n"),
         content if content.ends_with('\n') => format!("{content}\n{policy}\n"),
@@ -370,12 +394,12 @@ fn expected_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<(
     if !first_install {
         return Ok(files);
     }
-    for (relative, skill_path) in [(AGENTS_PATH, SKILL_PATH), (CLAUDE_PATH, CLAUDE_SKILL_PATH)] {
+    for relative in [AGENTS_PATH, CLAUDE_PATH] {
         let path = validate_managed_path(root, relative)?;
         let Some(existing) = read_optional_text(&path)? else {
             continue;
         };
-        let instruction = append_policy(&existing, skill_path);
+        let instruction = append_policy(&existing);
         if instruction != existing {
             files.push((relative.to_string(), instruction));
         }
@@ -386,8 +410,10 @@ fn expected_files(root: &Path, existing_skills: &[&'static str]) -> Result<Vec<(
 pub fn status(root: &Path) -> Result<GuidanceStatus> {
     let bundled_version = bundled_version()?;
     let logical_paths = existing_skill_paths(root)?;
+    let help_instruction = has_help_instruction(root);
     if logical_paths.is_empty() {
         return Ok(GuidanceStatus {
+            help_instruction,
             installed: false,
             installed_version: None,
             bundled_version,
@@ -430,6 +456,7 @@ pub fn status(root: &Path) -> Result<GuidanceStatus> {
         None
     };
     Ok(GuidanceStatus {
+        help_instruction,
         installed: true,
         update_available,
         installed_version,
@@ -563,21 +590,19 @@ fn compare_versions(installed: &str, bundled: &str) -> Option<Ordering> {
 
 #[must_use]
 pub fn warning_for(status: &GuidanceStatus) -> Option<WarningKind> {
-    if !status.installed {
-        Some(WarningKind::Setup)
-    } else if status.update_available {
-        Some(WarningKind::Update)
-    } else {
+    if status.installed {
+        status.update_available.then_some(WarningKind::Update)
+    } else if status.help_instruction {
         None
+    } else {
+        Some(WarningKind::Setup)
     }
 }
 
 #[must_use]
 pub fn warning_message(status: &GuidanceStatus) -> Option<String> {
     match warning_for(status)? {
-        WarningKind::Setup => Some(
-            "tip: install ngit's repository skill so coding agents use ngit instead of GitHub; run `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)".into(),
-        ),
+        WarningKind::Setup => Some(SETUP_TIP.into()),
         WarningKind::Update => Some(format!(
             "tip: run `ngit skill upgrade` (repository skill {} -> {})",
             status.installed_version.as_deref().unwrap_or("unknown"),
@@ -708,6 +733,7 @@ mod tests {
     #[test]
     fn warning_messages_are_exact() {
         let status = GuidanceStatus {
+            help_instruction: false,
             installed: true,
             installed_version: Some("1.0".into()),
             bundled_version: "1.1".into(),
@@ -719,6 +745,50 @@ mod tests {
             warning_message(&status).as_deref(),
             Some("tip: run `ngit skill upgrade` (repository skill 1.0 -> 1.1)")
         );
+    }
+
+    /// Maintainers word their own instruction files, so detection rests on
+    /// the two markers alone, and both must be in the same file.
+    #[test]
+    fn help_instruction_is_detected_by_its_markers() {
+        let root = temp_root();
+        assert!(!has_help_instruction(&root));
+        fs::write(root.join(AGENTS_PATH), "Use ngit; see `ngit --help`.\n").unwrap();
+        fs::write(root.join(CLAUDE_PATH), "Install: ngit.dev/install\n").unwrap();
+        assert!(!has_help_instruction(&root));
+
+        for relative in [AGENTS_PATH, CLAUDE_PATH] {
+            let custom = "# House rules\n\nWe use ngit. Run `ngit --help` first; get it at\nhttps://ngit.dev/install if absent.\n";
+            fs::write(root.join(relative), custom).unwrap();
+            let status = status(&root).unwrap();
+            assert!(status.help_instruction);
+            assert!(!status.installed);
+            assert_eq!(warning_for(&status), None);
+            assert_eq!(fs::read_to_string(root.join(relative)).unwrap(), custom);
+            fs::write(root.join(relative), "unrelated\n").unwrap();
+        }
+        fs::write(root.join(AGENTS_PATH), HELP_INSTRUCTION).unwrap();
+        assert!(has_help_instruction(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_reminder_stops_once_an_instruction_or_skill_exists() {
+        let root = temp_root();
+        let status_now = |root: &Path| status(root).unwrap();
+        assert_eq!(warning_for(&status_now(&root)), Some(WarningKind::Setup));
+        let tip = warning_message(&status_now(&root)).unwrap();
+        assert!(tip.contains("`ngit skill --help`"));
+
+        fs::write(root.join(AGENTS_PATH), b"\xff not utf-8").unwrap();
+        assert_eq!(warning_for(&status_now(&root)), Some(WarningKind::Setup));
+        fs::remove_file(root.join(AGENTS_PATH)).unwrap();
+
+        setup(&root, false).unwrap();
+        let installed = status_now(&root);
+        assert!(installed.installed && !installed.help_instruction);
+        assert_eq!(warning_for(&installed), None);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn setup_installs_both_skills_without_creating_instruction_files() {
@@ -827,14 +897,14 @@ mod tests {
     }
 
     #[test]
-    fn setup_adds_pointer_to_existing_claude_without_creating_agents() {
+    fn setup_appends_the_instruction_to_existing_claude_without_creating_agents() {
         let root = temp_root();
         fs::write(root.join(CLAUDE_PATH), "# Claude instructions\n").unwrap();
         setup(&root, false).unwrap();
 
         let claude = fs::read_to_string(root.join(CLAUDE_PATH)).unwrap();
         assert!(claude.contains("# Claude instructions"));
-        assert!(claude.contains(CLAUDE_SKILL_PATH));
+        assert!(claude.ends_with(HELP_INSTRUCTION));
         assert!(!claude.contains("<!--"));
         assert!(root.join(SKILL_PATH).is_file());
         assert!(root.join(CLAUDE_SKILL_PATH).is_file());
@@ -843,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_adds_pointer_to_each_existing_instruction_file() {
+    fn setup_appends_the_instruction_to_each_existing_instruction_file() {
         let root = temp_root();
         fs::write(
             root.join(AGENTS_PATH),
@@ -859,16 +929,14 @@ mod tests {
                 .unwrap()
                 .contains("Keep this text.")
         );
-        assert!(
-            fs::read_to_string(root.join(AGENTS_PATH))
-                .unwrap()
-                .contains(SKILL_PATH)
-        );
-        assert!(
-            fs::read_to_string(root.join(CLAUDE_PATH))
-                .unwrap()
-                .contains(CLAUDE_SKILL_PATH)
-        );
+        for relative in [AGENTS_PATH, CLAUDE_PATH] {
+            assert!(
+                fs::read_to_string(root.join(relative))
+                    .unwrap()
+                    .ends_with(&format!("\n\n{HELP_INSTRUCTION}"))
+            );
+        }
+        assert!(status(&root).unwrap().help_instruction);
         assert!(root.join(SKILL_PATH).is_file());
         assert!(root.join(CLAUDE_SKILL_PATH).is_file());
         fs::remove_dir_all(root).unwrap();

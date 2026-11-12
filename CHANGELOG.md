@@ -82,8 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade` (or `install` over an existing skill) removes the whole
   `reference/` directory left beside it by earlier versions and leaves the
   deletion uncommitted for review. An agent whose ngit predates workflow help is told
-  to update it. `ngit skill status`, reminders and instruction-file handling
-  behave as before.
+  to update it.
+- The recommended way to tell coding agents a repository uses ngit is now a
+  short instruction in the root `AGENTS.md` or `CLAUDE.md` that sends them to
+  `ngit --help`, with the repository skill as an option. `ngit skill --help`
+  shows the instruction to copy and reword. The maintainer reminder, including
+  after `ngit init`, points there rather than to `ngit skill install`, and
+  stops once one of those files mentions both `ngit --help` and
+  `ngit.dev/install` or the skill is installed. `ngit skill status` reports
+  the detection as `help_instruction`. `ngit skill install` appends this
+  instruction, in place of a pointer to the skill file, to existing
+  instruction files that do not mention ngit; it still creates none.
 
 - Credential-store failures include recovery guidance and the underlying cause.
   Login reports missing profiles before incompatible relay options and shows

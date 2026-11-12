@@ -427,3 +427,58 @@ async fn init_honors_repository_skill_reminder_opt_out() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn init_skips_the_reminder_when_an_instruction_file_points_to_help() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+
+    let create = repo
+        .ngit(["account", "create", "--local", "--name", "instructed"])
+        .output()
+        .await?;
+    assert!(create.status.success());
+    let commit = repo
+        .git(["commit", "--allow-empty", "-m", "init", "--no-gpg-sign"])
+        .output()
+        .await?;
+    assert!(commit.status.success());
+    // Maintainer wording, carrying only the two markers ngit looks for.
+    std::fs::write(
+        repo.dir().join("AGENTS.md"),
+        "Collaborate with ngit. Run `ngit --help` first.\nInstall: https://ngit.dev/install\n",
+    )?;
+
+    let grasp_url = harness.grasp("repo").url().to_string();
+    let init = repo
+        .ngit([
+            "init",
+            "--name",
+            "instructed",
+            "--identifier",
+            "instructed",
+            "--grasp-server",
+            &grasp_url,
+            "-d",
+        ])
+        .output()
+        .await?;
+    assert!(
+        init.status.success(),
+        "ngit init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&init.stderr).contains("ngit skill"),
+        "init reminded a repository whose instruction file already points to help"
+    );
+
+    Ok(())
+}

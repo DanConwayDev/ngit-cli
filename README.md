@@ -146,17 +146,36 @@ eg self-hosted, github, codeberg, etc.
                          └─────────┘
 ```
 
-## Repository-managed skill
+## Guidance for coding agents
 
-Run `ngit skill install` to add repository guidance that teaches coding agents
-to use ngit. The skill is a short bootstrap: it tells agents to use ngit in
-repositories with a `nostr://` remote and to read the workflow guidance in the
-installed `ngit --help`, so it seldom changes when ngit gains features. The
+Coding agents reach for GitHub or GitLab tools unless a repository says
+otherwise. The recommended way to say so is a short instruction in the root
+`AGENTS.md` or `CLAUDE.md`, which agents read at the start of every session:
+
+```markdown
+This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev),
+not GitHub or GitLab. Use ngit for issues, pull requests, reviews, CI and
+releases. Before any of those tasks, including pushing a pull request
+branch, run `ngit --help` and follow its workflow map. If ngit is
+missing, install it from https://ngit.dev/install.
+```
+
+Reword it to suit the repository. The workflow guidance itself lives in the
+installed `ngit --help`, so the instruction does not need to change when ngit
+gains features. ngit reminds maintainers until one of those files mentions
+both `ngit --help` and `ngit.dev/install`, or the repository skill is
+installed; `ngit skill opt-out --local` stops the reminder.
+
+### Repository-managed skill (optional)
+
+`ngit skill install` adds a short bootstrap skill carrying the same routing,
+for agents that discover skills but are given no instruction file. The
 reference files that earlier versions installed beside it are removed by
 `ngit skill upgrade`. The
 command installs the skill in the Codex and Claude discovery
-locations and adds a compact pointer to existing `AGENTS.md` or `CLAUDE.md`
-files without creating either file. Use `ngit skill upgrade` to update existing
+locations and appends the instruction above to existing `AGENTS.md` or
+`CLAUDE.md` files that do not already mention ngit, without creating either
+file. Use `ngit skill upgrade` to update existing
 copies from the version in the skill metadata; it does not restore a copy that
 was removed after installation. Install and upgrade leave their changes
 uncommitted so the repository's normal validation and commit workflow can run.
@@ -170,4 +189,5 @@ them. Successful commands set `action` to `installed`, `upgraded`,
 same change fields for files already left in the worktree, and omit post-update
 guidance status fields.
 
-Run `ngit skill --help` for status and reminder opt-out commands.
+Run `ngit skill --help` for the instruction, status and reminder opt-out
+commands.

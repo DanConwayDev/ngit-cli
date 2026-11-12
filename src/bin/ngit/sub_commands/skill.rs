@@ -240,6 +240,10 @@ fn print_changed_files(changed_files: &[String], partial: bool, is_maintainer: O
 }
 
 fn print_status(output: &Output) {
+    println!(
+        "instruction in AGENTS.md or CLAUDE.md: {}",
+        output.guidance.help_instruction
+    );
     println!("installed: {}", output.guidance.installed);
     println!(
         "installed version: {}",
