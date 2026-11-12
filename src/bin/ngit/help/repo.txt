@@ -1,0 +1,115 @@
+nostr:// URLs and cloning:
+  Standard git commands accept these URLs directly:
+
+    nostr://<npub>/<identifier>
+    nostr://<npub>/<relay-hint>/<identifier>   relay-hint is a bare domain
+    nostr://<user>@<domain>/<identifier>       NIP-05, only when given to you
+    nostr://<domain>/<repository-path>         NIP-AD: the domain resolves it
+
+    git clone nostr://<npub>/<relay-hint>/<identifier>
+    git clone nostr://<npub>/<identifier>
+    git clone nostr://ngit.dev/ngit.git          # NIP-AD bare-domain path
+
+  A relay hint skips discovery. Open and draft PRs are not fetched as
+  branches unless `nostr.auto-pr-branches` is true;
+  `ngit pr checkout <ID|nevent>` materialises one on demand.
+
+Is this a nostr repository?:
+    git remote -v | grep -q 'nostr://'   # primary check, no cache needed
+    ngit repo --json --offline            # full metadata when needed
+
+  The output reports `nostr_url`,
+  effective `git_servers` and `relays`, `grasp_servers`, `hashtags` and the
+  roster (`members`, `lead_source`, `lead_path`, `pending_actions`,
+  `health`). It always exits 0, and `is_nostr_repo: false` can be a
+  cold-cache false negative: if a remote shows nostr://, run `git fetch`
+  for that remote and retry. Follow an actionable error or `pending_actions`
+  rather than replacing an announcement wholesale.
+
+Publishing and hosting:
+  `ngit init` declares the complete first announcement; `ngit repo edit`
+  makes every later change. A grasp server bundles a relay and a git server
+  and creates the repository when an announcement lists it. Additional
+  relays and clone URLs are explicit, empty by default, and add to grasp
+  hosting rather than replace it:
+
+    relays = grasp-derived relays + additional relays
+    clones = grasp-derived clones + additional clones
+
+  Every announcement needs at least one relay and one git server. `init`
+  and `repo edit` refuse to publish otherwise, even for a metadata-only edit
+  of an announcement already missing one half; repair it in the same
+  command, e.g.
+  `ngit repo edit --name "New name" --add-grasp-server grasp.example.com`.
+
+    # preferred grasp servers, else ngit defaults
+    ngit init --name "My Project" --description "What it does" \
+      --defaults --json
+    ngit init --name "My Project" --grasp-server grasp.example.com \
+      --defaults --json
+    ngit init --name "My Project" \
+      --additional-relay wss://relay.example.com \
+      --additional-clone https://git.example.com/my-project.git \
+      --defaults --json
+    # no grasp server: both halves are required
+    ngit init --name "My Project" --grasp-server "" \
+      --additional-relay wss://relay.example.com \
+      --additional-clone https://git.example.com/my-project.git \
+      --defaults --json
+
+  The identifier is fixed at first publication: changing it creates a
+  different repository rather than renaming this one.
+
+Editing:
+  `repo edit` preserves every setting it is not told to change. Collections
+  change through repeatable --add-* and --remove-* flags that can be
+  combined in one command; to empty a collection, remove each value
+  currently reported. A grasp-derived relay or clone URL cannot be removed
+  as an additional entry: remove the grasp server and its pair goes too.
+
+    grasp server      --add-grasp-server URL      --remove-grasp-server URL
+    additional relay  --add-additional-relay URL  --remove-additional-relay URL
+    additional clone  --add-additional-clone URL  --remove-additional-clone URL
+    hashtag           --add-hashtag TAG           --remove-hashtag TAG
+
+  Scalars use replacement flags: --name, --description, --web, --u and
+  --earliest-unique-commit.
+
+  Each edit publishes a fresh announcement and, when the repository has
+  Nostr state, republishes that state once so new relays and servers hold
+  the authoritative refs. If that step fails, follow the reported
+  `ngit sync` recovery guidance.
+
+Roles and membership:
+  co-maintainer     publishes git state, merges, manages issues and PRs
+  lead maintainer   the same, plus responsibility for the roster; when a
+                    lead exists, routine roster changes go through the lead
+  moderator         publishes issue, PR and patch statuses (including
+                    recording an existing merge); cannot publish git state
+
+  Membership is reciprocal. Listing someone is an invitation: their events
+  are not authoritative until they publish an announcement acknowledging the
+  role.
+
+    # a sole maintainer's first add makes them lead
+    ngit repo edit --add-maintainer <npub> --json
+    # invitee confirms the role and the lead; --grasp-server <url> also
+    # hosts the git data there
+    ngit repo accept --json
+    # members retain history and follow a changed lead or roster
+    ngit repo follow-lead --json
+    # end your own role and republish
+    ngit repo leave --json
+    ngit repo edit --remove-maintainer <npub> --json
+    # handover: the new lead publishes the full roster first
+    ngit repo edit --lead-maintainer <npub> --json
+    ngit repo edit --acknowledge-maintainer-change <npub> --json
+
+  Change one relationship at a time. In a deliberately leadless repository
+  pass --no-lead-maintainer with every --add-maintainer and
+  --remove-maintainer.
+
+  Guides: https://ngit.dev/repositories (hosting choices, migrating from a
+  forge, mirrors, private repositories) and https://ngit.dev/maintainers
+  (https://ngit.dev/maintainers/going-deeper for leadless repositories,
+  removal and roster repair). Background: https://ngit.dev/how-it-works

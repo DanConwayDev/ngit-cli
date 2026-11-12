@@ -1,0 +1,32 @@
+Examples:
+    ngit sync --json                  # every ref
+    ngit sync --ref-name main --json  # one ref
+
+When to use:
+  Nostr state is the source of truth for refs; git servers are replicas.
+  `ngit sync` pushes, updates or deletes refs on the repository's git
+  servers until they match that state, for every ref or for one with
+  --ref-name. Use it when a server was added, was unreachable during a
+  push, or when another command reports sync recovery guidance. A normal
+  `git push` to the nostr remote already updates the servers and does not
+  need a sync afterwards.
+
+  --trust-server is the one exception to that direction: it accepts a git
+  server that is a clean fast-forward ahead and updates Nostr state to
+  match. Use it, or --force, only when asked to.
+
+  Git config and environment settings, including timeouts for large
+  pushes, relay authentication and the event cache directory, are listed
+  by `ngit --customize`:
+
+    git config nostr.signer alice              # repository signer
+    git config nostr.auto-pr-branches true     # fetch PRs as pr/* branches
+    git config nostr.http-io-timeout-ms 600000 # allow large grasp pushes
+    NGIT_CACHE_DIR=/writable/path ngit repo --json
+
+  If the global cache directory is unavailable
+  ngit uses an in-memory cache, but the repository's git common directory
+  must still be writable.
+
+  Guides: https://ngit.dev/configuration and
+  https://ngit.dev/troubleshooting

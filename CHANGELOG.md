@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--help` now explains workflows as well as flags. `ngit --help` ends with a
+  map from tasks to the command help that covers them, plus the conventions
+  shared by every command (JSON output, identifiers, signer and repository
+  selection). `ngit pr`, `issue`, `repo`, `ci`, `account`, `sync`, `release`,
+  `container` and `nsite --help` describe their workflow's rules and pitfalls,
+  including steps performed with plain git such as opening a PR by pushing a
+  `pr/` branch, and `ci status`, `inspect`, `secrets`, `service status` and
+  `rerun --help` describe their result and JSON contracts. `-h` stays a
+  compact summary.
+- The CLI reference export includes the workflow notes shown by `--help`.
+
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and
   throttled count samples. Shared diagnostics are structured and redundant human
@@ -61,6 +72,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ngit --customize` documents precedence and scope.
 
 ### Changed
+
+- The bundled agent skill (version 1.29) is now a short bootstrap. It tells
+  agents to use ngit in repositories with a `nostr://` remote and to read the
+  workflow guidance in the installed `ngit --help`, including before opening
+  or updating a PR with `git push`, instead of repeating commands and feature
+  details that change between releases. The reference files are no longer
+  bundled: `ngit skill install` writes only `SKILL.md`, and `ngit skill
+  upgrade` (or `install` over an existing skill) removes the whole
+  `reference/` directory left beside it by earlier versions and leaves the
+  deletion uncommitted for review. An agent whose ngit predates workflow help is told
+  to update it. `ngit skill status`, reminders and instruction-file handling
+  behave as before.
 
 - Credential-store failures include recovery guidance and the underlying cause.
   Login reports missing profiles before incompatible relay options and shows

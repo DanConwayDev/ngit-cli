@@ -1,0 +1,81 @@
+Where Nostr CI comes from:
+  A coordinator (the ngit-ci service) serving the repository runs the
+  workflow files under `.ngit/act/workflows/` (GitHub Actions syntax, in
+  Linux containers) and `.ngit/nix/workflows/` (native).
+  `.github/workflows/` is run only by GitHub Actions on a mirror. The
+  directories are independent: another provider's directory is not evidence
+  about Nostr CI, and a check that must run in both systems needs a file in
+  each. ngit-ci refuses macOS and Windows `runs-on` labels and job-level
+  `uses:` (reusable workflows); composite actions in steps work. To use
+  ngit inside a job, add the step `uses: danconwaydev/setup-ngit@v3`.
+
+Did CI pass?:
+  A successful push says nothing about CI. Query the exact commit that
+  introduced the change, or the PR (which reports only its latest revision):
+
+    # first query refreshes relays; no target means HEAD
+    ngit ci status <COMMIT|'#prefix'|nevent> --json
+    # later cache-only reads
+    ngit ci status <target> --json --offline
+    # exit non-zero unless green at this trust floor
+    ngit ci status <target> --require-ci-trust maintainer-directed --json
+
+  ci.state        `running`, `concluded` (every current run finished),
+                  `stale` (nothing running, but a run never concluded) or
+                  `none` (no run). `ci.conclusion` counts only once the
+                  state is `concluded`
+  ci.conclusion   `success`, or an outcome such as `failure`, `cancelled`
+                  or `timed_out`. The top-level `command_status: "ok"`
+                  means only that the query worked
+  ci.runs[]       `workflow` and `jobs` say what passed or failed. There is
+                  one current run per coordinator, workflow and trigger
+                  context, so runs triggered by a push, an issue action or
+                  a release stay separate at the same commit (`trigger`,
+                  `context`). `integrity` says whether the commit is held
+                  locally and whether the workflow file hashes to what the
+                  coordinator signed (null means unknown, not a mismatch);
+                  `classification` and `evidence` say why a run is trusted
+  ci.coverage     how completely the result is covered, with
+                  `ci.coverage_gaps`. Partial coverage is not success, and
+                  an aggregate success does not assert that every job
+                  succeeded
+
+  If no run appears, report that no matching Nostr CI event was found. Before
+  concluding that CI did not run, check that the workflow file existed at
+  that commit (`git show <commit>:.ngit/act/workflows/<file>`), that its
+  trigger matched, that a coordinator serves the repository
+  (`ci service status`), and that the query refreshed from relays.
+
+  Earlier attempts, previous tips and other history are shown for context
+  and never count towards the current conclusion or a trust gate. Missing
+  evidence is reported as waiting or not reported, never guessed to be
+  queued, skipped or failed.
+
+Which command:
+  ci status           summary for HEAD, a commit or a PR
+  ci status --watch   follow a run. It exits once every observed workflow has
+                      concluded and 10 quiet seconds pass; exit 0 then means
+                      observation ended, not that CI passed. It cannot be
+                      combined with --offline or --require-ci-trust, and a
+                      PR target stays pinned to the revision found at start
+  ci inspect          steps, logs, artifacts and trust evidence for the same
+                      selection, or for one exact event ID from `ci status`
+  ci service status   which coordinators serve this repository
+
+Trust gates:
+  The floors are `maintainer-directed` and `operationally-associated`.
+  `ci status --require-ci-trust <LEVEL>` exits non-zero unless the result
+  is a success at that floor, and `pr merge --require-ci-trust` gates a
+  merge the same way. Use a gate when the task or repository asks for one.
+
+Acting on CI (confirmed maintainers):
+  `ci trigger` runs one workflow once and needs no standing service.
+  `ci rerun` starts a new attempt from a completed native result; it does
+  not cancel an attempt that is still running. `ci cancel` requests
+  cancellation of one exact run. `ci service request` and `ci service stop`
+  manage standing service (`ci request` and `ci stop` are deprecated
+  aliases). `ci secrets` sends an encrypted secret update to a coordinator.
+  For all of them a zero exit means the request was published, not that the
+  coordinator accepted or finished it: observe the outcome with `ci status`.
+
+  Guides: https://ngit.dev/ci and https://ngit.dev/ci/workflows/

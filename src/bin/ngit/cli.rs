@@ -21,7 +21,8 @@ pub struct SignerParams<'a> {
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n includes a remote helper so native git commands (clone, fetch, push) work with nostr:// URLs\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit pr list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n   target another branch or select an explicit proposal base with:\n     git push -o target-branch=release/2.x -o base=<commit|branch|nevent> -u origin pr/branch\n - publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
+    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage}\n{all-args}{after-help}",
+    after_long_help = crate::cli_help::OVERVIEW
 )]
 #[command(propagate_version = true)]
 #[allow(clippy::struct_excessive_bools)]
@@ -443,47 +444,57 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// create and publish a new repository on nostr
+    #[command(after_long_help = crate::cli_help::REPO_POINTER)]
     Init(sub_commands::init::SubCommandArgs),
     /// manage repository metadata and maintainership
     #[command(
-        long_about = "manage repository metadata and maintainership\n\nrun without a subcommand to show repository info"
+        long_about = "manage repository metadata and maintainership\n\nrun without a subcommand to show repository info",
+        after_long_help = crate::cli_help::REPO
     )]
     Repo(RepoSubCommandArgs),
     /// submit PR with advanced options
     #[command(
-        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Send(sub_commands::send::SubCommandArgs),
     /// work with pull requests
     #[command(
-        long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
+        long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`",
+        after_long_help = crate::cli_help::PR
     )]
     Pr(PrSubCommandArgs),
     /// merge a PR as a local no-ff merge commit (alias for `ngit pr merge`)
     #[command(
-        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nthis is an alias for `ngit pr merge`; run without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nthis is an alias for `ngit pr merge`; run without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Merge(MergeSubCommandArgs),
     /// work with issues
+    #[command(after_long_help = crate::cli_help::ISSUE)]
     Issue(IssueSubCommandArgs),
     /// inspect CI results and the trust context behind them
+    #[command(after_long_help = crate::cli_help::CI)]
     Ci(CiSubCommandArgs),
     /// work with software applications, releases, and release assets
-    #[command(alias = "releases")]
+    #[command(alias = "releases", after_long_help = crate::cli_help::RELEASE)]
     Release(ReleaseSubCommandArgs),
     /// publish static websites through Nostr and Blossom
+    #[command(after_long_help = crate::cli_help::NSITE)]
     Nsite(NsiteSubCommandArgs),
     /// publish OCI container images through Nostr and Blossom
-    #[command(visible_alias = "oci")]
+    #[command(visible_alias = "oci", after_long_help = crate::cli_help::CONTAINER)]
     Container(ContainerSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
+    #[command(after_long_help = crate::cli_help::SYNC)]
     Sync(sub_commands::sync::SubCommandArgs),
     /// install and update ngit's repository skill for coding agents
     Skill(SkillArgs),
     /// inspect and update the ngit installation
     Update(UpdateArgs),
     /// list accounts, create an account, login, logout or export keys
+    #[command(after_long_help = crate::cli_help::ACCOUNT)]
     Account(AccountSubCommandArgs),
 }
 
@@ -514,6 +525,7 @@ pub struct NsiteSubCommandArgs {
 #[derive(Subcommand)]
 pub enum NsiteCommands {
     /// publish a directory as a root or named NIP-5A static site
+    #[command(after_long_help = crate::cli_help::NSITE_POINTER)]
     Publish(NsitePublishArgs),
 }
 
@@ -664,6 +676,7 @@ pub struct ContainerSubCommandArgs {
 #[derive(Subcommand)]
 pub enum ContainerCommands {
     /// upload an OCI image layout to Blossom and publish its tag map
+    #[command(after_long_help = crate::cli_help::CONTAINER_POINTER)]
     Publish(ContainerPublishArgs),
 }
 
@@ -1302,7 +1315,8 @@ pub enum PrCommands {
     },
     /// submit PR with advanced options (alias for `ngit send`)
     #[command(
-        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Send(sub_commands::send::SubCommandArgs),
     /// close a PR (author or maintainer only)
@@ -1372,7 +1386,8 @@ pub enum PrCommands {
     /// merge a PR into its declared target, or the default branch, as a no-ff
     /// merge commit (does not push)
     #[command(
-        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Merge(MergeSubCommandArgs),
     /// add one or more labels to a PR (author or maintainer only)
@@ -1484,6 +1499,9 @@ pub struct CiExecutionSelection {
     /// Repeat gte/lte to set both bounds. Preserve JSON string quotes, e.g.
     /// --require 'build=some-resource:eq:"value"'. Duplicate job/path/operator
     /// triples are rejected. Requirements select offerings, not guest settings.
+    /// Comparisons do not coerce types. In an env JSON Pointer write `/` as
+    /// `~1` and `~` as `~0`; in any path write `:` as `%3A` and `%` as `%25`.
+    /// A published request is not proof that resources were allocated.
     #[arg(long = "require", value_name = "JOB=PATH:OP:JSON")]
     pub requirements: Vec<String>,
     /// Compatibility flag; fresh manual triggers already rerun dependencies
@@ -1559,6 +1577,7 @@ pub struct CiSecretsArgs {
 pub enum CiServiceCommands {
     /// Show coordinators with observed runs in the last 30 days, maintainer
     /// relationships, service claims and advertised availability
+    #[command(after_long_help = crate::cli_help::CI_SERVICE_STATUS)]
     Status {
         /// Read cached evidence only; missing history is not proof of stopped
         /// service
@@ -1603,8 +1622,10 @@ pub enum CiCommands {
         command: CiServiceCommands,
     },
     /// Publish an encrypted atomic secret update to a live coordinator inbox
+    #[command(after_long_help = crate::cli_help::CI_SECRETS)]
     Secrets(CiSecretsArgs),
     /// Show detailed CI for HEAD, --target, or an exact signed event
+    #[command(after_long_help = crate::cli_help::CI_INSPECT)]
     Inspect(CiInspectArgs),
     /// show CI results, with the trust context of every signer behind them
     #[command(
@@ -1618,7 +1639,8 @@ pub enum CiCommands {
         A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Human output summarizes workflows and jobs, highlighting failed or active steps. Failed jobs show their steps and final three log lines. Use `ci inspect --target <TARGET>` for step durations, logs, artifacts and trust details. `--log-tail` selects tails for JSON only; human failed-job tails appear in `ci inspect` (use `--no-logs` to hide them).\n\n\
         With no target, HEAD remains current. Only when it has no CI run evidence, a compact summary may show the newest related previous PR/upstream tip with CI evidence. Explicit commit targets do not infer history. Earlier attempts on the current tip have concise status/time rows and exact inspect commands. Historical results never affect the current conclusion or trust gate.\n\n\
         Unstarted jobs are labelled not reported, never guessed to be queued or skipped. Conditions are never evaluated locally. Bare `ci inspect` details the same HEAD selection; `ci inspect <ID>` selects exact event evidence.\n\n\
-        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
+        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed.",
+        after_long_help = crate::cli_help::CI_STATUS
     )]
     Status {
         /// Watch CI until all observed workflows finish, then wait 10 quiet
@@ -1692,6 +1714,7 @@ pub enum CiCommands {
         offline: bool,
     },
     /// Rerun a completed native workflow, retaining its dependency bindings
+    #[command(after_long_help = crate::cli_help::CI_RERUN)]
     Rerun {
         /// Coordinator public key (npub or hex)
         coordinator: String,

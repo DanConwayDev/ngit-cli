@@ -1,0 +1,103 @@
+Open or update a PR with git:
+  The branch name MUST start with `pr/`. Any other name is an ordinary push
+  and never opens a PR; no push option changes that. For work on another
+  branch, rename it or create one first (`git branch -m pr/my-feature`).
+
+    git checkout -b pr/my-feature
+    # one commit: its subject and body become the title and description
+    git push -u origin pr/my-feature
+    # otherwise set them; literal \n, push options cannot carry newlines
+    git push -u origin pr/my-feature -o 'title=My feature' \
+      -o 'description=First paragraph.\n\nSecond paragraph.'
+    git push -u origin pr/release-fix -o target-branch=release/2.x
+    # pin or override the stack parent
+    git push -u origin pr/second-part -o base=<commit|branch|nevent>
+    # update the PR after amending or rebasing
+    git push --force origin pr/my-feature
+
+  - Do not use $'...\n...' for push options, and do not pre-escape a
+    Markdown file into `-o description=`; open the PR with `ngit send`.
+  - To push as another stored identity, use
+    `git -c nostr.signer=<alias|npub|profile-name> push ...`; --signer
+    applies to ngit commands only. `ngit account login --local <alias>`
+    makes an identity the repository default instead.
+
+Open a PR with ngit send:
+  `ngit send` (also `ngit pr send`) takes ordinary shell arguments, so
+  --description accepts real newlines from $'...' or "$(cat file.md)".
+  Inside double quotes \n stays a literal backslash-n.
+
+    ngit send HEAD~2 --subject "My feature" \
+      --description "$(cat pr-description.md)" --json
+    # new revision of an existing PR
+    ngit send HEAD~2 --in-reply-to <PR-ID|nevent> --json
+    ngit send --defaults --target-branch release/2.x --json
+    ngit send --defaults --base <commit|branch|nevent> --json
+
+  It works from any branch. --defaults with no range proposes the commits
+  ahead of the default branch and accepts a single commit's subject and
+  body as title and description. Pass --subject and --description together
+  or not at all. Do not also push a `pr/` branch for the same proposal.
+
+Stacked PRs:
+  Stacks are inferred: a branch that contains the unique latest tip of one
+  of your other open or draft PRs becomes that PR's child and follows the
+  parent as it advances. Rebase the child onto the parent's latest tip
+  before updating it; ngit refuses stale children and ambiguous candidates
+  rather than guessing. Use `base=` for a cross-author, historical or
+  ambiguous parent, and repeat it on each update if the child should stay
+  pinned.
+
+Read, comment, check out:
+    ngit pr list --json                      # default filter: open,draft
+    ngit pr list --json --status open,draft,closed,applied --label bug
+    ngit pr view <ID|nevent> --json --comments
+    ngit pr comment <ID|nevent> --body "Looks good" --json
+    ngit pr comment <ID|nevent> --body "Fixed!" \
+      --reply-to <comment-ID|nevent> --json
+    # local tracking branch that git pull and git push understand
+    ngit pr checkout <ID|nevent> --json
+
+  Open and draft PRs are not fetched as branches unless
+  `nostr.auto-pr-branches` is true. A PR's CI is read with
+  `ngit ci status <ID|nevent> --json`: see `ngit ci --help`.
+
+Merge (maintainers):
+    # no-ff merge commit on the PR's target; does not push
+    ngit pr merge <ID|nevent> --json
+    # PR inferred from the checked-out pr/ branch
+    ngit pr merge --json
+    # summary line and PR reference only
+    ngit pr merge <ID|nevent> --exclude-description --json
+    # publishes the merge and the applied status
+    git push origin <target-branch>
+
+  `ngit merge` is an alias with the same options. The merge lands on the
+  PR's declared target, or the default branch, resolved against the latest
+  Nostr repository state rather than a local tracking ref, with the message
+  `Merge #<8-hex>: <PR title>`. It checks out the target branch and needs
+  the PR's commits locally (`pr checkout` first if it says so). Closed and
+  applied PRs are refused before any git change. On conflicts, resolve
+  them and run `git commit`; the message is already prepared, and JSON
+  reports `action: "conflicted"` instead of `"merged"`.
+
+  Before merging or adding maintainer fixes, run
+  `git log --merges --oneline origin/<target>..HEAD`. A prior `Merge #...`
+  means a merge would nest merge history; rebase or cherry-pick the PR
+  commits onto the current target first unless that history is intentional.
+
+  `--require-ci-trust maintainer-directed` refuses the merge unless CI is
+  green at that trust floor. Add it when the task or repository asks for a
+  gate, not by default.
+
+Lifecycle:
+    ngit pr close <ID|nevent> --reason "blocked by upstream" --json
+    ngit pr reopen <ID|nevent> --reason "fix was incomplete" --json
+    ngit pr ready <ID|nevent> --reason "addressed review feedback" --json
+    ngit pr draft <ID|nevent> --reason "needs more work" --json
+    ngit pr label <ID|nevent> --label bug --label enhancement --json
+    ngit pr set-subject <ID|nevent> --subject "New title" --json
+    ngit pr set-cover-note <ID|nevent> \
+      --body "Updated description. See nostr:nevent1abc..." --json
+
+  Guide: https://ngit.dev/pull-requests
