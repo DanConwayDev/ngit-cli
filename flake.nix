@@ -82,6 +82,7 @@
 
           buildInputs = [
             pkg-config # required by git2
+            libgit2 # Nix builds disable implicit vendoring
             gitlint
             openssl
             dbus
@@ -116,6 +117,7 @@
           cargoLock.lockFile = ./Cargo.lock;
           buildInputs = [
             pkg-config # required by git2
+            libgit2 # Nix builds disable implicit vendoring
             openssl
             dbus
           ];

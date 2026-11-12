@@ -4,7 +4,7 @@ let
     src = craneLib.cleanCargoSource src;
     strictDeps = true;
     nativeBuildInputs = [ pkgs.pkg-config ];
-    buildInputs = [ pkgs.openssl pkgs.dbus ];
+    buildInputs = [ pkgs.libgit2 pkgs.openssl pkgs.dbus ];
   };
   dependencies = craneLib.buildDepsOnly (cargo // {
     pname = "ngit-test-dependencies";
@@ -28,7 +28,7 @@ let
       # Match stdenv's build-script fingerprints when restoring Cargo objects.
       CC = if pkgs.stdenv.cc.isClang then "clang" else "gcc";
       PKG_CONFIG = "pkg-config";
-      PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev pkgs.dbus.dev ];
+      PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.libgit2.dev pkgs.openssl.dev pkgs.dbus.dev ];
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     };
     text = script;
@@ -54,6 +54,7 @@ in {
     { name = "objects"; path = dependencies; }
     { name = "sources"; path = vendor; }
     { name = "rustfmt"; path = pkgs.rust-bin.nightly."2026-08-27".rustfmt; }
+    { name = "libgit2"; path = pkgs.libgit2.dev; }
     { name = "openssl"; path = pkgs.openssl.dev; }
     { name = "dbus"; path = pkgs.dbus.dev; }
   ] ++ map (tool: { name = tool.name; path = tool; }) tools);

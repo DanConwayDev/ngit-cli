@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh Nix package and toolchain inputs, retaining the supported Intel
+  macOS package set and pinned formatter. Declare libgit2 explicitly in
+  package, development, and CI environments as required by current Nixpkgs.
+
 - Refresh `openssl-sys` to 0.9.118. Downloadable archives still require the
   separately pinned OpenSSL build because its source-crate constraint is
   unchanged.
