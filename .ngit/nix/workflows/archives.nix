@@ -11,6 +11,9 @@ let
   command = name: inputs: script: pkgs.writeShellApplication {
     inherit name;
     runtimeInputs = base ++ inputs;
+    # These tiny scripts change with the checkout. Realize them locally rather
+    # than probing the fleet cache for each new command wrapper.
+    derivationArgs = { preferLocalBuild = true; allowSubstitutes = false; };
     runtimeEnv.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     text = script;
   };
