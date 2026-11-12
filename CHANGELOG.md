@@ -258,6 +258,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update `rustix` to 1.1.6 for the upstream extended-attribute buffer
+  soundness fix (RUSTSEC-2026-0486).
+
 - Update `libz-sys` to 1.1.33 for the upstream build environment disclosure
   fix (RUSTSEC-2026-0418) and bundled zlib 1.4. The previously locked `cc`
   version predates the environment-copying behavior required by the advisory;
