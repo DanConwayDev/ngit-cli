@@ -465,11 +465,11 @@ For questions about the codebase or contributions:
 <!-- ngit-agent-guidance:start -->
 ## Repository collaboration
 
-This repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.
+This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev), not GitHub or GitLab. It uses ngit for issues, pull requests, reviews, comments, merges, and repository state.
 
 - Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.
-- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `.agents/skills/ngit/SKILL.md`.
+- Before issue, pull request, review, comment, merge, CI, release, or repository metadata tasks, including pushing a pull request branch, run `ngit --help` and follow its workflow map.
 - Treat a `nostr://` remote as authoritative.
 - Pull request branches must use the `pr/` prefix.
-- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab.
+- If ngit is unavailable, report that it is required (install: https://ngit.dev/install) rather than falling back to GitHub or GitLab.
 <!-- ngit-agent-guidance:end -->
