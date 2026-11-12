@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Build and collect the five portable release archives on Nostr CI before
+  tagging, including Linux-hosted Windows MSVC cross-compilation.
+
 - `ngit pr applied <ID> --reason ...` records acceptance after a missed status
   publication, cherry-pick, or equivalent change without merging or touching
   Git state. Existing status authorization applies; repeated use is a no-op.

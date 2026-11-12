@@ -4,6 +4,38 @@
 Software Release events linked to the current repository. The default project
 manifest is `.ngit/release.yaml` (singular).
 
+## Portable archive rehearsal
+
+`.ngit/nix/workflows/archives.yaml` builds the real portable release binaries
+on pull requests, main pushes and manual requests without publishing a release.
+Linux providers build the three Linux archives with Zig and Windows MSVC with
+cargo-xwin. The Apple Silicon provider builds both macOS slices and combines
+them into the universal archive. No ARM Linux or Intel Mac provider is needed.
+
+All five jobs export the archive and a source/target/version/checksum report.
+The collection job consumes the provider-verified inputs, checks the complete
+set, and exports `release` with `SHA256SUMS` and `builds.json`. Internal names
+are independent of branch and tag so compatible exact-commit results can be
+reused. A future tag publisher adds the release tag to the filenames; it must
+consume these same jobs rather than maintaining another build implementation.
+
+Use the exact commit's `ngit ci status --json` results to retrieve artifacts.
+A passing build establishes packaging and the recorded smoke checks, not full
+native Windows or ARM Linux runtime coverage. Windows user acceptance may
+follow release; it does not block this migration. No new Windows provider is
+required. The existing GitHub tag publisher remains active during rehearsal.
+
+To request an archive rehearsal explicitly:
+
+```sh
+ngit ci trigger <coordinator-npub> HEAD \
+  --workflow .ngit/nix/workflows/archives.yaml --json
+```
+
+The workflow must exist in the published commit. PR jobs require hardware VM
+providers and receive no release secrets. Cold multi-target builds may need
+the coordinator timeout budget described under macOS pre-release checks.
+
 ## Publishing the ngit crate
 
 Nostr CI publishes `ngit` to crates.io after the existing lint, formatting and
