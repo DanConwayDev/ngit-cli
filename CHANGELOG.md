@@ -26,8 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of repeating them, and they are still accepted at every position. `--json`
   is the exception and stays listed on every command.
   Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
-  and group help such as `ngit pr --help` about 20% shorter. The CLI
-  reference export is unaffected.
+  and group help such as `ngit pr --help` about 20% shorter.
+- The `--repo` and `--json` option descriptions are one line each. Their
+  detail (precedence over detected targets, JSON Lines progress on stderr,
+  plain-text subprocess output) is now part of the conventions at the end of
+  `ngit --help`, which already covered the rest; the CLI reference export
+  carries it there too.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and

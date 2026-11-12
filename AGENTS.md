@@ -92,8 +92,8 @@ ngit/
   from the derive. An option's first doc-comment paragraph is its line in
   `-h`; later paragraphs appear only in `--help` of the command that defines
   it. Global options are listed by top-level help alone, except `--json`,
-  which every command lists, so a contract that spans commands belongs in
-  the notes, not in a global option's description.
+  which every command lists, and keep one-line descriptions; their contracts
+  belong in `help/overview.txt`.
 - Keep `skills/ngit/SKILL.md` a bootstrap that routes agents to installed
   help. Do not add commands, flags, or feature details to it; bump
   `metadata.version` whenever its text changes.

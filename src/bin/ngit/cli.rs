@@ -129,23 +129,10 @@ pub struct Cli {
     /// rejected
     #[arg(long, global = true)]
     pub proactive_auth: bool,
-    /// Target repository for repo-scoped operations. Accepts a configured
-    /// nostr:// remote name, an naddr, or a nostr:// URL. Overrides
-    /// `nostr.repo`, tracked-upstream, and remote-based auto-detection.
-    ///
-    /// Available at any command position:
-    ///   `ngit --repo upstream send`
-    ///   `ngit issue --repo upstream create`
-    ///   `ngit issue create --repo upstream`
+    /// Target repository for repo-scoped operations, overriding auto-detection
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
     /// Output machine-readable JSON on stdout
-    ///
-    /// Most commands emit one document. `ci status --watch` streams compact
-    /// snapshots/changes as JSON Lines; --full-events emits complete events.
-    ///
-    /// Signer and relay progress is compact JSON Lines on stderr, without
-    /// terminal redraws. Git/subprocess output may still contain plain text.
     #[arg(long, global = true, conflicts_with = "interactive")]
     pub json: bool,
 }

@@ -31,9 +31,10 @@ Rules for agents and scripts:
     branch name is a plain push and never creates a PR.
   - Read ngit output with --json. It is a global option and works at any
     position. Stdout is one JSON document unless a command's help says it
-    streams; progress and diagnostics go to stderr. `git` commands have no
-    --json. Top-level `command_status` is `ok` for exit 0 and `error`
-    otherwise; it never describes a nested domain result
+    streams; progress and diagnostics go to stderr as compact JSON Lines,
+    where git and subprocess output may still be plain text. `git` commands
+    have no --json. Top-level `command_status` is `ok` for exit 0 and
+    `error` otherwise; it never describes a nested domain result
     (`ngit ci status --json` reports `ok` with `ci.conclusion: "failure"`
     unless a gate was requested).
   - ngit repository commands normally refresh data from Nostr relays,
@@ -66,9 +67,10 @@ Rules for agents and scripts:
     and `ci.conclusion`, not `command_status`.
   - Target repository. With several nostr:// remotes, pass global
     --repo <REMOTE|NADDR|NOSTR-URL>; a configured remote name, an naddr and
-    a nostr:// URL are all accepted. Without it ngit infers the target from
-    config and branch tracking and fails rather than guesses. Before a
-    signing command, check the `target repository: <naddr> (source: ...)`
+    a nostr:// URL are all accepted. It works at any position and overrides
+    `nostr.repo`, branch tracking and remote-based detection. Without it
+    ngit infers the target from those and fails rather than guesses. Before
+    a signing command, check the `target repository: <naddr> (source: ...)`
     line on stderr.
 
   Guides: https://ngit.dev (index for agents: https://ngit.dev/llms.txt; any

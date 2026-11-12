@@ -358,11 +358,7 @@ mod tests {
     #[test]
     fn long_descriptions_stay_on_the_owning_command() {
         for (path, detail) in [
-            (
-                &[][..],
-                "Signer and relay progress is compact JSON Lines on stderr",
-            ),
-            (&[], "Available at any command position"),
+            (&["ci", "rerun"][..], "Repeat for other jobs."),
             (
                 &["pr", "merge"],
                 "run without an ID while on a `pr/` branch",
@@ -479,6 +475,23 @@ mod tests {
 
     /// Workflows performed with plain git have no command of their own, so
     /// the map and the owning group must both describe them.
+    /// The global option descriptions are one line each; what they used to
+    /// spell out lives in the conventions every agent reads.
+    #[test]
+    fn overview_carries_the_global_option_contracts() {
+        assert!(OVERVIEW.contains("go to stderr as compact JSON Lines"));
+        assert!(OVERVIEW.contains("git and subprocess output may still be plain text"));
+        assert!(OVERVIEW.contains("overrides\n    `nostr.repo`, branch tracking"));
+        let command = Cli::command();
+        for global in command.get_arguments().filter(|arg| arg.is_global_set()) {
+            assert!(
+                global.get_long_help().is_none(),
+                "global option {} has detail only `ngit --help` would show",
+                global.get_id()
+            );
+        }
+    }
+
     #[test]
     fn git_native_pr_workflow_is_discoverable() {
         assert!(OVERVIEW.contains("`git push` of a `pr/` branch"));
