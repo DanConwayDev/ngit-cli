@@ -152,11 +152,35 @@ fn resolve_update_instructions(
 fn scope_statuses(context: &SkillContext) -> Result<ScopeStatuses> {
     Ok(ScopeStatuses {
         repository: agent_guidance::status(&context.root)?,
-        global: agent_guidance::scope_status(InstallScope::Global, None)
-            .with_context(|| "failed to inspect the user-scope ngit skill".to_string())?,
-        system: agent_guidance::scope_status(InstallScope::System, None)
-            .with_context(|| "failed to inspect the system-scope ngit skill".to_string())?,
+        global: outside_scope_status(InstallScope::Global)?,
+        system: outside_scope_status(InstallScope::System)?,
     })
+}
+
+/// Status of a scope outside the repository. Those directories belong to
+/// the user or the machine and may be laid out in ways ngit will not write
+/// through, such as a system directory symlinked from a package store. That
+/// must not stop the repository's status being reported, so the scope is
+/// shown as not installed with a warning.
+fn outside_scope_status(scope: InstallScope) -> Result<agent_guidance::GuidanceStatus> {
+    match agent_guidance::scope_status(scope, None) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            eprintln!(
+                "warning: could not inspect the {} ngit skill: {error:#}",
+                scope.label()
+            );
+            Ok(agent_guidance::GuidanceStatus {
+                help_instruction: false,
+                installed: false,
+                installed_version: None,
+                bundled_version: agent_guidance::bundled_version()?,
+                update_available: false,
+                modified_files: vec![],
+                managed_files: vec![],
+            })
+        }
+    }
 }
 
 fn opt_out(args: &SkillOptOutArgs) -> Result<()> {

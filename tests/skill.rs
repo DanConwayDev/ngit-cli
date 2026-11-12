@@ -404,6 +404,36 @@ async fn system_install_uses_the_overridden_canonical_directory() -> Result<()> 
     Ok(())
 }
 
+/// A machine-wide skill directory that ngit will not write through, such as
+/// one symlinked from a package store, must not hide the repository's status.
+#[cfg(unix)]
+#[tokio::test]
+async fn status_survives_an_uninspectable_system_scope() -> Result<()> {
+    let harness = harness().await?;
+    let repo = harness.fresh_repo()?;
+    let store = tempfile::tempdir().context("create package store")?;
+    fs::write(
+        store.path().join("SKILL.md"),
+        agent_guidance::bundled_skill(),
+    )?;
+    let system_dir = tempfile::tempdir().context("create system skills directory")?;
+    std::os::unix::fs::symlink(store.path(), system_dir.path().join("ngit"))?;
+
+    let mut command = repo.ngit(["skill", "status", "--json"]);
+    command.env("NGIT_SYSTEM_SKILLS_DIR", system_dir.path());
+    let status = command.output().await?;
+    assert!(
+        status.status.success(),
+        "skill status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(json["command_status"], "ok");
+    assert_eq!(json["scopes"]["system"]["installed"], false);
+    assert_eq!(json["scopes"]["repository"]["installed"], false);
+    Ok(())
+}
+
 /// `--no-agent-file` declines the pointer a repository install would
 /// otherwise add to existing instruction files.
 #[tokio::test]
