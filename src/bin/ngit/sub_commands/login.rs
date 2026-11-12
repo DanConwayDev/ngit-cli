@@ -26,7 +26,7 @@ use crate::{
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
-    /// stored account to activate (full npub, profile, or exact Nostr display
+    /// Stored account to activate (full npub, profile, or exact Nostr display
     /// name)
     #[arg(
         value_name = "ACCOUNT",
@@ -43,23 +43,23 @@ pub struct SubCommandArgs {
     )]
     account: Option<String>,
 
-    /// set a repository-specific login that overrides the default account
+    /// Set a repository-specific login that overrides the default account
     #[arg(long, action)]
     local: bool,
 
-    /// save a named profile without changing the local or global login
+    /// Save a named profile without changing the local or global login
     #[arg(long, requires = "alias", conflicts_with = "local")]
     no_activate: bool,
 
-    /// don't fetch user metadata and relay list from relays
+    /// Don't fetch user metadata and relay list from relays
     #[arg(long, action)]
     offline: bool,
 
-    /// signer relay for nostrconnect (can be used multiple times)
+    /// Signer relay for nostrconnect (can be used multiple times)
     #[arg(long = "signer-relay")]
     signer_relays: Vec<String>,
 
-    /// bunker:// URL from signer app for non-interactive remote signer login
+    /// Bunker:// URL from signer app for non-interactive remote signer login
     #[arg(
         long = "bunker-url",
         conflicts_with_all = [
@@ -75,7 +75,7 @@ pub struct SubCommandArgs {
     )]
     bunker_url: Option<String>,
 
-    /// print a nostrconnect:// URI and wait for pairing without terminal input
+    /// Print a nostrconnect:// URI and wait for pairing without terminal input
     #[arg(
         long,
         conflicts_with_all = [
@@ -85,12 +85,12 @@ pub struct SubCommandArgs {
     )]
     nostrconnect: bool,
 
-    /// where to store the account secret: auto (OS credential store, falling
+    /// Where to store the account secret: auto (OS credential store, falling
     /// back to ngit's file store), file, or git-config (plaintext)
     #[arg(long, value_name = "auto|file|git-config")]
     secret_storage: Option<String>,
 
-    /// save or reactivate a named signer profile for an account
+    /// Save or reactivate a named signer profile for an account
     #[arg(long = "profile", alias = "alias", value_name = "NAME")]
     alias: Option<String>,
 }

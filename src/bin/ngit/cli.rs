@@ -21,7 +21,7 @@ pub struct SignerParams<'a> {
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage}\n{all-args}{after-help}",
+    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
     after_long_help = crate::cli_help::OVERVIEW
 )]
 #[command(propagate_version = true)]
@@ -29,10 +29,10 @@ pub struct SignerParams<'a> {
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
-    /// remote signer address
+    /// Remote signer address
     #[arg(long, global = true, hide = true)]
     pub bunker_uri: Option<String>,
-    /// remote signer app secret key
+    /// Remote signer app secret key
     #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
@@ -43,7 +43,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec_file", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec: Option<String>,
-    /// read an nsec or hex private key from a path resolving to a regular file
+    /// Read an nsec or hex private key from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -51,7 +51,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec_file: Option<PathBuf>,
-    /// established remote signer connection encoded as nbunksec
+    /// Established remote signer connection encoded as nbunksec
     #[arg(
         long,
         global = true,
@@ -66,7 +66,7 @@ pub struct Cli {
         ]
     )]
     pub nbunksec: Option<String>,
-    /// read an nbunksec connection from a path resolving to a regular file
+    /// Read an nbunksec connection from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -81,7 +81,7 @@ pub struct Cli {
         ]
     )]
     pub nbunksec_file: Option<PathBuf>,
-    /// use a configured signer by npub, profile, or cached Nostr display name
+    /// Use a configured signer by npub, profile, or cached Nostr display name
     /// for this command
     #[arg(
         long,
@@ -97,13 +97,13 @@ pub struct Cli {
         ]
     )]
     pub signer: Option<String>,
-    /// password to decrypt nsec
+    /// Password to decrypt nsec
     #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
-    /// disable spinner animations
+    /// Disable spinner animations
     #[arg(long, action, hide = true)]
     pub disable_cli_spinners: bool,
-    /// show customization options via git config
+    /// Show customization options via git config
     #[arg(short, long, global = true)]
     pub customize: bool,
     /// Use default values without prompting (non-interactive mode)
@@ -129,23 +129,10 @@ pub struct Cli {
     /// rejected
     #[arg(long, global = true)]
     pub proactive_auth: bool,
-    /// Target repository for repo-scoped operations. Accepts a configured
-    /// nostr:// remote name, an naddr, or a nostr:// URL. Overrides
-    /// `nostr.repo`, tracked-upstream, and remote-based auto-detection.
-    ///
-    /// Available at any command position:
-    ///   `ngit --repo upstream send`
-    ///   `ngit issue --repo upstream create`
-    ///   `ngit issue create --repo upstream`
+    /// Target repository for repo-scoped operations, overriding auto-detection
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
     /// Output machine-readable JSON on stdout
-    ///
-    /// Most commands emit one document. `ci status --watch` streams compact
-    /// snapshots/changes as JSON Lines; --full-events emits complete events.
-    ///
-    /// Signer and relay progress is compact JSON Lines on stderr, without
-    /// terminal redraws. Git/subprocess output may still contain plain text.
     #[arg(long, global = true, conflicts_with = "interactive")]
     pub json: bool,
 }
@@ -754,9 +741,6 @@ pub struct ReleaseListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -776,9 +760,6 @@ pub struct ReleaseViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -856,9 +837,6 @@ pub struct ReleasePublishArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -902,9 +880,6 @@ pub struct ReleaseAppListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -918,9 +893,6 @@ pub struct ReleaseAppViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1013,9 +985,6 @@ pub struct ReleaseAppInitArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1032,9 +1001,6 @@ pub struct ReleaseAppLinkArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -1068,9 +1034,6 @@ pub struct ReleaseAssetListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1093,9 +1056,6 @@ pub struct ReleaseAssetViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1213,9 +1173,6 @@ pub struct ReleaseAssetAddArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------

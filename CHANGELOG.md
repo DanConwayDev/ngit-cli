@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rerun --help` describe their result and JSON contracts. `-h` stays a
   compact summary.
 - The CLI reference export includes the workflow notes shown by `--help`.
+- `--help` is compact: each option takes one line, with no blank lines
+  between options, and its full description is shown by the command that
+  defines it. Global options such as `--repo` and `--signer` are listed
+  once, by `ngit --help` and `ngit -h`; subcommand help points there instead
+  of repeating them, and they are still accepted at every position. `--json`
+  is the exception and stays listed on every command.
+  Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
+  and group help such as `ngit pr --help` about 20% shorter.
+- Subcommand help no longer lists `-V, --version`; the flag still works
+  there and is listed by top-level help.
+- Option descriptions consistently start with a capital letter.
+- The description at the top of a command's help is wrapped at 80 columns.
+  Indented example commands are left on one line so they stay copyable.
+- The `--repo` and `--json` option descriptions are one line each. Their
+  detail (precedence over detected targets, JSON Lines progress on stderr,
+  plain-text subprocess output) is now part of the conventions at the end of
+  `ngit --help`, which already covered the rest; the CLI reference export
+  carries it there too.
+- Help output is styled on a colour terminal: section headings, including
+  those in the workflow notes, are bold in the yellow `ngit --customize` uses
+  for its sections, and command and option names are bold. Supporting text
+  is dimmed: bracketed defaults and possible values, `# comments` in
+  examples and the pointer to the global options. Commands and names
+  quoted in backticks within the workflow notes are bold. Piped output,
+  `NO_COLOR` and `--json` invocations get plain text with no escape codes.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and
@@ -73,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ngit release` subcommands no longer define their own `--json` beside the
+  global one. The flag is accepted at the same positions and produces the
+  same output; these commands now read the global JSON mode, so warnings and
+  progress follow it wherever the flag is written.
 - The bundled agent skill (version 1.30) is now a short bootstrap. It tells
   agents to use ngit in repositories with a `nostr://` remote, which its
   description also names as Grasp repositories, and to read the

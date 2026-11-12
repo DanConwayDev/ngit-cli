@@ -370,7 +370,7 @@ pub(super) async fn release_publish(
         )?;
     }
     enforce_metadata_policy(&context, publication.strict_metadata)?;
-    context.emit_human_warnings_before_signing(args.json);
+    context.emit_human_warnings_before_signing(crate::output::is_json());
 
     let signer = context
         .signer
@@ -384,7 +384,7 @@ pub(super) async fn release_publish(
                 &mut prepared_assets,
                 selection,
                 &signer,
-                args.json,
+                crate::output::is_json(),
             )
             .await?
         }
@@ -392,7 +392,7 @@ pub(super) async fn release_publish(
     };
     if let Some(warning) = blossom.incomplete_replication_warning() {
         context.warnings.push(warning);
-        context.emit_human_warnings_before_signing(args.json);
+        context.emit_human_warnings_before_signing(crate::output::is_json());
     }
     ensure_release_state_unchanged(
         &mut context,
@@ -531,7 +531,7 @@ pub(super) async fn release_publish(
             batch,
             &new_asset_event_ids,
             AssetReuseOption::ReleasePublish,
-            args.json,
+            crate::output::is_json(),
         )
         .await
         .map_err(|error| {
@@ -681,7 +681,7 @@ pub(super) async fn asset_add(
     )
     .await?;
     enforce_metadata_policy(&context, args.strict_metadata)?;
-    context.emit_human_warnings_before_signing(args.json);
+    context.emit_human_warnings_before_signing(crate::output::is_json());
 
     let signer = context
         .signer
@@ -695,7 +695,7 @@ pub(super) async fn asset_add(
                 std::slice::from_mut(prepared),
                 selection,
                 &signer,
-                args.json,
+                crate::output::is_json(),
             )
             .await?
         }
@@ -703,7 +703,7 @@ pub(super) async fn asset_add(
     };
     if let Some(warning) = blossom.incomplete_replication_warning() {
         context.warnings.push(warning);
-        context.emit_human_warnings_before_signing(args.json);
+        context.emit_human_warnings_before_signing(crate::output::is_json());
     }
     ensure_release_state_unchanged(
         &mut context,
@@ -827,7 +827,7 @@ pub(super) async fn asset_add(
             batch,
             &possible_orphans,
             AssetReuseOption::AssetAdd,
-            args.json,
+            crate::output::is_json(),
         )
         .await
         .map_err(|error| {
