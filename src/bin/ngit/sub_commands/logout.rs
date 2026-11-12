@@ -13,30 +13,30 @@ use crate::{cli::SignerParams, git::Repo};
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
-    /// account to remove, even after logout; an explicit npub removes all
+    /// Account to remove, even after logout; an explicit npub removes all
     /// saved credentials and profiles for that identity
     #[arg(value_name = "ACCOUNT", conflicts_with_all = ["profile", "signer"])]
     pub account: Option<String>,
-    /// exact named signer profile to remove
+    /// Exact named signer profile to remove
     #[arg(long, value_name = "NAME", conflicts_with = "signer")]
     pub profile: Option<String>,
-    /// remove all known saved profiles and current/non-local Git logins;
+    /// Remove all known saved profiles and current/non-local Git logins;
     /// do not search other repositories or revoke remote permissions
     #[arg(long, conflicts_with_all = ["local", "global", "profile", "account", "signer"])]
     pub all: bool,
-    /// remove the repository-specific login and credentials; a remaining
+    /// Remove the repository-specific login and credentials; a remaining
     /// default account becomes active; never remove the default login
     #[arg(long, conflicts_with = "global")]
     pub local: bool,
-    /// remove the default login and credentials; preserve repository-specific
+    /// Remove the default login and credentials; preserve repository-specific
     /// selections (shared credentials become unavailable)
     #[arg(long)]
     pub global: bool,
-    /// permit deleting identity private keys; otherwise their deletion fails
+    /// Permit deleting identity private keys; otherwise their deletion fails
     /// without prompting or changing anything
     #[arg(long, conflicts_with = "keep_credentials")]
     pub forget: bool,
-    /// clear the login selection but retain credentials for later reactivation
+    /// Clear the login selection but retain credentials for later reactivation
     #[arg(long)]
     pub keep_credentials: bool,
 }

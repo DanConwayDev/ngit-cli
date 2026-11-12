@@ -29,10 +29,10 @@ pub struct SignerParams<'a> {
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
-    /// remote signer address
+    /// Remote signer address
     #[arg(long, global = true, hide = true)]
     pub bunker_uri: Option<String>,
-    /// remote signer app secret key
+    /// Remote signer app secret key
     #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
@@ -43,7 +43,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec_file", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec: Option<String>,
-    /// read an nsec or hex private key from a path resolving to a regular file
+    /// Read an nsec or hex private key from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -51,7 +51,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec_file: Option<PathBuf>,
-    /// established remote signer connection encoded as nbunksec
+    /// Established remote signer connection encoded as nbunksec
     #[arg(
         long,
         global = true,
@@ -66,7 +66,7 @@ pub struct Cli {
         ]
     )]
     pub nbunksec: Option<String>,
-    /// read an nbunksec connection from a path resolving to a regular file
+    /// Read an nbunksec connection from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -81,7 +81,7 @@ pub struct Cli {
         ]
     )]
     pub nbunksec_file: Option<PathBuf>,
-    /// use a configured signer by npub, profile, or cached Nostr display name
+    /// Use a configured signer by npub, profile, or cached Nostr display name
     /// for this command
     #[arg(
         long,
@@ -97,13 +97,13 @@ pub struct Cli {
         ]
     )]
     pub signer: Option<String>,
-    /// password to decrypt nsec
+    /// Password to decrypt nsec
     #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
-    /// disable spinner animations
+    /// Disable spinner animations
     #[arg(long, action, hide = true)]
     pub disable_cli_spinners: bool,
-    /// show customization options via git config
+    /// Show customization options via git config
     #[arg(short, long, global = true)]
     pub customize: bool,
     /// Use default values without prompting (non-interactive mode)

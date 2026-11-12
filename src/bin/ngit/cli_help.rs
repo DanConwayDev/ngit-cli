@@ -470,6 +470,27 @@ mod tests {
         assert_eq!(wrap(&command), command);
     }
 
+    /// Options are listed one per line, where mixed capitalisation shows.
+    /// Command summaries are a separate, lowercase list.
+    #[test]
+    fn option_descriptions_start_with_a_capital() {
+        fn check(command: &Command) {
+            for arg in command.get_arguments() {
+                let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+                // An identifier keeps its spelling.
+                let identifier = help.starts_with("nsec ") || help.starts_with("npub ");
+                assert!(
+                    identifier || !help.starts_with(char::is_lowercase),
+                    "`{}` describes `{}` in lowercase: {help}",
+                    command.get_name(),
+                    arg.get_id()
+                );
+            }
+            command.get_subcommands().for_each(check);
+        }
+        check(&Cli::command());
+    }
+
     #[test]
     fn version_is_accepted_but_listed_only_at_the_top_level() {
         assert!(help(&[], "-h").contains("-V, --version"));

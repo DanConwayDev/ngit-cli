@@ -38,40 +38,40 @@ use crate::{
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
     #[arg(default_value = "")]
-    /// commits to send as proposal; like in `git format-patch` eg. HEAD~2
+    /// Commits to send as proposal; like in `git format-patch` eg. HEAD~2
     pub(crate) since_or_range: String,
     #[clap(long, value_parser, num_args = 0.., value_delimiter = ' ')]
-    /// references to an existing proposal for which this is a new
+    /// References to an existing proposal for which this is a new
     /// version and/or events / npubs to tag as mentions
     pub(crate) in_reply_to: Vec<String>,
-    /// don't prompt for a cover letter
+    /// Don't prompt for a cover letter
     #[arg(long, action)]
     pub(crate) no_cover_letter: bool,
-    /// optional cover letter subject/title
+    /// Optional cover letter subject/title
     #[clap(long, alias = "title")]
     pub(crate) subject: Option<String>,
     #[clap(long)]
-    /// optional cover letter description
+    /// Optional cover letter description
     pub(crate) description: Option<String>,
-    /// publish as Pull Request even if each commit is < 60kb
+    /// Publish as Pull Request even if each commit is < 60kb
     #[arg(long, action)]
     pub(crate) force_pr: bool,
-    /// publish as Patches even if they may be > 60kb; cannot be used when the
+    /// Publish as Patches even if they may be > 60kb; cannot be used when the
     /// existing proposal is already a PR kind (downgrades are not possible)
     #[arg(long, action)]
     pub(crate) force_patch: bool,
     #[clap(long = "push-option", short = 'o', value_parser, num_args = 0..)]
-    /// git push options to pass to the git server (eg. -o secret-scanning.skip)
+    /// Git push options to pass to the git server (eg. -o secret-scanning.skip)
     pub(crate) push_options: Vec<String>,
     #[clap(long = "git-server")]
-    /// git server URL to use for pushing the PR; accepts either a GRASP server
+    /// Git server URL to use for pushing the PR; accepts either a GRASP server
     /// base URL (eg. relay.ngit.dev) or a full clone URL (eg.
     /// <https://github.com/user/repo.git>)
     pub(crate) git_server: Option<String>,
-    /// branch this PR should target instead of the repository default
+    /// Branch this PR should target instead of the repository default
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
-    /// commit, branch, root PR, or PR update to use as the base for this
+    /// Commit, branch, root PR, or PR update to use as the base for this
     /// publication. History through this base is excluded from the proposed
     /// changes. Use a commit ID or a verified ref, e.g. --base github/master
     #[clap(long)]

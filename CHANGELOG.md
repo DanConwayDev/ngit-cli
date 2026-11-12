@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and group help such as `ngit pr --help` about 20% shorter.
 - Subcommand help no longer lists `-V, --version`; the flag still works
   there and is listed by top-level help.
+- Option descriptions consistently start with a capital letter.
 - The description at the top of a command's help is wrapped at 80 columns.
   Indented example commands are left on one line so they stay copyable.
 - The `--repo` and `--json` option descriptions are one line each. Their

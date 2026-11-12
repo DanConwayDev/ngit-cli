@@ -22,7 +22,7 @@ use crate::{
 
 #[derive(clap::Args)]
 pub struct SubCommandArgs {
-    /// use local cache only, skip network fetch
+    /// Use local cache only, skip network fetch
     #[arg(long, action)]
     pub offline: bool,
 }

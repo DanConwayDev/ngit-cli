@@ -43,31 +43,31 @@ use crate::{
 ))]
 pub struct SubCommandArgs {
     #[arg(long, alias = "title", help_heading = "Metadata")]
-    /// name of repository; --title is an alias
+    /// Name of repository; --title is an alias
     pub(crate) name: Option<String>,
     #[arg(long, help_heading = "Metadata")]
-    /// optional description
+    /// Optional description
     pub(crate) description: Option<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// add a grasp server (repeatable)
+    /// Add a grasp server (repeatable)
     pub(crate) add_grasp_server: Vec<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// remove a grasp server (repeatable)
+    /// Remove a grasp server (repeatable)
     pub(crate) remove_grasp_server: Vec<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// add a relay beyond those provided by grasp servers (repeatable)
+    /// Add a relay beyond those provided by grasp servers (repeatable)
     pub(crate) add_additional_relay: Vec<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// remove an additional relay (repeatable)
+    /// Remove an additional relay (repeatable)
     pub(crate) remove_additional_relay: Vec<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// add a git clone URL beyond those provided by grasp servers (repeatable)
+    /// Add a git clone URL beyond those provided by grasp servers (repeatable)
     pub(crate) add_additional_clone: Vec<String>,
     #[arg(long, value_name = "URL", help_heading = "Hosting")]
-    /// remove an additional git clone URL (repeatable)
+    /// Remove an additional git clone URL (repeatable)
     pub(crate) remove_additional_clone: Vec<String>,
     #[arg(long, value_parser, num_args = 1.., help_heading = "Metadata")]
-    /// homepage
+    /// Homepage
     pub(crate) web: Vec<String>,
     #[arg(
         short = 'u',
@@ -77,13 +77,13 @@ pub struct SubCommandArgs {
         num_args = 1..,
         help_heading = "Metadata"
     )]
-    /// informational NIP-34 subordinate-fork `u` tag fields
+    /// Informational NIP-34 subordinate-fork `u` tag fields
     pub(crate) upstream: Vec<String>,
     #[arg(long, value_name = "NPUB", help_heading = "Membership")]
-    /// invite one maintainer
+    /// Invite one maintainer
     pub(crate) add_maintainer: Option<String>,
     #[arg(long, value_name = "NPUB", help_heading = "Membership")]
-    /// remove one maintainer relationship
+    /// Remove one maintainer relationship
     pub(crate) remove_maintainer: Option<String>,
     #[arg(
         long,
@@ -110,7 +110,7 @@ pub struct SubCommandArgs {
         ],
         help_heading = "Membership"
     )]
-    /// record one maintainer's signed acceptance or departure boundary
+    /// Record one maintainer's signed acceptance or departure boundary
     pub(crate) acknowledge_maintainer_change: Option<String>,
     #[arg(
         long,
@@ -138,7 +138,7 @@ pub struct SubCommandArgs {
         ],
         help_heading = "Recovery"
     )]
-    /// repair one invalid self-defer by continuing it or recording its end
+    /// Repair one invalid self-defer by continuing it or recording its end
     pub(crate) repair_self_defer: Option<String>,
     #[arg(
         long,
@@ -146,31 +146,31 @@ pub struct SubCommandArgs {
         conflicts_with = "no_lead_maintainer",
         help_heading = "Membership"
     )]
-    /// assign the lead maintainer
+    /// Assign the lead maintainer
     pub(crate) lead_maintainer: Option<String>,
     #[arg(long, conflicts_with = "lead_maintainer", help_heading = "Membership")]
-    /// affirm deliberately leadless governance for this add or remove
+    /// Affirm deliberately leadless governance for this add or remove
     pub(crate) no_lead_maintainer: bool,
     #[arg(long, value_name = "TAG", help_heading = "Discovery")]
-    /// add a repository hashtag (repeatable)
+    /// Add a repository hashtag (repeatable)
     pub(crate) add_hashtag: Vec<String>,
     #[arg(long, value_name = "TAG", help_heading = "Discovery")]
-    /// remove a repository hashtag (repeatable)
+    /// Remove a repository hashtag (repeatable)
     pub(crate) remove_hashtag: Vec<String>,
     #[arg(long, help_heading = "Metadata")]
-    /// usually root commit but will be more recent commit for forks
+    /// Usually root commit but will be more recent commit for forks
     pub(crate) earliest_unique_commit: Option<String>,
     #[arg(long, help_heading = "Recovery")]
-    /// drop unknown tags from the existing announcement when republishing
+    /// Drop unknown tags from the existing announcement when republishing
     pub(crate) clean: bool,
     #[arg(long, conflicts_with = "public", help_heading = "Visibility")]
-    /// mark the repository private
+    /// Mark the repository private
     pub(crate) private: bool,
     #[arg(long, conflicts_with = "private", help_heading = "Visibility")]
-    /// remove the private marker
+    /// Remove the private marker
     pub(crate) public: bool,
     #[arg(long, help_heading = "Recovery")]
-    /// reserved for future state-only replacement; collisions still fail
+    /// Reserved for future state-only replacement; collisions still fail
     pub(crate) force: bool,
 }
 

@@ -39,13 +39,13 @@ use crate::{
 
 #[derive(Debug, Default, clap::Args)]
 pub struct SubCommandArgs {
-    /// optionally just sync a specific reference. eg main or v1.5.2
+    /// Optionally just sync a specific reference. eg main or v1.5.2
     #[clap(short, long)]
     pub(crate) ref_name: Option<String>,
-    /// force push updates and delete refs from non-grasp git servers
+    /// Force push updates and delete refs from non-grasp git servers
     #[arg(long, action)]
     force: bool,
-    /// trust git server(s) that are fast-forward ahead of nostr state and
+    /// Trust git server(s) that are fast-forward ahead of nostr state and
     /// update nostr state to match; only applies to clean fast-forwards —
     /// diverged refs must be resolved manually
     #[arg(short = 't', long, action)]
