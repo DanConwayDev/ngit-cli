@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit pr applied <ID> --reason ...` records acceptance after a missed status
+  publication, cherry-pick, or equivalent change without merging or touching
+  Git state. Existing status authorization applies; repeated use is a no-op.
 - `ngit skill install` and `upgrade` accept `--global` to install the skill
   for your user account (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`)
   and `--system` to install it for every user of the machine, in the

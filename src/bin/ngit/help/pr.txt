@@ -101,6 +101,16 @@ Merge (maintainers):
   green at that trust floor. Add it when the task or repository asks for a
   gate, not by default.
 
+Repair an already-landed PR's status:
+    ngit pr applied <ID|nevent> --reason "landed in abc123" --json
+
+  Use this after a missed applied-status publication, a cherry-pick, or an
+  equivalent change. The PR author or a confirmed repository member can
+  attest acceptance. It does not verify ancestry, create a merge, change
+  Git refs or work, or push code. An already-applied PR returns action
+  "unchanged" without publishing another event. Publication or signing
+  errors are failures: correct the cause and retry.
+
 Lifecycle:
     ngit pr close <ID|nevent> --reason "blocked by upstream" --json
     ngit pr reopen <ID|nevent> --reason "fix was incomplete" --json

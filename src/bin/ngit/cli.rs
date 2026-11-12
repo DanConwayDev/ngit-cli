@@ -1305,6 +1305,23 @@ pub enum PrCommands {
         #[arg(long)]
         offline: bool,
     },
+    /// mark an already-landed PR as applied (author or repository member)
+    ///
+    /// Records acceptance after a missed status publication, cherry-pick, or
+    /// equivalent change. This is an explicit attestation: it does not check
+    /// ancestry, merge commits, change Git refs, or push code. Repeating it
+    /// for an applied PR succeeds without publishing another status event.
+    Applied {
+        /// Proposal event-id (hex) or nevent (bech32)
+        #[arg(value_name = "ID|nevent")]
+        id: String,
+        /// Optional explanation of where the change landed
+        #[arg(long)]
+        reason: Option<String>,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
     /// reopen a closed PR (author or maintainer only)
     Reopen {
         /// Proposal event-id (hex) or nevent (bech32)

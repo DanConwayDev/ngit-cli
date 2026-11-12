@@ -5,7 +5,7 @@ Workflows:
   Help already read in this session does not need reading again.
 
     open or update a PR (a `git push` of a `pr/` branch),
-    stack, review, comment, merge                        ngit pr --help
+    stack, review, comment, merge, repair PR status      ngit pr --help
     issues, and resolving them from commit messages      ngit issue --help
     nostr:// URLs, clone, publish, hosting, maintainers  ngit repo --help
     CI results, trust, workflow files, secrets           ngit ci --help

@@ -276,6 +276,19 @@ async fn main() {
                     )
                     .await
                 }
+                PrCommands::Applied {
+                    id,
+                    reason,
+                    offline,
+                } => {
+                    sub_commands::pr_status::launch_applied(
+                        id,
+                        *offline,
+                        reason.as_deref(),
+                        signer_params,
+                    )
+                    .await
+                }
                 PrCommands::Reopen {
                     id,
                     reason,

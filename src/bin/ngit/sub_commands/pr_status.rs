@@ -268,3 +268,12 @@ pub async fn launch_draft(
     )
     .await
 }
+
+pub async fn launch_applied(
+    id: &str,
+    offline: bool,
+    reason: Option<&str>,
+    auth: SignerParams<'_>,
+) -> Result<()> {
+    launch_status(id, offline, Kind::GitStatusApplied, "applied", reason, auth).await
+}
