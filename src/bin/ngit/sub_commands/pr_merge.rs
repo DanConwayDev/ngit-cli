@@ -55,7 +55,7 @@ pub async fn launch(
     let selected_repo =
         get_resolved_repo_coordinate_when_remote_unknown(&git_repo, &mut client).await?;
     let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
-    let mut repo_coordinates = selected_repo.coordinate;
+    let mut repo_coordinates = selected_repo.coordinate.clone();
 
     let fetch_report = if offline {
         None
@@ -252,7 +252,6 @@ pub async fn launch(
                 event_id.to_hex()
             );
         }
-        git_repo.create_branch_at_commit(&branch_name, &tip_commit_str)?;
     }
 
     // An explicit `b` tag overrides the repository default. The target is
@@ -266,7 +265,69 @@ pub async fn launch(
             .context("could not determine the repository's default branch (e.g. main or master)")?
     };
 
-    let target_tip_to_install = if explicit_target.is_some() {
+    // Default-branch merges must not hide a stale target in the second
+    // parent of a merge, even when the PR already contains the upstream tip.
+    let is_default_target =
+        git_repo.get_default_branch_name(None)?.as_deref() == Some(target_branch.as_str());
+    if is_default_target {
+        let local_tip = git_repo.get_tip_of_branch(&target_branch).with_context(|| {
+            format!("default branch '{target_branch}' does not exist locally; check it out before merging")
+        })?;
+        let state = get_state_from_cache(Some(git_repo_path), &repo_ref)
+            .await
+            .context("failed to read the latest repository state for the PR target")?;
+        let target_ref = format!("refs/heads/{target_branch}");
+        let state_tip = state.state.get(&target_ref).with_context(|| {
+            format!("target branch '{target_branch}' is absent from the latest repository state")
+        })?;
+        if !git_repo.does_commit_exist(state_tip)? {
+            if offline {
+                bail!(
+                    "target branch '{target_branch}' tip {state_tip} is not available locally; rerun without --offline"
+                );
+            }
+            ensure_commit_local(
+                state_tip,
+                &git_repo,
+                &repo_ref,
+                &[],
+                &console::Term::stderr(),
+                private_signer.as_ref(),
+            )
+            .await
+            .context("failed to fetch the latest default branch tip")?;
+        }
+        let remote =
+            ngit::repo_ref::get_nostr_remote_for_resolved_coordinate(&git_repo, &selected_repo)
+                .await?;
+        let remote_name = remote.as_ref().map(|remote| remote.name.as_str());
+        ensure_target_contains_tip(
+            &git_repo,
+            &target_branch,
+            &local_tip.to_string(),
+            state_tip,
+            remote_name,
+        )?;
+        if let Some(remote) = remote_name {
+            if let Ok(reference) = git_repo
+                .git_repo
+                .find_reference(&format!("refs/remotes/{remote}/{target_branch}"))
+            {
+                let tip = reference
+                    .peel_to_commit()
+                    .context("failed to read target tracking tip")?;
+                ensure_target_contains_tip(
+                    &git_repo,
+                    &target_branch,
+                    &local_tip.to_string(),
+                    &tip.id().to_string(),
+                    remote_name,
+                )?;
+            }
+        }
+    }
+
+    let target_tip_to_install = if explicit_target.is_some() && !is_default_target {
         // Unlike a default-branch merge, a maintainer may never have checked
         // out this release or maintenance branch. Its remote-tracking ref can
         // therefore be stale even though the online event refresh above has
@@ -328,6 +389,9 @@ pub async fn launch(
     // happened. Merging from the worktree that currently owns the target is
     // safe and remains supported.
     ensure_target_available_in_current_worktree(&git_repo, &target_branch)?;
+    if !canonical_exists && !bare_exists {
+        git_repo.create_branch_at_commit(&branch_name, &tip_commit_str)?;
+    }
 
     // Remember the target ref before an explicit-target merge refreshes it.
     // This lets us put the repository back exactly as it was if the user's
@@ -1137,6 +1201,37 @@ async fn proposals_with_published_tip_at_branch_tip(
         }
     }
     Ok(matches)
+}
+
+/// Require the local target to contain each tip known for the selected repo.
+fn ensure_target_contains_tip(
+    repo: &Repo,
+    branch: &str,
+    local: &str,
+    upstream: &str,
+    remote: Option<&str>,
+) -> Result<()> {
+    let local = git2::Oid::from_str(local)?;
+    let upstream = git2::Oid::from_str(upstream)?;
+    if local == upstream || repo.git_repo.graph_descendant_of(local, upstream)? {
+        return Ok(());
+    }
+    let source = remote.map_or_else(
+        || "published repository state".to_owned(),
+        |remote| format!("{remote}/{branch} (including published repository state)"),
+    );
+    if repo.git_repo.graph_descendant_of(upstream, local)? {
+        let update = remote.map_or_else(
+            || format!("git merge --ff-only {upstream}"),
+            |remote| format!("git pull --ff-only {remote} {branch}"),
+        );
+        bail!(
+            "local target branch '{branch}' is behind {source}; fast-forward it before merging: `git switch {branch}`, then `{update}`, then rerun `ngit pr merge <PR-ID>`"
+        );
+    }
+    bail!(
+        "local target branch '{branch}' has diverged from {source}; reconcile its history before merging; local commits have not been discarded"
+    )
 }
 
 /// Refuse to merge when the local `pr/...` branch tip has drifted from the

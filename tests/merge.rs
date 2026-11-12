@@ -1750,3 +1750,138 @@ async fn merge_without_id_ambiguous_name_and_tip_still_errors() -> Result<()> {
 
     Ok(())
 }
+
+// The PR may itself contain the published target tip: it still cannot be
+// used to smuggle a stale main into the first parent of a merge.
+async fn stale_default_target_case(pr_contains_upstream: bool, diverged: bool) -> Result<()> {
+    let s = setup().await?;
+    let repo = &s.publisher;
+    let base = rev_parse(repo, "main").await?;
+    git_ok(
+        repo,
+        ["remote", "rename", "origin", "upstream"],
+        "rename remote",
+    )
+    .await?;
+    if pr_contains_upstream {
+        let checkout = repo
+            .ngit(["pr", "checkout", &s.prs[0].event_id.to_hex()])
+            .output()
+            .await?;
+        anyhow::ensure!(
+            checkout.status.success(),
+            "checkout: {}",
+            String::from_utf8_lossy(&checkout.stderr)
+        );
+        let tip = rev_parse(repo, "HEAD~1").await?;
+        git_ok(
+            repo,
+            ["branch", "-f", "main", &tip],
+            "advance main into PR history",
+        )
+        .await?;
+        git_ok(repo, ["checkout", "main"], "checkout main").await?;
+    } else {
+        git_ok(
+            repo,
+            ["commit", "--allow-empty", "-m", "upstream", "--no-gpg-sign"],
+            "upstream commit",
+        )
+        .await?;
+    }
+    repo.nostr_push(["upstream", "main"]).await?;
+    git_ok(
+        repo,
+        ["reset", "--hard", &base],
+        "restore stale local target",
+    )
+    .await?;
+    // Force the guard to use Nostr state, not a fresh tracking ref.
+    git_ok(
+        repo,
+        ["update-ref", "refs/remotes/upstream/main", &base],
+        "stale tracking ref",
+    )
+    .await?;
+    if diverged {
+        git_ok(
+            repo,
+            ["commit", "--allow-empty", "-m", "local", "--no-gpg-sign"],
+            "local commit",
+        )
+        .await?;
+    }
+    make_worktree_staged_unstaged_and_untracked(repo).await?;
+    let dirty = dirty_worktree_state(repo).await?;
+    let head = rev_parse(repo, "HEAD").await?;
+    let refs = git_stdout_at(repo, repo.dir(), &["show-ref"], "refs").await?;
+    let out = repo
+        .ngit([
+            "--repo",
+            "upstream",
+            "pr",
+            "merge",
+            &s.prs[0].event_id.to_hex(),
+        ])
+        .output()
+        .await?;
+    let error = String::from_utf8_lossy(&out.stderr);
+    anyhow::ensure!(!out.status.success(), "stale target was merged");
+    anyhow::ensure!(
+        error.contains(if diverged { "diverged" } else { "behind" })
+            && error.contains("upstream/main"),
+        "wrong refusal: {error}"
+    );
+    assert_eq!(rev_parse(repo, "HEAD").await?, head);
+    assert_eq!(
+        git_stdout_at(repo, repo.dir(), &["show-ref"], "refs").await?,
+        refs
+    );
+    assert_eq!(dirty_worktree_state(repo).await?, dirty);
+    Ok(())
+}
+
+#[tokio::test]
+async fn refuses_stale_default_even_when_pr_contains_upstream() -> Result<()> {
+    stale_default_target_case(true, false).await
+}
+
+#[tokio::test]
+async fn refuses_stale_default_when_pr_does_not_contain_upstream() -> Result<()> {
+    stale_default_target_case(false, false).await
+}
+
+#[tokio::test]
+async fn refuses_diverged_default_without_mutating_refs_or_work() -> Result<()> {
+    stale_default_target_case(false, true).await
+}
+
+#[tokio::test]
+async fn local_default_ahead_of_published_state_remains_mergeable() -> Result<()> {
+    let s = setup().await?;
+    s.publisher
+        .git_ok(
+            [
+                "commit",
+                "--allow-empty",
+                "-m",
+                "local maintainer change",
+                "--no-gpg-sign",
+            ],
+            "local commit",
+        )
+        .await?;
+    let local_tip = rev_parse(&s.publisher, "main").await?;
+    let out = s
+        .publisher
+        .ngit(["pr", "merge", &s.prs[0].event_id.to_hex()])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(rev_parse(&s.publisher, "HEAD^1").await?, local_tip);
+    Ok(())
+}

@@ -250,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- PR merges refuse behind or diverged local default targets before changing
+  refs or saving work, checking published repository state and the selected
+  remote. Locally ahead targets remain mergeable.
 - Nix CI includes `dbus-daemon` at runtime so isolated account credential-store
   tests can start their private session buses.
 - Correct the spelling of "public key" in the NIP-05 lookup progress message.

@@ -81,6 +81,17 @@ Merge (maintainers):
   them and run `git commit`; the message is already prepared, and JSON
   reports `action: "conflicted"` instead of `"merged"`.
 
+  A local default target must contain the latest published state and the
+  selected remote's tracking tip. Behind or diverged targets are refused,
+  even when the PR contains the missing commits. Fast-forward a behind
+  target first (use your selected remote and target branch):
+    git switch main
+    git pull --ff-only origin main
+    ngit pr merge <ID|nevent>
+  A locally ahead target is allowed. Divergence needs manual reconciliation;
+  ngit does not discard local commits. Explicit non-default targets retain
+  their automatic target-tip selection.
+
   Before merging or adding maintainer fixes, run
   `git log --merges --oneline origin/<target>..HEAD`. A prior `Merge #...`
   means a merge would nest merge history; rebase or cherry-pick the PR
