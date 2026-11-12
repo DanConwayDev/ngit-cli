@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An optional manual macOS pre-release workflow builds the Apple Silicon Nix
+  package and checks its startup, unit tests, and Git HTTPS trust handling
+  before a release is tagged.
+
 - `--help` now explains workflows as well as flags. `ngit --help` ends with a
   map from tasks to the command help that covers them, plus the conventions
   shared by every command (JSON output, identifiers, signer and repository

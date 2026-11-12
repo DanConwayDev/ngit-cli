@@ -2,7 +2,7 @@
 //! server. Set NGIT_TLS_TEST_BIN_DIR to an unpacked release archive to test
 //! those exact bytes.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

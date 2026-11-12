@@ -32,6 +32,7 @@
           src = self;
           craneLib = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable.latest.default;
           ngit-grasp = ngit-grasp-pkg;
+          ngit-package = self.packages.${system}.default;
         };
         manifest = pkgs.lib.importTOML ./Cargo.toml;
         # Pin the v3.1.1 release.

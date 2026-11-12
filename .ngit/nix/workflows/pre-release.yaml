@@ -1,0 +1,18 @@
+version: 1
+name: macOS pre-release checks
+system: aarch64-darwin
+reuse: never
+on:
+  workflow_dispatch:
+jobs:
+  macos:
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+    steps:
+      - package: {build: packages.aarch64-darwin.default}
+      - dependencies: {build: packages.aarch64-darwin.ci-dependencies}
+      - smoke
+      - unit
+      - cli
+      - https

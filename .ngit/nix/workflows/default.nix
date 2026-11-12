@@ -1,4 +1,4 @@
-{ pkgs, craneLib, src, ngit-grasp }:
+{ pkgs, craneLib, src, ngit-grasp, ngit-package }:
 let
   cargo = {
     src = craneLib.cleanCargoSource src;
@@ -70,6 +70,17 @@ in {
       tests = rust "tests" ''
         export NGIT_GRASP_BIN=${ngit-grasp}/bin/ngit-grasp
         cargo test --workspace --locked --offline
+      '';
+    };
+    pre-release.macos = {
+      smoke = command "smoke" ''
+        ${ngit-package}/bin/ngit --version
+      '';
+      unit = rust "unit" "cargo test --locked --offline --lib";
+      cli = rust "cli" "cargo test --locked --offline --bin ngit cli::tests";
+      https = rust "https" ''
+        export NGIT_TLS_TEST_BIN_DIR=${ngit-package}/bin
+        cargo test --locked --offline --test git_https
       '';
     };
     release.publish = command "publish" (builtins.readFile ./publish-crate.sh);
