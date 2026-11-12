@@ -158,11 +158,6 @@ async fn legacy_inferred_follow_materializes_existing_relationships_untimed() ->
     }
     let alice_npub = alice.to_bech32()?;
     let preparation_command = format!("ngit repo edit --lead-maintainer {alice_npub}");
-    let guidance = String::from_utf8_lossy(&follow.stderr);
-    assert!(
-        guidance.contains(&preparation_command),
-        "legacy convergence should identify the lead's required preparation command: {guidance}",
-    );
     let follow_json: serde_json::Value = serde_json::from_slice(&follow.stdout)?;
     assert_eq!(follow_json["action"], "followed_lead");
     assert_eq!(

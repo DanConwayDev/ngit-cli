@@ -541,12 +541,11 @@ async fn remote_proposal_signer_refusal_is_fatal_before_any_git_attempt() -> Res
         "signer refusal unexpectedly succeeded: {}",
         command_output(&output)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["command_status"], "error");
+    let diagnostic = report["error"].as_str().context("missing JSON error")?;
     assert!(
-        stdout.contains("failed to sign event: Rejected: Rejected")
-            && stderr.contains("0: Rejected")
-            && stderr.contains("1: Rejected"),
+        diagnostic.contains("failed to sign event: Rejected: Rejected"),
         "underlying remote-signer rejection was not preserved: {}",
         command_output(&output)
     );
@@ -785,22 +784,16 @@ async fn every_paired_relay_failing_preserves_failure_and_empty_cache() -> Resul
         !output.status.success(),
         "all rejected servers unexpectedly succeeded"
     );
-    let stdout = String::from_utf8(output.stdout)?;
-    if !stdout.trim().is_empty() {
-        let report: serde_json::Value = serde_json::from_str(&stdout)?;
-        assert_ne!(
-            report["command_status"], "ok",
-            "failed send reported JSON ok"
-        );
-    }
-    let stderr = String::from_utf8(output.stderr)?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["command_status"], "error");
+    let diagnostic = report["error"].as_str().context("missing JSON error")?;
     assert!(
-        stderr.contains("failed to push PR"),
-        "existing CLI failure context was lost: {stderr}"
+        diagnostic.contains("failed to push PR"),
+        "existing CLI failure context was lost: {diagnostic}"
     );
     assert!(
-        stderr.contains("event-first relay publication failure"),
-        "aggregate failure hid the event-first relay reason: {stderr}"
+        diagnostic.contains("event-first relay publication failure"),
+        "aggregate failure hid the event-first relay reason: {diagnostic}"
     );
     assert!(
         recorder

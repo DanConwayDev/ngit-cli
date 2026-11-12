@@ -289,7 +289,9 @@ async fn production_headless_key_retention_aliasing_and_explicit_deletion() -> R
         )
         .await?;
     assert!(!failure.status.success());
-    let diagnostic = String::from_utf8_lossy(&failure.stderr);
+    let document: Value = serde_json::from_slice(&failure.stdout)?;
+    assert_eq!(document["command_status"], "error");
+    let diagnostic = document["error"].as_str().context("missing JSON error")?;
     assert!(diagnostic.contains("unlock it or restore its session service"));
     assert!(!diagnostic.contains("credential backend initialization failed"));
     assert!(
@@ -641,7 +643,13 @@ async fn production_secret_service_mixed_storage_and_locked_deletion() -> Result
         !output.status.success(),
         "locked OS profile was rebound to a different identity"
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("choose a new profile name"));
+    let document: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(document["command_status"], "error");
+    let diagnostic = document["error"].as_str().context("missing JSON error")?;
+    assert!(
+        diagnostic.contains("choose a new profile name"),
+        "{diagnostic}"
+    );
     assert_eq!(
         probe.snapshot()?,
         before,
