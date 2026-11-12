@@ -856,26 +856,24 @@ mod tests {
     #[test]
     fn config_scope_signer_is_not_a_command_selection() {
         let dir = tempfile::tempdir().unwrap();
+        // Git exports GIT_DIR and related variables to hooks and to
+        // `git rebase --exec`. Left in place they would point every command
+        // below at that repository and write the test signer into its config.
+        let git_in_repo = || {
+            let mut command = Command::new("git");
+            ngit::git::detach_from_inherited_repository(&mut command)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            command
+        };
         for args in [
             ["init", "-q", "."].as_slice(),
             ["config", "--local", "nostr.signer", "configured-alice"].as_slice(),
         ] {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .status()
-                .unwrap();
+            let status = git_in_repo().args(args).status().unwrap();
             assert!(status.success(), "git {args:?} failed");
         }
-        let git_in_repo = || {
-            let mut command = Command::new("git");
-            command
-                .current_dir(dir.path())
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env_remove("GIT_CONFIG_COUNT");
-            command
-        };
 
         // command-config env for an unrelated key must not promote the
         // configured signer to command scope

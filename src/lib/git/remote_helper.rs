@@ -487,7 +487,11 @@ mod tests {
     }
 
     fn run<'a>(cwd: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String> {
-        let output = Command::new("git").current_dir(cwd).args(args).output()?;
+        let mut command = Command::new("git");
+        let output = crate::git::detach_from_inherited_repository(&mut command)
+            .current_dir(cwd)
+            .args(args)
+            .output()?;
         ensure!(
             output.status.success(),
             "git command failed: {}",

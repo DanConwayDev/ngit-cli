@@ -11,6 +11,41 @@ use nostr::prelude::Tags;
 use nostr_url::NostrUrlDecoded;
 
 use crate::git_events::{get_commit_id_from_patch, tag_value};
+/// Variables through which git points a command at one particular
+/// repository, as listed by `git rev-parse --local-env-vars`. Git exports
+/// them to hooks and to commands run by `git rebase --exec`, where they take
+/// precedence over the working directory.
+pub const REPOSITORY_ENV_VARS: [&str; 15] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// Stop a git command inheriting the repository of an enclosing git process,
+/// so it acts on its working directory. Without this, a command meant for a
+/// scratch repository edits the repository whose hook or rebase started the
+/// process.
+pub fn detach_from_inherited_repository(
+    command: &mut std::process::Command,
+) -> &mut std::process::Command {
+    for variable in REPOSITORY_ENV_VARS {
+        command.env_remove(variable);
+    }
+    command
+}
+
 pub mod identify_ahead_behind;
 pub mod nostr_url;
 pub(crate) mod remote_helper;
