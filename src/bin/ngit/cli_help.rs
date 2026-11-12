@@ -129,6 +129,15 @@ fn shape_subcommand(mut command: Command, long: bool) -> Command {
         }
         command = fold_long_help(command);
     }
+    // `--version` reports the same version everywhere, so only the top level
+    // lists it.
+    command = command.disable_version_flag(true).arg(
+        Arg::new("version")
+            .short('V')
+            .long("version")
+            .action(ArgAction::Version)
+            .hide(true),
+    );
     command = command.help_template(format!(
         "{about}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{GLOBAL_OPTIONS_POINTER}{{after-help}}"
     ));
@@ -279,6 +288,11 @@ mod tests {
             let path: Vec<&str> = path.iter().map(String::as_str).collect();
             for flag in ["-h", "--help"] {
                 let help = help(&path, flag);
+                let last = if path.is_empty() {
+                    "--version"
+                } else {
+                    "--help"
+                };
                 let options: Vec<&str> = help
                     .lines()
                     .skip_while(|line| *line != "Options:")
@@ -286,9 +300,7 @@ mod tests {
                     .take_while(|line| !line.is_empty())
                     .collect();
                 assert!(
-                    options
-                        .last()
-                        .is_some_and(|line| line.contains("--version")),
+                    options.last().is_some_and(|line| line.contains(last)),
                     "`{flag}` at {path:?} separates its options: {options:?}"
                 );
                 for line in help.lines() {
@@ -328,6 +340,7 @@ mod tests {
                 // Agents read output through --json, so it stays in view.
                 assert!(listed("--json"), "{path:?} does not list --json");
                 assert!(listed("--help"), "{path:?}");
+                assert!(!listed("--version"), "{path:?}");
             }
         }
     }
@@ -386,6 +399,16 @@ mod tests {
                 help(path, "--help"),
                 "{path:?}"
             );
+        }
+    }
+
+    #[test]
+    fn version_is_accepted_but_listed_only_at_the_top_level() {
+        assert!(help(&[], "-h").contains("-V, --version"));
+        for args in [["ngit", "pr", "-V"], ["ngit", "pr", "--version"]] {
+            let error = try_parse_from(args).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+            assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
         }
     }
 

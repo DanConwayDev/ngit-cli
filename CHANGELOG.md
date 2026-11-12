@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the exception and stays listed on every command.
   Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
   and group help such as `ngit pr --help` about 20% shorter.
+- Subcommand help no longer lists `-V, --version`; the flag still works
+  there and is listed by top-level help.
 - The `--repo` and `--json` option descriptions are one line each. Their
   detail (precedence over detected targets, JSON Lines progress on stderr,
   plain-text subprocess output) is now part of the conventions at the end of
