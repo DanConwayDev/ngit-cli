@@ -73,8 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The bundled agent skill (version 1.29) is now a short bootstrap. It tells
-  agents to use ngit in repositories with a `nostr://` remote and to read the
+- The bundled agent skill (version 1.30) is now a short bootstrap. It tells
+  agents to use ngit in repositories with a `nostr://` remote, which its
+  description also names as Grasp repositories, and to read the
   workflow guidance in the installed `ngit --help`, including before opening
   or updating a PR with `git push`, instead of repeating commands and feature
   details that change between releases. The reference files are no longer
