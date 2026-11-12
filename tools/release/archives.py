@@ -125,6 +125,12 @@ def pack(target, binaries, output):
         "target": target, "archive": path.name, "sha256": digest(path),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
     }
+    if "windows" in target:
+        report["cargo_xwin"] = subprocess.check_output(["cargo", "xwin", "--version"], text=True).strip()
+        report["windows_sdk"] = (Path(os.environ["XWIN_CACHE_DIR"]) / "xwin" / "DONE").read_text().splitlines()
+    elif "linux" in target:
+        report["cargo_zigbuild"] = subprocess.check_output(["cargo", "zigbuild", "--version"], text=True).strip()
+        report["zig"] = subprocess.check_output([os.environ.get("CARGO_ZIGBUILD_ZIG_PATH", "zig"), "version"], text=True).strip()
     (output / "build.json").write_text(json.dumps(report, indent=2) + "\n")
 
 

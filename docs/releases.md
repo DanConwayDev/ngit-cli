@@ -13,6 +13,8 @@ cargo-xwin. The Apple Silicon provider builds both macOS slices and combines
 them into the universal archive. No ARM Linux or Intel Mac provider is needed.
 
 All five jobs export the archive and a source/target/version/checksum report.
+Linux reports identify Zig; Windows reports identify cargo-xwin and the SDK
+components. The Windows SDK is pinned to 10.0.26100 and only x86_64 is fetched.
 The collection job consumes the provider-verified inputs, checks the complete
 set, and exports `release` with `SHA256SUMS` and `builds.json`. Internal names
 are independent of branch and tag so compatible exact-commit results can be
@@ -565,7 +567,10 @@ inspected and its URL passed to `--asset PLATFORM=URL`; avoid selecting an
 artifact only by name or by “latest”, because names repeat across runs and
 untrusted providers can publish claims for the same repository and commit.
 
-ngit-ci cannot currently pass artifacts across independent workflow files or
-runs. In particular, architectures built by separate coordinators cannot fan
-into a release job with `needs`; either build the release set in one supported
-workflow invocation or assemble it later from exact, trusted result events.
+For native Nix workflows, use `needs-workflows` plus explicit job dependencies
+to consume verified artifacts across workflow files on the same coordinator;
+the archive rehearsal and GitHub mirror above use this path. This does not
+provide artifact dependencies across independent coordinators. Keep all
+platform builds under one coordinator or assemble their outputs separately
+from exact, trusted result events. The act example above does not provide
+this native cross-workflow input interface.

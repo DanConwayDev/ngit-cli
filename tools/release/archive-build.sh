@@ -9,6 +9,7 @@ case "${NGIT_CI_JOB_ID:?}" in
   *) echo 'Unknown release archive job' >&2; exit 1 ;;
 esac
 export CARGO_BUILD_JOBS=2
+export XWIN_ARCH=x86_64 XWIN_SDK_VERSION=10.0.26100
 export XWIN_CACHE_DIR="$PWD/target/xwin-cache"
 if [[ $target == universal-apple-darwin ]]; then
   # Use the guest's Apple SDK and linker for portable downloads, not Nix dylibs.
@@ -24,7 +25,7 @@ fi
 export CARGO_HOME="$PWD/target/archive-cargo-home"
 export CARGO_TARGET_DIR="$PWD/target/archives"
 mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
-cp "$NGIT_ARCHIVE_VENDOR/config.toml" "$CARGO_HOME/config.toml"
+cp --remove-destination "$NGIT_ARCHIVE_VENDOR/config.toml" "$CARGO_HOME/config.toml"
 # Do not inherit the Nix development shell's host library/compiler choices.
 unset OPENSSL_DIR OPENSSL_LIB_DIR OPENSSL_INCLUDE_DIR PKG_CONFIG_PATH
 unset NIX_CFLAGS_COMPILE NIX_LDFLAGS
