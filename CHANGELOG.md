@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.
+  OpenSSL source is fetched as a pinned Nix input rather than downloaded
+  by the archive command inside the build guest.
 
 - `ngit pr applied <ID> --reason ...` records acceptance after a missed status
   publication, cherry-pick, or equivalent change without merging or touching

@@ -15,6 +15,8 @@ them into the universal archive. No ARM Linux or Intel Mac provider is needed.
 All five jobs export the archive and a source/target/version/checksum report.
 Linux reports identify Zig; Windows reports identify cargo-xwin and the SDK
 components. The Windows SDK is pinned to 10.0.26100 and only x86_64 is fetched.
+OpenSSL source is a checksum-pinned Nix input, shared with the standalone
+release helper; the archive command does not download it at runtime.
 The collection job consumes the provider-verified inputs, checks the complete
 set, and exports `release` with `SHA256SUMS` and `builds.json`. Internal names
 are independent of branch and tag so compatible exact-commit results can be

@@ -1,6 +1,7 @@
 """Packaging regressions; no network or native toolchain required."""
 
 import importlib.util
+import hashlib
 from pathlib import Path
 import tempfile
 import tarfile
@@ -16,6 +17,31 @@ spec.loader.exec_module(verify)
 
 
 class SourceTests(unittest.TestCase):
+    def test_provided_source_never_falls_back_to_download(self):
+        spec = importlib.util.spec_from_file_location("build", Path(__file__).with_name("build-openssl.py"))
+        build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build)
+        for state in ("valid", "corrupt", "missing"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                archive = root / "pinned-source.tar.gz"
+                if state != "missing":
+                    archive.write_bytes(b"source" if state == "valid" else b"corrupt")
+                env = root / "env"
+                argv = ["build-openssl.py", "aarch64-apple-darwin", "--source-archive", str(archive),
+                        "--output", str(root / "output"), "--env-file", str(env), "--jobs", "1"]
+                with patch("sys.argv", argv), patch.object(build, "SHA256", hashlib.sha256(b"source").hexdigest()), patch.object(build.urllib.request, "urlretrieve") as download, patch.object(build, "build", return_value={"OPENSSL_DIR": "/prefix"}) as native:
+                    if state == "valid":
+                        build.main()
+                        native.assert_called_once_with("aarch64-apple-darwin", root / "output", archive, 1)
+                        self.assertTrue(env.exists())
+                    else:
+                        with self.assertRaises(RuntimeError if state == "corrupt" else FileNotFoundError):
+                            build.main()
+                        native.assert_not_called()
+                        self.assertFalse(env.exists())
+                    download.assert_not_called()
+
     def test_bad_source_checksum_stops_before_build(self):
         spec = importlib.util.spec_from_file_location("build", Path(__file__).with_name("build-openssl.py"))
         build = importlib.util.module_from_spec(spec)

@@ -33,7 +33,7 @@ unset LIBSSH2_SYS_USE_PKG_CONFIG
 export LIBGIT2_NO_PKG_CONFIG=1
 if [[ $target != *windows* ]]; then
   env_file="$CARGO_TARGET_DIR/openssl.env"
-  python3 tools/release/build-openssl.py "$target" --output "$CARGO_TARGET_DIR/openssl" --env-file "$env_file" --jobs 2
+  python3 tools/release/build-openssl.py "$target" --source-archive "$NGIT_ARCHIVE_OPENSSL_SOURCE" --output "$CARGO_TARGET_DIR/openssl" --env-file "$env_file" --jobs 2
   while IFS='=' read -r key value; do export "$key=$value"; done < "$env_file"
 fi
 build_args=(--release --locked --offline --bins --features vendored-openssl)
