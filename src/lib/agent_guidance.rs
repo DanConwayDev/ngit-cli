@@ -300,8 +300,12 @@ fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
         bail!("invalid managed guidance path `{relative}`");
     }
 
-    let canonical_root = fs::canonicalize(root)
-        .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
+    let canonical_root = fs::canonicalize(root).with_context(|| {
+        format!(
+            "failed to resolve skill install directory {}",
+            root.display()
+        )
+    })?;
     let mut current = root.to_path_buf();
     let components = relative_path.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
@@ -328,7 +332,8 @@ fn validate_managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
                 })?;
                 if !resolved.starts_with(&canonical_root) {
                     bail!(
-                        "refusing to access managed guidance path `{relative}` outside the repository"
+                        "refusing to access managed guidance path `{relative}` outside {}",
+                        root.display()
                     );
                 }
             }
@@ -378,25 +383,30 @@ fn resolve_managed_symlink(
         return Ok(path);
     }
 
-    let canonical_root = fs::canonicalize(root)
-        .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
+    let canonical_root = fs::canonicalize(root).with_context(|| {
+        format!(
+            "failed to resolve skill install directory {}",
+            root.display()
+        )
+    })?;
     let resolved = fs::canonicalize(&requested).with_context(|| {
         format!(
-            "failed to resolve symlinked repository {kind} {}",
+            "failed to resolve symlinked ngit {kind} {}",
             requested.display()
         )
     })?;
     let Ok(target) = resolved.strip_prefix(&canonical_root) else {
         bail!(
-            "refusing to access repository {kind} `{relative}` because its symlink target is outside the repository"
+            "refusing to access ngit {kind} `{relative}` because its symlink target is outside {}",
+            root.display()
         );
     };
     if !resolved.is_file() {
-        bail!("refusing to access repository {kind} `{relative}` because its target is not a file");
+        bail!("refusing to access ngit {kind} `{relative}` because its target is not a file");
     }
     if target.file_name() != Some(OsStr::new(allowed_target_name)) {
         bail!(
-            "refusing to access repository {kind} `{relative}` because its symlink target `{}` is not a {allowed_target_name} file",
+            "refusing to access ngit {kind} `{relative}` because its symlink target `{}` is not a {allowed_target_name} file",
             target.display()
         );
     }
@@ -405,7 +415,7 @@ fn resolve_managed_symlink(
 
 fn validate_skill_path(root: &Path, layout: &SkillLayout, relative: &str) -> Result<PathBuf> {
     if !layout.is_skill_path(relative) {
-        bail!("unexpected repository skill path `{relative}`");
+        bail!("unexpected ngit skill path `{relative}`");
     }
     resolve_managed_symlink(root, relative, SKILL_FILE_NAME, "skill")
 }
@@ -421,7 +431,7 @@ fn existing_skill_paths(root: &Path, layout: &SkillLayout) -> Result<Vec<String>
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("failed to inspect repository skill `{relative}`"));
+                    .with_context(|| format!("failed to inspect ngit skill `{relative}`"));
             }
         }
     }
@@ -694,7 +704,8 @@ fn write_guidance(
                 .with_context(|| format!("failed to read managed file {}", path.display()))?;
             let Some(installed) = skill_version(&content) else {
                 bail!(
-                    "refusing to overwrite unrecognized repository skill `{logical}`; rerun with --force to replace it"
+                    "refusing to overwrite unrecognized ngit skill `{}`; rerun with --force to replace it",
+                    root.join(logical).display()
                 );
             };
             let comparison = compare_versions(&installed, &bundled);
@@ -708,17 +719,20 @@ fn write_guidance(
                 Some(Ordering::Equal) if content == CANONICAL_SKILL => {}
                 Some(Ordering::Equal) => {
                     bail!(
-                        "refusing to overwrite locally modified managed file `{logical}`; rerun with --force to replace it"
+                        "refusing to overwrite locally modified ngit skill `{}`; rerun with --force to replace it",
+                        root.join(logical).display()
                     );
                 }
                 Some(Ordering::Greater) => {
                     bail!(
-                        "refusing to downgrade ngit repository skill from {installed} to {bundled}; rerun with --force to override"
+                        "refusing to downgrade ngit skill `{}` from {installed} to {bundled}; rerun with --force to override",
+                        root.join(logical).display()
                     );
                 }
                 None => {
                     bail!(
-                        "refusing to overwrite repository skill `{logical}` with invalid metadata.version `{installed}`; rerun with --force to replace it"
+                        "refusing to overwrite ngit skill `{}` with invalid metadata.version `{installed}`; rerun with --force to replace it",
+                        root.join(logical).display()
                     );
                 }
                 Some(Ordering::Less) => unreachable!("outdated skills are handled above"),
@@ -1079,6 +1093,40 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    /// Refusals name the file by its full path and do not call a skill
+    /// outside a repository a repository skill.
+    #[test]
+    fn refusals_outside_a_repository_name_the_file_not_a_repository() {
+        let home = temp_root();
+        let layout = SkillLayout::home();
+        install_at(&home, &layout, false);
+        let skill = home.join(SKILL_PATH);
+
+        for (content, expected) in [
+            ("no front matter\n".to_string(), "unrecognized ngit skill"),
+            (
+                format!("{}\nlocal edit\n", bundled_skill()),
+                "locally modified ngit skill",
+            ),
+            (
+                bundled_skill().replace(
+                    &format!("version: \"{}\"", bundled_version().unwrap()),
+                    "version: \"999.0\"",
+                ),
+                "refusing to downgrade ngit skill",
+            ),
+        ] {
+            fs::write(&skill, content).unwrap();
+            let error = write_guidance(&home, &layout, false, false, &mut |_| {})
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains(&skill.display().to_string()), "{error}");
+            assert!(!error.contains("repository"), "{error}");
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn first_repository_install_can_leave_instruction_files_alone() {
         let root = temp_root();
@@ -1275,7 +1323,7 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("unrecognized repository skill")
+                .contains("unrecognized ngit skill")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1324,7 +1372,7 @@ mod tests {
             setup(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("failed to inspect repository skill")
+                .contains("failed to inspect ngit skill")
         );
         assert!(!root.join(SKILL_PATH).exists());
         assert!(!root.join(AGENTS_PATH).exists());
@@ -1538,7 +1586,7 @@ mod tests {
             update(&root, false)
                 .unwrap_err()
                 .to_string()
-                .contains("outside the repository")
+                .contains("symlink target is outside")
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), bundled_skill());
 
