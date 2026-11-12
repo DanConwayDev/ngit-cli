@@ -32,6 +32,10 @@ pub const HELP_INSTRUCTION: &str = include_str!("../bin/ngit/help/agent_instruct
 /// An instruction file that mentions all of these is treated as carrying the
 /// instruction, however it is worded.
 pub const HELP_INSTRUCTION_MARKERS: [&str; 2] = ["ngit --help", "ngit.dev/install"];
+/// Added to the upgrade tip while no instruction file carries the insert, so
+/// repositories that installed the skill learn of the recommended setup.
+const UPGRADE_INSERT_HINT: &str =
+    "; `ngit skill --help` describes the AGENTS.md insert now recommended";
 pub const SETUP_TIP: &str = "tip: add an AGENTS.md insert or a skill to tell collaborators' coding agents this repository uses ngit; run `ngit skill --help` for details";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
@@ -604,9 +608,14 @@ pub fn warning_message(status: &GuidanceStatus) -> Option<String> {
     match warning_for(status)? {
         WarningKind::Setup => Some(SETUP_TIP.into()),
         WarningKind::Update => Some(format!(
-            "tip: run `ngit skill upgrade` (repository skill {} -> {})",
+            "tip: run `ngit skill upgrade` (repository skill {} -> {}){}",
             status.installed_version.as_deref().unwrap_or("unknown"),
-            status.bundled_version
+            status.bundled_version,
+            if status.help_instruction {
+                ""
+            } else {
+                UPGRADE_INSERT_HINT
+            }
         )),
     }
 }
@@ -740,6 +749,16 @@ mod tests {
             update_available: true,
             modified_files: vec![],
             managed_files: vec![],
+        };
+        assert_eq!(
+            warning_message(&status).as_deref(),
+            Some(
+                "tip: run `ngit skill upgrade` (repository skill 1.0 -> 1.1); `ngit skill --help` describes the AGENTS.md insert now recommended"
+            )
+        );
+        let status = GuidanceStatus {
+            help_instruction: true,
+            ..status
         };
         assert_eq!(
             warning_message(&status).as_deref(),

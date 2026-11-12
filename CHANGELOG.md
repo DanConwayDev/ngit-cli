@@ -90,7 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows the instruction to copy and reword. The maintainer reminder, including
   after `ngit init`, points there rather than to `ngit skill install`, and
   stops once one of those files mentions both `ngit --help` and
-  `ngit.dev/install` or the skill is installed. `ngit skill status` reports
+  `ngit.dev/install` or the skill is installed. The upgrade reminder for an
+  outdated skill mentions the instruction until a file carries it.
+  `ngit skill status` reports
   the detection as `help_instruction`. `ngit skill install` appends this
   instruction, in place of a pointer to the skill file, to existing
   instruction files that do not mention ngit; it still creates none.
