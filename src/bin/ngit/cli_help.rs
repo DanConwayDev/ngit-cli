@@ -285,11 +285,33 @@ fn style_notes(notes: &StyledStr) -> StyledStr {
             };
             match comment {
                 Some(at) => format!("{}{MUTED}{}{MUTED:#}", &line[..at], &line[at..]),
-                None => line.to_string(),
+                None => embolden_inline_code(line),
             }
         })
         .collect();
     styled.join("\n").into()
+}
+
+/// Makes the `quoted` commands and names in a line of prose bold, as command
+/// and option names are elsewhere in help. A quotation that continues on
+/// the next line is left plain rather than guessed at.
+fn embolden_inline_code(line: &str) -> String {
+    const CODE: Style = Style::new().bold();
+    let parts: Vec<&str> = line.split('`').collect();
+    if parts.len().is_multiple_of(2) {
+        return line.to_string();
+    }
+    parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            if index % 2 == 1 {
+                format!("{CODE}`{part}`{CODE:#}")
+            } else {
+                (*part).to_string()
+            }
+        })
+        .collect()
 }
 
 /// Parses `args` like `Cli::try_parse_from`, rendering help and usage errors
@@ -519,6 +541,11 @@ mod tests {
                 "{args:?} does not mute `{muted}`"
             );
         }
+        let bold = Style::new().bold();
+        assert!(styled.contains(&format!(
+            "PR branches MUST start with {bold}`pr/`{bold:#} (e.g. {bold}`pr/my-feature`{bold:#})."
+        )));
+        assert_eq!(embolden_inline_code("an `unfinished"), "an `unfinished");
         // The command beside a comment keeps its normal weight.
         assert!(styled_help(&["ngit", "sync", "--help"]).contains(&format!(
             "    ngit sync --json                  {MUTED}# every ref"
