@@ -100,6 +100,21 @@ class Archives(unittest.TestCase):
                 self.assertEqual((root / "output" / archives.filename(target)).read_bytes(), target.encode())
             self.assertEqual(len((root / "output" / "SHA256SUMS").read_text().splitlines()), 5)
 
+    def test_pack_does_not_encode_build_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binaries = root / "bin"
+            binaries.mkdir()
+            (binaries / "ngit").write_bytes(elf())
+            (binaries / "git-remote-nostr").write_bytes(elf()[:64])
+            target = "x86_64-unknown-linux-gnu.2.17"
+            with patch.object(archives, "inspect_linkage"), patch.object(archives.subprocess, "run"), patch.object(archives.subprocess, "check_output", return_value="rustc test"), patch.dict(archives.os.environ, {"NGIT_CI_COMMIT_SHA": "a" * 40}):
+                archives.pack(target, binaries, root / "one")
+                archives.os.utime(binaries / "ngit", (100, 100))
+                archives.pack(target, binaries, root / "two")
+            name = archives.filename(target)
+            self.assertEqual((root / "one" / name).read_bytes(), (root / "two" / name).read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

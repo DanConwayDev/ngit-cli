@@ -2,6 +2,7 @@
 """Package portable binaries and verify the exact cross-provider release set."""
 import argparse
 import hashlib
+import gzip
 import importlib.util
 import io
 import json
@@ -103,9 +104,12 @@ def pack(target, binaries, output):
     if suffix:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name in names:
-                archive.write(binaries / name, name)
+                member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                member.compress_type = zipfile.ZIP_DEFLATED
+                member.external_attr = 0o100755 << 16
+                archive.writestr(member, (binaries / name).read_bytes())
     else:
-        with tarfile.open(path, "w:gz") as archive:
+        with path.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as archive:
             for name in names:
                 data = (binaries / name).read_bytes()
                 member = tarfile.TarInfo(name)
