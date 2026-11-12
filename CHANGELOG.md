@@ -98,6 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update the isolated Grasp integration-test fixture to v3.1.1, including
+  upstream server security fixes. This does not update deployed relays.
+
 - Refresh Nix package and toolchain inputs, retaining the supported Intel
   macOS package set and pinned formatter. Declare libgit2 explicitly in
   package, development, and CI environments as required by current Nixpkgs.
