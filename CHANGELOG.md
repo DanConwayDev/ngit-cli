@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ngit skill install` and `upgrade` accept `--global` to install the skill
+  for your user account (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`)
+  and `--system` to install it for every user of the machine, in the
+  directories agents document reading: `/etc/codex/skills/ngit` and, on
+  Linux, `/etc/claude-code/.claude/skills/ngit`. `NGIT_SYSTEM_SKILLS_DIR`
+  names a single directory to use instead. Interactive runs (`-i`) ask which
+  scope to use; non-interactive runs keep the repository scope. A first
+  repository install asks interactively before adding the ngit instruction
+  to existing `AGENTS.md`/`CLAUDE.md` files, and `--no-agent-file` declines
+  without prompting. `ngit skill status --json` reports every scope in a
+  `scopes` object, and install results name their `scope`. Thanks to
+  hzrd149.
 - `--help` now explains workflows as well as flags. `ngit --help` ends with a
   map from tasks to the command help that covers them, plus the conventions
   shared by every command (JSON output, identifiers, signer and repository

@@ -189,5 +189,19 @@ them. Successful commands set `action` to `installed`, `upgraded`,
 same change fields for files already left in the worktree, and omit post-update
 guidance status fields.
 
+The skill can also be installed outside a repository. `--global` installs it
+for your user account, in `~/.agents/skills/ngit` and `~/.claude/skills/ngit`,
+so your own agents recognise Grasp repositories that carry no guidance.
+`--system` installs it for every user of the machine, in the directories
+agents document reading: `/etc/codex/skills/ngit` and, on Linux,
+`/etc/claude-code/.claude/skills/ngit`; it may need elevated permissions, and
+`NGIT_SYSTEM_SKILLS_DIR` names a single directory to use instead. Interactive
+runs (`-i`) ask which scope to use and, on a first repository install, whether
+to add the instruction to existing instruction files (`--no-agent-file`
+declines). Results report the `scope` they targeted, and `ngit skill status`
+reports every scope; its `--json` output carries them in a `scopes` object.
+Neither scope tells collaborators' agents anything, so the maintainer
+reminder is unaffected by them.
+
 Run `ngit skill --help` for the instruction, status and reminder opt-out
 commands.

@@ -21,6 +21,8 @@ The repository skill (optional):
     ngit skill install --json
     ngit skill upgrade --json
     ngit skill status --json
+    ngit skill install --global      # your account, every repository
+    ngit skill install --system      # every user of this machine
     ngit skill opt-out --local       # stop reminders in this repository
     ngit skill opt-out --global      # stop them everywhere by default
 
@@ -31,3 +33,12 @@ The repository skill (optional):
   with the version bundled in this ngit. Both leave their changes
   uncommitted for review; contributors who are not maintainers propose
   them on a `pr/` branch.
+
+  --global writes `~/.agents/skills/ngit` and `~/.claude/skills/ngit`.
+  --system writes `/etc/codex/skills/ngit` and, on Linux,
+  `/etc/claude-code/.claude/skills/ngit`, and may need elevated
+  permissions; `NGIT_SYSTEM_SKILLS_DIR` names one directory to use instead.
+  Both help only the agents on this machine and edit no instruction file,
+  so they do not replace the instruction or repository skill that tells
+  collaborators' agents. With -i, `install` asks which scope to use and
+  whether to edit instruction files; --no-agent-file declines that edit.
