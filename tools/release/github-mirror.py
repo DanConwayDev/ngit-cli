@@ -108,7 +108,7 @@ def mirror(api, release):
 def main():
     if os.environ.get("NGIT_CI_REF_TYPE") != "tag" or os.environ.get("NGIT_CI_TRIGGER") not in ("push", "manual"):
         raise ValueError("GitHub mirroring requires an authorized tag context")
-    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "archives.collect/artifacts/release-set/release"
+    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "archives.collect/artifacts/release-set"
     release = plan(directory, os.environ["NGIT_CI_REF_NAME"], os.environ["NGIT_CI_COMMIT_SHA"])
     token = (Path(os.environ["NGIT_CI_SECRETS_DIR"]) / "GITHUB_RELEASE_TOKEN").read_text().strip()
     if not token:
