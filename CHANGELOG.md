@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plain-text subprocess output) is now part of the conventions at the end of
   `ngit --help`, which already covered the rest; the CLI reference export
   carries it there too.
+- Help output is styled on a colour terminal: section headings, including
+  those in the workflow notes, are bold in the yellow `ngit --customize` uses
+  for its sections, and command and option names are bold. Supporting text
+  is dimmed: bracketed defaults and possible values, `# comments` in
+  examples and the pointer to the global options. Piped output,
+  `NO_COLOR` and `--json` invocations get plain text with no escape codes.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and

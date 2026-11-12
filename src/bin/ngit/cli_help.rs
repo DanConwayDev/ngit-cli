@@ -19,7 +19,13 @@
 
 use std::ffi::{OsStr, OsString};
 
-use clap::{Arg, ArgAction, Command, CommandFactory, FromArgMatches};
+use clap::{
+    Arg, ArgAction, ColorChoice, Command, CommandFactory, FromArgMatches,
+    builder::{
+        StyledStr, Styles,
+        styling::{AnsiColor, Style},
+    },
+};
 
 use crate::cli::Cli;
 
@@ -60,6 +66,18 @@ const ALWAYS_LISTED_GLOBAL: &str = "json";
 
 const HELP_FLAG_ID: &str = "help";
 
+/// Section headings share the accent `ngit --customize` gives its sections.
+const HEADING: Style = AnsiColor::Yellow.on_default().bold();
+/// Supporting text steps back so the commands and descriptions beside it
+/// stand out: bracketed defaults and possible values, comments in examples
+/// and the pointer to the global options.
+const MUTED: Style = Style::new().dimmed();
+const STYLES: Styles = Styles::styled()
+    .header(HEADING)
+    .usage(HEADING)
+    .context(MUTED)
+    .context_value(MUTED);
+
 /// The command tree as the terminal presents it.
 ///
 /// clap's long layout puts every description on its own lines, separated by
@@ -82,6 +100,7 @@ pub fn command<T: AsRef<OsStr>>(args: &[T]) -> Command {
     let long = requested("--help") || requested("help");
 
     let mut root = Cli::command()
+        .styles(STYLES)
         // Unlimited: clap moves every description to its own line as soon as
         // one would not fit beside its option.
         .term_width(0)
@@ -94,6 +113,9 @@ pub fn command<T: AsRef<OsStr>>(args: &[T]) -> Command {
                 .action(ArgAction::HelpShort)
                 .help("Print a summary with -h, or full help and workflow notes with --help"),
         );
+    if requested("--json") {
+        root = root.color(ColorChoice::Never);
+    }
     if long {
         root = fold_long_help(root);
     }
@@ -144,7 +166,7 @@ fn shape_subcommand(mut command: Command, long: bool) -> Command {
             .hide(true),
     );
     command = command.help_template(format!(
-        "{about}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{GLOBAL_OPTIONS_POINTER}{{after-help}}"
+        "{about}{{usage-heading}} {{usage}}\n\n{{all-args}}\n\n{MUTED}{GLOBAL_OPTIONS_POINTER}{MUTED:#}{{after-help}}"
     ));
     command.mut_subcommands(|subcommand| shape_subcommand(subcommand, long))
 }
@@ -191,7 +213,9 @@ fn wrap(text: &str) -> String {
 /// its long layout.
 fn fold_long_help(mut command: Command) -> Command {
     if let Some(notes) = command.get_after_long_help().cloned() {
-        command = command.after_help(notes).after_long_help(None);
+        command = command
+            .after_help(style_notes(&notes))
+            .after_long_help(None);
     }
     command.mut_args(fold_long_arg_help)
 }
@@ -223,7 +247,7 @@ fn fold_long_arg_help(mut arg: Arg) -> Arg {
                 .iter()
                 .map(|value| value.to_string_lossy())
                 .collect();
-            help = format!("{help} [default: {}]", defaults.join(" "));
+            help = format!("{help} {MUTED}[default: {}]{MUTED:#}", defaults.join(" "));
             arg = arg.hide_default_value(true);
         }
         help.push_str("\nPossible values:");
@@ -238,6 +262,34 @@ fn fold_long_arg_help(mut arg: Arg) -> Arg {
         arg = arg.help(help).hide_possible_values(true);
     }
     arg
+}
+
+/// Marks the unindented `Heading:` lines of workflow notes and mutes the
+/// `# comments` in their examples. The escape codes are stripped again by
+/// clap unless stdout is a colour terminal.
+fn style_notes(notes: &StyledStr) -> StyledStr {
+    let styled: Vec<String> = notes
+        .to_string()
+        .lines()
+        .map(|line| {
+            if line.ends_with(':') && !line.starts_with(' ') {
+                return format!("{HEADING}{line}{HEADING:#}");
+            }
+            // Examples are indented by four spaces; a comment fills the line
+            // or follows the command.
+            let example = line.strip_prefix("    ").map(str::trim_start);
+            let comment = match example {
+                Some(example) if example.starts_with("# ") => Some(line.len() - example.len()),
+                Some(_) => line.find(" # ").map(|at| at + 1),
+                None => None,
+            };
+            match comment {
+                Some(at) => format!("{}{MUTED}{}{MUTED:#}", &line[..at], &line[at..]),
+                None => line.to_string(),
+            }
+        })
+        .collect();
+    styled.join("\n").into()
 }
 
 /// Parses `args` like `Cli::try_parse_from`, rendering help and usage errors
@@ -441,6 +493,40 @@ mod tests {
                 help(path, "--help"),
                 "{path:?}"
             );
+        }
+    }
+
+    #[test]
+    fn styling_is_limited_to_colour_terminals() {
+        let heading = format!("{HEADING}Workflows:{HEADING:#}");
+        let error = help_error(&["ngit", "--help"]);
+        // clap writes the styled form to a colour terminal and the plain form
+        // everywhere else, including under `NO_COLOR`.
+        let styled = error.render().ansi().to_string();
+        assert!(styled.contains(&heading));
+        let styled_help = |args: &[&str]| help_error(args).render().ansi().to_string();
+        for (args, muted) in [
+            (&["ngit", "pr", "--help"][..], GLOBAL_OPTIONS_POINTER),
+            (&["ngit", "pr", "-h"], GLOBAL_OPTIONS_POINTER),
+            (
+                &["ngit", "pr", "--help"],
+                "# one commit: its subject and body become the title and description",
+            ),
+            (&["ngit", "sync", "--help"], "# every ref"),
+        ] {
+            assert!(
+                styled_help(args).contains(&format!("{MUTED}{muted}{MUTED:#}")),
+                "{args:?} does not mute `{muted}`"
+            );
+        }
+        // The command beside a comment keeps its normal weight.
+        assert!(styled_help(&["ngit", "sync", "--help"]).contains(&format!(
+            "    ngit sync --json                  {MUTED}# every ref"
+        )));
+        assert!(!error.to_string().contains('\u{1b}'));
+        assert_eq!(command(&["ngit", "--help"]).get_color(), ColorChoice::Auto);
+        for args in [["ngit", "--help", "--json"], ["ngit", "--json", "--help"]] {
+            assert_eq!(command(&args).get_color(), ColorChoice::Never);
         }
     }
 

@@ -660,7 +660,11 @@ async fn main() {
         }
     } else {
         // Show help when no command is provided
-        if let Err(help) = cli_help::try_parse_from(["ngit", "--help"]) {
+        let mut args = vec!["ngit", "--help"];
+        if cli.json {
+            args.push("--json");
+        }
+        if let Err(help) = cli_help::try_parse_from(args) {
             help.exit();
         }
         std::process::exit(0);
