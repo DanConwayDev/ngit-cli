@@ -176,7 +176,7 @@ pub async fn launch(
 
     let selected_repo = get_resolved_repo_coordinate_for_publishing(&git_repo, &mut client).await?;
     let mut lookup = RepositoryLookup::from_resolved(&git_repo, &selected_repo)?;
-    let mut repo_coordinates = selected_repo.coordinate;
+    let mut repo_coordinates = selected_repo.coordinate.clone();
 
     if !no_fetch {
         fetching_with_account(
@@ -680,6 +680,23 @@ pub async fn launch(
         .await?
     };
 
+    // Only track a PR that represents the checked-out branch's full tip.
+    // Publishing patches or a range ending elsewhere must not retarget it.
+    if as_pr {
+        let root = root_proposal
+            .as_ref()
+            .or_else(|| events.first())
+            .context("proposal generated no root event")?;
+        let tip = commits.last().context("proposal has no commits")?;
+        let remote =
+            ngit::repo_ref::get_nostr_remote_for_resolved_coordinate(&git_repo, &selected_repo)
+                .await?;
+        if let Some(remote) = remote {
+            setup_sent_pr_tracking(&git_repo, &remote.name, root, tip)
+                .context("PR was published, but local upstream tracking could not be configured")?;
+        }
+    }
+
     if crate::output::is_json() {
         let result_event = events.first().context("proposal generated no events")?;
         let entity = if as_pr { "pr" } else { "patch" };
@@ -719,6 +736,44 @@ pub async fn launch(
         }
     }
     // TODO check if there is already a similarly named
+    Ok(())
+}
+
+fn setup_sent_pr_tracking(repo: &Repo, remote: &str, root: &Event, tip: &Sha1Hash) -> Result<()> {
+    let head = repo.git_repo.head()?;
+    if !head.is_branch() {
+        return Ok(());
+    }
+    let Some(branch_name) = head.shorthand().ok().filter(|name| name.starts_with("pr/")) else {
+        return Ok(());
+    };
+    if head.target() != Some(git2::Oid::from_str(&tip.to_string())?) {
+        return Ok(());
+    }
+    let config = repo.git_repo.config()?;
+    if config
+        .get_string(&format!("branch.{branch_name}.remote"))
+        .is_ok()
+        || config
+            .get_string(&format!("branch.{branch_name}.merge"))
+            .is_ok()
+    {
+        return Ok(());
+    }
+    let advertised = crate::git_remote_helper::proposal_branch_name(
+        root,
+        login::get_curent_user(repo)?.as_ref(),
+    )?;
+    repo.git_repo.reference(
+        &format!("refs/remotes/{remote}/{advertised}"),
+        git2::Oid::from_str(&tip.to_string())?,
+        true,
+        "published by ngit send",
+    )?;
+    repo.git_repo
+        .find_branch(branch_name, git2::BranchType::Local)?
+        .set_upstream(Some(&format!("{remote}/{advertised}")))
+        .context("failed to set published PR upstream")?;
     Ok(())
 }
 

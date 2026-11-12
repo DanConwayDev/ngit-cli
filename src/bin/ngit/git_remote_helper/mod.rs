@@ -268,6 +268,7 @@ fn respond_to_option(tokens: &[&str], push_options: &mut PushOptions) -> bool {
 
 mod fetch;
 mod list;
+pub(crate) use list::proposal_branch_name;
 pub(crate) mod push;
 
 /// Run the remote-helper protocol. `args` are the arguments following

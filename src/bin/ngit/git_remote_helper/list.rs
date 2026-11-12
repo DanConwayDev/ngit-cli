@@ -195,6 +195,23 @@ async fn get_open_and_draft_proposals_state(
             .into_iter()
             .filter(|name| name.starts_with("pr/"))
             .collect::<HashSet<_>>();
+        // A locally renamed PR branch still opts into its configured upstream.
+        // send records the advertised name, which can differ from the local name.
+        let config = git_repo.git_repo.config()?;
+        let tracked = branches
+            .iter()
+            .filter_map(|branch| {
+                config
+                    .get_string(&format!("branch.{branch}.merge"))
+                    .ok()
+                    .and_then(|name| {
+                        name.strip_prefix("refs/heads/pr/")
+                            .map(|suffix| format!("pr/{suffix}"))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut branches = branches;
+        branches.extend(tracked);
 
         if branches.is_empty() {
             return Ok(HashMap::new());
@@ -421,7 +438,7 @@ fn proposal_branch_names(
 }
 
 /// The single preferred branch name for a proposal.
-fn proposal_branch_name(
+pub(crate) fn proposal_branch_name(
     proposal: &nostr::prelude::Event,
     current_user: Option<&nostr::prelude::PublicKey>,
 ) -> Result<String> {

@@ -39,6 +39,19 @@ Open a PR with ngit send:
   body as title and description. Pass --subject and --description together
   or not at all. Do not also push a `pr/` branch for the same proposal.
 
+  After publishing a full local pr/ branch tip, send sets its upstream when
+  none exists. It uses the selected Nostr remote and the advertised PR name
+  (bare for the configured author, event-ID-suffixed for other identities).
+  Existing tracking is preserved. Patches, partial ranges ending before
+  HEAD, detached HEADs and ordinary branches do not acquire tracking.
+  After success, inspect or use the configured upstream:
+    git rev-parse --abbrev-ref '@{upstream}'
+    git pull --ff-only
+  A renamed branch can still track the original PR. If local and upstream
+  names differ, plain git push may refuse under push.default=simple; update
+  that PR with send --in-reply-to <PR-ID|nevent> instead. After a PR is merged,
+  switch to the default branch and pull it; the PR ref may no longer exist.
+
 Stacked PRs:
   Stacks are inferred: a branch that contains the unique latest tip of one
   of your other open or draft PRs becomes that PR's child and follows the

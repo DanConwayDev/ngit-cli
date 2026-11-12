@@ -253,6 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ngit send` configures upstream tracking after publishing a full local
+  `pr/` branch tip. Tracking uses the selected Nostr remote and its advertised
+  PR name, including after local renames; existing tracking is preserved.
+  Patches, partial ranges and ordinary branches do not acquire an upstream.
 - CI trigger reachability warnings describe only locally available signed
   state, without predicting rejection of PR-only commits or telling users
   to repush them. Coordinator policy and object availability decide acceptance.
