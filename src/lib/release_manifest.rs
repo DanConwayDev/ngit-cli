@@ -173,7 +173,8 @@ pub struct ResolvedReleaseManifestAsset {
 /// Parse and validate a release manifest without resolving its templates.
 pub fn parse_release_manifest(input: &str) -> Result<ReleaseManifest> {
     let mut manifest: ReleaseManifest =
-        serde_yaml::from_str(input).context("release manifest is not valid YAML")?;
+        serde_saphyr::from_str_with_options(input, crate::yaml::options())
+            .context("release manifest is not valid YAML")?;
     manifest.validate_and_normalize()?;
     Ok(manifest)
 }
@@ -934,12 +935,71 @@ assets:
     }
 
     #[test]
+    fn yaml_compat_preserves_aliases_block_scalars_and_numeric_strings() {
+        let manifest = parse_release_manifest(
+            r#"
+schema: 1
+application: "123"
+notes: |-
+  First line
+  Second line
+assets:
+  - source: &download https://example.com/app.tar.gz
+    original_url: *download
+    platform_agnostic: true
+"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.application.as_deref(), Some("123"));
+        assert_eq!(
+            manifest.assets[0].original_url.as_deref(),
+            Some("https://example.com/app.tar.gz")
+        );
+        assert_eq!(manifest.notes.as_deref(), Some("First line\nSecond line"));
+    }
+
+    #[test]
+    fn yaml_compat_rejects_legacy_booleans_merge_keys_and_multiple_documents() {
+        for boolean in ["yes", "no", "on", "off"] {
+            let input = format!(
+                "schema: 1\nassets:\n  - source: https://example.com/app\n    platform_agnostic: {boolean}\n"
+            );
+            assert!(parse_release_manifest(&input).is_err());
+        }
+        for boolean in ["true", "True", "TRUE"] {
+            let input = format!(
+                "schema: 1\nassets:\n  - source: https://example.com/app\n    platform_agnostic: {boolean}\n"
+            );
+            assert!(parse_release_manifest(&input).unwrap().assets[0].platform_agnostic);
+        }
+        for input in [
+            "schema: 1\nassets:\n  - <<: {source: https://example.com/app, platform_agnostic: true}\n",
+            "schema: 1\nassets: [{source: https://example.com/app, platform_agnostic: true}]\n---\nschema: 1\nassets: []\n",
+        ] {
+            assert!(parse_release_manifest(input).is_err());
+        }
+    }
+
+    #[test]
+    fn yaml_compat_errors_do_not_echo_adjacent_values() {
+        let error =
+            parse_release_manifest("schema: [\napplication: private-config-marker\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("release manifest is not valid YAML")
+        );
+        assert!(error.source().is_some());
+        assert!(!format!("{error:#}").contains("private-config-marker"));
+    }
+
+    #[test]
     fn rejects_duplicate_yaml_keys() {
         let error = parse_release_manifest(
             "schema: 1\nschema: 1\nassets:\n  - source: https://example.com/a\n    platform_agnostic: true\n",
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("duplicate field"));
+        assert!(format!("{error:#}").contains("duplicate"));
     }
 
     #[test]

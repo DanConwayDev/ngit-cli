@@ -85,6 +85,20 @@ ngit's test mode and the harness without a circular crate dependency:
   `.with_relay_timeout(RelayTimeout::ExpectedFailure)` on a harness builder or
   `repo.set_relay_timeout(...)` for subsequent commands. Command-local overrides
   use the same policy's `seconds()` value and `timeouts::RELAY_TIMEOUT_ENV`.
+- `RelayTimeout::Long`: sixty seconds for an explicitly identified healthy
+  long-running fixture whose sequential relay/Git operations exceed the normal
+  budget under full-workspace scheduling contention. Select it only on that
+  fixture's builder (or narrowly scoped repository commands), with the healthy
+  operation and any intentionally unavailable endpoint identified in a comment.
+  It is not a default and not a substitute for `ExpectedFailure` on a negative
+  test; functional checks and intentional endpoint failures remain unchanged.
+
+`NGIT_TEST_RELAY_TIMEOUT_SECS` remains test-only: under `NGITTEST`, it sets both
+relay budgets and ignores the production `NGIT_RELAY_TIMEOUT_SECS` /
+`NGIT_RELAY_CONNECT_TIMEOUT_SECS` variables and `nostr.relay-*-secs` config.
+This preserves the harness's ten-second connection allowance and keeps inherited
+user settings from changing fixture timing. Production settings are tested through
+explicit source values without mutating the test process environment.
 
 Three seconds trades some failure-path runtime for scheduling headroom on busy
 CI workers. Do not shorten a query merely because it expects no matching
@@ -146,6 +160,8 @@ tests deliberately do, to cover the global login scope. Before the
 sandbox existed, such a test logged the developer out of their own
 machine and left its throwaway account in their real `~/.gitconfig`.
 `tests/account_global_config_scope.rs` is the regression test.
+For real credential-store testing, the account lifecycle coverage matrix,
+and the disposable NixOS keyring VM, see [account testing](account-testing.md).
 
 ### Relay-injection mechanism: per-spawn env vars
 

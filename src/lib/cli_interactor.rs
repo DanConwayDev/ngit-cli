@@ -76,6 +76,19 @@ fn render_cli_error(
     details: &[(&str, &str)],
     suggestions: &[&str],
 ) -> anyhow::Error {
+    if crate::output_mode::is_json() {
+        crate::reporting::diagnostic(
+            "error",
+            category.unwrap_or("invalid_command"),
+            message,
+            serde_json::json!({"details":details, "suggestions":suggestions}),
+        );
+        return CliError {
+            message: message.to_string(),
+            category,
+        }
+        .into();
+    }
     let dim = Style::new().for_stderr().color256(247);
 
     eprint!(
@@ -537,7 +550,7 @@ pub struct Printer {
 }
 impl Printer {
     pub fn println(&mut self, line: String) {
-        eprintln!("{line}");
+        crate::reporting::message("info", "account_message", &line);
         self.printed_lines.push(line);
     }
     pub fn println_with_custom_formatting(
@@ -545,7 +558,7 @@ impl Printer {
         line: String,
         line_without_formatting: String,
     ) {
-        eprintln!("{line}");
+        crate::reporting::message("info", "account_message", &line);
         self.printed_lines.push(line_without_formatting);
     }
     pub fn printlns(&mut self, lines: Vec<String>) {
@@ -555,11 +568,13 @@ impl Printer {
     }
     pub fn clear_all(&mut self) {
         let term = console::Term::stderr();
-        let _ = term.clear_last_lines(count_lines_per_msg_vec(
-            term.width(),
-            &self.printed_lines,
-            0,
-        ));
+        if crate::output_mode::progress_policy().animate {
+            let _ = term.clear_last_lines(count_lines_per_msg_vec(
+                term.width(),
+                &self.printed_lines,
+                0,
+            ));
+        }
         self.printed_lines.drain(..);
     }
 }

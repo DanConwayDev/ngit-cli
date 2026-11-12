@@ -1,4 +1,4 @@
-//! End-to-end coverage for indexed non-default PR targets through both
+//! End-to-end coverage for explicit PR targets through both
 //! user-facing creation paths.
 
 use anyhow::{Context, Result};
@@ -6,6 +6,60 @@ use nostr_sdk::prelude::*;
 use test_harness::{
     CloneLogin, Harness, KIND_PULL_REQUEST, PublishRepoOpts, event_branch_name_tag, tag_value,
 };
+
+#[tokio::test]
+async fn send_and_git_push_accept_an_explicit_default_target() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (_, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "explicit default contributor".into(),
+            },
+        )
+        .await?;
+    let base = contributor.rev_parse("origin/main").await?;
+    for (branch, use_send) in [("pr/default-send", true), ("pr/default-push", false)] {
+        contributor
+            .git_ok(["checkout", "-b", branch, "origin/main"], "create proposal")
+            .await?;
+        commit_file(&contributor, "change.md", branch, "default target change").await?;
+        let tip = contributor.rev_parse("HEAD").await?;
+        if use_send {
+            ngit_ok(
+                &contributor,
+                &[
+                    "send",
+                    "--defaults",
+                    "--force-pr",
+                    "--target-branch",
+                    "main",
+                ],
+            )
+            .await?;
+        } else {
+            contributor
+                .nostr_push(["origin", branch, "-o", "target-branch=main"])
+                .await?;
+        }
+        let proposal = find_pr(&harness, branch.trim_start_matches("pr/")).await?;
+        assert_eq!(tag_value(&proposal, "b").as_deref(), Some("main"));
+        assert_eq!(
+            tag_value(&proposal, "merge-base").as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(tag_value(&proposal, "c").as_deref(), Some(tip.as_str()));
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn send_and_git_push_target_a_non_default_branch() -> Result<()> {
@@ -512,7 +566,7 @@ async fn target_errors_are_rejected_by_send_and_git_push_without_events() -> Res
         .await?;
     commit_file(&contributor, "error.md", "error\n", "error change").await?;
 
-    for target in ["missing", "main", "bad..target", "2.x"] {
+    for target in ["missing", "bad..target", "2.x"] {
         ngit_fails(
             &contributor,
             &[

@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
-use fresh::fresh_login_or_signup;
+use fresh::{LoginTarget, fresh_login_or_signup};
 use nostr::prelude::{PublicKey, Timestamp, ToBech32};
 
 #[cfg(not(test))]
@@ -54,7 +54,8 @@ pub async fn login_or_signup(
         Err(error) if matches!(signer_info, Some(SignerInfo::Selection { .. })) => Err(error),
         Err(error) if Interactor::is_non_interactive() => Err(require_account(error)),
         Err(error) if error.downcast_ref::<SignerInfoNotFound>().is_some() => {
-            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
+            fresh_login_or_signup(git_repo, client, None, LoginTarget::Global, &[], None, None)
+                .await
         }
         Err(error)
             if matches!(
@@ -62,8 +63,9 @@ pub async fn login_or_signup(
                 Some(credential_store::LookupError::Missing(_))
             ) =>
         {
-            eprintln!("{error}; please log in again");
-            fresh_login_or_signup(git_repo, client, None, false, &[], None, None).await
+            crate::report_message!("info", "account_diagnostic", "{error}; please log in again");
+            fresh_login_or_signup(git_repo, client, None, LoginTarget::Global, &[], None, None)
+                .await
         }
         Err(error) => Err(error),
     }
@@ -133,16 +135,24 @@ fn print_logged_in_as(
 ) -> Result<()> {
     if is_verbose() {
         if !offline_mode && user_ref.metadata.created_at.eq(&Timestamp::from(0)) {
-            eprintln!("failed to find profile...");
+            crate::report_message!("info", "account_diagnostic", "failed to find profile...");
         } else if !offline_mode && user_ref.metadata.name.eq(&user_ref.public_key.to_bech32()?) {
-            eprintln!("failed to extract account name from account metadata...");
+            crate::report_message!(
+                "info",
+                "account_diagnostic",
+                "failed to extract account name from account metadata..."
+            );
         } else if !offline_mode && user_ref.relays.created_at.eq(&Timestamp::from(0)) {
-            eprintln!(
+            crate::report_message!(
+                "info",
+                "account_diagnostic",
                 "failed to find your relay list. consider using another nostr client to create one to enhance your nostr experience."
             );
         }
     }
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         logged_in_message(&user_ref.metadata.name, source, alias)
     );
@@ -192,7 +202,7 @@ pub fn logged_out_message(
 pub fn login_identity(profile_name: &str, alias: Option<&str>) -> String {
     alias.map_or_else(
         || profile_name.to_string(),
-        |alias| format!("signer alias '{alias}'"),
+        |alias| format!("signer profile '{alias}'"),
     )
 }
 
@@ -247,11 +257,11 @@ mod display_tests {
         }
         assert_eq!(
             logged_in_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
-            "logged in to this local repository as signer alias 'dcagent'"
+            "logged in to this local repository as signer profile 'dcagent'"
         );
         assert_eq!(
             logged_out_message("Dan Conway", &SignerInfoSource::GitLocal, Some("dcagent")),
-            "logged out of this local repository as signer alias 'dcagent'"
+            "logged out of this local repository as signer profile 'dcagent'"
         );
     }
 }

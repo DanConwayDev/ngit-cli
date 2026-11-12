@@ -302,7 +302,7 @@ impl NostrUrlDecoded {
                         };
                         let progress = TransientLine::write(
                             &term,
-                            &format!("fetching pubic key info from {domain}..."),
+                            &format!("fetching public key info from {domain}..."),
                         )?;
                         let res = nip05_query(npub_or_nip05).await.with_context(|| {
                             let fallback = nip_ad_error

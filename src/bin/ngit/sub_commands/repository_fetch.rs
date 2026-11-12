@@ -195,12 +195,14 @@ mod tests {
             relays: vec![],
         };
         let mut client = Client::new(Params {
+            proactive_auth: false,
             keys: None,
             relay_default_set: vec![],
             announcement_indexer_relays: vec![],
             blaster_relays: vec![],
             fallback_signer_relays: vec![],
             grasp_default_set: vec![],
+            ..Params::default()
         });
 
         assert_eq!(

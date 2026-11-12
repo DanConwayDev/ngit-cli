@@ -1,9 +1,21 @@
 version: 1
 name: Rust CI
+system: x86_64-linux
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
 jobs:
-  ci:
-    run: apps.x86_64-linux.ci-checks
+  rust:
+    requirements:
+      resources:
+        memory-mib: {gte: 5120}
+        scratch-mib: {gte: 16384}
+    steps:
+      - dependencies: {build: packages.x86_64-linux.ci-dependencies}
+      - test-server: {build: packages.x86_64-linux.ci-test-server}
+      - format
+      - compile
+      - lint
+      - tests

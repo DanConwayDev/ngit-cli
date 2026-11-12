@@ -1556,7 +1556,7 @@ async fn merge_without_id_resolves_bare_branch_by_tip_when_logged_out() -> Resul
 
     // Log out so the author-based mapping has no user to match against.
     let out = author
-        .ngit(["account", "logout"])
+        .ngit(["account", "logout", "--forget"])
         .output()
         .await
         .context("failed to spawn ngit account logout")?;

@@ -3,20 +3,30 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+static JSON_STREAM: AtomicBool = AtomicBool::new(false);
+pub fn start_stream() {
+    JSON_STREAM.store(true, Ordering::Relaxed);
+}
+pub fn is_stream() -> bool {
+    JSON_STREAM.load(Ordering::Relaxed)
+}
+
+pub async fn write_json_line(value: &serde_json::Value) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(&bytes).await?;
+    stdout.flush().await?;
+    Ok(())
+}
+
 use anyhow::Result;
+pub use ngit::output_mode::{is_json, set_json_mode};
 use nostr::prelude::{EventId, RelayUrl, ToBech32, nip19::Nip19Event};
 use serde::Serialize;
 
-static JSON_MODE: AtomicBool = AtomicBool::new(false);
 static JSON_OUTPUT: LazyLock<Mutex<Option<serde_json::Value>>> = LazyLock::new(|| Mutex::new(None));
-
-pub fn set_json_mode(enabled: bool) {
-    JSON_MODE.store(enabled, Ordering::Relaxed);
-}
-
-pub fn is_json() -> bool {
-    JSON_MODE.load(Ordering::Relaxed)
-}
 
 pub fn term() -> console::Term {
     if is_json() {
@@ -58,6 +68,9 @@ pub fn set_event(action: &str, entity: &str, event_id: EventId, relay: Option<&R
 }
 
 pub fn finish_success() {
+    if is_stream() {
+        return;
+    }
     let value = JSON_OUTPUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -91,6 +104,15 @@ pub fn error_document(error: &anyhow::Error) -> serde_json::Value {
 }
 
 pub fn finish_error(error: &anyhow::Error) {
+    if is_stream() {
+        ngit::reporting::diagnostic(
+            "error",
+            "stream_stopped",
+            &format!("{error:#}"),
+            serde_json::json!({}),
+        );
+        return;
+    }
     let mut value = JSON_OUTPUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -117,6 +139,18 @@ pub fn finish_error(error: &anyhow::Error) {
     std::println!("{rendered}");
 }
 
+// Human result summaries are redundant once the command has a JSON document.
+// Earlier operational messages remain visible as structured diagnostics.
+pub fn human_message(message: &str) {
+    let has_result = JSON_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if !has_result {
+        ngit::reporting::message("info", "command_message", message);
+    }
+}
+
 // Keep human-facing command output visible in JSON mode without allowing it to
 // precede or follow the final machine-readable document on stdout. The remote
 // helper module is declared before these macros, so its protocol stdout is not
@@ -124,14 +158,14 @@ pub fn finish_error(error: &anyhow::Error) {
 macro_rules! println {
     () => {{
         if crate::output::is_json() {
-            std::eprintln!();
+            // JSON has no blank presentation lines.
         } else {
             std::println!();
         }
     }};
     ($($arg:tt)*) => {{
         if crate::output::is_json() {
-            std::eprintln!($($arg)*);
+            crate::output::human_message(&format!($($arg)*));
         } else {
             std::println!($($arg)*);
         }
@@ -141,9 +175,18 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => {{
         if crate::output::is_json() {
-            std::eprint!($($arg)*);
+            crate::output::human_message(&format!($($arg)*));
         } else {
             std::print!($($arg)*);
         }
+    }};
+}
+
+// Modules declared before output (notably the Git remote helper) retain their
+// protocol-specific output. This fallback is for command diagnostics, not UI.
+macro_rules! eprintln {
+    () => {{ if !crate::output::is_json() { std::eprintln!(); } }};
+    ($($arg:tt)*) => {{
+        ngit::reporting::message("info", "command_diagnostic", &format!($($arg)*));
     }};
 }

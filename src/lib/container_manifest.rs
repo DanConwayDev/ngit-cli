@@ -59,7 +59,8 @@ pub struct LoadedContainerManifest {
 /// Parse, validate, and normalize a container manifest.
 pub fn parse_container_manifest(input: &str) -> Result<ContainerManifest> {
     let mut manifest: ContainerManifest =
-        serde_yaml::from_str(input).context("container manifest is not valid YAML")?;
+        serde_saphyr::from_str_with_options(input, crate::yaml::options())
+            .context("container manifest is not valid YAML")?;
     manifest.validate_and_normalize()?;
     Ok(manifest)
 }
@@ -275,6 +276,42 @@ containers:
                 parse_container_manifest(input).is_err(),
                 "accepted:\n{input}"
             );
+        }
+    }
+
+    #[test]
+    fn yaml_compat_preserves_aliases_and_multiline_descriptions() {
+        let manifest = parse_container_manifest(
+            r#"
+schema: 1
+containers:
+  api:
+    layout: &layout artifacts/api
+    description: |-
+      First line
+      Second line
+  worker:
+    layout: *layout
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.containers["worker"].layout,
+            manifest.containers["api"].layout
+        );
+        assert_eq!(
+            manifest.containers["api"].description.as_deref(),
+            Some("First line\nSecond line")
+        );
+    }
+
+    #[test]
+    fn yaml_compat_rejects_merge_keys_and_multiple_documents() {
+        for input in [
+            "schema: 1\ncontainers:\n  api:\n    <<: {layout: artifacts/api}\n",
+            "schema: 1\ncontainers: {api: {layout: artifacts/api}}\n---\nschema: 1\ncontainers: {worker: {layout: artifacts/worker}}\n",
+        ] {
+            assert!(parse_container_manifest(input).is_err());
         }
     }
 

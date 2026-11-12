@@ -233,10 +233,20 @@ async fn capture_snapshot() -> Result<Snapshot> {
     // `nostr_push` supplies the harness environment to the remote helper.
     // `-u` sets upstream tracking; the second push does NOT use `-u` again
     // (plain FF).
+    let advanced_main = git2::Repository::open(publisher.dir())?
+        .head()?
+        .peel_to_commit()?
+        .id();
+    let contributor_repo = git2::Repository::open(contributor.dir())?;
+    assert!(
+        !contributor_repo.odb()?.exists(advanced_main),
+        "fixture must require fetching the destination's new default-branch tip"
+    );
     contributor
         .nostr_push(["-u", "origin", &format!("pr/{BRANCH}")])
         .await
         .context("first nostr_push -u origin pr/feature failed")?;
+    assert!(contributor_repo.odb()?.exists(advanced_main));
 
     // Capture the original PR event from the GRASP so we have its ID and
     // merge-base tag.

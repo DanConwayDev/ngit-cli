@@ -782,29 +782,29 @@ fn validate_fresh(cli: &Cli, args: &SubCommandArgs, user_has_grasp_list: bool) -
 #[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
     #[clap(long, alias = "title")]
-    /// name of repository (preferred over --identifier); --title is an alias
+    /// Name of repository (preferred over --identifier); --title is an alias
     pub(crate) name: Option<String>,
     #[clap(long)]
-    /// shortname with no spaces or special characters
+    /// Shortname with no spaces or special characters
     pub(crate) identifier: Option<String>,
     #[clap(long)]
-    /// optional description
+    /// Optional description
     pub(crate) description: Option<String>,
     #[clap(short, long, value_parser, num_args = 1..)]
-    /// where your git+nostr data is hosted; defaults apply when omitted, pass
+    /// Where your git+nostr data is hosted; defaults apply when omitted, pass
     /// an empty value (--grasp-server "") to host without a grasp server
     pub(crate) grasp_server: Vec<String>,
     #[clap(long = "additional-relay", value_parser, num_args = 1..)]
-    /// additional relays beyond grasp servers
+    /// Additional relays beyond grasp servers
     pub(crate) additional_relay: Vec<String>,
     #[clap(long = "additional-clone")]
-    /// additional git server URLs beyond grasp servers
+    /// Additional git server URLs beyond grasp servers
     pub(crate) additional_clone: Vec<String>,
     #[clap(long, value_parser, num_args = 1..)]
-    /// homepage
+    /// Homepage
     pub(crate) web: Vec<String>,
     #[clap(short = 'u', long = "u", alias = "upstream", value_parser, num_args = 1..)]
-    /// informational NIP-34 subordinate-fork `u` tag fields
+    /// Informational NIP-34 subordinate-fork `u` tag fields
     pub(crate) upstream: Vec<String>,
     /// Internal named-action projection used by `ngit repo edit`. It is not
     /// part of the `ngit init` command surface.
@@ -849,22 +849,22 @@ pub struct SubCommandArgs {
     #[clap(skip)]
     pub(crate) replace_hashtags: bool,
     #[clap(long, value_parser, num_args = 1..)]
-    /// hashtags for repository discovery
+    /// Hashtags for repository discovery
     pub(crate) hashtag: Vec<String>,
     #[clap(long)]
-    /// usually root commit but will be more recent commit for forks
+    /// Usually root commit but will be more recent commit for forks
     pub(crate) earliest_unique_commit: Option<String>,
     #[clap(long)]
-    /// drop unknown tags from the existing announcement when republishing
+    /// Drop unknown tags from the existing announcement when republishing
     /// (default is to preserve them so tags added by future ngit versions
     /// or third-party tools aren't silently lost)
     pub(crate) clean: bool,
     #[clap(long, conflicts_with = "public")]
-    /// mark the repository private and restrict discovery to its repository
+    /// Mark the repository private and restrict discovery to its repository
     /// relays
     pub(crate) private: bool,
     #[clap(long, conflicts_with = "private")]
-    /// remove the private marker from this maintainer's announcement
+    /// Remove the private marker from this maintainer's announcement
     pub(crate) public: bool,
 }
 
@@ -2370,7 +2370,9 @@ async fn launch_with_mode(
 
 fn should_suggest_skill(git_repo: &Repo, git_repo_path: &Path) -> bool {
     agent_guidance::reminders_enabled(git_repo).unwrap_or(false)
-        && agent_guidance::status(git_repo_path).is_ok_and(|status| !status.installed)
+        && agent_guidance::status(git_repo_path).is_ok_and(|status| {
+            agent_guidance::warning_for(&status) == Some(agent_guidance::WarningKind::Setup)
+        })
 }
 
 fn print_skill_suggestion() {
@@ -2378,9 +2380,7 @@ fn print_skill_suggestion() {
         "{}",
         Style::new()
             .fg(console::Color::Color256(214))
-            .apply_to(
-                "tip: help coding agents collaborate through ngit by running `ngit skill install` (or `ngit skill opt-out --local` to stop reminders here)",
-            )
+            .apply_to(agent_guidance::SETUP_TIP)
             .for_stderr()
     );
 }

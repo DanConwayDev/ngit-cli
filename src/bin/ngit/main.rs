@@ -4,13 +4,13 @@
 
 use std::ffi::OsStr;
 
-use clap::Parser;
 use cli::{
-    AccountCommands, CiCommands, Cli, Commands, ContainerCommands, IssueCommands, LogTailMode,
+    AccountCommands, CiCommands, Commands, ContainerCommands, IssueCommands, LogTailMode,
     PrCommands, SignerParams, customise_template, extract_signer_cli_arguments,
 };
 
 mod cli;
+mod cli_help;
 mod command_input;
 use ngit::{
     cli_interactor::{self, CliError},
@@ -28,6 +28,12 @@ mod git_remote_helper;
 mod output;
 // Declared after `output` so the stdout-guarding `println!` macro is in
 // scope for it.
+mod ci_delta;
+mod ci_display;
+mod ci_event_view;
+mod ci_history;
+mod ci_plan;
+mod ci_previous;
 mod ci_projection;
 mod push_bookkeeping;
 mod state_transaction;
@@ -80,11 +86,15 @@ async fn main() {
         return;
     }
 
-    let mut cli = Cli::parse();
+    let mut cli = cli_help::parse();
     output::set_json_mode(cli.json);
+    if cli.json {
+        console::set_colors_enabled_stderr(false);
+    }
+    ngit::output_mode::set_terminal_recovery_enabled(!cli.json);
     set_output_mode(if cli.quiet {
         OutputMode::Quiet
-    } else if cli.verbose || std::env::var("NGITTEST").is_ok() {
+    } else if cli.verbose || (!cli.json && std::env::var("NGITTEST").is_ok()) {
         OutputMode::Verbose
     } else {
         OutputMode::Normal
@@ -92,8 +102,16 @@ async fn main() {
 
     // Non-interactive by default; set NGIT_INTERACTIVE_MODE only when -i is
     // specified
-    if cli.interactive {
+    if cli.json {
+        // Machine-readable commands never consume terminal input, including
+        // when the interactive setting was inherited from a parent process.
+        std::env::remove_var("NGIT_INTERACTIVE_MODE");
+    } else if cli.interactive {
         std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+    }
+
+    if cli.proactive_auth {
+        std::env::set_var("NGIT_PROACTIVE_AUTH", "true");
     }
 
     if cli.repo_relay_only {
@@ -143,8 +161,9 @@ async fn main() {
         Err(err) => {
             if cli.json {
                 output::finish_error(&err);
+            } else {
+                eprintln!("Error: {err:?}");
             }
-            eprintln!("Error: {err:?}");
             std::process::exit(1);
         }
     };
@@ -163,11 +182,15 @@ async fn main() {
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
                 AccountCommands::Connect(sub_args) => {
-                    // `connect` is an alias for `login -i`: always interactive
-                    std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+                    // JSON output remains non-interactive even through this alias.
+                    if !cli.json {
+                        std::env::set_var("NGIT_INTERACTIVE_MODE", "1");
+                    }
                     sub_commands::login::launch(sub_args, signer_params).await
                 }
-                AccountCommands::Logout(sub_args) => sub_commands::logout::launch(sub_args).await,
+                AccountCommands::Logout(sub_args) => {
+                    sub_commands::logout::launch(sub_args, signer_params).await
+                }
                 AccountCommands::ExportKeys(sub_args) => {
                     sub_commands::export_keys::launch(sub_args, signer_params).await
                 }
@@ -487,6 +510,9 @@ async fn main() {
             },
             Commands::Ci(args) => match &args.ci_command {
                 CiCommands::Status {
+                    watch,
+                    follow,
+                    full_events,
                     target,
                     require_ci_trust,
                     log_tail,
@@ -494,18 +520,48 @@ async fn main() {
                 } => {
                     sub_commands::ci_status::launch(
                         target.as_deref(),
+                        *watch,
                         *offline,
                         *require_ci_trust,
-                        *log_tail,
+                        sub_commands::ci_status::View {
+                            detailed: false,
+                            follow: *follow,
+                            full_events: *full_events,
+                            log_tail: *log_tail,
+                        },
                         cli.json,
                         signer_params,
                     )
                     .await
                 }
+                CiCommands::Service { command } => match command {
+                    cli::CiServiceCommands::Status { offline } => {
+                        sub_commands::ci_service::launch(*offline, signer_params).await
+                    }
+                    cli::CiServiceCommands::Request {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_request(
+                            coordinator,
+                            *offline,
+                            signer_params,
+                        )
+                        .await
+                    }
+                    cli::CiServiceCommands::Stop {
+                        coordinator,
+                        offline,
+                    } => {
+                        sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
+                            .await
+                    }
+                },
                 CiCommands::Request {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci request` is deprecated; use `ci service request`");
                     sub_commands::ci_control::launch_request(coordinator, *offline, signer_params)
                         .await
                 }
@@ -513,14 +569,53 @@ async fn main() {
                     coordinator,
                     offline,
                 } => {
+                    eprintln!("warning: `ci stop` is deprecated; use `ci service stop`");
                     sub_commands::ci_control::launch_stop(coordinator, *offline, signer_params)
                         .await
+                }
+                CiCommands::Cancel {
+                    coordinator,
+                    run_id,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_cancel(
+                        coordinator,
+                        run_id,
+                        cli.force,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
+                }
+                CiCommands::Secrets(args) => {
+                    sub_commands::ci_control::launch_secrets(args, signer_params).await
+                }
+                CiCommands::Inspect(args) => {
+                    sub_commands::ci_inspect::launch(args, signer_params).await
+                }
+                CiCommands::Rerun {
+                    coordinator,
+                    result,
+                    job,
+                    selection,
+                    offline,
+                } => {
+                    sub_commands::ci_control::launch_rerun(
+                        coordinator,
+                        result,
+                        job.as_deref(),
+                        selection,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
                 CiCommands::Trigger {
                     coordinator,
                     commit_ish,
                     workflow,
                     git_ref,
+                    selection,
                     offline,
                 } => {
                     sub_commands::ci_control::launch_trigger(
@@ -528,6 +623,7 @@ async fn main() {
                         commit_ish.as_deref(),
                         workflow,
                         git_ref.as_deref(),
+                        selection,
                         *offline,
                         signer_params,
                     )
@@ -564,7 +660,13 @@ async fn main() {
         }
     } else {
         // Show help when no command is provided
-        Cli::parse_from(["ngit", "--help"]);
+        let mut args = vec!["ngit", "--help"];
+        if cli.json {
+            args.push("--json");
+        }
+        if let Err(help) = cli_help::try_parse_from(args) {
+            help.exit();
+        }
         std::process::exit(0);
     };
 
@@ -576,7 +678,9 @@ async fn main() {
             // Already printed styled output to stderr
             std::process::exit(1);
         }
-        eprintln!("Error: {err:?}");
+        if !cli.json {
+            eprintln!("Error: {err:?}");
+        }
         std::process::exit(1);
     }
     if cli.json {

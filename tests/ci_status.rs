@@ -217,6 +217,36 @@ async fn job_log_fields_follow_the_selected_json_output_mode() -> Result<()> {
     assert_eq!(job(&none, "test")["logs"], Value::Null);
     assert!(job(&none, "test").get("log_tail").is_none());
 
+    // Default inspection selects exactly the same HEAD attempts as status,
+    // with structured evidence and opt-in embedded logs.
+    for target_args in [vec![], vec!["--target", "HEAD"]] {
+        let output = arranged
+            .publisher
+            .ngit(
+                ["ci", "inspect", "--json", "--offline"]
+                    .into_iter()
+                    .chain(target_args),
+            )
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let inspected: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(inspected["ci"], none["ci"]);
+        assert_eq!(inspected["action"], "inspect");
+    }
+    let output = arranged
+        .publisher
+        .ngit(["ci", "inspect", "--json", "--offline", "--logs"])
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let inspected: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(inspected["ci"], all["ci"]);
+
     Ok(())
 }
 
@@ -530,7 +560,7 @@ async fn pr_ci_is_reported_for_the_latest_revision_only() -> Result<()> {
     let outdated = CiRunSpec::new(
         &arranged.published,
         "run-outdated",
-        first_tip,
+        first_tip.clone(),
         CiTrigger::pull_request(&pr),
         arranged.now,
     )
@@ -553,11 +583,61 @@ async fn pr_ci_is_reported_for_the_latest_revision_only() -> Result<()> {
     );
     assert!(runs(&json).is_empty());
 
+    assert_eq!(json["history"]["previous_tip"]["commit"], first_tip);
+    assert!(
+        json["history"]["previous_tip"]["workflows"][0]
+            .get("jobs")
+            .is_none()
+    );
+    contributor
+        .git_ok(
+            [
+                "branch",
+                "-m",
+                &format!("pr/revised({})", &root.id.to_hex()[..8]),
+            ],
+            "name PR branch",
+        )
+        .await?;
+    let local_tip = commit_file(&contributor, "local.md", "not published\n").await?;
+    let (_, local) = ci_status(&contributor, &[]).await?;
+    assert_eq!(local["target"]["commit"], local_tip);
+    assert_eq!(local["ci"]["state"], "none");
+    assert_eq!(local["history"]["previous_tip"]["commit"], first_tip);
+    let pending = CiRunSpec::new(
+        &arranged.published,
+        "run-current",
+        &second_tip,
+        CiTrigger::pull_request_revision(&pr, &revision),
+        arranged.now,
+    )
+    .conclusion(None)
+    .progress(CiProgress::running(arranged.now));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &pending)
+        .await?;
+    let (_, local) = ci_status(&contributor, &[]).await?;
+    assert_eq!(local["history"]["previous_tip"]["commit"], second_tip);
+    assert_eq!(
+        local["history"]["previous_tip"]["workflows"]
+            .as_array()
+            .context("workflow summaries")?
+            .len(),
+        1
+    );
+    assert_eq!(
+        local["history"]["previous_tip"]["command"],
+        format!("ngit ci status {second_tip}")
+    );
+    let (_, explicit) = ci_status(&contributor, &[&local_tip]).await?;
+    assert!(explicit["history"]["previous_tip"].is_null());
+
     // The current revision's own result is reported.
     let current = CiRunSpec::new(
         &arranged.published,
         "run-current",
-        second_tip,
+        second_tip.clone(),
         CiTrigger::pull_request_revision(&pr, &revision),
         arranged.now,
     )
@@ -573,6 +653,7 @@ async fn pr_ci_is_reported_for_the_latest_revision_only() -> Result<()> {
     assert_eq!(json["ci"]["conclusion"], "failure");
     assert_eq!(json["ci"]["revision_matched"], true);
     assert_eq!(runs(&json).len(), 1, "only the current revision's run");
+    assert!(json["history"]["previous_tip"].is_null());
 
     Ok(())
 }
@@ -874,11 +955,11 @@ async fn require_ci_trust_gates_on_the_weakest_current_run() -> Result<()> {
     .await?;
     assert!(out.status.success());
 
-    // The offline tier reads the same cache but skips the domain ladder, so
-    // its coverage is partial.
+    // The cached signed request establishes authority without optional
+    // domain checks, so this view has complete relevant evidence.
     let (out, offline) = ci_status(&arranged.publisher, &["--offline"]).await?;
     assert!(out.status.success());
-    assert_eq!(offline["ci"]["coverage"], "partial");
+    assert_eq!(offline["ci"]["coverage"], "complete");
     assert_eq!(runs(&offline).len(), 1, "the cache tier still has the run");
     assert_eq!(runs(&offline)[0]["classification"], "maintainer-directed");
 
@@ -1074,5 +1155,438 @@ async fn a_validated_manual_trigger_is_maintainer_direction_for_its_run() -> Res
         "the requesting maintainer is named as an npub: {json}"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn expected_steps_come_only_from_the_hash_verified_commit_blob() -> Result<()> {
+    let arranged = arrange("ci-declared-plan").await?;
+    let yaml = "on: push\njobs:\n  test:\n    steps:\n      - id: unit\n        name: Unit tests\n        run: tests\n  deploy:\n    if: false\n    steps:\n      - id: publish\n        run: publish\n";
+    let head = commit_file(&arranged.publisher, "ci.yml", yaml).await?;
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "planned",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", workflow_hash(yaml))
+    .conclusion(None)
+    .progress(CiProgress::running(arranged.now));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &arranged.coordinator, &spec)
+        .await?;
+    // A dirty working copy must not change the committed plan.
+    std::fs::write(
+        arranged.publisher.dir().join("ci.yml"),
+        "jobs: {wrong: {steps: []}}",
+    )?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    let declared = runs(&json)[0]["declared_jobs"]
+        .as_array()
+        .context("declared jobs")?;
+    assert_eq!(declared.len(), 2);
+    assert!(
+        declared
+            .iter()
+            .any(|j| j["id"] == "test" && j["steps"][0]["label"] == "Unit tests")
+    );
+    assert!(
+        runs(&json)[0]["jobs"]
+            .as_array()
+            .context("jobs")?
+            .is_empty(),
+        "YAML never fabricates observed skips"
+    );
+    let other = Keys::generate();
+    let mismatched = CiRunSpec::new(
+        &arranged.published,
+        "bad-hash",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", "ff".repeat(32));
+    arranged
+        .harness
+        .publish_ci_run(&arranged.ci_relay, &other, &mismatched)
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    let bad = runs(&json)
+        .iter()
+        .find(|r| r["run_id"] == "bad-hash")
+        .context("mismatched run")?;
+    assert!(
+        bad["declared_jobs"]
+            .as_array()
+            .context("declarations")?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn workflow_reports_queue_and_running_jobs_without_provider_snapshots() -> Result<()> {
+    use nostr::prelude::{EventBuilder, Tag, event::FinalizeEvent};
+    let arranged = arrange("ci-running-jobs").await?;
+    let head = arranged.publisher.rev_parse("HEAD").await?;
+    let mut progress = CiProgress::running(arranged.now);
+    progress.status = "queued".into();
+    let spec = CiRunSpec::new(
+        &arranged.published,
+        "queued-run",
+        head,
+        CiTrigger::push("refs/heads/main"),
+        arranged.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(progress);
+    let events = build_ci_run(&arranged.coordinator, &spec)?;
+    let queued = events.progress.context("queued marker")?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, std::slice::from_ref(&queued))
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    assert_eq!(runs(&json)[0]["status"], "queued");
+    assert!(
+        runs(&json)[0]["in_progress_jobs"]
+            .as_array()
+            .context("active jobs")?
+            .is_empty()
+    );
+
+    let mut tags: Vec<_> = queued
+        .tags
+        .iter()
+        .filter(|t| t.as_slice()[0] != "status")
+        .cloned()
+        .collect();
+    tags.push(Tag::custom("status", ["in_progress"]));
+    tags.push(Tag::custom("in-progress", ["test"]));
+    let running = EventBuilder::new(queued.kind, "")
+        .custom_created_at(Timestamp::from(queued.created_at.as_secs() + 1))
+        .tags(tags)
+        .finalize(&arranged.coordinator)?;
+    arranged
+        .harness
+        .publish_ci_events(&arranged.ci_relay, &[running])
+        .await?;
+    let (_, json) = ci_status(&arranged.publisher, &[]).await?;
+    assert_eq!(runs(&json)[0]["status"], "in_progress");
+    assert_eq!(
+        runs(&json)[0]["in_progress_jobs"],
+        serde_json::json!(["test"])
+    );
+    assert!(
+        runs(&json)[0]["live_jobs"]
+            .as_array()
+            .context("snapshots")?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn earlier_attempts_are_inspectable_but_never_make_a_queued_rerun_green() -> Result<()> {
+    let a = arrange("ci-attempt-history").await?;
+    let head = a.publisher.rev_parse("HEAD").await?;
+    let first = CiRunSpec::new(
+        &a.published,
+        "old-success",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 600,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW));
+    let mut queued = CiProgress::running(a.now);
+    queued.status = "queued".into();
+    let second = CiRunSpec::new(
+        &a.published,
+        "queued-rerun",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(queued);
+    let old = build_ci_run(&a.coordinator, &first)?;
+    let old_id = old.result.as_ref().context("result")?.id;
+    let mut events = old.all();
+    events.extend(build_ci_run(&a.coordinator, &second)?.all());
+    a.harness.publish_ci_events(&a.ci_relay, &events).await?;
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(runs(&json).len(), 1);
+    assert_eq!(runs(&json)[0]["status"], "queued");
+    let previous = &json["history"]["earlier_attempts"];
+    assert_eq!(previous.as_array().context("history")?.len(), 1);
+    assert_eq!(previous[0]["event"], old_id.to_hex());
+    assert_eq!(previous[0]["event_type"], "result");
+    assert_eq!(previous[0]["time_kind"], "reported");
+    assert!(previous[0]["timestamp"].is_u64());
+    let (output, _) =
+        ci_status(&a.publisher, &["--require-ci-trust", "maintainer-directed"]).await?;
+    assert!(!output.status.success());
+    let inspection = a
+        .publisher
+        .ngit(["ci", "inspect", &old_id.to_hex(), "--json", "--offline"])
+        .output()
+        .await?;
+    assert!(
+        inspection.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspection.stderr)
+    );
+    // Finishing the latest attempt must not hide an older attempt that still runs.
+    let older_running = CiRunSpec::new(
+        &a.published,
+        "older-running",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 300,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(CiProgress::running(a.now - 300));
+    let events = build_ci_run(&a.coordinator, &older_running)?;
+    let progress_id = events.progress.as_ref().context("old progress")?.id;
+    a.harness
+        .publish_ci_events(&a.ci_relay, &events.all())
+        .await?;
+    let finished = CiRunSpec::new(
+        &a.published,
+        "queued-rerun",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW));
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &finished)
+        .await?;
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(json["ci"]["conclusion"], "success");
+    let active = json["history"]["earlier_attempts"]
+        .as_array()
+        .context("earlier attempts")?
+        .iter()
+        .find(|r| r["run_id"] == "older-running")
+        .context("old running attempt")?;
+    assert_eq!(active["event"], progress_id.to_hex());
+    assert_eq!(active["event_type"], "progress");
+    assert_eq!(active["status"], "in_progress");
+    assert_eq!(active["time_kind"], "started");
+    Ok(())
+}
+
+#[tokio::test]
+async fn independent_branch_contexts_at_one_commit_are_not_retries() -> Result<()> {
+    let a = arrange("ci-context-attempts").await?;
+    let head = a.publisher.rev_parse("HEAD").await?;
+    for (id, branch) in [
+        ("main-run", "refs/heads/main"),
+        ("release-run", "refs/heads/release"),
+    ] {
+        let spec = CiRunSpec::new(&a.published, id, &head, CiTrigger::push(branch), a.now)
+            .workflow("ci.yml", workflow_hash(WORKFLOW));
+        a.harness
+            .publish_ci_run(&a.ci_relay, &a.coordinator, &spec)
+            .await?;
+    }
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(runs(&json).len(), 2);
+    assert!(
+        json["history"]["earlier_attempts"]
+            .as_array()
+            .context("attempts")?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn branch_history_is_latest_related_tip_and_never_current_evidence() -> Result<()> {
+    let a = arrange("ci-branch-history").await?;
+    let first = a.publisher.rev_parse("HEAD").await?;
+    let second = commit_file(&a.publisher, "second.md", "published\n").await?;
+    a.publisher.nostr_push(["-u", "origin", "main"]).await?;
+    let old = CiRunSpec::new(
+        &a.published,
+        "late-first",
+        &first,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW));
+    let newer = CiRunSpec::new(
+        &a.published,
+        "second-failed",
+        &second,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 600,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(Some("failure"));
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &old)
+        .await?;
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &newer)
+        .await?;
+    let (_, same) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(same["ci"]["conclusion"], "failure");
+    assert!(same["history"]["previous_tip"].is_null());
+    let head = commit_file(&a.publisher, "local.md", "unpublished\n").await?;
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(json["ci"]["state"], "none");
+    assert_eq!(json["history"]["previous_tip"]["commit"], second, "{json}");
+    let stale = CiRunSpec::new(
+        &a.published,
+        "local-run",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 3600,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(CiProgress::expired(a.now));
+    for event in build_ci_run(&a.coordinator, &stale)?.all() {
+        ngit::client::save_event_in_local_cache(a.publisher.dir(), &event).await?;
+    }
+    let (_, stale) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(stale["ci"]["state"], "stale");
+    assert!(stale["history"]["previous_tip"].is_null());
+    let mut queued_progress = CiProgress::running(a.now - 120);
+    queued_progress.status = "queued".into();
+    let queued = CiRunSpec::new(
+        &a.published,
+        "local-run",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now - 120,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(queued_progress);
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &queued)
+        .await?;
+    let (_, queued) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(runs(&queued)[0]["status"], "queued");
+    assert!(queued["history"]["previous_tip"].is_null());
+    let pending = CiRunSpec::new(
+        &a.published,
+        "local-run",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW))
+    .conclusion(None)
+    .progress(CiProgress::running(a.now));
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &pending)
+        .await?;
+    let (_, running) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(running["ci"]["state"], "running");
+    assert!(running["history"]["previous_tip"].is_null());
+    let done = CiRunSpec::new(
+        &a.published,
+        "local-run",
+        &head,
+        CiTrigger::push("refs/heads/main"),
+        a.now,
+    )
+    .workflow("ci.yml", workflow_hash(WORKFLOW));
+    a.harness
+        .publish_ci_run(&a.ci_relay, &a.coordinator, &done)
+        .await?;
+    let (_, finished) = ci_status(&a.publisher, &[]).await?;
+    assert_eq!(finished["ci"]["conclusion"], "success");
+    assert!(finished["history"]["previous_tip"].is_null());
+    a.publisher
+        .git_ok(
+            ["checkout", "-b", "divergent", &first],
+            "divergent checkout",
+        )
+        .await?;
+    commit_file(&a.publisher, "divergent.md", "different\n").await?;
+    a.publisher
+        .git_ok(
+            ["config", "branch.divergent.remote", "origin"],
+            "upstream remote",
+        )
+        .await?;
+    a.publisher
+        .git_ok(
+            ["config", "branch.divergent.merge", "refs/heads/main"],
+            "upstream branch",
+        )
+        .await?;
+    let (_, divergent) = ci_status(&a.publisher, &[]).await?;
+    assert!(divergent["history"]["previous_tip"].is_null());
+    assert!(
+        divergent["history"]["notice"]
+            .as_str()
+            .context("notice")?
+            .contains("divergent")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unpublished_branch_is_not_ambiguous_or_associated_by_shared_tip() -> Result<()> {
+    let a = arrange("ci-unpublished-branch").await?;
+    a.publisher
+        .git_ok(
+            ["checkout", "-b", "pr/unpublished"],
+            "create unpublished branch",
+        )
+        .await?;
+    let (_, json) = ci_status(&a.publisher, &[]).await?;
+    assert!(json["history"]["previous_tip"].is_null());
+    assert!(
+        json["history"]["notice"]
+            .as_str()
+            .context("notice")?
+            .starts_with("No published PR found")
+    );
+
+    let pr = a
+        .harness
+        .publish_pr(
+            &a.published,
+            PublishPrOpts {
+                branch: Some("existing".into()),
+                commits: vec![],
+                title: "existing PR".into(),
+                description: "shared commits are not a branch association".into(),
+                in_reply_to: vec![],
+            },
+        )
+        .await?;
+    ngit_ok(&a.publisher, &["pr", "checkout", &pr.event_id.to_hex()]).await?;
+    a.publisher
+        .git_ok(
+            ["branch", "-m", "pr/new-work"],
+            "rename to unpublished branch",
+        )
+        .await?;
+    for add_commit in [false, true] {
+        if add_commit {
+            commit_file(&a.publisher, "extra.md", "local work\n").await?;
+        }
+        let (_, json) = ci_status(&a.publisher, &[]).await?;
+        assert!(json["history"]["previous_tip"].is_null());
+        assert!(
+            json["history"]["notice"]
+                .as_str()
+                .context("notice")?
+                .starts_with("No published PR found")
+        );
+    }
     Ok(())
 }

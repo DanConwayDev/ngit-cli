@@ -526,6 +526,51 @@ pub async fn verify_identity<L: Nip05Lookup + ?Sized + Sync>(
     settle_identity(identity, signer, outcome)
 }
 
+/// Optional display labels, independent of repository authorization.
+///
+/// Reuse fresh cached repository-root matches, but never probe those roots for
+/// presentation. Network lookups are restricted to the signer's own declared
+/// NIP-05 identity. Offline views use only fresh cached verification.
+pub async fn verified_identity_labels<L: Nip05Lookup + ?Sized + Sync>(
+    lookup: &L,
+    cache: Option<&Nip05Cache>,
+    signers: &[PublicKey],
+    profiles: &HashMap<PublicKey, String>,
+    repository_domains: &[String],
+    offline: bool,
+    now: Timestamp,
+) -> HashMap<PublicKey, String> {
+    let mut labels = HashMap::new();
+    for signer in signers {
+        for identity in
+            identity_candidates(profiles.get(signer).map(String::as_str), repository_domains)
+        {
+            if cache.and_then(|c| c.get(identity.address(), now))
+                == Some(CachedLookup::Resolved(*signer))
+            {
+                labels.insert(*signer, identity.display().into_owned());
+                break;
+            }
+        }
+    }
+    if !offline {
+        let unresolved: Vec<_> = signers
+            .iter()
+            .filter(|s| !labels.contains_key(s))
+            .copied()
+            .collect();
+        // Empty repository domains is deliberate: no unrelated server probes.
+        for (signer, identities) in
+            verify_identities(lookup, cache, &unresolved, profiles, &[], now).await
+        {
+            if let Some(identity) = identities.into_iter().find(|i| i.verified) {
+                labels.insert(signer, identity.identity.display().into_owned());
+            }
+        }
+    }
+    labels
+}
+
 /// Resolve every candidate identity for every signer.
 ///
 /// `profile_nip05` holds the `nip05` value from each signer's kind-0 profile,
@@ -786,6 +831,80 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn display_labels_verify_only_declared_identities_and_reuse_cached_roots() {
+        let signer = Keys::generate().public_key();
+        let wrong = Keys::generate().public_key();
+        let lookup = CountingLookup::resolving("_@coordinator.example", signer);
+        let profiles = [(signer, "_@coordinator.example".to_owned())]
+            .into_iter()
+            .collect();
+        let roots = vec!["unrelated.example".to_owned()];
+        let labels =
+            verified_identity_labels(&lookup, None, &[signer], &profiles, &roots, false, ts(100))
+                .await;
+        assert_eq!(
+            labels.get(&signer).map(String::as_str),
+            Some("coordinator.example")
+        );
+        assert_eq!(lookup.looked_up(), vec!["_@coordinator.example"]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Nip05Cache::in_dir(dir.path());
+        cache
+            .put(
+                &address("_@unrelated.example"),
+                CachedLookup::Resolved(signer),
+                ts(100),
+            )
+            .unwrap();
+        let offline_lookup = CountingLookup::default();
+        let labels = verified_identity_labels(
+            &offline_lookup,
+            Some(&cache),
+            &[signer, wrong],
+            &HashMap::new(),
+            &roots,
+            true,
+            ts(101),
+        )
+        .await;
+        assert_eq!(
+            labels.get(&signer).map(String::as_str),
+            Some("unrelated.example")
+        );
+        assert!(!labels.contains_key(&wrong));
+        let expired = verified_identity_labels(
+            &offline_lookup,
+            Some(&cache),
+            &[signer],
+            &HashMap::new(),
+            &roots,
+            true,
+            ts(100 + NIP05_SUCCESS_TTL.as_secs() + 1),
+        )
+        .await;
+        assert!(expired.is_empty());
+        assert_eq!(offline_lookup.calls(), 0);
+
+        let profiles = [(signer, "runner@coordinator.example".to_owned())]
+            .into_iter()
+            .collect();
+        let named = CountingLookup::resolving("runner@coordinator.example", signer);
+        let labels =
+            verified_identity_labels(&named, None, &[signer], &profiles, &[], false, ts(100)).await;
+        assert_eq!(
+            labels.get(&signer).map(String::as_str),
+            Some("runner@coordinator.example")
+        );
+        let mismatch = CountingLookup::resolving("runner@coordinator.example", wrong);
+        assert!(
+            verified_identity_labels(&mismatch, None, &[signer], &profiles, &[], false, ts(100))
+                .await
+                .is_empty()
+        );
     }
 
     fn identity(nip05: &str) -> Nip05Identity {

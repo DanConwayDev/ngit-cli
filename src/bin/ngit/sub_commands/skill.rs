@@ -126,10 +126,10 @@ fn resolve_scope(args: &SkillInstallArgs) -> Result<InstallScope> {
     })
 }
 
-/// Decide whether a first repository install may add a pointer to the managed
-/// skill in existing AGENTS.md/CLAUDE.md files. Declining via
+/// Decide whether a first repository install may append the help instruction
+/// to existing AGENTS.md/CLAUDE.md files. Declining via
 /// `--no-agent-file` wins; an interactive session is asked (default yes);
-/// non-interactive sessions keep the pre-existing automatic pointer.
+/// non-interactive sessions keep the pre-existing automatic edit.
 fn resolve_update_instructions(
     args: &SkillInstallArgs,
     root: &Path,
@@ -144,7 +144,7 @@ fn resolve_update_instructions(
     }
     Interactor::default().confirm(
         PromptConfirmParms::default()
-            .with_prompt("add a pointer to the ngit skill in existing AGENTS.md/CLAUDE.md files?")
+            .with_prompt("add the ngit instruction to existing AGENTS.md/CLAUDE.md files?")
             .with_default(true),
     )
 }
@@ -421,6 +421,10 @@ fn print_changed_files(changed_files: &[String], partial: bool, is_maintainer: O
 }
 
 fn print_status(output: &Output) {
+    println!(
+        "instruction in AGENTS.md or CLAUDE.md: {}",
+        output.guidance.help_instruction
+    );
     println!("installed: {}", output.guidance.installed);
     println!(
         "installed version: {}",

@@ -19,7 +19,7 @@ use client::{
     Connect, FetchReport, consolidate_fetch_outcome, finish_fetch_progress,
     get_repo_ref_from_cache, save_repository_privacy_to_git_config, warn_if_invited_as_maintainer,
 };
-use git::{RepoActions, nostr_url::NostrUrlDecoded};
+use git::nostr_url::NostrUrlDecoded;
 use ngit::{
     client::{self, Client, Params},
     git::{self, Repo, utils::set_git_timeout},
@@ -279,6 +279,7 @@ pub(crate) mod push;
 /// corrupt git's remote-helper protocol.
 #[allow(clippy::too_many_lines)]
 pub async fn run(args: &[String]) -> Result<()> {
+    ngit::output_mode::set_terminal_recovery_enabled(false);
     // Capture this before any libgit2-backed operation. libgit2 does not read
     // the command-config environment that Git forwards to remote helpers.
     let command_signer =
@@ -324,7 +325,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         return Ok(());
     };
 
-    let git_repo_path = git_repo.get_path()?;
+    let git_repo_path = git_repo.workdir_or_git_dir();
     let cached_repo_ref =
         get_repo_ref_from_cache(Some(git_repo_path), &decoded_nostr_url.coordinate)
             .await
@@ -352,7 +353,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     // quiet suppression happens inside print_update_notice_if_available
     let _ = ngit::version_check::print_update_notice_if_available(Some(git_repo_path)).await;
 
-    let mut client = Client::new(Params::with_git_config_relay_defaults(&Some(&git_repo)));
+    let mut client_params = Params::with_git_config_relay_defaults(&Some(&git_repo));
+    if std::env::var_os("NGIT_PROACTIVE_AUTH").is_none() {
+        if let Some(value) = command_config_value("nostr.proactive-auth")? {
+            client_params.proactive_auth = git2::Config::parse_bool(&value)
+                .context("nostr.proactive-auth must be a boolean")?;
+        }
+    }
+    let mut client = Client::new(client_params);
     if let Some(repo_ref) = cached_repo_ref.as_ref().filter(|repo_ref| repo_ref.private) {
         client.nip42_register_private_repo_relays(repo_ref.relays.clone());
     }
@@ -799,6 +807,21 @@ mod tests {
             command_config_value_from(&mut command, "nostr.signer").unwrap(),
             Some("Dan Conway".to_string())
         );
+    }
+
+    #[test]
+    fn extracts_proactive_auth_from_git_command_config() {
+        for enabled in [false, true] {
+            let mut command = Command::new("git");
+            command.env_remove("GIT_CONFIG_COUNT").env(
+                "GIT_CONFIG_PARAMETERS",
+                format!("'nostr.proactive-auth'='{enabled}'"),
+            );
+            let value = command_config_value_from(&mut command, "nostr.proactive-auth")
+                .unwrap()
+                .unwrap();
+            assert_eq!(git2::Config::parse_bool(&value).unwrap(), enabled);
+        }
     }
 
     #[test]

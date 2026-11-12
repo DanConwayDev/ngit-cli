@@ -90,7 +90,7 @@ pub(super) async fn app_init(
         ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
     )
     .context("failed to order software application replacement")?;
-    context.emit_human_warnings_before_signing(args.json);
+    context.emit_human_warnings_before_signing(crate::output::is_json());
     let signer = context
         .signer
         .clone()
@@ -104,7 +104,8 @@ pub(super) async fn app_init(
     require_signed_author(&event, signer_public_key)?;
     let application = SoftwareApplication::parse(&event)
         .context("signed software application failed validation")?;
-    let relay_results = publish_application(&context, event.clone(), args.json).await?;
+    let relay_results =
+        publish_application(&context, event.clone(), crate::output::is_json()).await?;
 
     let operation = if existing.is_some() {
         "edited"
@@ -224,7 +225,7 @@ pub(super) async fn app_link(
         ngit::event_ordering::OrderingPolicy::PreferSameTimestamp,
     )
     .context("failed to order software application link replacement")?;
-    context.emit_human_warnings_before_signing(args.json);
+    context.emit_human_warnings_before_signing(crate::output::is_json());
     let signer = context
         .signer
         .clone()
@@ -234,7 +235,8 @@ pub(super) async fn app_link(
     require_signed_author(&event, signer_public_key)?;
     let application = SoftwareApplication::parse(&event)
         .context("signed software application failed validation")?;
-    let relay_results = publish_application(&context, event.clone(), args.json).await?;
+    let relay_results =
+        publish_application(&context, event.clone(), crate::output::is_json()).await?;
 
     let authority = context.authority(&application);
     let result = mutation_json(

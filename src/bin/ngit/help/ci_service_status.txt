@@ -1,0 +1,17 @@
+Reading the result:
+  Lists coordinators with observed workflow runs for this repository in
+  the last 30 days, across commits and branches, plus coordinators that
+  were requested, claim to serve it, or advertise readiness for it without
+  recent runs. Readiness is a discovery hint for choosing a coordinator to
+  request, not a promise of acceptance. Maintainer requests, the
+  coordinator's own service claim, its advertised availability and the
+  authorization of individual runs are separate facts: a run does not prove
+  a standing service agreement, and a claim does not prove that a workflow
+  is eligible or that the coordinator is connected.
+
+  This is observed history, not an archive (JSON `history_complete: false`):
+  relays may prune evidence, so absence never proves that service stopped.
+  Coordinator labels are verified NIP-05 identities, never profile display
+  names, with the npub always shown; JSON has `verified_identity`, the full
+  `request_history`, activity counts, latest-run evidence and relay
+  failures.

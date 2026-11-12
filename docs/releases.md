@@ -25,19 +25,70 @@ the tagged commit; adding it does not backfill existing tags.
 
 ## Nix CI checks
 
-Branch pushes and pull requests run `.ngit/nix/workflows/ci.yaml`. Tag pushes
-run checks once in the release workflow, before its secret-bearing publisher.
-Both select the root flake's `ci-checks` app and the pinned development shell:
+Branch pushes, PRs and manual requests run `.ngit/nix/workflows/ci.yaml`.
+Its Rust job reports dependency, test-server, format, compile, lint and test steps.
+The compile step restores Nix-cached third-party objects and builds the current
+source and test binaries; lint and tests share the same writable target tree.
+The dependency cache includes the pinned toolchain, formatter, vendored crate
+sources and native build tools as well as dev-profile objects. Compile, lint
+and tests use Cargo's offline mode, so they do not contact the crate registry.
+The next build step caches the pinned Grasp integration-test server separately,
+keeping heavy builds sequential and giving each its own timing and cache checkpoint.
+No secrets enter these builds or cached outputs.
+
+The Rust and crate-publication jobs require at least 5 GiB of guest RAM,
+leaving headroom for compilation and parallel test fixtures. This is a
+provider-selection minimum, not a memory cap; publication also compiles
+the packaged crate during Cargo verification.
+
+Review the provider summary at the top of the final job log when tuning these
+minimums: observed guest RAM includes the guest OS, and swap activity or OOM
+kills signal pressure. Compare cold dependency builds with cached runs and
+leave headroom; a successful run alone does not measure peak memory.
+
+`.ngit/nix/workflows/default.nix` owns commands scoped by workflow, job and
+step (`ci.rust.compile`, `release.publish`). The root flake exposes them as
+`ngit-ci.commands`; YAML step names select them without repeated `run:` fields.
+For local checks, use the pinned development shell:
 
 ```sh
-nix run .#ci-checks
+nix develop --command cargo fmt --all -- --check
+nix develop --command cargo clippy --workspace --all-targets --locked -- --deny warnings
+nix develop --command cargo test --workspace --locked
 ```
 
-The app runs Clippy, formatting and workspace tests, with optional named step
-measurements separating compilation from execution. No diagnostic artifacts
-are produced. The provider's Nix cache can reuse tool closures; this migration
-does not introduce a persistent Cargo target cache. The separate GitHub platform
-archive workflow remains responsible for platform release binaries.
+The release workflow depends on the complete CI workflow at the peeled tag
+commit, reusing compatible successful checks instead of repeating them. Missing
+checks are scheduled; failures block publication. `reuse: never` keeps the
+publisher specific to each tag push. Its ten-minute cancellation grace allows
+an active `cargo publish` to finish after TERM; cancellation before publication
+starts exits immediately. Forced cancellation still bounds the process lifetime.
+Cargo's own package verification remains enabled. The separate platform archive
+workflow remains responsible for platform release binaries.
+
+## OpenSSL in downloadable archives
+
+The Unix archive workflow builds checksum-pinned OpenSSL 3.5.9 LTS with
+`tools/release/build-openssl.py` and statically links it through
+`openssl-sys`'s target-specific `OPENSSL_DIR`, `OPENSSL_STATIC`, and
+`OPENSSL_NO_VENDOR` settings. Keep these settings even though Cargo enables
+`vendored-openssl`: the compatible `openssl-src` 300.x release still contains
+OpenSSL 3.6.3. Updating a Nix library or running Cargo audit does not update
+these bundled libraries. Windows uses WinHTTP/WinCNG and does not bundle
+OpenSSL with the current dependency features. Remove the separate build only
+after a compatible, patched source crate is available and the resulting
+archives are verified.
+
+Run `python3 -m unittest discover -s tools/release` for the packaging checks.
+Inspect each built archive with `tools/release/verify-openssl.py`. On Linux,
+`NGIT_TLS_TEST_BIN_DIR=/absolute/path/to/unpacked/archive cargo test --locked
+--test git_https` exercises that exact `ngit`/`git-remote-nostr` pair against a
+local HTTPS Git server, including rejection with an unrelated trust anchor.
+The macOS scan checks each architecture's provider version independently,
+since a crypto-only link can omit the full TLS version banner.
+The version scan is a packaging guard; it does not replace native platform
+builds, dynamic-link inspection, or TLS runtime tests. Repeat inspection on
+published downloads before reporting a release vulnerability as resolved.
 
 ## Quick start
 
@@ -254,7 +305,27 @@ genuine upload or post-upload-verification shortfall produces the final
 per-server copy warning.
 
 `--verbose` also retains each per-server outcome and failure message. `--json`
-keeps stdout machine-readable and does not draw progress bars.
+keeps stdout as one final result document and does not draw progress bars.
+Blossom progress is flushed as JSON Lines on stderr during release, nsite and
+container publication (unless `--quiet` is set). Each record has
+`type: "progress"`, `operation: "blossom"`, `schema_version: 1` and an `event`
+object with a snake-case `kind` and milestone-specific fields. Placement events
+identify `filename` and the full `server` URL; upload requests include `attempt`
+and `total_bytes`. Throttled `uploaded_bytes` records contain cumulative
+`bytes_sent`, `total_bytes`, `percent` and `attempt`; counters reset for each
+request. They are emitted at 10% steps or on the next byte event after 15 seconds,
+not as a heartbeat while stalled. `upload_body_finished` means the request body
+was sent, not that storage or publication succeeded. `placement_finished` reports
+the server outcome; the final stdout result and exit status remain authoritative
+for the whole command.
+
+Signer and relay progress also use compact JSON Lines, with separate operation
+IDs; shared notices and errors use diagnostic records. See the
+[progress contract](architecture/progress-output.md). Git operations and external
+processes may still emit text. Consumers should select the envelope above and
+tolerate other record types, future fields and remaining plain-text paths.
+Keep stdout and stderr separate; do not feed combined output to a single-document
+JSON parser. Without `--json`, captured stderr receives plain progress lines.
 
 Each asset has exactly one source:
 

@@ -18,6 +18,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     path::Path,
 };
 
@@ -34,7 +35,7 @@ use ngit::{
             CiInputs, CiTrustContext, QuotedEventFetcher, RepositoryContext,
             identity_lookup_signers, resolve_cache_tier, resolve_full_tier,
         },
-        trust::{CONTEXT_INCOMPLETE_LABEL, Coverage, TrustClassification, TrustResolution},
+        trust::{Coverage, TrustClassification, TrustResolution},
     },
     client::{
         Client, Connect, get_all_proposal_patch_pr_pr_update_events_from_cache,
@@ -311,9 +312,16 @@ pub struct Integrity {
 }
 
 pub struct JobReport {
+    pub name: Option<String>,
+    pub event_id: EventId,
+    pub details: ngit::ci::details::JobDetails,
+    pub execution_run_id: String,
+    pub reused: bool,
     pub job_id: String,
     pub conclusion: Conclusion,
     pub provider: PublicKey,
+    pub started_at: Option<u64>,
+    pub reported_at: u64,
     pub log_tail: String,
     pub logs: Option<String>,
     pub resolution: TrustResolution,
@@ -321,17 +329,30 @@ pub struct JobReport {
 
 impl JobReport {
     fn human_line(&self) -> String {
-        let label = self
-            .resolution
-            .classification()
-            .map_or("Checking", TrustClassification::label);
         let logs = self
             .logs
             .as_ref()
-            .map_or(String::new(), |logs| format!("  {logs}"));
+            .map_or(String::new(), |logs| format!("  logs: {logs}"));
+        let name = self
+            .name
+            .as_ref()
+            .filter(|name| **name != self.job_id)
+            .map_or(self.job_id.clone(), |name| {
+                format!("{name} ({})", self.job_id)
+            });
         format!(
-            "    job {} {} [{label}]{logs}",
-            self.job_id, self.conclusion
+            "{}{}",
+            crate::ci_display::timed_row(
+                &self.conclusion.to_string(),
+                &name,
+                1,
+                crate::ci_display::elapsed_label(crate::ci_display::elapsed_to_report(
+                    self.started_at,
+                    self.reported_at
+                ))
+                .as_deref()
+            ),
+            console::style(logs).dim(),
         )
     }
 
@@ -346,14 +367,25 @@ impl JobReport {
             .filter(|tail| !tail.is_empty())
     }
 
-    fn human_lines(&self, mode: LogTailMode) -> String {
+    fn human_lines(&self, mode: LogTailMode, plan: Option<&crate::ci_plan::JobPlan>) -> String {
         let mut output = self.human_line();
+        if self.reused {
+            let _ = write!(output, "\n      reused from run {}", self.execution_run_id);
+        }
+        output.push_str(&crate::ci_plan::steps(&self.details, plan, false));
+        output.push_str(&crate::ci_plan::artifact_links(&self.details));
+        if let Some(reason) = &self.details.skip_reason {
+            let _ = write!(output, "\n      skip reason: {reason}");
+        }
+
         if let Some(tail) = self.included_log_tail(mode) {
-            output.push_str("\n      log tail:");
-            for line in tail.lines() {
-                output.push_str("\n        ");
-                output.push_str(line);
-            }
+            let _ = write!(
+                output,
+                "\n\n{}\n{}\n{}\n",
+                console::style(format!("--- job log: {} ---", self.job_id)).bold(),
+                console::style(crate::ci_display::clean_log(tail).trim_end_matches('\n')).dim(),
+                console::style(format!("--- end job log: {} ---", self.job_id)).bold()
+            );
         }
         output
     }
@@ -361,6 +393,7 @@ impl JobReport {
 
 pub struct RunReport {
     pub run: WorkflowRun,
+    pub plan: Vec<crate::ci_plan::JobPlan>,
     pub state: RunState,
     /// 1-based position of this attempt among the attempts seen for the same
     /// coordinator and workflow on this target's revision.
@@ -375,6 +408,7 @@ pub struct CiReport {
     pub conclusion: Option<Conclusion>,
     pub revision_matched: bool,
     pub coverage: Coverage,
+    pub coverage_gaps: Vec<ngit::ci::resolve::CoverageGap>,
     /// The conservative rollup across the current runs.
     pub rollup: TrustResolution,
     pub runs: Vec<RunReport>,
@@ -463,6 +497,7 @@ impl CiReport {
             "conclusion": self.conclusion.map(Conclusion::as_str),
             "revision_matched": self.revision_matched,
             "coverage": self.coverage.as_str(),
+            "coverage_gaps": self.coverage_gaps,
             "runs": self.runs.iter().map(|run| run.to_json(log_tail)).collect::<Vec<Value>>(),
         });
         if let Some(outdated) = &self.outdated {
@@ -507,7 +542,14 @@ impl CiReport {
 
     /// The `ngit ci status` human rendering.
     pub fn print(&self, target: &Target, log_tail: LogTailMode) {
-        println!("CI for {}", target.describe());
+        match target {
+            Target::Commit { ids, .. } => println!(
+                "CI for {} ({})",
+                target.describe(),
+                ids.first().map_or("unknown commit", String::as_str)
+            ),
+            Target::PullRequest { .. } => println!("CI for {}", target.describe()),
+        }
         self.print_result_lines(log_tail);
         // Shape rejections are diagnostics for a publisher, not something a
         // reader of this repository can act on, so they follow ngit's
@@ -544,6 +586,7 @@ impl CiReport {
             }
         }
         for run in &self.runs {
+            println!();
             run.print(log_tail);
         }
         if let Some(conclusion) = self.conclusion {
@@ -553,8 +596,24 @@ impl CiReport {
         }
         self.print_outdated(log_tail);
         if self.is_incomplete() && self.has_results() {
-            println!("  {CONTEXT_INCOMPLETE_LABEL}");
+            self.print_coverage();
         }
+    }
+
+    pub fn print_coverage(&self) {
+        for gap in self.visible_coverage_gaps(ngit::output_mode::is_verbose()) {
+            println!("{}", console::style(gap.message()).dim());
+        }
+    }
+
+    pub(crate) fn visible_coverage_gaps(
+        &self,
+        verbose: bool,
+    ) -> impl Iterator<Item = &ngit::ci::resolve::CoverageGap> {
+        use ngit::ci::resolve::CoverageGap;
+        self.coverage_gaps
+            .iter()
+            .filter(move |gap| verbose || matches!(gap, CoverageGap::QuotedEvents))
     }
 
     /// Earlier revisions, under their own heading. A result for a superseded
@@ -572,6 +631,31 @@ impl CiReport {
 }
 
 impl RunReport {
+    pub(crate) fn previous_attempt(&self, job: &JobReport) -> bool {
+        self.run
+            .has_replacement_allocation(&job.job_id, job.provider, job.details.allocation)
+    }
+
+    pub(crate) fn current_jobs(&self) -> impl Iterator<Item = &JobReport> {
+        self.jobs.iter().filter(|job| !self.previous_attempt(job))
+    }
+
+    pub(crate) fn previous_attempt_lines(&self) -> String {
+        let mut output = String::new();
+        for job in self.jobs.iter().filter(|job| self.previous_attempt(job)) {
+            let _ = writeln!(
+                output,
+                "    {}",
+                console::style(format!(
+                    "{}: previous attempt {} · replacement allocated · ngit ci inspect {}",
+                    job.job_id, job.conclusion, job.event_id
+                ))
+                .dim()
+            );
+        }
+        output
+    }
+
     #[must_use]
     pub fn conclusion(&self) -> Option<Conclusion> {
         match self.state {
@@ -580,35 +664,59 @@ impl RunReport {
         }
     }
 
-    fn state_label(&self) -> String {
+    pub(crate) fn state_label(&self) -> String {
         match self.state {
             RunState::Concluded(conclusion) => conclusion.to_string(),
-            RunState::Running => "running".to_owned(),
+            RunState::Running => self
+                .run
+                .progress
+                .as_ref()
+                .map_or("running", |p| p.status.as_str())
+                .to_owned(),
             RunState::Stale => "stale".to_owned(),
         }
     }
 
     #[must_use]
     pub fn to_json(&self, log_tail: LogTailMode) -> Value {
-        let jobs = self
+        let encode_job = |job: &JobReport| {
+            let mut value = json!({
+                "job": job.job_id,
+                "name": job.name,
+                "event": crate::output::event_id_to_nevent(job.event_id, None),
+                "execution": job.details,
+                "execution_run_id": job.execution_run_id,
+                "reused": job.reused,
+                "conclusion": job.conclusion.as_str(),
+                "provider": npub(job.provider),
+                "started_at": job.started_at,
+                "reported_at": job.reported_at,
+                "elapsed_to_report_ms": crate::ci_display::elapsed_to_report(job.started_at, job.reported_at),
+                "logs": job.logs,
+                "classification": job.resolution.classification().map(TrustClassification::as_str),
+            });
+            if let Some(tail) = job.included_log_tail(log_tail) {
+                value["log_tail"] = json!(tail);
+            }
+            value
+        };
+        let jobs = self.current_jobs().map(encode_job).collect::<Vec<_>>();
+        let previous_jobs = self
             .jobs
             .iter()
-            .map(|job| {
-                let mut value = json!({
-                    "job": job.job_id,
-                    "conclusion": job.conclusion.as_str(),
-                    "provider": npub(job.provider),
-                    "logs": job.logs,
-                    "classification": job.resolution.classification().map(TrustClassification::as_str),
-                });
-                if let Some(tail) = job.included_log_tail(log_tail) {
-                    value["log_tail"] = json!(tail);
-                }
-                value
-            })
-            .collect::<Vec<Value>>();
+            .filter(|job| self.previous_attempt(job))
+            .map(encode_job)
+            .collect::<Vec<_>>();
+        let timing = crate::ci_history::AttemptSummary::new(&self.run, Timestamp::now());
         json!({
+            "time_kind": timing.time_kind,
+            "timestamp": timing.timestamp,
             "workflow": self.run.workflow_path,
+            "event": crate::output::event_id_to_nevent(self.run.container_event_id(), None),
+            "result": self.run.result.as_ref().map(|r| crate::output::event_id_to_nevent(r.event_id, None)),
+            "trigger": self.run.trigger.as_str(),
+            "details": self.run.result.as_ref().map(|r| &r.details).or_else(|| self.run.progress.as_ref().map(|p| &p.details)),
+            "context": self.run.common().context,
             "state": match self.state {
                 RunState::Running => "running",
                 RunState::Concluded(_) => "concluded",
@@ -636,11 +744,37 @@ impl RunReport {
                 "commit_present": self.integrity.commit_present,
                 "workflow_hash_matches": self.integrity.workflow_hash_matches,
             },
+            "status": self.state_label(),
+            "in_progress_jobs": self.running_jobs(),
+            "declared_jobs": self.plan,
             "jobs": jobs,
+            "previous_job_attempts": previous_jobs,
+            "live_jobs": self.run.live_jobs.iter().filter(|j| j.is_live(Timestamp::now())).map(|j| json!({
+                "job": j.job_id, "provider": npub(j.author), "state": "in_progress", "expiration": j.expiration.as_secs(),
+                "started_at": j.started_at.map(|t| t.as_secs()),
+                "execution": j.details, "logs": j.logs,
+                "log_tail": if matches!(log_tail, LogTailMode::None) { None } else { Some(&j.log_tail) },
+            })).collect::<Vec<_>>(),
         })
     }
 
-    pub fn print(&self, log_tail: LogTailMode) {
+    pub(crate) fn running_jobs(&self) -> Vec<&str> {
+        self.run
+            .progress
+            .as_ref()
+            .filter(|p| {
+                self.run.result.is_none()
+                    && p.is_pending()
+                    && p.is_live(Timestamp::now())
+                    && p.created_at <= Timestamp::now()
+            })
+            .into_iter()
+            .flat_map(|p| p.in_progress_jobs.iter().map(String::as_str))
+            .filter(|id| !self.current_jobs().any(|job| job.job_id == *id))
+            .collect()
+    }
+
+    fn print_header(&self) {
         let label = self
             .resolution
             .classification()
@@ -651,25 +785,111 @@ impl RunReport {
             .first()
             .map_or(String::new(), |item| format!("  {}", item.summary));
         println!(
-            "  {:<10} {}  [{label}]{evidence}",
-            self.state_label(),
-            self.run.workflow_path,
+            "{} · {}",
+            crate::ci_display::row(&self.state_label(), &self.run.workflow_path, 0),
+            console::style(crate::ci_display::run_metadata(self)).dim()
         );
         println!(
-            "    integrity: commit {}, workflow hash {}",
+            "  {}",
+            console::style(format!(
+                "Coordinator {} · {label}{evidence}",
+                npub(self.run.coordinator)
+            ))
+            .dim()
+        );
+        println!(
+            "  {} · {}",
+            console::style(crate::ci_history::context_label(
+                self.run.activity_context()
+            ))
+            .dim(),
+            console::style(format!(
+                "`ngit ci inspect {}`",
+                self.run.container_event_id()
+            ))
+            .cyan()
+        );
+        println!(
+            "  integrity: commit {}, workflow hash {}",
             if self.integrity.commit_present {
-                "present"
+                console::style("present").dim()
             } else {
-                "not held locally"
+                console::style("not held locally").yellow()
             },
             match self.integrity.workflow_hash_matches {
-                Some(true) => "matches",
-                Some(false) => "MISMATCH",
-                None => "unknown",
+                Some(true) => console::style("matches").dim(),
+                Some(false) => console::style("MISMATCH").red().bold(),
+                None => console::style("unknown").yellow(),
             },
         );
-        for job in &self.jobs {
-            println!("{}", job.human_lines(log_tail));
+    }
+
+    pub fn print(&self, log_tail: LogTailMode) {
+        self.print_header();
+        let now = Timestamp::now();
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
+        for job in &self.run.live_jobs {
+            if !job.is_live(Timestamp::now()) {
+                continue;
+            }
+            println!(
+                "{}",
+                crate::ci_display::live_job_row(self, &job.job_id, &mut clocks, now)
+            );
+            println!(
+                "{}{}",
+                crate::ci_plan::live_steps(
+                    job,
+                    self.plan.iter().find(|p| p.id == job.job_id),
+                    &mut clocks,
+                    now
+                ),
+                crate::ci_plan::artifact_links(&job.details)
+            );
+            if let Some(logs) = &job.logs {
+                println!("      logs: {logs}");
+            }
+        }
+        let running = self.running_jobs();
+        for id in &running {
+            if !self
+                .run
+                .live_jobs
+                .iter()
+                .any(|job| job.job_id == *id && job.is_live(Timestamp::now()))
+            {
+                println!(
+                    "{} (reported by coordinator)",
+                    crate::ci_display::live_job_row(self, id, &mut clocks, now)
+                );
+                println!(
+                    "{}",
+                    crate::ci_plan::steps(
+                        &ngit::ci::details::JobDetails::default(),
+                        self.plan.iter().find(|p| p.id == *id),
+                        true
+                    )
+                );
+            }
+        }
+        for expected in &self.plan {
+            if !running.contains(&expected.id.as_str())
+                && !self.jobs.iter().any(|j| j.job_id == expected.id)
+                && !self
+                    .run
+                    .live_jobs
+                    .iter()
+                    .any(|j| j.job_id == expected.id && j.is_live(Timestamp::now()))
+            {
+                println!("{}", crate::ci_plan::pending_job(expected));
+            }
+        }
+        print!("{}", self.previous_attempt_lines());
+        for job in self.current_jobs() {
+            println!(
+                "{}",
+                job.human_lines(log_tail, self.plan.iter().find(|p| p.id == job.job_id))
+            );
         }
     }
 }
@@ -700,6 +920,19 @@ pub async fn build_report(
     client: &Client,
     request: &ProjectionRequest<'_>,
 ) -> Result<CiReport> {
+    build_event_report(git_repo, git_repo_path, repo_ref, client, request, None).await
+}
+
+/// Inspect an exact aggregate or job without silently selecting a newer
+/// attempt.
+pub async fn build_event_report(
+    git_repo: &Repo,
+    git_repo_path: &Path,
+    repo_ref: &RepoRef,
+    client: &Client,
+    request: &ProjectionRequest<'_>,
+    exact: Option<EventId>,
+) -> Result<CiReport> {
     let now = Timestamp::now();
     let repository = RepositoryContext::from_repo_ref(repo_ref);
 
@@ -713,7 +946,7 @@ pub async fn build_report(
         .collect();
 
     let selection = request.target.select(&grouped.runs);
-    let current = latest_attempts_with_positions(&selection.current);
+    let current = selected_attempts(&selection.current, exact);
     // Evidence assembly sees every run known for the target, whether or not
     // this surface reports the superseded ones: an earlier revision's run is
     // legitimate identity-level evidence about its signer, and a signer must
@@ -775,6 +1008,7 @@ pub async fn build_report(
     };
 
     let report = |attempt: &Attempt| RunReport {
+        plan: crate::ci_plan::load(git_repo, &attempt.run),
         state: attempt.run.state(now),
         attempt_of: attempt.attempt_of,
         resolution: context.run_resolution(&attempt.run),
@@ -807,6 +1041,7 @@ pub async fn build_report(
         },
         revision_matched: selection.revision_matched,
         coverage: context.coverage().unwrap_or(Coverage::Partial),
+        coverage_gaps: context.coverage_gaps.clone(),
         rollup: context.summarize(&current_runs),
         runs,
         outdated,
@@ -1042,9 +1277,16 @@ impl TargetRuns {
 
 fn job_report(context: &CiTrustContext, run: &WorkflowRun, job: &JobResult) -> JobReport {
     JobReport {
+        name: job.name.clone(),
+        event_id: job.event_id,
+        details: job.details.clone(),
+        execution_run_id: job.run.run_id.clone(),
+        reused: job.run.run_id != run.run_id,
         job_id: job.job_id.clone(),
         conclusion: job.conclusion,
         provider: job.author,
+        started_at: job.started_at.map(|t| t.as_secs()),
+        reported_at: job.created_at.as_secs(),
         log_tail: job.log_tail.clone(),
         logs: job.logs.clone(),
         resolution: context.job_resolution(run, job),
@@ -1058,20 +1300,28 @@ struct Attempt {
     attempt_of: usize,
 }
 
-/// The latest attempt per `(coordinator, workflow)`, each with the number of
-/// attempts it is the latest of.
+/// The latest attempt per coordinator, workflow and trigger context,
+/// each with the number of attempts it is the latest of.
 fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
-    let mut counts: HashMap<(PublicKey, &str), usize> = HashMap::new();
+    let mut counts = HashMap::<_, usize>::new();
     for run in runs {
         *counts
-            .entry((run.coordinator, run.workflow_path.as_str()))
+            .entry((
+                run.coordinator,
+                run.workflow_path.as_str(),
+                run.activity_context(),
+            ))
             .or_insert(0) += 1;
     }
     latest_attempts(runs)
         .into_iter()
         .map(|run| Attempt {
             attempt_of: counts
-                .get(&(run.coordinator, run.workflow_path.as_str()))
+                .get(&(
+                    run.coordinator,
+                    run.workflow_path.as_str(),
+                    run.activity_context(),
+                ))
                 .copied()
                 .unwrap_or(1),
             run: run.clone(),
@@ -1082,8 +1332,8 @@ fn latest_attempts_with_positions(runs: &[WorkflowRun]) -> Vec<Attempt> {
 /// The latest attempts of every superseded revision, newest revision first.
 ///
 /// Attempts are collapsed *within* a revision, never across them:
-/// `latest_attempts` keys on `(coordinator, workflow)` alone, so collapsing
-/// the whole set would hide one revision's result behind another's.
+/// `latest_attempts` keys on coordinator, workflow and trigger context;
+/// collapsing the whole set would hide one revision's result behind another's.
 fn outdated_attempts(runs: &[WorkflowRun]) -> Vec<Attempt> {
     let mut by_revision: HashMap<Option<EventId>, Vec<WorkflowRun>> = HashMap::new();
     for run in runs {
@@ -1271,7 +1521,7 @@ async fn load_quoted_events(
 /// Best effort by design: a signer with no reachable profile simply has no
 /// declared identity to verify, which is an absence of evidence rather than a
 /// finding, so a failure here is not surfaced.
-async fn fetch_signer_profiles(
+pub(crate) async fn fetch_signer_profiles(
     git_repo_path: &Path,
     client: &Client,
     repo_ref: &RepoRef,
@@ -1408,6 +1658,25 @@ pub fn relay_coverage(
         Coverage::Complete
     } else {
         Coverage::Partial
+    }
+}
+
+fn selected_attempts(runs: &[WorkflowRun], exact: Option<EventId>) -> Vec<Attempt> {
+    if let Some(id) = exact {
+        runs.iter()
+            .filter(|run| {
+                run.container_event_id() == id
+                    || run.progress.as_ref().is_some_and(|p| p.event_id == id)
+                    || run.jobs.iter().any(|job| job.event_id == id)
+                    || run.live_jobs.iter().any(|job| job.event_id == id)
+            })
+            .map(|run| Attempt {
+                run: run.clone(),
+                attempt_of: 1,
+            })
+            .collect()
+    } else {
+        latest_attempts_with_positions(runs)
     }
 }
 
@@ -1698,6 +1967,7 @@ mod tests {
         let context = CiTrustContext::loading();
         let job = job_report(&context, &run, &run.jobs[0]);
         RunReport {
+            plan: Vec::new(),
             state: run.state(Timestamp::from_secs(300)),
             attempt_of: 1,
             resolution: context.run_resolution(&run),
@@ -1711,16 +1981,113 @@ mod tests {
     }
 
     #[test]
+    fn live_job_timer_ticks_through_renewals_and_separates_allocations() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        let job = &report.run.jobs[0];
+        report.run.live_jobs.push(kinds::JobProgress {
+            started_at: None,
+            event_id: job.event_id,
+            author: job.author,
+            created_at: Timestamp::from_secs(100),
+            expiration: Timestamp::from_secs(500),
+            run: job.run.clone(),
+            job_id: job.job_id.clone(),
+            common: job.common.clone(),
+            details: job.details.clone(),
+            log_tail: String::new(),
+            logs: None,
+        });
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
+        let render = |report: &RunReport, clocks: &mut crate::ci_plan::LiveStepClocks, now| {
+            crate::ci_display::live_job_row(report, "build", clocks, Timestamp::from_secs(now))
+        };
+        assert!(render(&report, &mut clocks, 110).contains("≥10s"));
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(112);
+        assert!(render(&report, &mut clocks, 115).contains("≥15s"));
+        assert!(render(&report, &mut clocks, 120).contains("≥20s"));
+        report.run.live_jobs[0].details.allocation = Some(EventId::from_byte_array([0; 32]));
+        assert!(render(&report, &mut clocks, 120).contains("≥8s"));
+        report.run.run_id = "another-run".into();
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(119);
+        assert!(render(&report, &mut clocks, 120).contains("≥1s"));
+        // Joining mid-job must include its reported timeline, without adding
+        // durations together: work can overlap.
+        report.run.live_jobs[0].details.steps = vec![ngit::ci::details::Step {
+            id: "tests".into(),
+            label: "tests".into(),
+            start_ms: Some(178_000),
+            duration_ms: None,
+            outcome: "unknown".into(),
+            artifacts: None,
+        }];
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(400);
+        let mut clocks = crate::ci_plan::LiveStepClocks::default();
+        assert!(render(&report, &mut clocks, 420).contains("≥3m 18s"));
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut clocks,
+            Timestamp::from_secs(420),
+        );
+        assert!(steps.contains("≥20s"));
+        report.run.live_jobs[0].created_at = Timestamp::from_secs(425);
+        assert!(render(&report, &mut clocks, 430).contains("≥3m 28s"));
+        // A supplied anchor replaces fallback clocks even when observation
+        // started late. Explicit states are authoritative, including unknown.
+        let job = &mut report.run.live_jobs[0];
+        job.started_at = Some(Timestamp::from_secs(100));
+        job.details.steps[0].outcome = "running".into();
+        for (id, state) in [
+            ("future", "pending"),
+            ("omitted", "skipped"),
+            ("uncertain", "unknown"),
+        ] {
+            job.details.steps.push(ngit::ci::details::Step {
+                id: id.into(),
+                label: id.into(),
+                start_ms: None,
+                duration_ms: None,
+                outcome: state.into(),
+                artifacts: None,
+            });
+        }
+        assert!(render(&report, &mut clocks, 430).contains("5m 30s"));
+        assert!(!render(&report, &mut clocks, 430).contains('≥'));
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut clocks,
+            Timestamp::from_secs(430),
+        );
+        assert!(steps.contains("2m 32s running tests"));
+        assert!(steps.contains("pending future"));
+        assert!(steps.contains("unknown uncertain"));
+        assert!(steps.contains("1 skipped steps"));
+        assert!(!steps.contains('≥'));
+        assert_eq!(report.run.live_jobs[0].details.steps[0].duration_ms, None);
+        report.run.live_jobs[0].started_at = None;
+        let steps = crate::ci_plan::live_steps(
+            &report.run.live_jobs[0],
+            None,
+            &mut crate::ci_plan::LiveStepClocks::default(),
+            Timestamp::from_secs(430),
+        );
+        assert!(steps.contains("≥5s running tests"));
+        assert!(steps.contains("unknown uncertain"));
+        assert!(steps.contains("1 skipped steps"));
+    }
+
+    #[test]
     fn job_logs_round_trip_into_json_and_the_human_line() {
         let logs = "https://ci.example/jobs/build?attempt=1#logs";
         let report = run_report_with_job(Conclusion::Success, "", Some(logs));
 
         assert_eq!(report.jobs[0].logs.as_deref(), Some(logs));
         assert_eq!(report.to_json(LogTailMode::Auto)["jobs"][0]["logs"], logs);
-        assert_eq!(
-            report.jobs[0].human_line(),
-            format!("    job build success [Checking]  {logs}")
-        );
+        let line = report.jobs[0].human_line();
+        assert!(line.contains(logs));
+        assert!(line.find("success") < line.find("build"));
+        assert!(!line.contains("Checking"));
     }
 
     #[test]
@@ -1732,10 +2099,8 @@ mod tests {
             report.to_json(LogTailMode::Auto)["jobs"][0]["logs"],
             Value::Null
         );
-        assert_eq!(
-            report.jobs[0].human_line(),
-            "    job build success [Checking]"
-        );
+        assert!(!report.jobs[0].human_line().contains("Checking"));
+        assert!(report.jobs[0].human_line().contains("build"));
     }
 
     #[test]
@@ -1748,10 +2113,10 @@ mod tests {
             report.to_json(LogTailMode::Auto)["jobs"][0]["log_tail"],
             tail
         );
-        assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::Auto),
-            "    job build failure [Checking]\n      log tail:\n        [log-tail omitted=42]\n        assertion failed"
-        );
+        let rendered = report.jobs[0].human_lines(LogTailMode::Auto, None);
+        assert!(rendered.contains("--- job log: build ---"));
+        assert!(rendered.contains("\nassertion failed\n"));
+        assert!(rendered.contains("--- end job log: build ---"));
     }
 
     #[test]
@@ -1764,18 +2129,192 @@ mod tests {
                 .get("log_tail")
                 .is_none()
         );
-        assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::Auto),
-            "    job build success [Checking]"
+        assert!(
+            !report.jobs[0]
+                .human_lines(LogTailMode::Auto, None)
+                .contains(tail)
         );
         assert_eq!(
             report.to_json(LogTailMode::All)["jobs"][0]["log_tail"],
             tail
         );
-        assert_eq!(
-            report.jobs[0].human_lines(LogTailMode::All),
-            "    job build success [Checking]\n      log tail:\n        build completed"
+        assert!(
+            report.jobs[0]
+                .human_lines(LogTailMode::All, None)
+                .contains("\nbuild completed\n")
         );
+    }
+
+    #[test]
+    fn run_metadata_hides_first_attempt_and_keeps_time_semantics_in_json() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        report.run.run_id = "76c65676cf620d37".to_owned();
+        let metadata = crate::ci_display::run_metadata(&report);
+        assert!(metadata.contains("76c65676…"));
+        assert!(!metadata.contains("attempt"));
+        assert!(!metadata.contains("reported"));
+        report.attempt_of = 2;
+        assert!(crate::ci_display::run_metadata(&report).contains("attempt 2"));
+        let json = report.to_json(LogTailMode::None);
+        assert_eq!(json["run_id"], "76c65676cf620d37");
+        assert_eq!(json["time_kind"], "reported");
+        assert!(!metadata.contains("elapsed"));
+        report.run.result.as_mut().unwrap().started_at = Some(Timestamp::from_secs(100));
+        assert!(crate::ci_display::run_metadata(&report).contains(" · 1m 40s"));
+    }
+
+    #[test]
+    fn replacement_allocation_moves_rejected_result_to_history_before_snapshot() {
+        let mut report =
+            run_report_with_job(Conclusion::StartupFailure, "capacity exhausted", None);
+        let result = report.run.result.take().unwrap();
+        let allocation = EventId::from_byte_array([1; 32]);
+        report.jobs[0].details.allocation = Some(allocation);
+        let mut details = result.details.clone();
+        details
+            .job_progress
+            .push(ngit::ci::details::JobProgressReference {
+                provider: report.jobs[0].provider,
+                allocation: EventId::from_byte_array([2; 32]),
+                job: "build".into(),
+            });
+        report.run.progress = Some(kinds::WorkflowProgress {
+            details,
+            event_id: result.event_id,
+            author: result.author,
+            created_at: Timestamp::now(),
+            run_id: result.run_id.clone(),
+            status: kinds::ProgressStatus::InProgress,
+            conclusion: None,
+            expiration: Timestamp::from_secs(Timestamp::now().as_secs() + 600),
+            queued_at: None,
+            started_at: None,
+            queue: None,
+            in_progress_jobs: vec!["build".into()],
+            provenance: result.provenance.clone(),
+            jobs: vec![],
+            common: result.common.clone(),
+        });
+        report.state = RunState::Running;
+        assert_eq!(report.running_jobs(), ["build"]);
+        assert_eq!(report.current_jobs().count(), 0);
+        let json = report.to_json(LogTailMode::All);
+        assert_eq!(json["jobs"], json!([]));
+        assert_eq!(
+            json["previous_job_attempts"][0]["conclusion"],
+            "startup_failure"
+        );
+        assert_eq!(
+            json["previous_job_attempts"][0]["log_tail"],
+            "capacity exhausted"
+        );
+        assert!(
+            report
+                .previous_attempt_lines()
+                .contains("replacement allocated")
+        );
+
+        // Same-allocation completion and the immutable workflow result retain
+        // their authority, even if stale progress still references a retry.
+        report.run.progress.as_mut().unwrap().details.job_progress[0].allocation = allocation;
+        assert_eq!(report.current_jobs().count(), 1);
+        assert!(report.running_jobs().is_empty());
+        report.run.progress.as_mut().unwrap().details.job_progress[0].allocation =
+            EventId::from_byte_array([2; 32]);
+        report.run.result = Some(result);
+        assert_eq!(report.current_jobs().count(), 1);
+        assert!(report.previous_attempt_lines().is_empty());
+    }
+
+    #[test]
+    fn running_workflow_header_ticks_without_repeating_start_age() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        let result = report.run.result.take().unwrap();
+        report.run.progress = Some(kinds::WorkflowProgress {
+            details: result.details,
+            event_id: result.event_id,
+            author: result.author,
+            created_at: Timestamp::from_secs(200),
+            run_id: result.run_id,
+            status: kinds::ProgressStatus::InProgress,
+            conclusion: None,
+            expiration: Timestamp::from_secs(10_000),
+            queued_at: None,
+            started_at: Some(Timestamp::from_secs(100)),
+            queue: None,
+            in_progress_jobs: vec![],
+            provenance: result.provenance,
+            jobs: vec![],
+            common: result.common,
+        });
+        report.state = RunState::Running;
+        let render = |now| crate::ci_display::run_metadata_at(&report, Timestamp::from_secs(now));
+        let metadata = render(532);
+        assert!(metadata.contains("7m 12s"));
+        assert!(
+            !metadata.contains("ago")
+                && !metadata.contains("started")
+                && !metadata.contains("elapsed")
+        );
+        assert!(render(533).contains("7m 13s"));
+        assert!(render(3701).contains("1h 00m 01s"));
+        report.run.progress.as_mut().unwrap().started_at = None;
+        assert!(
+            crate::ci_display::run_metadata_at(&report, Timestamp::from_secs(532)).contains("ago")
+        );
+    }
+
+    #[test]
+    fn status_expands_only_failed_jobs_and_keeps_the_log_preview_bounded() {
+        let failed = run_report_with_job(
+            Conclusion::Failure,
+            "first\nsecond\nthird\nfourth",
+            Some("https://ci.example/failure.txt"),
+        );
+        let success =
+            run_report_with_job(Conclusion::Success, "first\nsecond\nthird\nfourth", None);
+        let details = crate::ci_display::failure_details(&failed.jobs[0], None);
+        assert!(!details.contains("first"));
+        assert!(details.contains("second"));
+        assert!(details.contains("fourth"));
+        let plain = console::strip_ansi_codes(&details);
+        assert!(plain.contains("Full log: https://ci.example/failure.txt"));
+        assert!(plain.contains("└ second"));
+        assert!(!plain.contains("end log preview"));
+        assert!(plain.find("Full log:") < plain.find("└ second"));
+        let empty = run_report_with_job(
+            Conclusion::Failure,
+            "",
+            Some("https://ci.example/failure.txt"),
+        );
+        let empty = crate::ci_display::failure_details(&empty.jobs[0], None);
+        assert!(empty.contains("https://ci.example/failure.txt"));
+        assert!(!empty.contains('└'));
+        assert!(crate::ci_display::failure_details(&success.jobs[0], None).is_empty());
+    }
+
+    #[test]
+    fn job_timing_is_numeric_and_provider_context_stays_in_json() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        report.jobs[0].started_at = Some(100);
+        report.jobs[0].reported_at = 125;
+        let json = report.to_json(LogTailMode::None);
+        assert_eq!(json["jobs"][0]["elapsed_to_report_ms"], 25_000);
+        assert!(json["jobs"][0]["provider"].as_str().is_some());
+        assert!(json["jobs"][0].get("classification").is_some());
+        assert!(report.jobs[0].human_line().contains("~25s"));
+        assert!(!report.jobs[0].human_line().contains("Checking"));
+    }
+
+    #[test]
+    fn embedded_log_controls_cannot_escape_the_log_section() {
+        let report = run_report_with_job(Conclusion::Failure, "\x1b[2Jhello\rworld\nnext", None);
+        let rendered = report.jobs[0].human_lines(LogTailMode::Auto, None);
+        assert!(!rendered.contains("\x1b[2J"));
+        assert!(!rendered.contains('\r'));
+        assert!(rendered.contains("\nhelloworld\n"));
+        assert!(rendered.contains("\nnext\n"));
+        assert!(rendered.contains("--- end job log: build ---"));
     }
 
     #[test]
@@ -1788,9 +2327,10 @@ mod tests {
                 .get("log_tail")
                 .is_none()
         );
-        assert_eq!(
-            failed.jobs[0].human_lines(LogTailMode::None),
-            "    job build failure [Checking]"
+        assert!(
+            !failed.jobs[0]
+                .human_lines(LogTailMode::None, None)
+                .contains("job log")
         );
         assert!(
             empty.to_json(LogTailMode::All)["jobs"][0]
@@ -1882,6 +2422,7 @@ mod tests {
             state: CiState::None,
             conclusion: None,
             revision_matched: false,
+            coverage_gaps: Vec::new(),
             coverage: Coverage::Complete,
             rollup: TrustResolution::Settled {
                 classification: TrustClassification::NoKnownContext,
@@ -1890,6 +2431,7 @@ mod tests {
             },
             runs: Vec::new(),
             outdated: Some(vec![RunReport {
+                plan: Vec::new(),
                 state: run.state(Timestamp::now()),
                 attempt_of: 1,
                 resolution: TrustResolution::Settled {
@@ -1926,6 +2468,7 @@ mod tests {
             state,
             conclusion,
             revision_matched: true,
+            coverage_gaps: Vec::new(),
             coverage: Coverage::Complete,
             rollup: TrustResolution::Settled {
                 classification,
@@ -1936,6 +2479,37 @@ mod tests {
             outdated: None,
             skipped: Vec::new(),
         }
+    }
+
+    #[test]
+    fn routine_coverage_diagnostics_remain_available_without_summary_warnings() {
+        use ngit::ci::resolve::CoverageGap;
+        let mut report = rolled_up(
+            CiState::Concluded,
+            Some(Conclusion::Success),
+            TrustClassification::MaintainerDirected,
+        );
+        report.coverage_gaps = vec![
+            CoverageGap::RepositoryInputs,
+            CoverageGap::CacheOnlyIdentities,
+            CoverageGap::QuotedEvents,
+            CoverageGap::IdentityLookup,
+        ];
+        assert_eq!(
+            report
+                .visible_coverage_gaps(false)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![CoverageGap::QuotedEvents]
+        );
+        assert_eq!(report.visible_coverage_gaps(true).count(), 4);
+        assert_eq!(
+            report.to_ci_value(None, LogTailMode::Auto)["coverage_gaps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]

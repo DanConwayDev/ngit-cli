@@ -9,16 +9,347 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Teach `ngit skill install` and `ngit skill upgrade` about install scopes.
-  Interactive runs choose between the current repository, the user's home
-  directory (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`), and a
-  machine-wide directory (`/usr/local/share/agents/skills/ngit`, override
-  with `NGIT_SYSTEM_SKILLS_DIR`); `--global` and `--system` pick a scope
-  without prompting, and non-interactive runs keep the repository scope. A
-  first repository install now asks before adding the skill pointer to
-  existing `AGENTS.md`/`CLAUDE.md` files (default yes; `--no-agent-file`
-  declines), and `ngit skill status` reports every scope through a new
-  `scopes` object in its JSON output.
+- `ngit skill install` and `upgrade` accept `--global` to install the skill
+  for your user account (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`)
+  and `--system` to install it for every user of the machine, in
+  `/usr/local/share/agents/skills/ngit` (override with
+  `NGIT_SYSTEM_SKILLS_DIR`). Interactive runs (`-i`) ask which
+  scope to use; non-interactive runs keep the repository scope. A first
+  repository install asks interactively before adding the ngit instruction
+  to existing `AGENTS.md`/`CLAUDE.md` files, and `--no-agent-file` declines
+  without prompting. `ngit skill status --json` reports every scope in a
+  `scopes` object, and install results name their `scope`. Thanks to
+  hzrd149.
+- `--help` now explains workflows as well as flags. `ngit --help` ends with a
+  map from tasks to the command help that covers them, plus the conventions
+  shared by every command (JSON output, identifiers, signer and repository
+  selection). `ngit pr`, `issue`, `repo`, `ci`, `account`, `sync`, `release`,
+  `container` and `nsite --help` describe their workflow's rules and pitfalls,
+  including steps performed with plain git such as opening a PR by pushing a
+  `pr/` branch, and `ci status`, `inspect`, `secrets`, `service status` and
+  `rerun --help` describe their result and JSON contracts. `-h` stays a
+  compact summary.
+- The CLI reference export includes the workflow notes shown by `--help`.
+- `--help` is compact: each option takes one line, with no blank lines
+  between options, and its full description is shown by the command that
+  defines it. Global options such as `--repo` and `--signer` are listed
+  once, by `ngit --help` and `ngit -h`; subcommand help points there instead
+  of repeating them, and they are still accepted at every position. `--json`
+  is the exception and stays listed on every command.
+  Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
+  and group help such as `ngit pr --help` about 20% shorter.
+- Subcommand help no longer lists `-V, --version`; the flag still works
+  there and is listed by top-level help.
+- Option descriptions consistently start with a capital letter.
+- The description at the top of a command's help is wrapped at 80 columns.
+  Indented example commands are left on one line so they stay copyable.
+- The `--repo` and `--json` option descriptions are one line each. Their
+  detail (precedence over detected targets, JSON Lines progress on stderr,
+  plain-text subprocess output) is now part of the conventions at the end of
+  `ngit --help`, which already covered the rest; the CLI reference export
+  carries it there too.
+- Help output is styled on a colour terminal: section headings, including
+  those in the workflow notes, are bold in the yellow `ngit --customize` uses
+  for its sections, and command and option names are bold. Supporting text
+  is dimmed: bracketed defaults and possible values, `# comments` in
+  examples and the pointer to the global options. Commands and names
+  quoted in backticks within the workflow notes are bold. Piped output,
+  `NO_COLOR` and `--json` invocations get plain text with no escape codes.
+
+- `--json` streams compact signer and relay progress as JSON Lines on stderr,
+  with immediate waits, retries and failures, aggregate relay outcomes and
+  throttled count samples. Shared diagnostics are structured and redundant human
+  result summaries are suppressed. Explicit signer pairing emits an actionable
+  URI record even with `--quiet`. Final stdout results remain unchanged; Git
+  and external-process output are not yet fully structured.
+
+- `ci status --watch` monitors workflow and job progress in an inline terminal
+  view without taking over the screen. It exits after all observed workflows
+  conclude and 10 seconds pass without updates; pending work or missing evidence
+  keeps it open. `--follow` watches indefinitely. Stopping observation does not
+  cancel execution.
+- `ci status --watch --json` streams compact snapshots and changes with short
+  run/allocation references and full identities in initial snapshots.
+  Unchanged renewals are suppressed; `--full-events` retains complete decoded
+  events. Redirected human output receives snapshots when events arrive.
+- `ci inspect` shows detailed CI for HEAD or an explicit `--target`, including
+  steps, logs, artifacts and coordinator trust. An event ID selects exact
+  evidence; decoded or raw signed JSON and filters support protocol diagnosis.
+  `--artifacts` retrieves and verifies manifests without downloading their files.
+- `ci service status` shows repository coordinators, observed runs from the last
+  30 days, latest outcomes and dated maintainer request/stop history. Requested
+  coordinators remain visible without recent runs. Verified domain identities
+  label coordinators; service claims, advertised availability and run
+  authorization remain distinct, with supporting evidence in JSON.
+- `ci rerun COORDINATOR RESULT [--job JOB]` requests a new native attempt from a
+  completed result while retaining external dependency bindings. Native trigger
+  and rerun requests support per-job environment pins and resource requirements.
+- `ci cancel COORDINATOR RUN-ID` lets confirmed maintainers request cancellation
+  of an exact workflow attempt. `--force` bypasses job grace periods or escalates
+  an earlier request. Publication is not confirmation of termination.
+- `ci secrets` sends encrypted atomic set/remove updates to a coordinator inbox
+  and waits for inventory confirmation. Output distinguishes accepted updates
+  from pending confirmation; `--confirmation-timeout` controls the wait
+  (90 seconds by default, zero for publication only).
+- CI supports issue-open/reopen/close and release-publication triggers, keeping
+  distinct activity contexts separate even when they share a Git commit.
+- `account login --nostrconnect` supports URI-based pairing without QR codes or
+  terminal input, including named profiles, explicit signer relays and JSON.
+  `--profile NAME --no-activate` saves a signer without changing the active login.
+- `account logout --all` removes all known saved profiles and credentials and
+  clears current-repository and non-local Git login configuration, including
+  conditional includes and Windows ProgramData configuration. It does not scan
+  other repositories or revoke access at remote signers. `--keep-credentials`
+  clears selections without accessing saved secrets, including locked keyrings.
+- Configure relay timeouts through `nostr.relay-timeout-secs` and
+  `nostr.relay-connect-timeout-secs`, or `NGIT_RELAY_TIMEOUT_SECS` and
+  `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults remain 45 seconds and the smaller
+  of 7 seconds and the long timeout; an explicit connect override is independent.
+  `ngit --customize` documents precedence and scope.
+
+### Changed
+
+- `ngit release` subcommands no longer define their own `--json` beside the
+  global one. The flag is accepted at the same positions and produces the
+  same output; these commands now read the global JSON mode, so warnings and
+  progress follow it wherever the flag is written.
+- The bundled agent skill (version 1.30) is now a short bootstrap. It tells
+  agents to use ngit in repositories with a `nostr://` remote, which its
+  description also names as Grasp repositories, and to read the
+  workflow guidance in the installed `ngit --help`, including before opening
+  or updating a PR with `git push`, instead of repeating commands and feature
+  details that change between releases. The reference files are no longer
+  bundled: `ngit skill install` writes only `SKILL.md`, and `ngit skill
+  upgrade` (or `install` over an existing skill) removes the whole
+  `reference/` directory left beside it by earlier versions and leaves the
+  deletion uncommitted for review. An agent whose ngit predates workflow help is told
+  to update it.
+- The recommended way to tell coding agents a repository uses ngit is now a
+  short instruction in the root `AGENTS.md` or `CLAUDE.md` that sends them to
+  `ngit --help`, with the repository skill as an option. `ngit skill --help`
+  shows the instruction to copy and reword. The maintainer reminder, including
+  after `ngit init`, points there rather than to `ngit skill install`, and
+  stops once one of those files mentions both `ngit --help` and
+  `ngit.dev/install` or the skill is installed. The upgrade reminder for an
+  outdated skill mentions the instruction until a file carries it.
+  `ngit skill status` reports
+  the detection as `help_instruction`. `ngit skill install` appends this
+  instruction, in place of a pointer to the skill file, to existing
+  instruction files that do not mention ngit; it still creates none.
+
+- Credential-store failures include recovery guidance and the underlying cause.
+  Login reports missing profiles before incompatible relay options and shows
+  how to supply credentials for the named profile.
+- Accept an explicit default branch in `ngit send --target-branch` and Git
+  push `target-branch=` options, retaining it as the PR target.
+- Share relay destination selection between PR admission and ordinary event
+  publication to keep repository-only routing and fallback policy consistent.
+- Fetch and cache NIP-11 relay information during standard event fetching to
+  detect relay capabilities. When a known GRASP implementation lacking purgatory
+  (such as Pyramid) is used as a PR hint server, push Git data before publishing
+  its PR event to prevent retention of duplicate PR events.
+
+- PRs and PR updates now send the signed event to the selected hint's GRASP
+  relay before pushing its Git data. If either step fails, ngit tries the next
+  candidate with a newly signed event and its clone hint. Once the hint works,
+  a second stage sends the same event to all remaining Nostr relays, including
+  GRASP relays, before replicating Git to accepting GRASPs and ordinary Git
+  servers. Ordinary relays no longer wait for replica Git pushes. This lets
+  overloaded GRASP servers reject unaccepted pushes cheaply and apply publisher
+  Web-of-Trust policy before receiving a pack. Server selection, one clone hint,
+  serial Git transfers and first-success GRASP-06 fallback are preserved.
+  Failover updates are strictly newer than earlier attempts.
+  Parallel repository-GRASP pushes without an explicit hint are future work.
+  Publication still waits for auth-required before authenticating, unless
+  proactive authentication was explicitly enabled. Public-repository
+  AUTH signing is bounded by the configured relay timeout (45 seconds by default)
+  and a timeout skips that destination; private/GRASP-08 repositories retain the
+  signer's native approval window. Network waits remain bounded in both cases;
+  read connections retain their existing demand-auth policy.
+
+- Bring `ngit ci` up to date with the forthcoming ngit-ci event shapes and
+  controls. Status shows workflow, job and live step progress with readable
+  timings, short run IDs and ages. Failed jobs include a direct full-log link
+  and a muted `└` preview of the last three lines. Inspection adds full execution,
+  artifact and trust details with copyable log sections.
+- CI counters use signed job starts and step offsets when available, with
+  measured completed-step durations and labelled lower bounds for older events.
+  Explicit pending/running states are supported; verified workflow definitions
+  supply expected work without predicting conditional outcomes. Workflow headers
+  show a ticking duration while running, then age and duration after completion.
+- Current CI stays separate from earlier attempts and previous commits. Earlier
+  attempts retain inspection links; only the newest related previous tip appears,
+  as a concise workflow summary, when current-tip CI is absent. Shared commits
+  alone do not establish a published PR association. Reused results and distinct
+  executions such as matrix instances remain identifiable. Coordinator-selected
+  retries stay current, with rejected allocations retained as previous attempts.
+- CI trust uses relevant signed evidence without unnecessary identity lookups
+  when authorization is already established. Routine relay-refresh and optional
+  identity diagnostics stay in verbose output and JSON. Missing authorization
+  evidence and integrity problems remain visible.
+- Standing CI controls are now `ci service request` and `ci service stop`;
+  the old commands remain as deprecated aliases. Native manual triggers rerun
+  dependency graphs without emitting the obsolete `rerun` tag;
+  `--rerun-dependencies` is accepted as a compatibility alias.
+- Relay authentication is deferred until a request receives `auth-required:`,
+  avoiding signer prompts for public reads. Gated requests authenticate and
+  retry; `--proactive-auth`, `nostr.proactive-auth`, or `NGIT_PROACTIVE_AUTH`
+  restores immediate authentication for eligible relays.
+- Remote signer requests retry automatically with three sends two minutes apart,
+  then time out two minutes after the last send. Direct terminal users can press
+  `r` or `R` to resend and restart the window. JSON, headless and Git-helper
+  operations retain automatic recovery without reading recovery keys. Refusals
+  stop immediately; initial pairing and waits behind another signer operation
+  are bounded to two minutes. Pairing failures retain their causes.
+- Signer progress distinguishes pairing, public-key approval and request delivery,
+  shows per-relay connection state and recovery guidance, and retains reminders
+  for a second approval. Terminal progress stays aligned during pairing, and
+  concurrent requests keep separate reports. JSON and redirected progress use
+  append-only stderr messages across relay, Git, signer and Blossom operations. Verbose mode retains
+  detailed diagnostics; JSON stdout remains structured command output or the
+  explicit CI watch stream.
+- Name reusable signer configurations with `account login --profile NAME`.
+  The old `--alias` spelling, stored bindings and JSON fields remain compatible.
+  Login prompts clarify scope and profile replacement; `account whoami`
+  distinguishes active signers, repository overrides and saved accounts.
+- Ordinary logout removes the selected connection and saved profile. Use
+  `--keep-credentials` to sign out without deleting credentials; identity-key
+  deletion requires `--forget`. These safeguards also apply to `--all`.
+  Repository overrides take precedence over defaults, with explicit `--local`
+  and `--global` scope controls. Removing shared credentials affects other
+  repositories that use them.
+- An explicit npub in `account logout` or `account forget-keys` selects all known
+  credentials and profiles for that identity; named-profile and credential-entry
+  targets remain selective. Saved credentials can be removed without contacting
+  a signer. Legacy Git-config connections that cannot be retained automatically
+  must be exported before using `--keep-credentials`.
+
+### Fixed
+
+- Nix CI includes `dbus-daemon` at runtime so isolated account credential-store
+  tests can start their private session buses.
+- Correct the spelling of "public key" in the NIP-05 lookup progress message.
+- `ngit release publish`, `ngit nsite deploy` and `ngit container` now print
+  plain Blossom upload progress lines when stderr is not a terminal (log files,
+  CI, scripts, coding agents). With `--json`, these updates are structured JSON
+  Lines on stderr; other diagnostics remain text. Each asset and server
+  reports when it starts, how many bytes have been sent (at 10% steps or on
+  the next byte event after 15 seconds), retries, and when it finishes or fails.
+  Previously the upload was silent until the final replication summary, so it looked like a
+  stalled signer. Interactive terminals keep the existing progress bars, and
+  `--json` stdout is unchanged.
+
+- Concurrent account imports and deletions preserve unrelated credentials and
+  public-index updates in JSON storage.
+- Refuse to reassign a known signer alias/profile to another identity while its
+  OS credential store is inaccessible, preventing an unexpected identity switch
+  when the keyring unlocks. New profiles still support file fallback.
+- Reject unused `account login --signer-relay` options when selecting saved
+  credentials or importing a bunker URL, with guidance for fresh pairing.
+- Resolve abbreviated local commit IDs in `--base` and Git push `base=`
+  options before interpreting them as PR event prefixes.
+- Named remote-signer profiles can use JSON storage when the OS credential store
+  is unavailable, without losing the new connection or binding it to an existing
+  default signer. Fresh login replaces the identity's default remote session
+  while preserving independent profiles and keys. Failed authentication or
+  storage leaves the working selection intact; global login preserves local
+  overrides.
+- Incomplete local login selections block signing rather than silently using the
+  global identity. Account inventory reports unavailable selections accurately.
+- File-store logout works on headless Unix systems without a session bus or
+  installed Secret Service. Locked or unreachable OS stores block deletion;
+  failed deletion does not leave profile removal markers. Git include cleanup
+  follows symlink-relative paths without
+  modifying unrelated configuration files.
+- Bare clone/fetch consumers, including Nix source caches, can load existing
+  signers and discover proposal refs. Automatic PR branch visibility remains
+  opt-in; this does not provide full bare-repository command or publishing support.
+- Repository state ignores names such as `refs/tagsevil` rather than treating
+  them as genuine `refs/tags/` entries.
+
+### Security
+
+- Update nostr/nostr-sdk to 0.45.6 for an upstream signature-verification cache
+  fix. ngit ingests relay events through this path, so clients should update.
+- `ngit release publish` rejects manifest file paths outside the repository root,
+  including absolute paths, `..` escapes and escaping symlinks, before opening or
+  uploading them. This covers assets, source, notes, icons and images. Explicit
+  CLI paths such as `--manifest` and `--notes-file` remain allowed to be absolute.
+- Verify signatures of cached update metadata before using it, preventing a
+  tampered local cache from directing `ngit update` to an unrelated release.
+- Cargo-based updates and the standalone installer run from the detected Cargo
+  installation root, avoiding repository-local `.cargo/config.toml` settings
+  such as compiler wrappers, linkers and source replacements. User-level Cargo
+  configuration still applies.
+
+## [3.0.5] - 2026-10-28
+
+Repair bundled OpenSSL in Unix release archives and avoid unnecessary
+repository-history downloads when listing Git-server refs.
+
+### Changed
+
+- Update the pinned ngit-grasp integration-test fixture from 3.0.9 to 3.0.10
+  so development and Nix CI use the current server release.
+
+### Security
+
+- Build downloadable Unix release archives with statically linked OpenSSL 3.5.9
+  LTS instead of the 3.6.3 supplied by `openssl-src` 300.x. This includes the
+  crafted-certificate memory allocation fix for Git HTTPS
+  ([CVE-2026-35189](https://openssl-library.org/news/vulnerabilities/#CVE-2026-35189))
+  and the other upstream fixes through September 2026. Verify the embedded
+  version in packaged binaries before NIP-82 publication. These are upstream
+  fixes, not evidence of exploitation against ngit. Source builds using Cargo's
+  `vendored-openssl` feature alone still require a patched external static
+  OpenSSL until a compatible fixed `openssl-src` is available.
+
+### Fixed
+
+- List Git-server refs without downloading repository history. Server checks
+  previously fetched HEAD from each server into the same object database,
+  causing unnecessary transfers and 60-second timeouts when cloning repositories
+  such as Amber. Proposal pushes fetch missing destination history explicitly
+  when calculating their base. Private-repository HTTP authorization is preserved.
+
+## [3.0.4] - 2026-10-27
+
+Update certificate trust and dependencies, improve interactive workflows and
+diagnostics, and clarify handling of conflicting installations.
+
+### Security
+
+- Reject compromised eMudhra/emSign intermediate certificates with
+  rustls-webpki 0.103.16 and remove the affected root from bundled certificate
+  stores with roots 1.0.11. This addresses the risk of TLS endpoint impersonation,
+  including relay connections and Android HTTPS. These three advisories cover
+  the same CA incident ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html),
+  [0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html),
+  [0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html)).
+
+### Changed
+
+- Update the pinned ngit-grasp integration-test fixture from 3.0.7 to 3.0.9
+  so compatibility checks exercise the current server release.
+- Refresh the pinned nixpkgs, rust-overlay, and crane inputs for Nix builds
+  and development. The development toolchain moves to Rust 1.99.1; the Nix
+  Linux package uses OpenSSL 3.5.9 LTS. Keep Intel macOS on the supported
+  nixpkgs 26.05 branch after unstable dropped that platform.
+  The native OpenSSL update also includes the crafted-certificate allocation
+  fix ([CVE-2026-35189](https://openssl-library.org/news/vulnerabilities/#CVE-2026-35189))
+  for Nix-installed ngit; downloadable archives use a separate vendored version.
+- Refresh Rustls, ZIP, Negentropy, ctutils, faster-hex, and Tokio, including
+  upstream security and safety fixes for which no affected production path was
+  identified in ngit. Adapt APK filename decoding to ZIP 9.
+- Replace deprecated serde_yaml and its unmaintained unsafe-libyaml dependency
+  with serde-saphyr 2.0.0 for release manifests, container manifests, and legacy
+  maintainers.yaml files. Preserve tested parsing and configuration round-trip
+  behavior, including strict booleans and literal merge keys, without adding
+  source snippets to error messages.
+- Refresh serde_json to 1.0.154, passwords to 3.1.19, tokio-util to 0.7.20,
+  tokio-rustls to 0.26.6, libc to 0.2.191, hyper to 1.12.0, and hyper-util to
+  0.1.21 within the existing dependency requirements.
+- Refresh mailparse, zeroize, and rstest alongside the security dependency updates.
 
 ### Fixed
 

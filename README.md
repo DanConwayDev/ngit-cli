@@ -58,6 +58,8 @@ Run `ngit --customize` to list supported git config keys and their environment-v
 ```sh
 git config nostr.repo-relay-only true       # only publish nostr events to repo relays
 git config nostr.auto-pr-branches true      # fetch every open and draft PR branch
+git config nostr.relay-timeout-secs 10     # long Nostr relay timeout (default: 45 seconds)
+git config nostr.relay-connect-timeout-secs 3  # fetch connect attempts and quorum grace (default: 7 seconds)
 git config nostr.http-io-timeout-ms 600000  # allow large GRASP pushes up to 10 minutes of socket silence
 ```
 
@@ -144,38 +146,61 @@ eg self-hosted, github, codeberg, etc.
                          └─────────┘
 ```
 
-## Coding-agent skill
+## Guidance for coding agents
 
-Run `ngit skill install` to add guidance that teaches coding agents to use
-ngit. Interactive runs (`-i`) first ask where to install: this repository
-(shared with everyone who clones it), your user account, or every user on
-this machine. Non-interactive runs keep the repository scope; pass
-`--global` or `--system` to choose another scope without prompting.
+Coding agents reach for GitHub or GitLab tools unless a repository says
+otherwise. The recommended way to say so is a short instruction in the root
+`AGENTS.md` or `CLAUDE.md`, which agents read at the start of every session:
 
-The repository scope installs the skill in the Codex and Claude discovery
-locations and, on a first install, adds a compact pointer to existing
-`AGENTS.md` or `CLAUDE.md` files without creating either file; interactive
-runs ask before adding the pointer, and `--no-agent-file` skips it. The
-global scope installs the same layout under `~/.agents/skills/ngit` and
-`~/.claude/skills/ngit` for all of your repositories. The system scope
-installs one canonical copy in `/usr/local/share/agents/skills/ngit`
-(`%ALLUSERSPROFILE%\agents\skills\ngit` on Windows; override with
-`NGIT_SYSTEM_SKILLS_DIR`) and may need elevated permissions.
+```markdown
+This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev),
+not GitHub or GitLab. Use ngit for issues, pull requests, reviews, CI and
+releases. Before any of those tasks, including pushing a pull request
+branch, run `ngit --help` and follow its workflow map. If ngit is
+missing, install it from https://ngit.dev/install.
+```
 
-Use `ngit skill upgrade` to update installed copies from the version in the
-skill metadata; it does not restore a copy that was removed after
-installation. Repository-scope install and upgrade leave their changes
-uncommitted so the repository's normal validation and commit workflow can
-run. Contributors who are not maintainers should commit the changes on a
-`pr/` branch and push it to propose a pull request. With `--json`,
-`changed_files` lists the managed paths that remain as Git changes and
-`changes_uncommitted` states whether there is anything to commit. Git-ignored
-managed files are installed but omitted from those fields because ordinary
-Git staging excludes them. Successful commands set `action` to `installed`,
-`upgraded`, `reconciled`, or `unchanged` and report the `scope` they
-targeted; partial update failures use `failed`, report the same change
-fields for files already left in the worktree, and omit post-update guidance
-status fields. `ngit skill status` reports every scope; the `scopes` object
-in its `--json` output carries the per-scope install state.
+Reword it to suit the repository. The workflow guidance itself lives in the
+installed `ngit --help`, so the instruction does not need to change when ngit
+gains features. ngit reminds maintainers until one of those files mentions
+both `ngit --help` and `ngit.dev/install`, or the repository skill is
+installed; `ngit skill opt-out --local` stops the reminder.
 
-Run `ngit skill --help` for status and reminder opt-out commands.
+### Repository-managed skill (optional)
+
+`ngit skill install` adds a short bootstrap skill carrying the same routing,
+for agents that discover skills but are given no instruction file. The
+reference files that earlier versions installed beside it are removed by
+`ngit skill upgrade`. The
+command installs the skill in the Codex and Claude discovery
+locations and appends the instruction above to existing `AGENTS.md` or
+`CLAUDE.md` files that do not already mention ngit, without creating either
+file. Use `ngit skill upgrade` to update existing
+copies from the version in the skill metadata; it does not restore a copy that
+was removed after installation. Install and upgrade leave their changes
+uncommitted so the repository's normal validation and commit workflow can run.
+Contributors who are not maintainers should commit the changes on a `pr/`
+branch and push it to propose a pull request. With `--json`, `changed_files`
+lists the managed paths that remain as Git changes and `changes_uncommitted`
+states whether there is anything to commit. Git-ignored managed files are
+installed but omitted from those fields because ordinary Git staging excludes
+them. Successful commands set `action` to `installed`, `upgraded`,
+`reconciled`, or `unchanged`; partial update failures use `failed`, report the
+same change fields for files already left in the worktree, and omit post-update
+guidance status fields.
+
+The skill can also be installed outside a repository. `--global` installs it
+for your user account, in `~/.agents/skills/ngit` and `~/.claude/skills/ngit`,
+so your own agents recognise Grasp repositories that carry no guidance.
+`--system` installs it for every user of the machine, in
+`/usr/local/share/agents/skills/ngit`; it may need elevated permissions, and
+`NGIT_SYSTEM_SKILLS_DIR` overrides the directory. Interactive
+runs (`-i`) ask which scope to use and, on a first repository install, whether
+to add the instruction to existing instruction files (`--no-agent-file`
+declines). Results report the `scope` they targeted, and `ngit skill status`
+reports every scope; its `--json` output carries them in a `scopes` object.
+Neither scope tells collaborators' agents anything, so the maintainer
+reminder is unaffected by them.
+
+Run `ngit skill --help` for the instruction, status and reminder opt-out
+commands.

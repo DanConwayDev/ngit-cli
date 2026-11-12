@@ -67,6 +67,7 @@ pub mod blossom;
 pub mod buzz;
 pub mod ci;
 pub mod grasp;
+pub mod grasp_recorder;
 pub mod harness;
 pub mod nostr;
 pub mod port;
@@ -88,6 +89,7 @@ pub use ci::{
     build_manual_trigger, build_service_control, repo_coordinate, workflow_hash,
 };
 pub use grasp::GraspServer;
+pub use grasp_recorder::{GraspObservation, GraspRecorder, GraspRelayMode};
 pub use harness::{Harness, HarnessBuilder};
 pub use nostr::{
     KIND_PULL_REQUEST, KIND_PULL_REQUEST_UPDATE, KIND_REPO_STATE, event_branch_name_tag, tag_value,

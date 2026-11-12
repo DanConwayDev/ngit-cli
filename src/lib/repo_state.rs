@@ -27,7 +27,7 @@ impl RepoState {
                 // "<commit-oid> refs/tags/v1.0.0^{}" in the list output so
                 // it can resolve the tag to a commit. without the ^{} line
                 // git fetch --prune deletes the tag as unresolvable.
-                if ["refs/heads/", "refs/tags", "HEAD"]
+                if ["refs/heads/", "refs/tags/", "HEAD"]
                     .iter()
                     .any(|s| name.starts_with(*s))
                 {
@@ -111,6 +111,63 @@ pub fn default_branch_from_state(state: &HashMap<String, String>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod try_from_ref_filter {
+        use nostr::prelude::{
+            Keys,
+            event::{FinalizeUnsignedEvent, SignEvent},
+        };
+
+        use super::*;
+
+        const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+        fn state_from_refs(refs: &[&str]) -> HashMap<String, String> {
+            let mut tags = vec![Tag::identifier("test-repo")];
+            for name in refs {
+                let value = if name == &"HEAD" {
+                    "ref: refs/heads/main"
+                } else {
+                    OID
+                };
+                tags.push(Tag::parse([*name, value]).unwrap());
+            }
+            let keys = Keys::generate();
+            let event = keys
+                .sign_event(
+                    EventBuilder::new(STATE_KIND, "")
+                        .tags(tags)
+                        .finalize_unsigned(keys.public_key()),
+                )
+                .unwrap();
+            RepoState::try_from(vec![event]).unwrap().state
+        }
+
+        #[test]
+        fn accepts_heads_tags_and_peeled_tags() {
+            let state =
+                state_from_refs(&["refs/heads/main", "refs/tags/v1.0.0", "refs/tags/v1.0.0^{}"]);
+            assert_eq!(state.get("refs/heads/main"), Some(&OID.to_string()));
+            assert_eq!(state.get("refs/tags/v1.0.0"), Some(&OID.to_string()));
+            assert_eq!(state.get("refs/tags/v1.0.0^{}"), Some(&OID.to_string()));
+        }
+
+        #[test]
+        fn accepts_head() {
+            let state = state_from_refs(&["HEAD"]);
+            assert_eq!(state.get("HEAD"), Some(&"ref: refs/heads/main".to_string()));
+        }
+
+        #[test]
+        fn rejects_tags_prefix_lookalikes_and_other_refs() {
+            let state = state_from_refs(&["refs/tagsevil", "refs/malicious"]);
+            assert!(!state.contains_key("refs/tagsevil"));
+            assert!(!state.contains_key("refs/malicious"));
+            // no attacker ref is admitted; state stays empty (no branch
+            // exists for add_head to synthesize a HEAD from).
+            assert!(state.is_empty());
+        }
+    }
 
     mod default_branch_from_state {
         use super::*;

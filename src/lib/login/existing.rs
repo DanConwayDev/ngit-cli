@@ -9,7 +9,6 @@ use anyhow::{Context, Result, bail};
 use nostr::prelude::{
     Event, Filter, Keys, Kind, Metadata, PublicKey, ToBech32, nip46::NostrConnectUri,
 };
-use nostr_connect::client::NostrConnect;
 
 use super::{
     SignerInfo, SignerInfoSource, credential_store,
@@ -25,10 +24,11 @@ use crate::{
     cli_interactor::{Interactor, InteractorPrompt, PromptPasswordParms},
     client::{fetch_public_key, get_event_from_global_cache},
     git::{
-        Repo, RepoActions, get_git_config_item, get_git_config_item_global,
-        get_git_config_item_system, open_global_configs_for_repo,
+        Repo, get_git_config_item, get_git_config_item_global, get_git_config_item_system,
+        open_global_configs_for_repo,
     },
     output_mode::TransientLine,
+    remote_signer::NostrConnect,
 };
 
 #[derive(Debug)]
@@ -53,8 +53,9 @@ impl std::fmt::Display for SignerAliasNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "signer alias '{}' is not defined in the OS credential store, credentials.json, or git config",
-            self.alias
+            "signer alias '{}' is not defined. {}",
+            self.alias,
+            credential_store::missing_profile_credentials_message(&self.alias)
         )
     }
 }
@@ -87,11 +88,7 @@ pub async fn load_existing_login(
     let user_ref = get_user_details(
         &public_key,
         client,
-        if let Some(git_repo) = git_repo {
-            Some(git_repo.get_path()?)
-        } else {
-            None
-        },
+        git_repo.as_ref().map(|repo| repo.workdir_or_git_dir()),
         silent,
         fetch_profile_updates,
     )
@@ -173,21 +170,28 @@ pub async fn get_signer_info(
                         let explicit_cli_selection = source
                             == SignerInfoSource::CommandLineArguments
                             && matches!(signer_info, Some(SignerInfo::Selection { .. }));
-                        let configured_selection = match source {
-                            SignerInfoSource::GitLocal => git_repo.is_some_and(|repo| {
-                                get_git_config_item(&Some(repo), "nostr.signer")
-                                    .is_ok_and(|value| value.is_some())
-                            }),
-                            SignerInfoSource::GitGlobal => {
-                                get_git_config_item_global(git_repo, "nostr.signer")
-                                    .is_ok_and(|value| value.is_some())
-                            }
-                            SignerInfoSource::GitSystem => {
-                                get_git_config_item_system("nostr.signer")
-                                    .is_ok_and(|value| value.is_some())
-                            }
-                            SignerInfoSource::CommandLineArguments => false,
-                        };
+                        // A configured scope owns the login even when its credentials
+                        // are incomplete. Never silently sign as a wider-scope account.
+                        let mut configured_selection = false;
+                        for key in [
+                            "nostr.signer",
+                            "nostr.nsec",
+                            "nostr.bunker-uri",
+                            "nostr.bunker-app-key",
+                        ] {
+                            let value = match source {
+                                SignerInfoSource::GitLocal => match git_repo {
+                                    Some(repo) => get_git_config_item(&Some(repo), key)?,
+                                    None => None,
+                                },
+                                SignerInfoSource::GitGlobal => {
+                                    get_git_config_item_global(git_repo, key)?
+                                }
+                                SignerInfoSource::GitSystem => get_git_config_item_system(key)?,
+                                SignerInfoSource::CommandLineArguments => None,
+                            };
+                            configured_selection |= value.is_some();
+                        }
                         if explicit_cli_selection
                             || configured_selection
                             || error
@@ -438,22 +442,24 @@ pub async fn configured_signer_npub(
     git_repo: &Option<&Repo>,
     source: SignerInfoSource,
 ) -> Result<Option<String>> {
-    let has_login = match source {
-        SignerInfoSource::GitLocal => git_repo.is_some_and(|repo| {
-            ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-                .iter()
-                .any(|key| get_git_config_item(&Some(repo), key).is_ok_and(|value| value.is_some()))
-        }),
-        SignerInfoSource::GitGlobal => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-            .iter()
-            .any(|key| {
-                get_git_config_item_global(git_repo, key).is_ok_and(|value| value.is_some())
-            }),
-        SignerInfoSource::GitSystem => ["nostr.signer", "nostr.nsec", "nostr.bunker-uri"]
-            .iter()
-            .any(|key| get_git_config_item_system(key).is_ok_and(|value| value.is_some())),
-        SignerInfoSource::CommandLineArguments => false,
-    };
+    let mut has_login = false;
+    for key in [
+        "nostr.signer",
+        "nostr.nsec",
+        "nostr.bunker-uri",
+        "nostr.bunker-app-key",
+    ] {
+        let value = match source {
+            SignerInfoSource::GitLocal => match git_repo {
+                Some(repo) => get_git_config_item(&Some(repo), key)?,
+                None => None,
+            },
+            SignerInfoSource::GitGlobal => get_git_config_item_global(git_repo, key)?,
+            SignerInfoSource::GitSystem => get_git_config_item_system(key)?,
+            SignerInfoSource::CommandLineArguments => None,
+        };
+        has_login |= value.is_some();
+    }
     if !has_login {
         return Ok(None);
     }
@@ -602,11 +608,7 @@ async fn resolve_selection_by_profile_name(
     selector: &str,
     password: &Option<String>,
 ) -> Result<ResolvedSelection> {
-    let git_repo_path = if let Some(git_repo) = git_repo {
-        Some(git_repo.get_path()?)
-    } else {
-        None
-    };
+    let git_repo_path = git_repo.as_ref().map(|repo| repo.workdir_or_git_dir());
     let events =
         get_event_from_global_cache(git_repo_path, vec![Filter::default().kind(Kind::Metadata)])
             .await
@@ -633,6 +635,12 @@ fn select_credentialed_profile(
 ) -> Result<ResolvedSelection> {
     let candidates = cached_profile_candidates(selector, events);
     if candidates.is_empty() {
+        if let Ok(alias) = credential_store::normalize_alias(selector) {
+            bail!(
+                "{}",
+                credential_store::missing_profile_credentials_message(&alias)
+            );
+        }
         bail!(
             "no cached profile is named '{selector}'; profiles enter ngit's cache when their account logs in. Select the signer with `--signer <npub>` or a signer alias instead"
         );
@@ -961,12 +969,14 @@ pub fn command_signer_public_key(
     }
 }
 
-struct SelectorTarget {
-    npub: String,
-    credential: Option<String>,
+pub struct SelectorTarget {
+    pub npub: String,
+    pub credential: Option<String>,
 }
 
-fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<SelectorTarget> {
+/// Resolve public selection metadata without loading keys or contacting a
+/// signer.
+pub fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<SelectorTarget> {
     if selector.starts_with("npub1") {
         let npub = PublicKey::parse(selector)
             .context("--signer contains an invalid npub")?
@@ -978,6 +988,7 @@ fn resolve_selector_npub(git_repo: &Option<&Repo>, selector: &str) -> Result<Sel
         });
     }
     let alias = credential_store::normalize_alias(selector)?;
+    credential_store::ensure_profile_not_forgotten(&alias)?;
     let key = format!("nostr.signer-alias.{alias}");
     let mut store_error = None;
     match credential_store::retrieve_signer_alias_from(&alias, credential_store::Backend::Os) {
@@ -1103,7 +1114,9 @@ fn hint_plaintext_secret(git_repo: &Option<&Repo>) {
     {
         return;
     }
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "hint: this login's nostr secret is stored in plaintext in git config; run `ngit account login` to move it into a credential store, or set `git config --global nostr.secret-storage git-config` to keep it there and silence this hint."
     );
 }

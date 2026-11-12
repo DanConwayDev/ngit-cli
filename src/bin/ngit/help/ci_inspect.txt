@@ -1,0 +1,26 @@
+Selection:
+  With no ID, `ci inspect` details the same HEAD and latest-attempt
+  selection as `ci status`; --target <commit-ish|PR> matches an explicit
+  status target. An ID selects one exact workflow, job or service event,
+  even an expired one, follows its quoted result, request and allocation
+  references one hop, and never substitutes another attempt for missing
+  evidence. Short run IDs printed by `ci status` are display labels: pass
+  the full event ID or nevent. --kind and --author are for protocol
+  diagnosis; use `ci service status` to discover coordinators.
+
+JSON:
+  Default and --target inspection carry the same CI projection as
+  `ci status`; --logs adds embedded log tails. Exact-ID inspection returns
+  the decoded event: `id`, `kind`, `type`, `author`, `created_at`, `content`
+  and an ordered `tags` array whose entries keep the original `tag`, a
+  readable `name` and all `values`, including repeated, empty and unknown
+  ones. --raw returns the original signed event instead. The signature is
+  verified before decoding, which is not coordinator admission or provider
+  authorization. Relay failures stay visible in the JSON.
+
+Artifacts:
+  --artifacts needs an event ID and network access. It fetches that
+  event's artifact manifests: at most
+  16 MiB each, verified against the Blossom SHA-256, schema version and
+  declared file count. No archive is extracted and no listed file is
+  downloaded. Status and watch never fetch manifests.

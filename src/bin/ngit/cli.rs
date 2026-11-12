@@ -21,17 +21,18 @@ pub struct SignerParams<'a> {
 #[command(
     author,
     version,
-    help_template = "{name} {version}\nnostr plugin for git\n includes a remote helper so native git commands (clone, fetch, push) work with nostr:// URLs\n - clone a nostr repository, or add as a remote, by using the url format nostr://npub123/identifier\n - remote branches beginning with `pr/` are open PRs from contributors; `ngit pr list` can be used to view all PRs\n - to open a PR, push a branch with the prefix `pr/` or use `ngit send` for advanced options\n   set title and description via push options:\n     git push -o 'title=My PR' -o 'description=line1\\n\\nline2' -u origin pr/branch\n   target another branch or select an explicit proposal base with:\n     git push -o target-branch=release/2.x -o base=<commit|branch|nevent> -u origin pr/branch\n - publish a repository to nostr with `ngit init`\n\n{usage}\n{all-args}"
+    help_template = "{name} {version}\nnostr plugin for git\n native git commands (clone, fetch, push) work with nostr:// URLs\n pushing a branch named `pr/<name>` opens a PR; `ngit init` publishes a repository\n `ngit --help` ends with a workflow map and shared conventions: read it before collaboration tasks\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
+    after_long_help = crate::cli_help::OVERVIEW
 )]
 #[command(propagate_version = true)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
-    /// remote signer address
+    /// Remote signer address
     #[arg(long, global = true, hide = true)]
     pub bunker_uri: Option<String>,
-    /// remote signer app secret key
+    /// Remote signer app secret key
     #[arg(long, global = true, hide = true)]
     pub bunker_app_key: Option<String>,
     /// nsec or hex private key
@@ -42,7 +43,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec_file", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec: Option<String>,
-    /// read an nsec or hex private key from a path resolving to a regular file
+    /// Read an nsec or hex private key from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -50,7 +51,7 @@ pub struct Cli {
         conflicts_with_all = ["nsec", "nbunksec", "nbunksec_file", "signer"]
     )]
     pub nsec_file: Option<PathBuf>,
-    /// established remote signer connection encoded as nbunksec
+    /// Established remote signer connection encoded as nbunksec
     #[arg(
         long,
         global = true,
@@ -65,7 +66,7 @@ pub struct Cli {
         ]
     )]
     pub nbunksec: Option<String>,
-    /// read an nbunksec connection from a path resolving to a regular file
+    /// Read an nbunksec connection from a path resolving to a regular file
     #[arg(
         long,
         global = true,
@@ -80,8 +81,8 @@ pub struct Cli {
         ]
     )]
     pub nbunksec_file: Option<PathBuf>,
-    /// use a configured signer by npub, alias, or cached profile name for
-    /// this command
+    /// Use a configured signer by npub, profile, or cached Nostr display name
+    /// for this command
     #[arg(
         long,
         global = true,
@@ -96,13 +97,13 @@ pub struct Cli {
         ]
     )]
     pub signer: Option<String>,
-    /// password to decrypt nsec
+    /// Password to decrypt nsec
     #[arg(short, long, global = true, hide = true)]
     pub password: Option<String>,
-    /// disable spinner animations
+    /// Disable spinner animations
     #[arg(long, action, hide = true)]
     pub disable_cli_spinners: bool,
-    /// show customization options via git config
+    /// Show customization options via git config
     #[arg(short, long, global = true)]
     pub customize: bool,
     /// Use default values without prompting (non-interactive mode)
@@ -117,24 +118,21 @@ pub struct Cli {
     /// Suppress progress and other non-essential output
     #[arg(short = 'q', long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
-    /// Enable verbose output
+    /// Show detailed progress immediately and retain diagnostics
     #[arg(short = 'v', long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
     /// Only publish nostr events to repository relays, not user or default
     /// relays
     #[arg(long, global = true)]
     pub repo_relay_only: bool,
-    /// Target repository for repo-scoped operations. Accepts a configured
-    /// nostr:// remote name, an naddr, or a nostr:// URL. Overrides
-    /// `nostr.repo`, tracked-upstream, and remote-based auto-detection.
-    ///
-    /// Available at any command position:
-    ///   `ngit --repo upstream send`
-    ///   `ngit issue --repo upstream create`
-    ///   `ngit issue create --repo upstream`
+    /// Authenticate to eligible relays on AUTH challenges before a request is
+    /// rejected
+    #[arg(long, global = true)]
+    pub proactive_auth: bool,
+    /// Target repository for repo-scoped operations, overriding auto-detection
     #[arg(long, global = true, value_name = "REMOTE|NADDR|NOSTR-URL")]
     pub repo: Option<String>,
-    /// Output one machine-readable JSON document on stdout
+    /// Output machine-readable JSON on stdout
     #[arg(long, global = true, conflicts_with = "interactive")]
     pub json: bool,
 }
@@ -186,6 +184,12 @@ Values are semicolon-separated URLs without spaces.
     Useful when you do not want to broadcast to your personal relay set.
     Also available as: {repo_relay_only_flag}
 
+  {proactive_auth}
+    Authenticate on relay AUTH challenges instead of waiting for auth-required
+    request rejections. Defaults to false. Requires an already attached signer
+    and an eligible relay. Also available as --proactive-auth or
+    NGIT_PROACTIVE_AUTH=true. For Git: git -c nostr.proactive-auth=true pull.
+
   {auto_pr_branches}
     Set to true to advertise every open or draft PR as a `pr/*` branch.
     Defaults to false; local config overrides global config. `ngit pr checkout`
@@ -201,6 +205,23 @@ Values are semicolon-separated URLs without spaces.
   {skill_reminders}
     Set to false to disable repository skill setup and update reminders.
     For one repository, run: {skill_opt_out}
+
+  {relay_timeout:<39} {relay_timeout_env}
+    Long Nostr relay timeout in seconds. Used for standalone connections,
+    connection retry budgets, event reads and adaptive fetch rounds. Default: 45.
+    Each existing phase retains its own budget; this is not a whole-command limit.
+    Example: {relay_timeout_example}
+
+  {relay_connect_timeout:<39} {relay_connect_timeout_env}
+    Fetch connection-attempt timeout and adaptive-fetch quorum grace in seconds.
+    Without a valid environment or Git config override, defaults to the smaller
+    of 7 seconds and the long relay timeout. Explicit overrides are independent.
+    Example: {relay_connect_timeout_example}
+
+  Relay timeouts accept positive whole seconds. Valid environment values override
+  Git config (local before global). Invalid environment values fall back to Git
+  config; invalid Git config values use the defaults described above.
+  These settings do not change Git HTTP or remote-signer timeouts.
 
   {http_connect_timeout:<39} {http_connect_timeout_env:<32}
     HTTP connect timeout for libgit2 fetch/push operations in milliseconds.
@@ -258,12 +279,19 @@ implementation details used for efficiency.
         nostate = key("nostr.nostate true"),
         repo_relay_only = key("nostr.repo-relay-only true"),
         repo_relay_only_flag = cmd("ngit --repo-relay-only send"),
+        proactive_auth = key("nostr.proactive-auth true"),
         auto_pr_branches = key("nostr.auto-pr-branches true"),
         trust_server_domains = key("nostr.trust-server-domains"),
         trust_server_example =
             cmd("git config --global nostr.trust-server-domains 'github.com;codeberg.org'"),
         skill_reminders = key("nostr.skill-reminders true"),
         skill_opt_out = cmd("ngit skill opt-out --local"),
+        relay_timeout = key("nostr.relay-timeout-secs"),
+        relay_timeout_env = env("NGIT_RELAY_TIMEOUT_SECS"),
+        relay_timeout_example = cmd("git config nostr.relay-timeout-secs 10"),
+        relay_connect_timeout = key("nostr.relay-connect-timeout-secs"),
+        relay_connect_timeout_env = env("NGIT_RELAY_CONNECT_TIMEOUT_SECS"),
+        relay_connect_timeout_example = cmd("git config nostr.relay-connect-timeout-secs 3"),
         http_connect_timeout = key("nostr.http-connect-timeout-ms"),
         http_connect_timeout_env = env("NGIT_HTTP_CONNECT_TIMEOUT_MS"),
         http_connect_timeout_default = key("3000"),
@@ -403,47 +431,59 @@ fn read_secret_file(path: &Path, label: &str) -> Result<String> {
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// create and publish a new repository on nostr
+    #[command(after_long_help = crate::cli_help::REPO_POINTER)]
     Init(sub_commands::init::SubCommandArgs),
     /// manage repository metadata and maintainership
     #[command(
-        long_about = "manage repository metadata and maintainership\n\nrun without a subcommand to show repository info"
+        long_about = "manage repository metadata and maintainership\n\nrun without a subcommand to show repository info",
+        after_long_help = crate::cli_help::REPO
     )]
     Repo(RepoSubCommandArgs),
     /// submit PR with advanced options
     #[command(
-        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Send(sub_commands::send::SubCommandArgs),
     /// work with pull requests
     #[command(
-        long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`"
+        long_about = "work with pull requests\n\nPRs are created by pushing a branch with the `pr/` prefix:\n  git push -u origin pr/my-branch\nor with advanced options via `ngit send`",
+        after_long_help = crate::cli_help::PR
     )]
     Pr(PrSubCommandArgs),
     /// merge a PR as a local no-ff merge commit (alias for `ngit pr merge`)
     #[command(
-        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nthis is an alias for `ngit pr merge`; run without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nthis is an alias for `ngit pr merge`; run without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Merge(MergeSubCommandArgs),
     /// work with issues
+    #[command(after_long_help = crate::cli_help::ISSUE)]
     Issue(IssueSubCommandArgs),
     /// inspect CI results and the trust context behind them
+    #[command(after_long_help = crate::cli_help::CI)]
     Ci(CiSubCommandArgs),
     /// work with software applications, releases, and release assets
-    #[command(alias = "releases")]
+    #[command(alias = "releases", after_long_help = crate::cli_help::RELEASE)]
     Release(ReleaseSubCommandArgs),
     /// publish static websites through Nostr and Blossom
+    #[command(after_long_help = crate::cli_help::NSITE)]
     Nsite(NsiteSubCommandArgs),
     /// publish OCI container images through Nostr and Blossom
-    #[command(visible_alias = "oci")]
+    #[command(visible_alias = "oci", after_long_help = crate::cli_help::CONTAINER)]
     Container(ContainerSubCommandArgs),
     /// update repo git servers to reflect nostr state (add, update or delete
     /// remote refs)
+    #[command(after_long_help = crate::cli_help::SYNC)]
     Sync(sub_commands::sync::SubCommandArgs),
-    /// install and update ngit's skill for coding agents
+    /// tell coding agents to use ngit: repository instruction, skill and
+    /// reminders
+    #[command(after_long_help = crate::cli_help::SKILL)]
     Skill(SkillArgs),
     /// inspect and update the ngit installation
     Update(UpdateArgs),
     /// list accounts, create an account, login, logout or export keys
+    #[command(after_long_help = crate::cli_help::ACCOUNT)]
     Account(AccountSubCommandArgs),
 }
 
@@ -474,6 +514,7 @@ pub struct NsiteSubCommandArgs {
 #[derive(Subcommand)]
 pub enum NsiteCommands {
     /// publish a directory as a root or named NIP-5A static site
+    #[command(after_long_help = crate::cli_help::NSITE_POINTER)]
     Publish(NsitePublishArgs),
 }
 
@@ -561,7 +602,7 @@ pub struct SkillInstallArgs {
     /// (`/usr/local/share/agents/skills`, or `$NGIT_SYSTEM_SKILLS_DIR`)
     #[arg(long, conflicts_with = "global")]
     pub system: bool,
-    /// Skip adding a skill pointer to existing AGENTS.md/CLAUDE.md files
+    /// Skip adding the ngit instruction to existing AGENTS.md/CLAUDE.md files
     #[arg(long)]
     pub no_agent_file: bool,
 }
@@ -586,16 +627,16 @@ pub enum AccountCommands {
     Login(sub_commands::login::SubCommandArgs),
     /// connect interactively (alias for `login -i`)
     Connect(sub_commands::login::SubCommandArgs),
-    /// remove nostr account details from git config; keeps the stored
-    /// secret unless --forget is passed
+    /// remove the selected login and credentials; --all removes all known saved
+    /// sessions, while --forget also permits deleting identity keys
     Logout(sub_commands::logout::SubCommandArgs),
     /// export nostr keys to login to other nostr clients
     #[command(
         long_about = "export nostr keys to login to other nostr clients\n\nBy default, opens a menu for printing or displaying the npub and secret as a QR code. Use --secret to print only the nsec or nbunksec.\n\nExamples:\n  ngit account export-keys --secret\n  ngit --signer work account export-keys --secret"
     )]
     ExportKeys(sub_commands::export_keys::SubCommandArgs),
-    /// remove a stored account secret from the OS credential store / ngit
-    /// file store
+    /// delete all stored credentials for an npub, or one exact entry,
+    /// including identity keys without further confirmation
     ForgetKeys(sub_commands::forget_keys::SubCommandArgs),
     /// create a new nostr account
     Create(sub_commands::create::SubCommandArgs),
@@ -639,6 +680,7 @@ pub struct ContainerSubCommandArgs {
 #[derive(Subcommand)]
 pub enum ContainerCommands {
     /// upload an OCI image layout to Blossom and publish its tag map
+    #[command(after_long_help = crate::cli_help::CONTAINER_POINTER)]
     Publish(ContainerPublishArgs),
 }
 
@@ -714,9 +756,6 @@ pub struct ReleaseListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -736,9 +775,6 @@ pub struct ReleaseViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -816,9 +852,6 @@ pub struct ReleasePublishArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -862,9 +895,6 @@ pub struct ReleaseAppListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -878,9 +908,6 @@ pub struct ReleaseAppViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -973,9 +1000,6 @@ pub struct ReleaseAppInitArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -992,9 +1016,6 @@ pub struct ReleaseAppLinkArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -1028,9 +1049,6 @@ pub struct ReleaseAssetListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1053,9 +1071,6 @@ pub struct ReleaseAssetViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1173,9 +1188,6 @@ pub struct ReleaseAssetAddArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,7 +1289,8 @@ pub enum PrCommands {
     },
     /// submit PR with advanced options (alias for `ngit send`)
     #[command(
-        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch"
+        long_about = "submit PR with advanced options\n\nfor a simpler flow, push a branch with the `pr/` prefix using native git:\n  git push -o 'title=My PR' -o 'description=details here' -u origin pr/my-branch",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Send(sub_commands::send::SubCommandArgs),
     /// close a PR (author or maintainer only)
@@ -1347,7 +1360,8 @@ pub enum PrCommands {
     /// merge a PR into its declared target, or the default branch, as a no-ff
     /// merge commit (does not push)
     #[command(
-        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent"
+        long_about = "merge a PR into its declared target branch, or the repository default, as a no-ff merge commit (does not push)\n\nrun without an ID while on a `pr/` branch to merge that PR, or pass a PR event-id (hex) or nevent",
+        after_long_help = crate::cli_help::PR_POINTER
     )]
     Merge(MergeSubCommandArgs),
     /// add one or more labels to a PR (author or maintainer only)
@@ -1435,41 +1449,119 @@ pub enum LogTailMode {
     None,
 }
 
+#[derive(clap::Args, Default)]
+pub struct CiExecutionSelection {
+    /// Pin a native job's installed environment: JOB=SHA256[,MANIFEST-URL]
+    ///
+    /// JOB is its YAML key. SHA256 is the lowercase environment manifest hash,
+    /// obtained from a provider offering or job evidence using ci inspect.
+    /// Repeat for other jobs. The optional URL must name the same digest.
+    /// This selects an installed environment; it does not install an image
+    /// or remove resource requirements. Omitted jobs keep their normal pins.
+    #[arg(long, value_name = "JOB=SHA256[,URL]")]
+    pub environment: Vec<String>,
+    /// Override a native job's resource/environment requirement (repeatable)
+    ///
+    /// JOB is its YAML key. PATH is a resource name or env/JSON-pointer.
+    /// OP is eq, gte, lte or contains. JSON is an integer, boolean or quoted
+    /// string; gte/lte require integers. Each path replaces its whole inherited
+    /// constraint for that job; other paths and jobs are unchanged.
+    ///
+    /// Examples: --require 'build=memory-mib:gte:8192' (8 GiB RAM),
+    /// --require 'build=vcpus:gte:4',
+    /// --require 'build=env/configuration/guest/job-uid:eq:0'.
+    /// Repeat gte/lte to set both bounds. Preserve JSON string quotes, e.g.
+    /// --require 'build=some-resource:eq:"value"'. Duplicate job/path/operator
+    /// triples are rejected. Requirements select offerings, not guest settings.
+    /// Comparisons do not coerce types. In an env JSON Pointer write `/` as
+    /// `~1` and `~` as `~0`; in any path write `:` as `%3A` and `%` as `%25`.
+    /// A published request is not proof that resources were allocated.
+    #[arg(long = "require", value_name = "JOB=PATH:OP:JSON")]
+    pub requirements: Vec<String>,
+    /// Compatibility flag; fresh manual triggers already rerun dependencies
+    #[arg(long)]
+    pub rerun_dependencies: bool,
+}
+
+#[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // Independent CLI switches.
+pub struct CiInspectArgs {
+    /// Commit-ish or PR to inspect; defaults to HEAD when no event/filter is
+    /// given
+    #[arg(long, conflicts_with_all = ["id", "event", "kinds", "author", "raw", "include_expired"])]
+    pub target: Option<String>,
+    /// Include log tails for successful jobs too (human output shows failed-job
+    /// logs by default)
+    #[arg(long, conflicts_with = "no_logs")]
+    pub logs: bool,
+    /// Hide embedded log tails; retain log links
+    #[arg(long)]
+    pub no_logs: bool,
+    /// Exact workflow, job or service event ID (hex or nevent)
+    pub id: Option<String>,
+    /// Include the original signed event instead of decoding its tags
+    #[arg(long)]
+    pub raw: bool,
+    /// Fetch and verify artifact manifests referenced by the selected event
+    #[arg(long, requires = "id", conflicts_with = "offline")]
+    pub artifacts: bool,
+    /// Event kinds; default: coordinator/provider advertisements and service
+    /// status
+    #[arg(long = "kind", value_delimiter = ',')]
+    pub kinds: Vec<u16>,
+    /// Restrict the signing author (npub or hex)
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Inspect an exact event id or nevent
+    #[arg(long, conflicts_with = "id")]
+    pub event: Option<String>,
+    /// Include expired metadata and snapshots
+    #[arg(long)]
+    pub include_expired: bool,
+    /// Maximum cached results per kind
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub limit: u16,
+    /// Read cached events only
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(clap::Args)]
+pub struct CiSecretsArgs {
+    /// Coordinator public key (npub or hex)
+    pub coordinator: String,
+    /// JSON file mapping secret names to values; values are never accepted on
+    /// argv
+    #[arg(long, value_name = "PATH")]
+    pub set_file: Option<std::path::PathBuf>,
+    /// Set NAME from the environment variable NAME (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub set_from_env: Vec<String>,
+    /// Seconds to wait for coordinator confirmation (0 publishes without
+    /// waiting). Relay delivery succeeds independently; JSON confirmation
+    /// remains pending if no matching status arrives before this deadline.
+    #[arg(long, default_value_t = 90)]
+    pub confirmation_timeout: u64,
+    /// Remove a secret name (repeatable)
+    #[arg(long, value_name = "NAME")]
+    pub remove: Vec<String>,
+}
+
 #[derive(Subcommand)]
-pub enum CiCommands {
-    /// show CI results, with the trust context of every signer behind them
-    #[command(
-        long_about = "show CI results, with the trust context of every signer behind them\n\n\
-        <TARGET> is resolved in this order:\n  \
-        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
-        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
-        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
-        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
-        5. with no target, the HEAD commit\n\n\
-        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Each job line includes its provider-published log URL when present. Signed per-job log tails are included for non-successful jobs by default; `--log-tail` selects auto, all, or none for both human and JSON output.\n\n\
-        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed."
-    )]
+pub enum CiServiceCommands {
+    /// Show coordinators with observed runs in the last 30 days, maintainer
+    /// relationships, service claims and advertised availability
+    #[command(after_long_help = crate::cli_help::CI_SERVICE_STATUS)]
     Status {
-        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
-        /// HEAD
-        #[arg(value_name = "TARGET")]
-        target: Option<String>,
-        /// Exit non-zero unless the current result is a success whose weakest
-        /// run meets this trust floor
-        #[arg(long, value_name = "LEVEL", value_enum)]
-        require_ci_trust: Option<CiTrustFloor>,
-        /// Which signed per-job log tails to include in human and JSON output
-        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
-        log_tail: LogTailMode,
-        /// Skip the relay fetch and NIP-05 trust verification, reading CI
-        /// from the local cache
+        /// Read cached evidence only; missing history is not proof of stopped
+        /// service
         #[arg(long)]
         offline: bool,
     },
     /// ask a coordinator to run CI for this repository
     #[command(
         long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
-        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci stop`. It never covers runs that started before it.\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
         <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
         The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
     )]
@@ -1484,13 +1576,130 @@ pub enum CiCommands {
     /// ask a coordinator to stop running CI for this repository
     #[command(
         long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
-        Published for the same repository perspective as `ngit ci request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
     )]
     Stop {
         /// Coordinator public key (npub or hex)
         #[arg(value_name = "COORDINATOR")]
         coordinator: String,
         /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CiCommands {
+    /// Manage standing CI service for this repository
+    Service {
+        #[command(subcommand)]
+        command: CiServiceCommands,
+    },
+    /// Publish an encrypted atomic secret update to a live coordinator inbox
+    #[command(after_long_help = crate::cli_help::CI_SECRETS)]
+    Secrets(CiSecretsArgs),
+    /// Show detailed CI for HEAD, --target, or an exact signed event
+    #[command(after_long_help = crate::cli_help::CI_INSPECT)]
+    Inspect(CiInspectArgs),
+    /// show CI results, with the trust context of every signer behind them
+    #[command(
+        long_about = "show CI results, with the trust context of every signer behind them\n\n\
+        <TARGET> is resolved in this order:\n  \
+        1. `#<hex-prefix>` is always a PR/event-id prefix\n  \
+        2. an nevent, note, or full 64-character event id is always an event id, and must name a cached PR or one of its revisions\n  \
+        3. otherwise a commit-ish, resolved with git (an annotated tag is queried by both its tag object id and the commit it peels to)\n  \
+        4. a bare short hex that is not a commit-ish falls back to a PR event-id prefix\n  \
+        5. with no target, the HEAD commit\n\n\
+        A PR reports only the runs for its latest revision; results for earlier revisions are never presented as current. Human output summarizes workflows and jobs, highlighting failed or active steps. Failed jobs show their steps and final three log lines. Use `ci inspect --target <TARGET>` for step durations, logs, artifacts and trust details. `--log-tail` selects tails for JSON only; human failed-job tails appear in `ci inspect` (use `--no-logs` to hide them).\n\n\
+        With no target, HEAD remains current. Only when it has no CI run evidence, a compact summary may show the newest related previous PR/upstream tip with CI evidence. Explicit commit targets do not infer history. Earlier attempts on the current tip have concise status/time rows and exact inspect commands. Historical results never affect the current conclusion or trust gate.\n\n\
+        Unstarted jobs are labelled not reported, never guessed to be queued or skipped. Conditions are never evaluated locally. Bare `ci inspect` details the same HEAD selection; `ci inspect <ID>` selects exact event evidence.\n\n\
+        Trust context describes why a result may deserve attention. `No known context` is an absence of evidence, never a finding against the signer. The integrity marker is separate from trust: it is ngit's own check that it holds the commit and that the workflow file at that commit hashes to what the coordinator signed.",
+        after_long_help = crate::cli_help::CI_STATUS
+    )]
+    Status {
+        /// Watch CI until all observed workflows finish, then wait 10 quiet
+        /// seconds for further updates (JSON Lines with --json)
+        #[arg(long, conflicts_with_all = ["offline", "require_ci_trust"])]
+        watch: bool,
+        /// Keep watching after completion until interrupted
+        #[arg(long, requires = "watch")]
+        follow: bool,
+        /// Emit complete decoded events instead of compact JSON changes
+        #[arg(long, requires_all = ["watch", "json"])]
+        full_events: bool,
+        /// PR (`#<prefix>`, nevent, or event-id), commit-ish, or nothing for
+        /// HEAD
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+        /// Exit non-zero unless the current result is a success whose weakest
+        /// run meets this trust floor
+        #[arg(long, value_name = "LEVEL", value_enum)]
+        require_ci_trust: Option<CiTrustFloor>,
+        /// Which signed per-job log tails to include in JSON output
+        #[arg(long, value_name = "MODE", value_enum, default_value = "auto")]
+        log_tail: LogTailMode,
+        /// Skip the relay fetch and NIP-05 trust verification, reading CI
+        /// from the local cache
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Deprecated alias for `ci service request`
+    #[command(
+        long_about = "ask a coordinator to run CI for this repository (kind-9843 Service Request)\n\n\
+        The request is a standing one: it covers runs the coordinator starts after it, and stays in force until `ngit ci service stop`. It never covers runs that started before it.\n\n\
+        <COORDINATOR> is the coordinator's public key, as an npub or hex.\n\n\
+        The request is signed for one repository perspective: your own announcement when you have published one, otherwise the selected maintainer's. A coordinator's default policy accepts only a confirmed maintainer of that perspective, so ngit warns — but does not refuse — when you are not one; an operator may have accepted your key explicitly."
+    )]
+    Request {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Deprecated alias for `ci service stop`
+    #[command(
+        long_about = "ask a coordinator to stop running CI for this repository (kind-9844 Service Stop)\n\n\
+        Published for the same repository perspective as `ngit ci service request`. A confirmed maintainer's Stop closes every earlier Request for that perspective; anybody else's closes only their own."
+    )]
+    Stop {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Use local cache only, skip network fetch
+        #[arg(long)]
+        offline: bool,
+    },
+    /// request cancellation of one exact workflow run
+    #[command(
+        long_about = "Request cancellation of one exact workflow run (kind 9846). By default, running jobs follow their cancellation grace periods. Use --force (kind 9848) to stop all active tasks in that run immediately, bypassing those grace periods; this also escalates an earlier ordinary cancellation. Requires a confirmed repository maintainer. Pass the coordinator and 64-character run id reported by ci status, and select the repository perspective used by that run with --repo. A successful command means the request was published; use ci status to observe confirmed completion. Cancellation cannot roll back effects already published."
+    )]
+    Cancel {
+        /// Coordinator public key (npub or hex)
+        #[arg(value_name = "COORDINATOR")]
+        coordinator: String,
+        /// Exact workflow run id from ci status (64 lowercase hexadecimal
+        /// characters)
+        #[arg(value_name = "RUN-ID")]
+        run_id: String,
+        /// Use the local repository and maintainer cache without refreshing it
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Rerun a completed native workflow, retaining its dependency bindings
+    #[command(after_long_help = crate::cli_help::CI_RERUN)]
+    Rerun {
+        /// Coordinator public key (npub or hex)
+        coordinator: String,
+        /// Exact completed Workflow Result event id or nevent
+        result: String,
+        /// Rerun this job and its dependants; omit to restart every job
+        #[arg(long)]
+        job: Option<String>,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
+        /// Use cached source result and repository authority only
         #[arg(long)]
         offline: bool,
     },
@@ -1514,6 +1723,8 @@ pub enum CiCommands {
         /// Git ref published as the run's context, e.g. refs/heads/main
         #[arg(long = "ref", value_name = "GIT-REF")]
         git_ref: Option<String>,
+        #[command(flatten)]
+        selection: CiExecutionSelection,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1729,6 +1940,22 @@ mod tests {
     };
 
     #[test]
+    fn proactive_auth_is_opt_in_and_global() {
+        assert!(
+            !super::Cli::try_parse_from(["ngit", "repo"])
+                .unwrap()
+                .proactive_auth
+        );
+        for args in [
+            vec!["ngit", "--proactive-auth", "repo"],
+            vec!["ngit", "repo", "--proactive-auth"],
+            vec!["ngit", "issue", "list", "--proactive-auth"],
+        ] {
+            assert!(super::Cli::try_parse_from(args).unwrap().proactive_auth);
+        }
+    }
+
+    #[test]
     fn ci_detail_log_tail_modes_default_to_auto() {
         let cli = Cli::try_parse_from(["ngit", "ci", "status"]).unwrap();
         let Some(Commands::Ci(args)) = cli.command else {
@@ -1750,6 +1977,25 @@ mod tests {
         assert_eq!(log_tail, LogTailMode::None);
 
         assert!(Cli::try_parse_from(["ngit", "ci", "status", "--log-tail=everything"]).is_err());
+    }
+
+    #[test]
+    fn ci_inspect_defaults_to_head_and_keeps_exact_events_distinct() {
+        for args in [
+            vec!["ngit", "ci", "inspect"],
+            vec!["ngit", "ci", "inspect", "--target", "HEAD", "--logs"],
+            vec!["ngit", "ci", "inspect", "deadbeef", "--logs"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["ngit", "ci", "inspect", "deadbeef", "--target", "HEAD"],
+            vec![
+                "ngit", "ci", "inspect", "--target", "HEAD", "--kind", "19843",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     fn assert_json_on_every_leaf(command: &Command, path: &str) {

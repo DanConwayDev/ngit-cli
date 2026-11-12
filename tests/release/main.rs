@@ -115,14 +115,26 @@ async fn release_publish_bootstraps_the_application_asset_and_release() -> Resul
     .await?;
     server.finish().await?;
 
-    let fetch_summaries = stderr
+    let records = stderr
         .lines()
-        .filter(|line| *line == "no updates" || line.starts_with("updates: "))
-        .count();
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let fetches: Vec<_> = records
+        .iter()
+        .filter(|record| record["operation"] == "relay_fetch")
+        .collect();
     ensure!(
-        fetch_summaries == 1,
-        "release publish emitted {fetch_summaries} fetch summaries:\n{stderr}"
+        !fetches.is_empty(),
+        "release publish did not report relay fetching"
     );
+    for fetch in fetches {
+        ensure!(
+            records
+                .iter()
+                .any(|record| record["id"] == fetch["id"] && record["state"] == "completed"),
+            "relay fetch lacks its final outcome"
+        );
+    }
 
     ensure!(output["result"]["application_operation"] == "created");
     ensure!(
@@ -699,7 +711,7 @@ async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
     publish_to_default_relay(&harness, &server_list).await?;
     wait_for_relay_event(&harness, server_list.id).await?;
 
-    let output = run_json(
+    let (output, stderr) = run_json_with_stderr(
         &publisher,
         &[
             "release",
@@ -719,6 +731,32 @@ async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
         ],
     )
     .await?;
+    // stdout remains exactly one JSON document (parsed by the helper), while
+    // captured stderr exposes structured upload milestones alongside diagnostics.
+    let records: Vec<Value> = stderr
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("non-JSON publication stderr: {stderr}"))?;
+    let progress: Vec<Value> = records
+        .into_iter()
+        .filter(|record| record["type"] == "progress" && record["operation"] == "blossom")
+        .collect();
+    for server in [primary.base_url_with_slash(), mirror.base_url_with_slash()] {
+        for kind in [
+            "upload_request_started",
+            "upload_body_finished",
+            "placement_finished",
+        ] {
+            ensure!(
+                progress
+                    .iter()
+                    .any(|record| record["event"]["kind"] == kind
+                        && record["event"]["server"] == server),
+                "missing {kind} progress for {server}: {stderr}"
+            );
+        }
+    }
     let primary_url = primary.blob_url(&hash);
     let primary_root = primary.base_url_with_slash();
     let mirror_root = mirror.base_url_with_slash();

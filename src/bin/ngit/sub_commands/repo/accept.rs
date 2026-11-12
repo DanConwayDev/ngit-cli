@@ -28,11 +28,11 @@ use crate::{
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
     #[clap(short, long, value_parser, num_args = 1..)]
-    /// where your git+nostr data is hosted (optional; uses your saved grasp
+    /// Where your git+nostr data is hosted (optional; uses your saved grasp
     /// server list or the selected maintainer's servers if not specified)
     grasp_server: Vec<String>,
     #[arg(long)]
-    /// reserved for future state-only replacement; collisions still fail
+    /// Reserved for future state-only replacement; collisions still fail
     force: bool,
 }
 

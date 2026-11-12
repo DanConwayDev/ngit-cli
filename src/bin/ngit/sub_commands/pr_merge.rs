@@ -306,8 +306,6 @@ pub async fn launch(
         let target_tip = resolve_target_branch_tip_with_known_tip(
             &git_repo,
             &target_branch,
-            None,
-            false,
             Some(state_target_tip),
         )?;
         Some(target_tip.to_string())

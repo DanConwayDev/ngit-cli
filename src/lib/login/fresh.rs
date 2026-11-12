@@ -17,7 +17,6 @@ use nostr::prelude::{
     key::AsyncGetPublicKey,
     nip46::NostrConnectUri,
 };
-use nostr_connect::client::NostrConnect;
 use qrcode::QrCode;
 use tokio::{signal, sync::Mutex};
 
@@ -40,14 +39,24 @@ use crate::{
     },
     client::{Connect, send_events},
     git::{Repo, RepoActions, remove_git_config_item, save_git_config_item},
+    remote_signer::NostrConnect,
 };
+
+/// Where a successful login persists its selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginTarget {
+    Global,
+    Local,
+    /// Store a named profile without selecting it in Git config.
+    ProfileOnly,
+}
 
 pub async fn fresh_login_or_signup(
     git_repo: &Option<&Repo>,
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     signer_info: Option<SignerInfo>,
-    save_local: bool,
+    target: LoginTarget,
     signer_relays: &[String],
     alias: Option<&str>,
     selected_by: Option<&str>,
@@ -67,16 +76,19 @@ pub async fn fresh_login_or_signup(
             .await?;
             break (signer, user_ref.public_key, signer_info, source);
         }
+        let mut choices = vec![
+            "secret key (nsec / ncryptsec)".to_string(),
+            "nostr connect (remote signer)".to_string(),
+        ];
+        if target != LoginTarget::ProfileOnly {
+            choices.push("create account".to_string());
+        }
+        choices.push("help".to_string());
         match Interactor::default().choice(
             PromptChoiceParms::default()
                 .with_prompt("login to nostr")
                 .with_default(0)
-                .with_choices(vec![
-                    "secret key (nsec / ncryptsec)".to_string(),
-                    "nostr connect (remote signer)".to_string(),
-                    "create account".to_string(),
-                    "help".to_string(),
-                ])
+                .with_choices(choices)
                 .dont_report(),
         )? {
             0 => match get_fresh_nsec_signer().await {
@@ -87,16 +99,17 @@ pub async fn fresh_login_or_signup(
             1 => match get_fresh_nip46_signer(client, signer_relays).await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("error getting fresh nip46 signer: {e}");
-                    continue;
-                }
+                Err(e) => return Err(e.context("failed to connect to remote signer")),
             },
-            2 => match signup(client).await {
+            2 if target != LoginTarget::ProfileOnly => match signup(client).await {
                 Ok(Some(res)) => break res,
                 Ok(None) => continue,
                 Err(e) => {
-                    eprintln!("error getting fresh signer from signup: {e}");
+                    crate::report_message!(
+                        "info",
+                        "account_diagnostic",
+                        "error getting fresh signer from signup: {e}"
+                    );
                     continue;
                 }
             },
@@ -118,20 +131,36 @@ pub async fn fresh_login_or_signup(
     if let Some(alias) = alias {
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
-    let mut saved_source = git_config_source(!save_local);
+    let mut saved_source = git_config_source(target != LoginTarget::Local);
     let mut receipts = CredentialStorageReceipts::default();
-    if let SignerInfo::Selection { selector } = &signer_info {
+    if target == LoginTarget::ProfileOnly {
+        save_profile_without_activation(git_repo, &signer_info, alias, &npub, &mut receipts)?;
+        saved_source = SignerInfoSource::CommandLineArguments;
+    } else if let SignerInfo::Selection { selector } = &signer_info {
         // account login resolves selections before calling this function, but
         // library callers may still supply one. Persist the separately
         // resolved npub so an alias can never be copied into `nostr.npub`.
         if let Some(alias) = alias {
-            save_signer_alias_into(git_repo, alias, &npub, None, !save_local, &mut receipts)?;
+            save_signer_alias_into(
+                git_repo,
+                alias,
+                &npub,
+                None,
+                target != LoginTarget::Local,
+                &mut receipts,
+            )?;
         } else {
-            save_signer_selection(git_repo, selector, &npub, !save_local)?;
+            save_signer_selection(git_repo, selector, &npub, target != LoginTarget::Local)?;
         }
     } else {
-        saved_source =
-            save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
+        saved_source = save_to_git_config(
+            git_repo,
+            &signer_info,
+            target != LoginTarget::Local,
+            alias,
+            &mut receipts,
+        )
+        .await?;
         if saved_source != SignerInfoSource::CommandLineArguments {
             let saved_globally = saved_source == SignerInfoSource::GitGlobal;
             if let Some(alias) = alias {
@@ -168,7 +197,7 @@ pub async fn fresh_login_or_signup(
         false,
     )
     .await?;
-    print_logged_in_as(&user_ref, client.is_none(), &saved_source, alias)?;
+    report_login(&user_ref, client.is_none(), &saved_source, alias, target)?;
     Ok((signer, user_ref, saved_source))
 }
 
@@ -181,7 +210,7 @@ pub async fn login_with_bunker_url(
     #[cfg(test)] client: Option<&MockConnect>,
     #[cfg(not(test))] client: Option<&Client>,
     bunker_url: &str,
-    save_local: bool,
+    target: LoginTarget,
     signer_relays: &[String],
     alias: Option<&str>,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
@@ -189,7 +218,36 @@ pub async fn login_with_bunker_url(
         .context("invalid bunker:// URL - must be a valid bunker:// URI")?;
 
     let (app_key, _) = generate_nostr_connect_app(client, signer_relays)?;
+    login_with_connect_uri(git_repo, client, &app_key, &url, target, alias).await
+}
 
+/// Start client-initiated pairing without reading terminal input or displaying
+/// a QR code. The URI is emitted on stderr before waiting, including in JSON
+/// output mode.
+pub async fn login_with_nostrconnect(
+    git_repo: &Option<&Repo>,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    target: LoginTarget,
+    signer_relays: &[String],
+    alias: Option<&str>,
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
+    let (app_key, url) = generate_nostr_connect_app(client, signer_relays)?;
+    if url.relays().is_empty() {
+        bail!("no signer relays configured; provide --signer-relay <url>");
+    }
+    login_with_connect_uri(git_repo, client, &app_key, &url, target, alias).await
+}
+
+async fn login_with_connect_uri(
+    git_repo: &Option<&Repo>,
+    #[cfg(test)] client: Option<&MockConnect>,
+    #[cfg(not(test))] client: Option<&Client>,
+    app_key: &Keys,
+    url: &NostrConnectUri,
+    target: LoginTarget,
+    alias: Option<&str>,
+) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
     let printer = Arc::new(Mutex::new(Printer::default()));
     {
         let mut p = printer.lock().await;
@@ -197,7 +255,19 @@ pub async fn login_with_bunker_url(
     }
 
     let (signer, user_public_key, bunker_uri) =
-        listen_for_remote_signer(&app_key, &url, printer).await?;
+        listen_for_remote_signer_when_listening(app_key, url, printer, || {
+            if matches!(url, NostrConnectUri::Client { .. }) {
+                if crate::output_mode::is_json() {
+                    crate::reporting::action_required(
+                        "signer_pairing",
+                        serde_json::json!({"uri":url.to_string()}),
+                    );
+                } else {
+                    crate::report_message!("info", "account_diagnostic", "nostrconnect: {url}");
+                }
+            }
+        })
+        .await?;
 
     let signer_info = SignerInfo::Bunker {
         bunker_uri: bunker_uri.to_string(),
@@ -210,8 +280,19 @@ pub async fn login_with_bunker_url(
         crate::login::credential_store::ensure_alias_available(alias, &npub)?;
     }
     let mut receipts = CredentialStorageReceipts::default();
-    let source =
-        save_to_git_config(git_repo, &signer_info, !save_local, alias, &mut receipts).await?;
+    let source = if target == LoginTarget::ProfileOnly {
+        save_profile_without_activation(git_repo, &signer_info, alias, &npub, &mut receipts)?;
+        SignerInfoSource::CommandLineArguments
+    } else {
+        save_to_git_config(
+            git_repo,
+            &signer_info,
+            target != LoginTarget::Local,
+            alias,
+            &mut receipts,
+        )
+        .await?
+    };
     if source != SignerInfoSource::CommandLineArguments {
         if let Some(alias) = alias {
             let credential = receipts
@@ -246,7 +327,7 @@ pub async fn login_with_bunker_url(
     )
     .await?;
 
-    print_logged_in_as(&user_ref, client.is_none(), &source, alias)?;
+    report_login(&user_ref, client.is_none(), &source, alias, target)?;
     Ok((signer, user_ref, source))
 }
 
@@ -354,7 +435,7 @@ pub async fn get_fresh_nsec_signer() -> Result<
 }
 
 pub fn show_prompt_success(label: &str, value: &str) {
-    eprintln!("{}", {
+    crate::report_message!("info", "account_diagnostic", "{}", {
         let mut s = String::new();
         let _ = ColorfulTheme::default().format_input_prompt_selection(&mut s, label, value);
         s
@@ -362,7 +443,7 @@ pub fn show_prompt_success(label: &str, value: &str) {
 }
 
 fn show_prompt_error(label: &str, value: &str) {
-    eprintln!("{}", {
+    crate::report_message!("info", "account_diagnostic", "{}", {
         let mut s = String::new();
         let _ = ColorfulTheme::default().format_error(
             &mut s,
@@ -438,10 +519,18 @@ pub async fn get_fresh_nip46_signer(
             // after "signer connection established".
             let nc_listener = Arc::clone(&nostr_connect);
             let pubkey_handle = tokio::spawn(async move {
-                let res = nc_listener
-                    .get_public_key_async()
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e));
+                let res = crate::signer_progress::run_remote_operation_when_listening(
+                    &nc_listener,
+                    "waiting for remote signer pairing...",
+                    async {
+                        nc_listener
+                            .get_public_key_async()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    },
+                    || {},
+                )
+                .await;
                 done_listener.store(true, Ordering::Relaxed);
                 res
             });
@@ -449,10 +538,19 @@ pub async fn get_fresh_nip46_signer(
             // Wait (on a blocking thread so it doesn't stall the listener)
             // for either the signer to connect or the user to pick an option.
             let done_menu = Arc::clone(&done);
-            let choice =
-                tokio::task::spawn_blocking(move || wait_for_signer_or_menu_choice(&done_menu))
-                    .await
-                    .context("connect menu task panicked")??;
+            let choice = match tokio::task::spawn_blocking(move || {
+                wait_for_signer_or_menu_choice(&done_menu)
+            })
+            .await
+            .context("connect menu task panicked")
+            .and_then(|result| result)
+            {
+                Ok(choice) => choice,
+                Err(error) => {
+                    pubkey_handle.abort();
+                    return Err(error);
+                }
+            };
 
             match choice {
                 // Signer connected (or the listener finished) on its own.
@@ -465,7 +563,9 @@ pub async fn get_fresh_nip46_signer(
                         // leave it in place (the user may still be mid-scan) and
                         // print a clear green marker so it's obvious we've moved
                         // on to a connected signer.
-                        eprintln!(
+                        crate::report_message!(
+                            "info",
+                            "account_diagnostic",
                             "{}",
                             Style::new()
                                 .for_stderr()
@@ -489,11 +589,10 @@ pub async fn get_fresh_nip46_signer(
                             SignerInfoSource::GitGlobal,
                         )));
                     }
-                    _ => {
-                        // Connection failed — redisplay and listen again.
-                        eprintln!("failed to connect to signer, trying again...");
-                        continue;
+                    Ok(Err(error)) => {
+                        return Err(error.context("failed to connect to remote signer"));
                     }
+                    Err(error) => return Err(error).context("remote signer task failed"),
                 },
                 Some(ConnectMenuChoice::EnterBunkerUri) => {
                     pubkey_handle.abort();
@@ -583,23 +682,31 @@ pub fn generate_nostr_connect_app(
 /// the user can use whichever their signer app supports.
 fn display_nostr_connect(url: &NostrConnectUri) -> Result<()> {
     let dim = Style::new().for_stderr().color256(247);
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         Style::new().for_stderr().bold().apply_to("nostr connect")
     );
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         dim.apply_to("scan QR code in signer app (eg. Amber):")
     );
     for line in generate_qr(&url.to_string())? {
-        eprintln!("{line}");
+        crate::report_message!("info", "account_diagnostic", "{line}");
     }
-    eprintln!();
-    eprintln!(
+    crate::report_message!("info", "account_diagnostic", "");
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         dim.apply_to("or copy this connection string into your signer:")
     );
-    eprintln!(
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{}",
         Style::new()
             .for_stderr()
@@ -607,14 +714,19 @@ fn display_nostr_connect(url: &NostrConnectUri) -> Result<()> {
             .cyan()
             .apply_to(url.to_string())
     );
-    eprintln!();
+    crate::report_message!("info", "account_diagnostic", "");
     let relays = url
         .relays()
         .iter()
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    eprintln!("{}", dim.apply_to(format!("signer relays: {relays}")));
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{}",
+        dim.apply_to(format!("signer relays: {relays}"))
+    );
     Ok(())
 }
 
@@ -634,15 +746,32 @@ enum ConnectMenuChoice {
 fn print_connect_menu_options() {
     let bold = Style::new().for_stderr().bold();
     let dim = Style::new().for_stderr().color256(247);
-    eprintln!();
-    eprintln!(
+    crate::report_message!("info", "account_diagnostic", "");
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
         "{} {}",
         bold.apply_to("waiting for signer to connect…"),
         dim.apply_to("(scan the QR code or copy the connection string above)")
     );
-    eprintln!("{} manually enter bunker:// url", bold.apply_to("[1]"));
-    eprintln!("{} change signer relays", bold.apply_to("[2]"));
-    eprintln!("{} cancel", bold.apply_to("[3]"));
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} manually enter bunker:// url",
+        bold.apply_to("[1]")
+    );
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} change signer relays",
+        bold.apply_to("[2]")
+    );
+    crate::report_message!(
+        "info",
+        "account_diagnostic",
+        "{} cancel",
+        bold.apply_to("[3]")
+    );
 }
 
 /// Block until either the signer connects (the `done` flag is set by the
@@ -761,6 +890,16 @@ pub async fn listen_for_remote_signer(
     nostr_connect_url: &NostrConnectUri,
     printer: Arc<Mutex<Printer>>,
 ) -> Result<(Arc<crate::NgitSigner>, PublicKey, NostrConnectUri)> {
+    listen_for_remote_signer_when_listening(app_key, nostr_connect_url, printer, || {}).await
+}
+
+pub async fn listen_for_remote_signer_when_listening(
+    app_key: &Keys,
+    nostr_connect_url: &NostrConnectUri,
+    printer: Arc<Mutex<Printer>>,
+    listening: impl FnOnce(),
+) -> Result<(Arc<crate::NgitSigner>, PublicKey, NostrConnectUri)> {
+    let mut listening = Some(listening);
     let app_key = app_key.clone();
     let nostr_connect_url_clone = nostr_connect_url.clone();
 
@@ -779,9 +918,17 @@ pub async fn listen_for_remote_signer(
     let pubkey_future = {
         let nc = Arc::clone(&nostr_connect);
         async move {
-            nc.get_public_key_async()
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+            crate::signer_progress::run_remote_operation_when_listening(
+                &nc,
+                "waiting for remote signer pairing...",
+                async { nc.get_public_key_async().await.map_err(anyhow::Error::from) },
+                || {
+                    if let Some(callback) = listening.take() {
+                        callback();
+                    }
+                },
+            )
+            .await
         }
     };
 
@@ -799,22 +946,19 @@ pub async fn listen_for_remote_signer(
     let mut printer = printer_clone.lock().await;
     printer.clear_all();
 
-    if let Some(Ok(public_key)) = res {
-        // Get the proper bunker URI from the NostrConnect client
-        // This will contain the correct remote-signer-pubkey that was discovered
-        // during the connection handshake, regardless of whether the original URL
-        // was bunker:// (already had it) or nostrconnect:// (extracted from response
-        // event author)
-        let bunker_url = nostr_connect
-            .bunker_uri()
-            .await
-            .context("failed to get bunker URI from NostrConnect client")?;
+    let public_key = res.context("remote signer connection cancelled")??;
+    // Get the proper bunker URI from the NostrConnect client
+    // This will contain the correct remote-signer-pubkey that was discovered
+    // during the connection handshake, regardless of whether the original URL
+    // was bunker:// (already had it) or nostrconnect:// (extracted from response
+    // event author)
+    let bunker_url = nostr_connect
+        .bunker_uri()
+        .await
+        .context("failed to get bunker URI from NostrConnect client")?;
 
-        let signer = Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect)));
-        Ok((signer, public_key, bunker_url))
-    } else {
-        bail!("failed to get signer")
-    }
+    let signer = Arc::new(crate::NgitSigner::Connect(Arc::clone(&nostr_connect)));
+    Ok((signer, public_key, bunker_url))
 }
 
 pub fn generate_qr(data: &str) -> Result<Vec<String>> {
@@ -924,22 +1068,42 @@ async fn save_to_git_config(
             }
         }
 
-        eprintln!("Error: {error:?}");
+        crate::report_message!("info", "account_diagnostic", "Error: {error:?}");
         match signer_info {
             SignerInfo::Nsec { nsec, .. } => {
-                eprintln!("consider manually setting git config nostr.nsec to: {nsec}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config nostr.nsec to: {nsec}"
+                );
             }
             SignerInfo::Bunker {
                 bunker_uri,
                 bunker_app_key,
                 ..
             } => {
-                eprintln!("consider manually setting git config as follows:");
-                eprintln!("nostr.bunker-uri: {bunker_uri}");
-                eprintln!("nostr.bunker-app-key: {bunker_app_key}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config as follows:"
+                );
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "nostr.bunker-uri: {bunker_uri}"
+                );
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "nostr.bunker-app-key: {bunker_app_key}"
+                );
             }
             SignerInfo::Selection { selector } => {
-                eprintln!("consider manually setting git config nostr.signer to: {selector}");
+                crate::report_message!(
+                    "info",
+                    "account_diagnostic",
+                    "consider manually setting git config nostr.signer to: {selector}"
+                );
             }
         }
         if global {
@@ -972,12 +1136,16 @@ async fn save_to_git_config(
                             if user_ref.public_key == get_pubkey_from_signer_info(signer_info)? {
                                 return Ok(SignerInfoSource::GitGlobal);
                             } else {
-                                eprintln!(
+                                crate::report_message!(
+                                    "info",
+                                    "account_diagnostic",
                                     "global git config hasn't been updated with different npub"
                                 );
                             }
                         } else {
-                            eprintln!(
+                            crate::report_message!(
+                                "info",
+                                "account_diagnostic",
                                 "global git config hasn't been updated with nostr login values"
                             );
                         }
@@ -1018,7 +1186,7 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
             format!("{scope} now selects signer {selector}")
         }
         SignerInfo::Selection { selector } => {
-            format!("{scope} now selects signer alias '{selector}'")
+            format!("{scope} now selects signer profile '{selector}'")
         }
         SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some() => {
             format!("{scope} now points to the stored account secret")
@@ -1040,9 +1208,81 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
     }
 }
 
-/// Persist an alias in both the selected git-config scope and, when enabled,
-/// the credential store. Git config remains a portable account selector for
-/// repository directories mounted into environments with a different store.
+/// Store the machine-wide alias and its receipt without changing Git config.
+fn store_profile_alias(
+    git_repo: &Option<&Repo>,
+    alias: &str,
+    npub: &str,
+    credential: Option<&str>,
+    receipts: &mut CredentialStorageReceipts,
+) -> Result<bool> {
+    use credential_store::SecretStorage;
+    let policy = credential_store::policy(git_repo);
+    let credential_backed = policy != SecretStorage::GitConfig;
+    receipts.alias = credential_backed
+        .then(|| credential_store::store_alias(alias, npub, credential, policy))
+        .transpose()
+        .context("failed to save signer alias in the credential store")?
+        .map(|(entry, backend)| CredentialStorageReport {
+            subject: format!("signer profile '{alias}'"),
+            entry,
+            backend,
+            os_fallback: policy == SecretStorage::Auto
+                && backend == credential_store::Backend::File,
+        });
+
+    Ok(credential_backed)
+}
+
+fn save_profile_without_activation(
+    git_repo: &Option<&Repo>,
+    signer_info: &SignerInfo,
+    alias: Option<&str>,
+    npub: &str,
+    receipts: &mut CredentialStorageReceipts,
+) -> Result<()> {
+    let alias = alias.context("saving without activation requires a named profile")?;
+    anyhow::ensure!(
+        credential_store::policy(git_repo) != credential_store::SecretStorage::GitConfig,
+        "--no-activate requires auto or file secret storage; use --secret-storage auto"
+    );
+    protect_secrets(git_repo, signer_info, Some(alias), receipts)?;
+    let receipt = receipts
+        .secret
+        .as_ref()
+        .context("cannot save this profile without activation: no credential was stored")?;
+    let credential = credential_store::is_bunker_signer_entry_name(&receipt.entry)
+        .then(|| receipt.entry.clone());
+    store_profile_alias(git_repo, alias, npub, credential.as_deref(), receipts)?;
+    Ok(())
+}
+
+fn report_login(
+    user_ref: &UserRef,
+    offline: bool,
+    source: &SignerInfoSource,
+    alias: Option<&str>,
+    target: LoginTarget,
+) -> Result<()> {
+    if target == LoginTarget::ProfileOnly {
+        let alias = alias.context("saving without activation requires a named profile")?;
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
+            "signer profile '{alias}' saved without changing the active login"
+        );
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
+            "use --signer {alias} or git -c nostr.signer={alias} for one command"
+        );
+        Ok(())
+    } else {
+        print_logged_in_as(user_ref, offline, source, alias)
+    }
+}
+
+/// Persist an alias in the selected Git-config scope and credential store.
 fn save_signer_alias_into(
     git_repo: &Option<&Repo>,
     alias: &str,
@@ -1051,25 +1291,11 @@ fn save_signer_alias_into(
     global: bool,
     receipts: &mut CredentialStorageReceipts,
 ) -> Result<()> {
-    use crate::login::credential_store::{self, SecretStorage};
-
     let alias = credential_store::normalize_alias(alias)?;
     let npub = PublicKey::parse(npub)
         .context("cannot save signer alias for an invalid npub")?
         .to_bech32()?;
-    let policy = credential_store::policy(git_repo);
-    let credential_backed = policy != SecretStorage::GitConfig;
-    receipts.alias = credential_backed
-        .then(|| credential_store::store_alias(&alias, &npub, credential, policy))
-        .transpose()
-        .context("failed to save signer alias in the credential store")?
-        .map(|(entry, backend)| CredentialStorageReport {
-            subject: format!("signer alias '{alias}'"),
-            entry,
-            backend,
-            os_fallback: policy == SecretStorage::Auto
-                && backend == credential_store::Backend::File,
-        });
+    let credential_backed = store_profile_alias(git_repo, &alias, &npub, credential, receipts)?;
 
     let global = global && std::env::var("NGITTEST").is_err();
     let scope = if global {
@@ -1091,6 +1317,7 @@ fn save_signer_alias_into(
         remove_git_config_item(scope, "nostr.bunker-uri")?;
         remove_git_config_item(scope, "nostr.bunker-app-key")?;
     }
+    credential_store::reactivate_profile(&alias)?;
     Ok(())
 }
 
@@ -1104,9 +1331,12 @@ fn print_credential_storage(
     );
     // this runs from the receipts guard's Drop, possibly mid-unwind, where
     // an eprintln! panic on a closed stderr would abort the process
-    let mut stderr = std::io::stderr().lock();
     for message in credential_storage_messages(secret, alias, &file_store) {
-        let _ = writeln!(stderr, "{message}");
+        if crate::output_mode::is_json() {
+            crate::reporting::message("info", "credential_storage", &message);
+        } else {
+            let _ = writeln!(std::io::stderr().lock(), "{message}");
+        }
     }
 }
 
@@ -1258,7 +1488,9 @@ fn protect_secrets(
     }
     let policy = credential_store::policy(git_repo);
     if policy == SecretStorage::GitConfig {
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
             "{} will be stored in Git config in plaintext (secret-storage policy: git-config)",
             signer_storage_subject(signer_info)
         );
@@ -1327,6 +1559,14 @@ fn protect_secrets(
             if credential_store::is_signer_credential_conflict(&error) {
                 return Err(error);
             }
+            if alias.is_some() {
+                // A named profile needs a durable credential binding. Falling
+                // back to plaintext here would let the later alias write
+                // replace the connection with a selection of the npub default.
+                return Err(error.context(
+                    "failed to save the named signer profile; fix credential storage and retry; the configured login has not changed",
+                ));
+            }
             if !Interactor::is_non_interactive()
                 && Interactor::default().confirm(PromptConfirmParms::default().with_prompt(
                     "failed to store the secret in a credential store. save it as plaintext in git config instead?",
@@ -1354,17 +1594,6 @@ fn silently_save_to_git_config(
     signer_info: &SignerInfo,
     global: bool,
 ) -> Result<()> {
-    if global {
-        // remove local login otherwise it will override global next time ngit is called
-        if let Some(git_repo) = git_repo {
-            git_repo.remove_git_config_item("nostr.npub", false)?;
-            git_repo.remove_git_config_item("nostr.nsec", false)?;
-            git_repo.remove_git_config_item("nostr.bunker-uri", false)?;
-            git_repo.remove_git_config_item("nostr.bunker-app-key", false)?;
-            git_repo.remove_git_config_item("nostr.signer", false)?;
-        }
-    }
-
     let git_repo = if global {
         &None
     } else if git_repo.is_none() {
@@ -1579,7 +1808,7 @@ async fn signup(
         SignerInfoSource,
     )>,
 > {
-    eprintln!("create account");
+    crate::report_message!("info", "account_diagnostic", "create account");
     loop {
         let name = Interactor::default()
             .input(
@@ -1622,7 +1851,9 @@ async fn signup(
         .await?;
 
         show_prompt_success("user display name", &name);
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
             "to login to other nostr clients eg. gitworkshop.dev with this account run `ngit export-keys` at any time to reveal your nostr account secret"
         );
         break Ok(Some((
@@ -1696,7 +1927,7 @@ mod storage_reporting_tests {
             os_fallback: true,
         };
         let alias = CredentialStorageReport {
-            subject: "signer alias 'dcagent'".to_string(),
+            subject: "signer profile 'dcagent'".to_string(),
             entry: "alias:dcagent".to_string(),
             backend: Backend::File,
             os_fallback: true,
@@ -1706,7 +1937,7 @@ mod storage_reporting_tests {
         assert_eq!(
             credential_storage_messages(Some(&secret), Some(&alias), path),
             vec![format!(
-                "signer alias 'dcagent' and associated account secret are stored in {path} (OS credential store unavailable)"
+                "signer profile 'dcagent' and associated account secret are stored in {path} (OS credential store unavailable)"
             )]
         );
         assert_eq!(
@@ -1731,7 +1962,7 @@ mod storage_reporting_tests {
             os_fallback: false,
         };
         let alias = CredentialStorageReport {
-            subject: "signer alias 'dcagent'".to_string(),
+            subject: "signer profile 'dcagent'".to_string(),
             entry: "alias:dcagent".to_string(),
             backend: Backend::Os,
             os_fallback: false,
@@ -1740,7 +1971,7 @@ mod storage_reporting_tests {
         assert_eq!(
             credential_storage_messages(Some(&secret), Some(&alias), "unused"),
             vec![
-                "signer alias 'dcagent' and associated account secret are stored in the OS credential store as entries 'alias:dcagent' and 'npub1account' under service 'nostr'"
+                "signer profile 'dcagent' and associated account secret are stored in the OS credential store as entries 'alias:dcagent' and 'npub1account' under service 'nostr'"
                     .to_string()
             ]
         );
@@ -1763,7 +1994,7 @@ mod status_message_tests {
                 SignerInfo::Selection {
                     selector: "dcagent".to_string(),
                 },
-                "this repository's local Git config now selects signer alias 'dcagent'",
+                "this repository's local Git config now selects signer profile 'dcagent'",
             ),
             (
                 true,

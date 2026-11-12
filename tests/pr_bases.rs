@@ -8,6 +8,54 @@ use test_harness::{
 };
 
 #[tokio::test]
+async fn abbreviated_commit_bases_work_through_send_and_git_push() -> Result<()> {
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let (_, published) = harness.publish_repo(PublishRepoOpts::default()).await?;
+    let contributor = harness
+        .clone_published_repo(
+            &published,
+            CloneLogin::AsContributor {
+                display_name: "short base contributor".into(),
+            },
+        )
+        .await?;
+    for (branch, use_send) in [("pr/short-base-send", true), ("pr/short-base-push", false)] {
+        contributor
+            .git_ok(["checkout", "-b", branch, "origin/main"], "create proposal")
+            .await?;
+        commit_file(&contributor, "base.md", branch, "local base commit").await?;
+        let base = contributor.rev_parse("HEAD").await?;
+        commit_file(&contributor, "change.md", branch, "proposed change").await?;
+        let tip = contributor.rev_parse("HEAD").await?;
+        if use_send {
+            ngit_ok(
+                &contributor,
+                &["send", "--defaults", "--force-pr", "--base", &base[..8]],
+            )
+            .await?;
+        } else {
+            contributor
+                .nostr_push(["origin", branch, "-o", &format!("base={}", &base[..8])])
+                .await?;
+        }
+        let proposal = find_pr(&harness, branch.trim_start_matches("pr/")).await?;
+        assert_eq!(
+            tag_value(&proposal, "merge-base").as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(tag_value(&proposal, "c").as_deref(), Some(tip.as_str()));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn root_and_update_references_select_the_expected_base() -> Result<()> {
     let harness = Harness::builder(
         env!("CARGO_BIN_EXE_ngit"),
@@ -100,7 +148,7 @@ async fn root_and_update_references_select_the_expected_base() -> Result<()> {
             "origin",
             "pr/child",
             "-o",
-            &format!("base={}", parent.id.to_hex()),
+            &format!("base={}", &parent.id.to_hex()[..8]),
         ])
         .await?;
 
@@ -776,6 +824,10 @@ async fn patch_to_pr_upgrade_roots_are_valid_bases_through_both_surfaces() -> Re
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    // This fixture performs several real event-first staging operations. Give
+    // healthy ACKs headroom under full-workspace scheduling contention without
+    // changing production timeouts or masking a deliberately broken relay.
+    .with_relay_timeout(test_harness::RelayTimeout::Long)
     .with_relay("default")
     .with_grasp_server("repo")
     .build()

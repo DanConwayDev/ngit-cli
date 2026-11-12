@@ -46,7 +46,7 @@ use nostr_sdk::{
     client::ClientBuilder,
     error::{Error as NostrSdkError, ErrorKind as NostrSdkErrorKind},
     proxy::Proxy,
-    relay::{RelayLimits, RelayNotification, RelayStatus},
+    relay::{Relay, RelayCapabilities, RelayLimits, RelayNotification, RelayOptions, RelayStatus},
 };
 use serde_json::Value;
 
@@ -64,8 +64,11 @@ use crate::{
         get_likely_logged_in_user,
         user::{PrivateGitRelayDiscovery, get_user_ref_from_cache},
     },
-    output_mode::{TransientLine, is_quiet, is_verbose, write_progress_line},
-    relay_auth::{PolicyAuthenticator, RelayAuthMode, RelayAuthPolicy},
+    output_mode::{ProgressPolicy, TransientLine, progress_policy, write_progress_line},
+    relay_auth::{
+        AuthSigningCapture, AuthSigningTimeout, DemandAuthTransport, PolicyAuthenticator,
+        RelayAuthMode, RelayAuthPolicy,
+    },
     repo_ref::{
         RepoRef, announcement_author_declines_maintainership,
         announcement_author_declines_moderatorship,
@@ -152,12 +155,18 @@ fn apply_onion_proxy(builder: ClientBuilder) -> ClientBuilder {
 /// Build nostr-sdk with ngit's session-scoped NIP-42 policy. The client always
 /// has the policy authenticator installed, but it cannot sign until the command
 /// explicitly attaches a signer.
-fn build_nostr_client(auth_policy: Arc<RelayAuthPolicy>) -> nostr_sdk::client::Client {
+fn build_nostr_client(
+    auth_policy: Arc<RelayAuthPolicy>,
+    proactive_auth: bool,
+    observer: crate::ci::watch::Observer,
+) -> nostr_sdk::client::Client {
     crate::tls::install_default_crypto_provider();
     apply_onion_proxy(
         ClientBuilder::default()
+            .admit_policy(observer)
             .relay_limits(RelayLimits::disable())
             .verify_subscriptions(true)
+            .websocket_transport(DemandAuthTransport::new(proactive_auth))
             .authenticator(PolicyAuthenticator::new(auth_policy)),
     )
     .build()
@@ -192,7 +201,123 @@ struct BarRevealState {
 enum RelayProgressMode {
     Concise,
     Detailed,
+    LogConcise,
+    LogDetailed,
+    Json,
+    JsonDetailed,
     Hidden,
+}
+
+impl RelayProgressMode {
+    fn from_policy(policy: ProgressPolicy, silent: bool) -> Self {
+        match (silent || policy.quiet, policy.animate, policy.detailed) {
+            (true, _, _) => Self::Hidden,
+            (false, true, false) => Self::Concise,
+            (false, true, true) => Self::Detailed,
+            (false, false, false) => Self::LogConcise,
+            (false, false, true) => Self::LogDetailed,
+        }
+    }
+
+    fn animated(self) -> bool {
+        matches!(self, Self::Concise | Self::Detailed)
+    }
+
+    fn logs(self) -> bool {
+        matches!(self, Self::LogConcise | Self::LogDetailed)
+    }
+}
+
+/// Append-only progress records completed checks, not current relay health.
+#[derive(Default)]
+struct RelayLog {
+    succeeded: usize,
+    failed: usize,
+    emitted: HashSet<String>,
+}
+
+impl RelayLog {
+    fn start(&mut self, prefix: &str) -> Option<String> {
+        self.changed(format!("  {}: started", plain_relay_progress(prefix)))
+    }
+
+    fn finish(
+        &mut self,
+        prefix: &str,
+        message: &str,
+        success: bool,
+        detailed: bool,
+    ) -> Option<String> {
+        if success {
+            self.succeeded += 1;
+        } else {
+            self.failed += 1;
+        }
+        if success && !detailed {
+            return None;
+        }
+        let outcome = if message.is_empty() {
+            if success {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            }
+        } else {
+            plain_relay_progress(message)
+        };
+        self.changed(format!("  {}: {outcome}", plain_relay_progress(prefix)))
+    }
+
+    fn changed(&mut self, line: String) -> Option<String> {
+        self.emitted.insert(line.clone()).then_some(line)
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "Relay checks complete: {} succeeded, {} failed",
+            self.succeeded, self.failed
+        )
+    }
+}
+
+struct RelayJson {
+    progress: crate::reporting::Progress,
+    succeeded: usize,
+    failed: usize,
+    detailed: bool,
+}
+
+impl RelayJson {
+    fn outcome(&mut self, relay: &str, message: &str, success: bool) {
+        if success {
+            self.succeeded += 1;
+        } else {
+            self.failed += 1;
+        }
+        if !success || self.detailed {
+            self.progress.update(if success { "relay_completed" } else { "relay_failed" },
+                serde_json::json!({"relay": relay, "reason": if success { None } else { Some(plain_relay_progress(message)) }}));
+        }
+        self.progress
+            .sample(serde_json::json!({"succeeded":self.succeeded, "failed":self.failed}));
+    }
+    fn finish(&mut self, has_errors: bool) {
+        self.progress.finish(
+            if has_errors {
+                "incomplete"
+            } else {
+                "completed"
+            },
+            serde_json::json!({"succeeded":self.succeeded, "failed":self.failed}),
+        );
+    }
+}
+
+fn plain_relay_progress(text: &str) -> String {
+    console::strip_ansi_codes(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Owns the complete lifecycle of one multi-relay progress report.
@@ -200,11 +325,14 @@ enum RelayProgressMode {
 /// Normal commands start with one concise spinner and reveal per-relay rows
 /// only after the shared delay. Partial failures remain transient once the
 /// operation completes; an unavailable required relay set retains its
-/// diagnostics. Verbose commands always retain details, while silent or test
-/// commands never expose a renderer.
+/// diagnostics. Verbose terminals retain details. JSON emits compact typed
+/// outcomes; pipes receive plain transitions. Quiet and silent reports stay
+/// hidden.
 pub struct RelayProgressReporter {
     details: Option<MultiProgress>,
     mode: RelayProgressMode,
+    log: Option<Arc<Mutex<RelayLog>>>,
+    json: Option<Arc<Mutex<RelayJson>>>,
     _spinner_multi: Option<MultiProgress>,
     spinner: Option<ProgressBar>,
     heading: Option<ProgressBar>,
@@ -226,44 +354,112 @@ struct FetchRelayHealth {
 #[derive(Clone)]
 pub struct RelayProgressHandle {
     details: MultiProgress,
+    mode: RelayProgressMode,
+    log: Option<Arc<Mutex<RelayLog>>>,
+    json: Option<Arc<Mutex<RelayJson>>>,
     reveal_state: Option<Arc<BarRevealState>>,
 }
 
 impl RelayProgressHandle {
     fn add(&self, progress_bar: ProgressBar) -> ProgressBar {
+        if self.mode == RelayProgressMode::LogDetailed {
+            if let Some(line) = self
+                .log
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .start(&progress_bar.prefix())
+            {
+                crate::report_message!("info", "relay_diagnostic", "{line}");
+            }
+        }
         self.details.add(progress_bar)
     }
 
-    fn finish_bar(&self, progress_bar: &ProgressBar, message: String) {
+    fn enable_tick(&self, progress_bar: &ProgressBar) {
+        if self.mode.animated() {
+            progress_bar.enable_steady_tick(Duration::from_millis(300));
+        }
+    }
+
+    fn finish_bar(&self, relay: &str, progress_bar: &ProgressBar, message: String, success: bool) {
+        if let Some(json) = &self.json {
+            json.lock().unwrap().outcome(relay, &message, success);
+        }
+        if let Some(log) = &self.log {
+            if let Some(line) = log.lock().unwrap().finish(
+                &progress_bar.prefix(),
+                &message,
+                success,
+                self.mode == RelayProgressMode::LogDetailed,
+            ) {
+                crate::report_message!("info", "relay_diagnostic", "{line}");
+            }
+        }
         finish_bar(progress_bar, message, &self.reveal_state);
     }
 }
 
 impl RelayProgressReporter {
-    fn new(heading_message: impl Into<String>, animate: bool, silent: bool) -> Self {
+    fn new(
+        operation: &str,
+        metadata: serde_json::Value,
+        heading_message: impl Into<String>,
+        animate: bool,
+        silent: bool,
+    ) -> Self {
         let heading_message = heading_message.into();
-        let mode = if silent || is_quiet() || std::env::var("NGITTEST").is_ok() {
-            RelayProgressMode::Hidden
-        } else if is_verbose() || !animate {
-            RelayProgressMode::Detailed
+        let mut policy = progress_policy();
+        policy.animate &= animate;
+        let mode = if crate::output_mode::is_json() && !policy.quiet && !silent {
+            if policy.detailed {
+                RelayProgressMode::JsonDetailed
+            } else {
+                RelayProgressMode::Json
+            }
         } else {
-            RelayProgressMode::Concise
+            RelayProgressMode::from_policy(policy, silent)
         };
-        Self::with_mode(heading_message, mode)
+        Self::with_mode(operation, metadata, heading_message, mode)
     }
 
     /// Construct the standard relay-fetch report used by non-silent commands.
     pub fn fetching() -> Self {
-        Self::new(RELAY_FETCH_HEADING, true, false)
+        Self::new(
+            "relay_fetch",
+            serde_json::json!({"unit":"relay_checks"}),
+            RELAY_FETCH_HEADING,
+            true,
+            false,
+        )
     }
 
     /// Construct a hidden reporter for alternative [`Connect`]
     /// implementations and queries which own no terminal UI.
     pub fn hidden() -> Self {
-        Self::with_mode(String::new(), RelayProgressMode::Hidden)
+        Self::with_mode(
+            "relay_fetch",
+            serde_json::json!({}),
+            String::new(),
+            RelayProgressMode::Hidden,
+        )
     }
 
-    fn with_mode(heading_message: String, mode: RelayProgressMode) -> Self {
+    fn with_mode(
+        operation: &str,
+        metadata: serde_json::Value,
+        heading_message: String,
+        mode: RelayProgressMode,
+    ) -> Self {
+        if mode.logs() {
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "{}",
+                plain_relay_progress(&heading_message)
+            );
+        }
         let (spinner_multi, spinner) = if mode == RelayProgressMode::Concise {
             let multi = MultiProgress::new();
             let spinner = multi.add(
@@ -286,7 +482,7 @@ impl RelayProgressReporter {
         } else {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
         };
-        let heading = (mode != RelayProgressMode::Hidden).then(|| {
+        let heading = mode.animated().then(|| {
             details
                 .add(ProgressBar::new(0).with_style(ProgressStyle::with_template("{msg}").unwrap()))
         });
@@ -325,6 +521,21 @@ impl RelayProgressReporter {
         Self {
             details: Some(details),
             mode,
+            log: mode
+                .logs()
+                .then(|| Arc::new(Mutex::new(RelayLog::default()))),
+            json: matches!(
+                mode,
+                RelayProgressMode::Json | RelayProgressMode::JsonDetailed
+            )
+            .then(|| {
+                Arc::new(Mutex::new(RelayJson {
+                    progress: crate::reporting::Progress::new(operation, metadata),
+                    succeeded: 0,
+                    failed: 0,
+                    detailed: mode == RelayProgressMode::JsonDetailed,
+                }))
+            }),
             _spinner_multi: spinner_multi,
             spinner,
             heading,
@@ -340,6 +551,9 @@ impl RelayProgressReporter {
     pub fn handle(&self) -> RelayProgressHandle {
         RelayProgressHandle {
             details: self.details.as_ref().unwrap().clone(),
+            mode: self.mode,
+            log: self.log.clone(),
+            json: self.json.clone(),
             reveal_state: self.reveal_state.clone(),
         }
     }
@@ -352,6 +566,22 @@ impl RelayProgressReporter {
     ) -> Result<()> {
         if let Some(handle) = self.timer_handle.take() {
             handle.abort();
+        }
+        if let Some(json) = &self.json {
+            json.lock().unwrap().finish(has_errors);
+            self.finished = true;
+            return Ok(());
+        }
+        if let Some(log) = &self.log {
+            let summary = concise_summary.unwrap_or_else(|| log.lock().unwrap().summary());
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "{}",
+                plain_relay_progress(&summary)
+            );
+            self.finished = true;
+            return Ok(());
         }
         if self.mode == RelayProgressMode::Concise && show_concise_details {
             reveal_relay_progress(
@@ -367,7 +597,7 @@ impl RelayProgressReporter {
 
         let retain_details = retain_relay_progress_details(self.mode, show_concise_details);
         let details = self.details.take().unwrap();
-        if !retain_details {
+        if self.mode.animated() && !retain_details {
             details.clear()?;
         }
         drop(details);
@@ -402,8 +632,10 @@ impl Drop for RelayProgressReporter {
         if let Some(spinner) = &self.spinner {
             spinner.finish_and_clear();
         }
-        if let Some(details) = &self.details {
-            let _ = details.clear();
+        if self.mode.animated() {
+            if let Some(details) = &self.details {
+                let _ = details.clear();
+            }
         }
     }
 }
@@ -460,6 +692,8 @@ fn finish_bar(bar: &ProgressBar, message: String, reveal_state: &Option<Arc<BarR
 
 #[allow(clippy::struct_field_names)]
 pub struct Client {
+    ci_observer: crate::ci::watch::Observer,
+    relay_timeouts: crate::relay_timeouts::RelayTimeouts,
     client: nostr_sdk::client::Client,
     relay_default_set: Vec<String>,
     announcement_indexer_relays: Vec<String>,
@@ -468,6 +702,7 @@ pub struct Client {
     grasp_default_set: Vec<String>,
     relays_not_to_retry: Arc<RwLock<HashMap<RelayUrl, String>>>,
     auth_policy: Arc<RelayAuthPolicy>,
+    proactive_auth: bool,
 }
 
 impl Client {
@@ -560,8 +795,12 @@ impl Connect for Client {
         if let Some(keys) = opts.keys {
             auth_policy.set_signer(Arc::new(NgitSigner::Keys(keys)));
         }
+        let ci_observer = crate::ci::watch::Observer::default();
         Client {
-            client: build_nostr_client(Arc::clone(&auth_policy)),
+            ci_observer: ci_observer.clone(),
+            relay_timeouts: opts.relay_timeouts,
+            client: build_nostr_client(Arc::clone(&auth_policy), opts.proactive_auth, ci_observer),
+            proactive_auth: opts.proactive_auth,
             relay_default_set: opts.relay_default_set,
             announcement_indexer_relays: opts.announcement_indexer_relays,
             blaster_relays: opts.blaster_relays,
@@ -576,7 +815,11 @@ impl Connect for Client {
         self.auth_policy.set_signer(signer);
         // Preserve existing behavior: attaching a signer drops any anonymous
         // connections. Relay classifications survive through the shared policy.
-        self.client = build_nostr_client(Arc::clone(&self.auth_policy));
+        self.client = build_nostr_client(
+            Arc::clone(&self.auth_policy),
+            self.proactive_auth,
+            self.ci_observer.clone(),
+        );
     }
 
     async fn connect(&self, relay_url: &RelayUrl) -> Result<()> {
@@ -599,7 +842,7 @@ impl Connect for Client {
             #[allow(clippy::large_futures)]
             relay
                 .try_connect()
-                .timeout(std::time::Duration::from_secs(long_timeout()))
+                .timeout(std::time::Duration::from_secs(self.relay_timeouts.overall))
                 .await?;
         }
 
@@ -708,7 +951,11 @@ impl Connect for Client {
             .filter_map(|relay| match RelayUrl::parse(relay) {
                 Ok(url) => Some(url),
                 Err(error) => {
-                    eprintln!("warning: skipping invalid relay url {relay}: {error}");
+                    crate::report_message!(
+                        "info",
+                        "relay_diagnostic",
+                        "warning: skipping invalid relay url {relay}: {error}"
+                    );
                     None
                 }
             })
@@ -726,7 +973,11 @@ impl Connect for Client {
         // mistake an outage for absent events consult their own caches or
         // use get_events_per_relay directly
         if !relay_results.is_empty() && relay_results.iter().all(Result::is_err) {
-            eprintln!("warning: no relay responded while fetching events; continuing without them");
+            crate::report_message!(
+                "info",
+                "relay_diagnostic",
+                "warning: no relay responded while fetching events; continuing without them"
+            );
         }
         Ok(get_dedup_events(relay_results))
     }
@@ -748,7 +999,7 @@ impl Connect for Client {
         let relays_map = self.client.relays().await;
 
         // Static timeout for get_events_per_relay (no adaptive timeout here)
-        let static_timeout = Arc::new(AtomicU64::new(long_timeout()));
+        let static_timeout = Arc::new(AtomicU64::new(self.relay_timeouts.overall));
 
         let futures: Vec<_> = relays
             .clone()
@@ -760,17 +1011,13 @@ impl Connect for Client {
                 let static_timeout_clone = static_timeout.clone();
                 let progress = progress.clone();
                 async move {
-                    let pb = if std::env::var("NGITTEST").is_err() {
-                        let pb = progress.add(
-                            ProgressBar::new(1)
-                                .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
-                                .with_style(pb_style(static_timeout_clone)?),
-                        );
-                        pb.enable_steady_tick(Duration::from_millis(300));
-                        Some(pb)
-                    } else {
-                        None
-                    };
+                    let pb = progress.add(
+                        ProgressBar::new(1)
+                            .with_prefix(format!("{: <11}{}", "connecting", relay.url()))
+                            .with_style(pb_style(static_timeout_clone)?),
+                    );
+                    progress.enable_tick(&pb);
+                    let pb = Some(pb);
                     fn style_progress_bar_with_error(
                         relay_url: &RelayUrl,
                         pb: &Option<ProgressBar>,
@@ -792,19 +1039,19 @@ impl Connect for Client {
                         let message =
                             style_progress_bar_with_error(relay.url(), &pb, &anyhow!("{reason}"));
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message);
+                            progress.finish_bar(relay.url().as_str(), pb, message, false);
                         }
                         bail!("{reason}");
                     }
                     if let Err(error) = ensure_onion_url_reachable(relay.url().as_str()) {
                         let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                         if let Some(pb) = &pb {
-                            progress.finish_bar(pb, message);
+                            progress.finish_bar(relay.url().as_str(), pb, message, false);
                         }
                         return Err(error);
                     }
                     #[allow(clippy::large_futures)]
-                    match get_events_of(relay, filters, &pb).await {
+                    match get_events_of(relay, filters, &pb, self.relay_timeouts).await {
                         Err(error) => {
                             // Check error for timeout/connection issues and add to skip list
                             if error.to_string().contains("connection timeout") {
@@ -812,7 +1059,7 @@ impl Connect for Client {
                             }
                             let message = style_progress_bar_with_error(relay.url(), &pb, &error);
                             if let Some(pb) = &pb {
-                                progress.finish_bar(pb, message);
+                                progress.finish_bar(relay.url().as_str(), pb, message, false);
                             }
                             Err(error)
                         }
@@ -824,7 +1071,7 @@ impl Connect for Client {
                                     format!("{} events", res.len()),
                                     relay.url()
                                 ));
-                                progress.finish_bar(pb, String::new());
+                                progress.finish_bar(relay.url().as_str(), pb, String::new(), true);
                             }
                             Ok(res)
                         }
@@ -871,6 +1118,14 @@ impl Connect for Client {
         };
         let mut observed_generations = cache_generations();
         let mut cache_restarts = 0;
+
+        let relay_information =
+            Arc::new(crate::relay_information::RelayInformationRefreshes::default());
+        if let Some(coordinate) = selected_maintainer_coordinate {
+            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                relay_information.start(&repo_ref.relays);
+            }
+        }
 
         let mut request = create_relays_request(
             git_repo_path,
@@ -991,10 +1246,11 @@ impl Connect for Client {
                     let search = request.announcement_search.clone();
                     let searched_relay = request.selected_relay.clone();
                     let peers = round_progress.clone();
+                    let relay_information = Arc::clone(&relay_information);
                     let scope = request.scope;
                     let repository_success_count_clone =
                         repository_success_count_for_loop.clone();
-                    let current_timeout_clone = Arc::new(AtomicU64::new(long_timeout()));
+                    let current_timeout_clone = Arc::new(AtomicU64::new(self.relay_timeouts.overall));
                     let announcement_resolved_clone = announcement_resolved_for_loop.clone();
                     let announcement_resolution_coordinate =
                         announcement_resolution_coordinate.clone();
@@ -1013,10 +1269,9 @@ impl Connect for Client {
                             .context("fetch_all_from_relay called without a relay")?;
                         ensure_onion_url_reachable(relay_url.as_str())?;
 
-                        // Always create a real progress bar added to the detail
-                        // multi. In test mode the multi has a hidden draw target
-                        // so nothing is displayed. In concise mode the multi
-                        // starts hidden and the background timer reveals it.
+                        // Bars carry outcomes even for append-only logs. Only
+                        // terminal modes draw them; concise terminals reveal
+                        // their detail view after the shared delay.
                         let pb = progress.add(
                             ProgressBar::new(1)
                                 .with_prefix(
@@ -1028,7 +1283,7 @@ impl Connect for Client {
                                 )
                                 .with_style(pb_style(current_timeout_clone.clone())?),
                         );
-                        pb.enable_steady_tick(Duration::from_millis(300));
+                        progress.enable_tick(&pb);
                         let pb = Some(pb);
 
                         /// Set error styling on a progress bar without finishing
@@ -1066,7 +1321,7 @@ impl Connect for Client {
                                 &anyhow!("{reason}"),
                             );
                             if let Some(ref bar) = pb {
-                                progress.finish_bar(bar, msg);
+                                progress.finish_bar(relay_url.as_str(), bar, msg, false);
                             }
                             bail!("{reason}");
                         }
@@ -1076,8 +1331,8 @@ impl Connect for Client {
                         tokio::pin!(fetch_future);
 
                         let mut deadline = FetchDeadline::new(
-                            Duration::from_secs(long_timeout()),
-                            Duration::from_secs(short_timeout()),
+                            Duration::from_secs(self.relay_timeouts.overall),
+                            Duration::from_secs(self.relay_timeouts.connect),
                         );
                         let timeout_future = async {
                             loop {
@@ -1144,7 +1399,7 @@ impl Connect for Client {
                                     &error,
                                 );
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, msg);
+                                    progress.finish_bar(relay_url.as_str(), bar, msg, false);
                                 }
                                 Err(error)
                             }
@@ -1153,7 +1408,7 @@ impl Connect for Client {
                                 // by fetch_all_from_relay; finish it through
                                 // the deferred mechanism.
                                 if let Some(ref bar) = pb {
-                                    progress.finish_bar(bar, String::new());
+                                    progress.finish_bar(relay_url.as_str(), bar, String::new(), true);
                                 }
                                 Ok(res)
                             }
@@ -1161,6 +1416,11 @@ impl Connect for Client {
                     };
                     async move {
                         let result = fetch.await;
+                        if let Some(coordinate) = selected_maintainer_coordinate {
+                            if let Ok(repo_ref) = get_repo_ref_from_cache(git_repo_path, coordinate).await {
+                                relay_information.start(&repo_ref.relays);
+                            }
+                        }
                         let search_result = search.zip(searched_relay).map(|(search, relay)| {
                             let outcome = search.result.lock().unwrap().clone().unwrap_or_else(|| {
                                 AnnouncementSearchResult::Failed(result.as_ref().err()
@@ -1197,6 +1457,9 @@ impl Connect for Client {
                     None
                 };
             let selected_announcement_resolved = selected_repo_ref.is_some();
+            if let Some(repo_ref) = &selected_repo_ref {
+                relay_information.start(&repo_ref.relays);
+            }
             if !request.lock_repository_relays {
                 if let Some(repo_ref) = &selected_repo_ref {
                     if repo_ref.private {
@@ -1365,7 +1628,7 @@ impl Connect for Client {
                 .await?
                 .ok_or_else(|| anyhow!("relay not found: {relay_url}"))?;
             let events: Vec<nostr::prelude::Event> =
-                get_events_of(&relay, filters.clone(), pb).await?;
+                get_events_of(&relay, filters.clone(), pb, self.relay_timeouts).await?;
             // Preserve the completed selected-repository query even if a later
             // discovery round or cache write fails. get_events_of requires EOSE.
             if let Some(search) = &request.announcement_search {
@@ -1540,48 +1803,492 @@ fn author_announcement_discovery_pending(
     is_author_announcement_relay && !announcement_resolved.load(Ordering::Acquire)
 }
 
-fn relay_timeout(default: u64) -> u64 {
-    relay_timeout_for_mode(
-        default,
-        std::env::var("NGITTEST").is_ok(),
-        std::env::var(crate::test_timeouts::RELAY_TIMEOUT_ENV)
-            .ok()
-            .as_deref(),
-    )
+/// A failed isolated staging operation, separated by whether the user signer
+/// or the publication transport failed. Signing failures are command-fatal;
+/// only publication failures are eligible for per-server fallback.
+#[derive(Debug)]
+pub(crate) enum EarlyPublicationError {
+    Signing(anyhow::Error),
+    Publication(anyhow::Error),
 }
 
-fn relay_timeout_for_mode(default: u64, test_mode: bool, override_secs: Option<&str>) -> u64 {
-    if test_mode {
-        override_secs
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|seconds| *seconds > 0)
-            .map_or(
-                crate::test_timeouts::RelayTimeout::Normal.seconds(),
-                u64::from,
-            )
-    } else {
-        default
+impl Client {
+    /// Publish an already signed proposal through a fresh direct relay. The
+    /// shared client's pool, declined-auth markers and reconnect tasks are not
+    /// touched, including after rejection or acknowledgement timeout.
+    pub(crate) async fn stage_signed_proposal_event(
+        &self,
+        event: &Event,
+        paired_relay: &RelayUrl,
+        private_repository: bool,
+        signer: &Arc<NgitSigner>,
+    ) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+        publish_signed_proposal_event(
+            event,
+            paired_relay,
+            private_repository,
+            signer,
+            self.proactive_auth,
+            self.relay_timeouts,
+        )
+        .await
     }
 }
 
-fn long_timeout() -> u64 {
-    relay_timeout(45)
+// Private-repository signing retains its native approval window, including
+// explicit manual retries. Only that case disables the SDK's combined timer;
+// its network waits are still bounded by the separate watchdog below.
+const PRIVATE_SIGNING_SDK_TIMEOUT: Duration = Duration::from_secs(366 * 24 * 60 * 60);
+
+fn classify_auth_publication_failure(error: anyhow::Error) -> EarlyPublicationError {
+    if error.is::<AuthSigningTimeout>() {
+        EarlyPublicationError::Publication(error)
+    } else {
+        EarlyPublicationError::Signing(error)
+    }
 }
 
-fn short_timeout() -> u64 {
-    relay_timeout(7)
+async fn publish_signed_proposal_event(
+    event: &Event,
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<NgitSigner>,
+    proactive_auth: bool,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+    let (relay, signing_capture) = build_isolated_write_relay(
+        paired_relay,
+        private_repository,
+        signer,
+        proactive_auth,
+        timeouts,
+    )
+    .map_err(EarlyPublicationError::Publication)?;
+    publish_signed_proposal_on_relay(
+        relay,
+        signing_capture,
+        event,
+        paired_relay,
+        timeouts,
+        private_repository,
+    )
+    .await
+}
+
+async fn publish_signed_proposal_on_relay(
+    relay: Relay,
+    signing_capture: AuthSigningCapture,
+    event: &Event,
+    paired_relay: &RelayUrl,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+    private_repository: bool,
+) -> Result<RelayPublishOutcome, EarlyPublicationError> {
+    let connect_timeout = Duration::from_secs(timeouts.connect);
+    let acknowledgement_timeout = Duration::from_secs(timeouts.overall);
+    let sdk_timeout = if private_repository {
+        PRIVATE_SIGNING_SDK_TIMEOUT
+    } else {
+        // Public AUTH signing and the subsequent network acknowledgement each
+        // receive at most one configured relay budget.
+        acknowledgement_timeout.saturating_mul(2)
+    };
+    // Network waiting and active AUTH signing have separate deadlines. Public
+    // AUTH times out and skips this server; private signing uses its native
+    // deadline. A missing challenge never gets a signer-sized network wait.
+    let result = {
+        let operation = async {
+            relay
+                .try_connect()
+                .timeout(connect_timeout)
+                .await
+                .with_context(|| format!("failed to connect to proposal relay {paired_relay}"))?;
+            match relay
+                .send_event(event)
+                .ok_timeout(sdk_timeout)
+                .authentication_timeout(sdk_timeout)
+                .await
+            {
+                Ok(output) if output.id() == &event.id && output.status().is_ack() => Ok(()),
+                Ok(_output) => anyhow::bail!(
+                    "paired relay returned an invalid acknowledgement for proposal event {}",
+                    event.id
+                ),
+                // The paired relay already possesses this exact signed instance.
+                Err(error) if event_rejection_is_duplicate(&error) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        };
+        tokio::pin!(operation);
+
+        // nostr-sdk broadcasts AuthenticationFailed before waiting for EVENT OK.
+        // If that broadcast precedes SendEvent's subscription, preserve the
+        // authenticator's original error rather than misclassifying it as a
+        // network timeout. Observe it independently of that SDK channel.
+        tokio::select! {
+            result = &mut operation => result
+                .with_context(|| format!("proposal relay {paired_relay} publication failed"))
+                .map(|()| RelayPublishOutcome::accepted(paired_relay.as_str().trim_end_matches('/')))
+                .map_err(EarlyPublicationError::Publication),
+            () = signing_capture.network_timeout(acknowledgement_timeout) => {
+                Err(EarlyPublicationError::Publication(anyhow!(
+                    "proposal relay {paired_relay} timed out waiting for publication or authentication"
+                )))
+            }
+            error = signing_capture.signing_failed() => {
+                Err(classify_auth_publication_failure(error))
+            }
+        }
+        // The owning operation future is dropped here, before cleanup below.
+    };
+
+    if matches!(result, Err(EarlyPublicationError::Signing(_))) {
+        // A captured signer error is already fatal. Cancel any other SDK auth
+        // future before draining instead of leaving a second human request
+        // interactive while this operation returns.
+        relay.shutdown();
+    }
+    // Closing prevents new auth signatures and drains an operation already
+    // started. Its own public AUTH/native private deadline still applies.
+    signing_capture.close_and_drain().await;
+    relay.shutdown();
+
+    if !matches!(result, Err(EarlyPublicationError::Signing(_))) {
+        // A send result and signer failure can become ready in either order.
+        // Preserve signer fatality even when the network result won the select.
+        if let Some(error) = signing_capture.take_error() {
+            return Err(classify_auth_publication_failure(error));
+        }
+    }
+    result
+}
+
+fn build_isolated_write_relay(
+    paired_relay: &RelayUrl,
+    private_repository: bool,
+    signer: &Arc<NgitSigner>,
+    proactive_auth: bool,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
+) -> Result<(Relay, AuthSigningCapture)> {
+    crate::tls::install_default_crypto_provider();
+    ensure_onion_url_reachable(paired_relay.as_str())?;
+
+    // This is deliberately a new policy and direct Relay, never Client::clone
+    // or the shared send_event_to/add_relay path. Register classification and
+    // the exact signer Arc so restricted/proactive publication cannot silently
+    // become anonymous merely because this policy starts empty.
+    let auth_policy = Arc::new(RelayAuthPolicy::default());
+    if private_repository {
+        auth_policy.register_private_repo_relays([paired_relay.clone()]);
+    } else {
+        auth_policy.register_repo_relays([paired_relay.clone()]);
+    }
+    auth_policy.set_signer(Arc::clone(signer));
+    let signing_capture = AuthSigningCapture::default();
+
+    let mut options = RelayOptions::new()
+        .connect_timeout(Duration::from_secs(timeouts.connect))
+        .reconnect(false)
+        .ping(false)
+        .limits(RelayLimits::disable())
+        .verify_subscriptions(true);
+    if let Some(address) = tor_socks5_proxy_addr() {
+        // Match ordinary ClientBuilder routing: onion-only SOCKS, never an
+        // implicit proxy for a direct clearnet relay.
+        options = options.proxy(Proxy::onion(address));
+    }
+
+    let relay = Relay::builder(paired_relay.clone())
+        .capabilities(RelayCapabilities::WRITE)
+        // Publishing still waits for auth-required before revealing the signer
+        // identity, unless the user explicitly enabled proactive auth.
+        .websocket_transport(DemandAuthTransport::new(proactive_auth))
+        .authenticator(PolicyAuthenticator::with_signing_capture(
+            auth_policy,
+            signing_capture.clone(),
+            (!private_repository).then_some(Duration::from_secs(timeouts.overall)),
+        ))
+        .opts(options)
+        .build();
+    Ok((relay, signing_capture))
+}
+
+#[cfg(test)]
+mod isolated_proposal_tests {
+    use futures::{SinkExt, StreamExt};
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_required_without_a_challenge_has_a_network_deadline() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            while let Some(message) = socket.next().await {
+                let message = message?;
+                if message.is_close() {
+                    break;
+                }
+                if let Ok(raw) = message.to_text() {
+                    let value: serde_json::Value = serde_json::from_str(raw)?;
+                    if value[0] == "EVENT" {
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!([
+                                    "OK",
+                                    value[1]["id"],
+                                    false,
+                                    "auth-required: sign in"
+                                ])
+                                .to_string()
+                                .into(),
+                            ))
+                            .await?;
+                    }
+                }
+            }
+            anyhow::Ok(())
+        });
+        let keys = Keys::generate();
+        let event =
+            EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal").finalize(&keys)?;
+        let signer = Arc::new(NgitSigner::Keys(keys));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_event(
+                &event,
+                &url,
+                false,
+                &signer,
+                false,
+                crate::relay_timeouts::RelayTimeouts {
+                    connect: 1,
+                    overall: 1,
+                },
+            ),
+        )
+        .await
+        .context("missing AUTH challenge bypassed the network deadline")?;
+        assert!(matches!(result, Err(EarlyPublicationError::Publication(_))));
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        Ok(())
+    }
+
+    #[test]
+    fn auth_signing_timeout_skips_a_destination_but_refusal_is_fatal() {
+        assert!(matches!(
+            classify_auth_publication_failure(anyhow::Error::new(AuthSigningTimeout)),
+            EarlyPublicationError::Publication(_)
+        ));
+        assert!(matches!(
+            classify_auth_publication_failure(anyhow!("signer refused")),
+            EarlyPublicationError::Signing(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publication_waits_for_auth_required_before_authenticating() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server_url = url.clone();
+        let keys = Keys::generate();
+        let expected_signer = keys.public_key();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", "publish-only"])
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            let mut authenticated = false;
+            let mut auth_required = false;
+            let mut pending_event = None;
+            while let Some(message) = socket.next().await {
+                let message = message?;
+                if message.is_close() {
+                    break;
+                }
+                let Ok(raw) = message.to_text() else {
+                    continue;
+                };
+                let value: serde_json::Value = serde_json::from_str(raw)?;
+                match value[0].as_str() {
+                    Some("AUTH") => {
+                        assert!(
+                            auth_required,
+                            "publication disclosed identity before auth-required"
+                        );
+                        let auth: Event = serde_json::from_value(value[1].clone())?;
+                        auth.verify()?;
+                        assert_eq!(auth.pubkey, expected_signer);
+                        assert!(nostr::nips::nip42::is_valid_auth_event(
+                            &auth,
+                            &server_url,
+                            "publish-only"
+                        ));
+                        authenticated = true;
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!(["OK", auth.id, true, ""])
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await?;
+                    }
+                    Some("EVENT") => {
+                        if !authenticated {
+                            auth_required = true;
+                            socket
+                                .send(Message::Text(
+                                    serde_json::json!([
+                                        "OK",
+                                        value[1]["id"],
+                                        false,
+                                        "auth-required: publish"
+                                    ])
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await?;
+                        } else {
+                            pending_event = Some(value[1]["id"].clone());
+                        }
+                    }
+                    _ => {}
+                }
+                if authenticated {
+                    if let Some(id) = pending_event.take() {
+                        socket
+                            .send(Message::Text(
+                                serde_json::json!(["OK", id, true, ""]).to_string().into(),
+                            ))
+                            .await?;
+                    }
+                }
+            }
+            assert!(
+                authenticated,
+                "publication never answered the AUTH challenge"
+            );
+            anyhow::Ok(())
+        });
+        let event =
+            EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal").finalize(&keys)?;
+        let signer = Arc::new(NgitSigner::Keys(keys));
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_event(
+                &event,
+                &url,
+                false,
+                &signer,
+                false,
+                crate::relay_timeouts::RelayTimeouts {
+                    connect: 1,
+                    overall: 1,
+                },
+            ),
+        )
+        .await?
+        .map_err(|error| anyhow!("{error:?}"))?;
+        assert!(outcome.accepted_by_relay());
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        Ok(())
+    }
+
+    const SIGNER_REFUSAL: &str = "remote signer deliberately refused isolated NIP-42 AUTH";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_refusal_before_event_wait_is_fatal_and_closes_the_relay() -> Result<()> {
+        crate::tls::install_default_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let relay_url = RelayUrl::parse(&format!("ws://{}", listener.local_addr()?))?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let mut socket = accept_async(stream).await?;
+            socket
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", "before-event-wait"])
+                        .to_string()
+                        .into(),
+                ))
+                .await?;
+            // Deliberately send no AuthenticationFailed equivalent and no OK.
+            // The SDK notification which carries that state is transient; the
+            // production capture is what must release the later EVENT waiter.
+            while let Some(message) = socket.next().await {
+                if message?.is_close() {
+                    break;
+                }
+            }
+            anyhow::Ok(())
+        });
+
+        let keys = Keys::generate();
+        let signer = Arc::new(NgitSigner::Rejecting {
+            keys: keys.clone(),
+            reason: SIGNER_REFUSAL,
+        });
+        let timeouts = crate::relay_timeouts::RelayTimeouts {
+            overall: 30,
+            connect: 30,
+        };
+        let connect_timeout = Duration::from_secs(timeouts.connect);
+        let (relay, capture) =
+            build_isolated_write_relay(&relay_url, false, &signer, true, timeouts)?;
+        relay.try_connect().timeout(connect_timeout).await?;
+
+        // Drive a real PolicyAuthenticator from a real relay AUTH challenge,
+        // then start SendEvent only after its error predates that subscription.
+        tokio::time::timeout(Duration::from_secs(5), capture.wait_for_signing_failure())
+            .await
+            .context("PolicyAuthenticator did not capture the AUTH signer refusal")?;
+        let event = EventBuilder::new(crate::git_events::KIND_PULL_REQUEST, "proposal")
+            .finalize(&keys)
+            .map_err(|error| anyhow!(error))?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            publish_signed_proposal_on_relay(relay, capture, &event, &relay_url, timeouts, false),
+        )
+        .await
+        .context("captured signer refusal was hidden by the SDK authentication wait")?;
+        match result {
+            Err(EarlyPublicationError::Signing(error)) => {
+                assert_eq!(error.to_string(), SIGNER_REFUSAL);
+            }
+            Err(EarlyPublicationError::Publication(error)) => {
+                panic!("signer refusal became a retryable publication failure: {error:#}")
+            }
+            Ok(outcome) => panic!("signer refusal produced relay acceptance: {outcome:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .context("isolated relay did not close after signer refusal")???;
+        Ok(())
+    }
 }
 
 async fn get_events_of(
     relay: &nostr_sdk::relay::Relay,
     filters: Vec<nostr::prelude::Filter>,
     pb: &Option<ProgressBar>,
+    timeouts: crate::relay_timeouts::RelayTimeouts,
 ) -> Result<Vec<Event>> {
     // relay.reconcile(filter, opts).await?;
 
     let mut retry_delay = Duration::from_secs(2);
     let start_time = std::time::Instant::now();
-    let max_timeout = Duration::from_secs(long_timeout());
+    let max_timeout = Duration::from_secs(timeouts.overall);
     let mut last_error = None;
     let mut attempt_num = 0;
     let dim = Style::new().color256(247);
@@ -1600,7 +2307,7 @@ async fn get_events_of(
         #[allow(clippy::large_futures)]
         match relay
             .try_connect()
-            .timeout(Duration::from_secs(short_timeout()))
+            .timeout(Duration::from_secs(timeouts.connect))
             .await
         {
             Ok(_) => {
@@ -1619,7 +2326,7 @@ async fn get_events_of(
 
         // For short delays (< 2s), just show a simple message and sleep
         // For longer delays, show a countdown to provide feedback
-        if retry_delay < Duration::from_secs(2) {
+        if retry_delay < Duration::from_secs(2) || !progress_policy().animate {
             if let Some(pb) = pb {
                 let retry_msg = if attempt_num > 1 {
                     format!("retrying (attempt {attempt_num})")
@@ -1697,7 +2404,7 @@ async fn get_events_of(
         return Ok(Vec::new());
     }
 
-    fetch_complete_events(relay, filters, Duration::from_secs(long_timeout())).await
+    fetch_complete_events(relay, filters, Duration::from_secs(timeouts.overall)).await
 }
 
 async fn fetch_complete_events(
@@ -1753,6 +2460,9 @@ async fn fetch_complete_events(
 }
 
 pub struct Params {
+    pub relay_timeouts: crate::relay_timeouts::RelayTimeouts,
+    /// Answer unsolicited AUTH challenges instead of waiting for auth-required.
+    pub proactive_auth: bool,
     pub keys: Option<nostr::prelude::Keys>,
     pub relay_default_set: Vec<String>,
     pub announcement_indexer_relays: Vec<String>,
@@ -1818,6 +2528,10 @@ fn env_grasp_server_list(var: &str) -> Option<Vec<String>> {
 impl Default for Params {
     fn default() -> Self {
         Params {
+            relay_timeouts: crate::relay_timeouts::RelayTimeouts::load(None),
+            proactive_auth: std::env::var("NGIT_PROACTIVE_AUTH")
+                .ok()
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             keys: None,
             relay_default_set: if std::env::var("NGITTEST").is_ok() {
                 env_relay_url_list("NGIT_RELAY_DEFAULT_SET").unwrap_or_else(|| {
@@ -1885,7 +2599,17 @@ impl Params {
     }
 
     pub fn with_git_config_relay_defaults(git_repo: &Option<&Repo>) -> Self {
-        let mut params = Params::default();
+        let mut params = Params {
+            relay_timeouts: crate::relay_timeouts::RelayTimeouts::load(*git_repo),
+            ..Params::default()
+        };
+        if std::env::var_os("NGIT_PROACTIVE_AUTH").is_none() {
+            params.proactive_auth = get_git_config_item(git_repo, "nostr.proactive-auth")
+                .ok()
+                .flatten()
+                .and_then(|value| git2::Config::parse_bool(&value).ok())
+                .unwrap_or(false);
+        }
         if std::env::var("NGITTEST").is_err() {
             // ignore git config settings under test
             if let Ok(Some(relay_defaults)) =
@@ -2096,7 +2820,7 @@ async fn get_local_cache_database(git_repo_path: &Path) -> Result<CacheDatabase>
     })
 }
 
-fn get_global_cache_dir() -> Result<PathBuf> {
+pub(crate) fn get_global_cache_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("NGIT_CACHE_DIR") {
         return Ok(PathBuf::from(path));
     }
@@ -2150,7 +2874,9 @@ async fn get_global_cache_database(git_repo_path: Option<&Path>) -> Result<Cache
 
 fn use_in_memory_global_cache(error: anyhow::Error) -> Arc<dyn NostrDatabase> {
     if !GLOBAL_CACHE_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!(
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
             "warning: {error:#}\n\
              continuing with an in-memory global cache; set NGIT_CACHE_DIR to a writable directory \
              to enable persistent caching"
@@ -2808,7 +3534,11 @@ pub fn save_repository_privacy_to_git_config(git_repo_path: &Path, private: bool
         Ok(())
     })();
     if let Err(error) = result {
-        eprintln!("warning: failed to record repository privacy in git config: {error:#}");
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
+            "warning: failed to record repository privacy in git config: {error:#}"
+        );
     }
 }
 
@@ -2832,7 +3562,11 @@ pub async fn warn_if_invited_as_maintainer(git_repo_path: &Path, repo_ref: &Repo
     };
 
     if invited_as_maintainer && !INVITED_MAINTAINER_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!("warning: you are invited as a maintainer, consider running `ngit repo accept`.");
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
+            "warning: you are invited as a maintainer, consider running `ngit repo accept`."
+        );
     }
 }
 
@@ -4620,7 +5354,7 @@ async fn fetching_with_report_policy_outcome(
     // subcommands (e.g. `ngit issue list --json | jq .`). The progress bars
     // above also write to stderr, keeping all human-facing fetch chatter off
     // stdout.
-    if print_summary {
+    if print_summary && !crate::output_mode::is_json() {
         let term = console::Term::stderr();
         if outcome.report.to_string().is_empty() {
             write_progress_line(&term, "no updates")?;
@@ -4923,6 +5657,126 @@ fn outcomes_to_results(outcomes: Vec<RelayPublishOutcome>) -> Vec<(String, bool)
         .collect()
 }
 
+/// Operation-scoped outcome for an exact signed proposal and publication relay.
+/// The initial hint receipt requires its Git push to succeed; broader fanout
+/// starts only after that hint works. Replica receipts also track their Git
+/// outcome. Retaining all attempted outcomes prevents duplicate publication
+/// after Git replication. No global or filesystem-keyed evidence is retained.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalPublicationReceipt {
+    pub event: Event,
+    pub relay: RelayUrl,
+    pub outcome: RelayPublishOutcome,
+}
+
+/// Merge only receipts supplied by the immediate proposal push operation.
+/// Matching the complete Event (including its signature), not just its id,
+/// prevents another signing instance from consuming this acceptance evidence.
+fn merge_early_publication_receipts(
+    events: &[Event],
+    outcomes: &mut Vec<RelayPublishOutcome>,
+    receipts: &[ProposalPublicationReceipt],
+) {
+    let matching = receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.outcome.accepted_by_relay()
+                && events.iter().any(|event| event == &receipt.event)
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() || outcomes.iter().any(RelayPublishOutcome::accepted_by_relay) {
+        return;
+    }
+
+    let original = outcomes.clone();
+    let mut relays = original
+        .iter()
+        .map(|outcome| outcome.relay.trim_end_matches('/').to_string())
+        .collect::<Vec<_>>();
+    for receipt in &matching {
+        let relay = receipt.relay.as_str().trim_end_matches('/').to_string();
+        if !relays.contains(&relay) {
+            relays.push(relay);
+        }
+    }
+
+    let mut partially_covered = Vec::new();
+    *outcomes = relays
+        .into_iter()
+        .map(|relay| {
+            if let Some(outcome) = original.iter().find(|outcome| {
+                outcome.accepted_by_relay() && outcome.relay.trim_end_matches('/') == relay
+            }) {
+                return outcome.clone();
+            }
+            let missing = events
+                .iter()
+                .filter(|event| {
+                    !matching.iter().any(|receipt| {
+                        receipt.event == **event
+                            && receipt.relay.as_str().trim_end_matches('/') == relay
+                    })
+                })
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                for receipt in matching.iter().filter(|receipt| {
+                    receipt.relay.as_str().trim_end_matches('/') == relay
+                }) {
+                    crate::report_message!("info", "relay_diagnostic",
+                        "warning: later relay fanout did not confirm proposal event {}; using its Git-committed early acceptance on {} (no other event or relay acceptance is implied)",
+                        receipt.event.id, relay
+                    );
+                }
+                RelayPublishOutcome::accepted(relay)
+            } else {
+                for receipt in matching.iter().filter(|receipt| {
+                    receipt.relay.as_str().trim_end_matches('/') == relay
+                }) {
+                    partially_covered.push(format!("{} on {}", receipt.event.id, relay));
+                }
+                if let Some(outcome) = original
+                    .iter()
+                    .find(|outcome| outcome.relay.trim_end_matches('/') == relay)
+                    .filter(|outcome| outcomes_error_is_useful(outcome))
+                {
+                    outcome.clone()
+                } else {
+                    let missing_ids = missing
+                        .iter()
+                        .map(|event| event.id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    RelayPublishOutcome::rejected(
+                        relay,
+                        format!(
+                            "early relay + Git acceptance covers only part of this batch; events still unfulfilled on this relay: {missing_ids}"
+                        ),
+                    )
+                }
+            }
+        })
+        .collect();
+
+    if !partially_covered.is_empty() {
+        partially_covered.sort();
+        partially_covered.dedup();
+        crate::report_message!(
+            "info",
+            "relay_diagnostic",
+            "warning: early publication plus Git acceptance covers only part of this event batch: {}; the close/other events still need relay publication",
+            partially_covered.join(", ")
+        );
+    }
+}
+
+fn outcomes_error_is_useful(outcome: &RelayPublishOutcome) -> bool {
+    outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| !error.is_empty())
+}
+
 fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()> {
     if outcomes.iter().any(RelayPublishOutcome::accepted_by_relay) {
         return Ok(());
@@ -4946,6 +5800,73 @@ fn require_publication_acceptance(outcomes: &[RelayPublishOutcome]) -> Result<()
     bail!(
         "couldn't publish all requested updates to any Nostr relay:\n{failures}\n\nResolve the relay errors above before retrying. Some updates may already have been accepted."
     )
+}
+
+#[cfg(test)]
+mod proposal_receipt_tests {
+    use nostr::prelude::{EventBuilder, FinalizeEvent, Keys};
+
+    use super::*;
+
+    fn event(keys: &Keys, content: &str) -> Event {
+        EventBuilder::new(Kind::TextNote, content)
+            .finalize(keys)
+            .expect("test event must sign")
+    }
+
+    fn receipt(event: Event, relay: &RelayUrl) -> ProposalPublicationReceipt {
+        ProposalPublicationReceipt {
+            event,
+            relay: relay.clone(),
+            outcome: RelayPublishOutcome::accepted(relay.as_str()),
+        }
+    }
+
+    #[test]
+    fn exact_receipt_preserves_single_event_acceptance_after_late_failure() {
+        let keys = Keys::generate();
+        let proposal = event(&keys, "proposal");
+        let early = RelayUrl::parse("ws://early.example.com").unwrap();
+        let late = "ws://late.example.com";
+        let receipts = vec![receipt(proposal.clone(), &early)];
+        let mut outcomes = vec![RelayPublishOutcome::rejected(late, "offline")];
+
+        merge_early_publication_receipts(std::slice::from_ref(&proposal), &mut outcomes, &receipts);
+
+        assert!(require_publication_acceptance(&outcomes).is_ok());
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| { outcome.relay == early.as_str() && outcome.accepted_by_relay() })
+        );
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.relay == late && outcome.error.as_deref() == Some("offline")
+        }));
+    }
+
+    #[test]
+    fn proposal_receipt_does_not_cover_a_later_close_status() {
+        let keys = Keys::generate();
+        let proposal = event(&keys, "proposal");
+        let close_status = event(&keys, "close status");
+        let early = RelayUrl::parse("ws://early.example.com").unwrap();
+        let late = "ws://late.example.com";
+        let receipts = vec![receipt(proposal.clone(), &early)];
+        let mut outcomes = vec![RelayPublishOutcome::rejected(late, "offline")];
+        let events = vec![proposal, close_status.clone()];
+
+        merge_early_publication_receipts(&events, &mut outcomes, &receipts);
+
+        assert!(require_publication_acceptance(&outcomes).is_err());
+        assert!(outcomes.iter().all(|outcome| !outcome.accepted_by_relay()));
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.relay == early.as_str()
+                && outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(&close_status.id.to_string()))
+        }));
+    }
 }
 
 /// Publish events, requiring at least one relay to accept the entire batch.
@@ -4972,6 +5893,43 @@ pub async fn send_events(
         events,
         my_write_relays,
         repo_read_relays,
+        &[],
+        animate,
+        silent,
+    )
+    .await?;
+    require_publication_acceptance(&outcomes)?;
+    Ok(outcomes_to_results(outcomes))
+}
+
+/// Internal proposal-push fanout carrying that same operation's committed
+/// early-publication receipts. The generic [`send_events`] and
+/// [`send_events_with_results`] APIs deliberately never consult receipts.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn send_events_with_proposal_receipts(
+    #[cfg(test)] client: &crate::client::MockConnect,
+    #[cfg(not(test))] client: &Client,
+    git_repo_path: Option<&Path>,
+    events: Vec<Event>,
+    my_write_relays: Vec<String>,
+    repo_read_relays: Vec<RelayUrl>,
+    receipts: &[ProposalPublicationReceipt],
+    animate: bool,
+    silent: bool,
+) -> Result<Vec<(String, bool)>> {
+    if events.is_empty() {
+        return Ok(vec![]);
+    }
+    let outcomes = send_events_with_cache_path(
+        client,
+        git_repo_path,
+        git_repo_path,
+        true,
+        events,
+        my_write_relays,
+        repo_read_relays,
+        receipts,
         animate,
         silent,
     )
@@ -5004,6 +5962,7 @@ pub async fn send_events_with_results(
             events,
             my_write_relays,
             repo_read_relays,
+            &[],
             animate,
             silent,
         )
@@ -5065,6 +6024,7 @@ pub async fn publish_events_without_caching(
         events,
         my_write_relays,
         repo_read_relays,
+        &[],
         animate,
         silent,
     )
@@ -5096,6 +6056,7 @@ pub async fn send_public_events(
             events,
             my_write_relays,
             additional_relays,
+            &[],
             animate,
             silent,
         )
@@ -5119,6 +6080,7 @@ async fn send_events_with_cache_path(
     events: Vec<nostr::prelude::Event>,
     my_write_relays: Vec<String>,
     repo_read_relays: Vec<RelayUrl>,
+    early_receipts: &[ProposalPublicationReceipt],
     animate: bool,
     silent: bool,
 ) -> Result<Vec<RelayPublishOutcome>> {
@@ -5153,30 +6115,17 @@ async fn send_events_with_cache_path(
         bail!("repository-only publication requires at least one repository relay")
     }
 
-    let my_write_relays = if repo_relay_only {
-        vec![]
-    } else {
-        my_write_relays
-    };
-
-    // Only include default relays as fallback when there are no repo relays
-    // (bootstrapping case, e.g. new account signup). When repo relays exist,
-    // trust the repo and user relay configuration.
-    let fallback = [
-        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
-            client.get_relay_default_set().clone()
-        } else {
-            vec![]
-        },
-        if !repo_relay_only && events.iter().any(|e| e.kind.eq(&Kind::GitRepoAnnouncement)) {
-            client.get_blaster_relays().clone()
-        } else {
-            vec![]
-        },
-    ]
-    .concat();
-    let mut relays: Vec<&str> = vec![];
-
+    let targets = publication_targets(
+        &repo_read_relays,
+        &my_write_relays,
+        client.get_relay_default_set(),
+        client.get_blaster_relays(),
+        repo_relay_only,
+        events
+            .iter()
+            .any(|event| event.kind == Kind::GitRepoAnnouncement),
+    );
+    let my_write_relays = targets.write_relays;
     if private_repository {
         client.nip42_register_private_repo_relays(repo_read_relays.clone());
     } else {
@@ -5189,41 +6138,33 @@ async fn send_events_with_cache_path(
             .collect(),
     );
 
-    let repo_read_relays = repo_read_relays
+    let repo_read_relays = targets.repo_relays;
+    let fallback = targets.fallback;
+    let relays = targets
+        .relays
         .iter()
-        .map(|r| r.to_string())
-        .collect::<Vec<String>>();
-
-    let all = &[
-        repo_read_relays.clone(),
-        my_write_relays.clone(),
-        fallback.clone(),
-    ]
-    .concat();
-    // add duplicates first
-    for r in &repo_read_relays {
-        let r_clean = remove_trailing_slash(r);
-        if !my_write_relays
-            .iter()
-            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
-            .count()
-            > 1
-            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
-        {
-            relays.push(r);
-        }
-    }
-
-    for r in all {
-        let r_clean = remove_trailing_slash(r);
-        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
-            relays.push(r);
-        }
-    }
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
     let events_description = describe_events(&events);
+    let already_attempted = !early_receipts.is_empty()
+        && relays.iter().all(|relay| {
+            events.iter().all(|event| {
+                early_receipts.iter().any(|receipt| {
+                    receipt.event == *event
+                        && remove_trailing_slash(receipt.relay.as_str())
+                            == remove_trailing_slash(relay)
+                })
+            })
+        });
     let progress_reporter = RelayProgressReporter::new(
-        format!("Publishing {events_description} to nostr relays..."),
+        "relay_publish",
+        serde_json::json!({"unit":"relay_batches", "events":events.len(), "relays":relays.len()}),
+        if already_attempted {
+            format!("Reporting publication results for {events_description}...")
+        } else {
+            format!("Publishing {events_description} to nostr relays...")
+        },
         animate,
         silent,
     );
@@ -5257,7 +6198,7 @@ async fn send_events_with_cache_path(
     })?;
 
     #[allow(clippy::borrow_deref_ref)]
-    let relay_results: Vec<RelayPublishOutcome> = join_all(relays.iter().map(|&relay| {
+    let mut relay_results: Vec<RelayPublishOutcome> = join_all(relays.iter().map(|&relay| {
         let progress = progress.clone();
         let my_write_relays = my_write_relays.clone();
         let repo_read_relays = repo_read_relays.clone();
@@ -5302,11 +6243,32 @@ async fn send_events_with_cache_path(
                     .with_style(pb_style.clone()),
             );
             if animate {
-                pb.enable_steady_tick(Duration::from_millis(300));
+                progress.enable_tick(&pb);
             }
             pb.inc(0); // need to make pb display intially
             let mut error = None;
             for event in &events {
+                // Do not repeat admission in the final fanout. A Git-backed
+                // acceptance satisfies this event; a failed candidate remains
+                // failed. Other events, such as a patch close status, still
+                // require their own publication.
+                let prior = early_receipts
+                    .iter()
+                    .filter(|receipt| {
+                        receipt.event == *event
+                            && remove_trailing_slash(receipt.relay.as_str()) == relay_clean
+                    })
+                    .min_by_key(|receipt| !receipt.outcome.accepted_by_relay());
+                if let Some(receipt) = prior {
+                    if let Some(reason) = &receipt.outcome.error {
+                        error = Some(reason.clone());
+                        pb.set_style(pb_after_style_failed.clone());
+                        progress.finish_bar(relay, &pb, reason.clone(), false);
+                        break;
+                    }
+                    pb.inc(1);
+                    continue;
+                }
                 match client.send_event_to(cache_path, relay, event.clone()).await {
                     Ok(_) => pb.inc(1),
                     Err(e) => {
@@ -5321,7 +6283,7 @@ async fn send_events_with_cache_path(
                             .for_stderr()
                             .red()
                             .to_string();
-                        progress.finish_bar(&pb, msg);
+                        progress.finish_bar(relay, &pb, msg, false);
                         error = Some(reason);
                         break;
                     }
@@ -5329,7 +6291,7 @@ async fn send_events_with_cache_path(
             }
             if error.is_none() {
                 pb.set_style(pb_after_style_succeeded.clone());
-                progress.finish_bar(&pb, String::new());
+                progress.finish_bar(relay, &pb, String::new(), true);
             }
             RelayPublishOutcome {
                 relay: relay_clean.to_string(),
@@ -5338,6 +6300,8 @@ async fn send_events_with_cache_path(
         }
     }))
     .await;
+
+    merge_early_publication_receipts(&events, &mut relay_results, early_receipts);
 
     let succeeded_count = relay_results
         .iter()
@@ -5377,6 +6341,87 @@ async fn send_events_with_cache_path(
     )?;
 
     Ok(relay_results)
+}
+
+/// Publication destinations and their roles, shared by proposal admission and
+/// ordinary publication. Keep routing separate from transport and receipts.
+pub(crate) struct PublicationTargets {
+    pub(crate) relays: Vec<String>,
+    repo_relays: Vec<String>,
+    write_relays: Vec<String>,
+    fallback: Vec<String>,
+}
+
+pub(crate) fn publication_targets(
+    repo_read_relays: &[RelayUrl],
+    my_write_relays: &[String],
+    default_relays: &[String],
+    blaster_relays: &[String],
+    repo_relay_only: bool,
+    includes_announcement: bool,
+) -> PublicationTargets {
+    let my_write_relays = if repo_relay_only {
+        vec![]
+    } else {
+        my_write_relays.to_vec()
+    };
+
+    // Only include default relays as fallback when there are no repo relays
+    // (bootstrapping case, e.g. new account signup). When repo relays exist,
+    // trust the repo and user relay configuration.
+    let fallback = [
+        if !repo_relay_only && repo_read_relays.is_empty() && my_write_relays.is_empty() {
+            default_relays.to_vec()
+        } else {
+            vec![]
+        },
+        if !repo_relay_only && includes_announcement {
+            blaster_relays.to_vec()
+        } else {
+            vec![]
+        },
+    ]
+    .concat();
+    let mut relays: Vec<&str> = vec![];
+
+    let repo_read_relays = repo_read_relays
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<Vec<String>>();
+
+    let all = &[
+        repo_read_relays.clone(),
+        my_write_relays.clone(),
+        fallback.clone(),
+    ]
+    .concat();
+    // add duplicates first
+    for r in &repo_read_relays {
+        let r_clean = remove_trailing_slash(r);
+        if !my_write_relays
+            .iter()
+            .filter(|x| r_clean.eq(&remove_trailing_slash(x)))
+            .count()
+            > 1
+            && !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x)))
+        {
+            relays.push(r);
+        }
+    }
+
+    for r in all {
+        let r_clean = remove_trailing_slash(r);
+        if !relays.iter().any(|x| r_clean.eq(&remove_trailing_slash(x))) {
+            relays.push(r);
+        }
+    }
+
+    PublicationTargets {
+        relays: relays.into_iter().map(str::to_owned).collect(),
+        repo_relays: repo_read_relays,
+        write_relays: my_write_relays,
+        fallback,
+    }
 }
 
 fn repository_only_routing(
@@ -5707,6 +6752,105 @@ mod tests {
     }
 
     #[test]
+    fn relay_progress_respects_output_policy() {
+        use crate::output_mode::OutputMode;
+        for json in [false, true] {
+            for terminal in [false, true] {
+                for mode in [OutputMode::Normal, OutputMode::Verbose, OutputMode::Quiet] {
+                    let policy = ProgressPolicy::new(mode, json, terminal);
+                    let selected = RelayProgressMode::from_policy(policy, false);
+                    assert_eq!(
+                        selected.animated(),
+                        terminal && !json && mode != OutputMode::Quiet
+                    );
+                    assert_eq!(
+                        selected.logs(),
+                        (!terminal || json) && mode != OutputMode::Quiet
+                    );
+                    assert_eq!(
+                        RelayProgressMode::from_policy(policy, true),
+                        RelayProgressMode::Hidden
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn json_relay_report_summarizes_successes_and_preserves_failures() {
+        let (progress, bytes) = crate::reporting::tests::progress("relay_publish");
+        let mut report = RelayJson {
+            progress,
+            succeeded: 0,
+            failed: 0,
+            detailed: false,
+        };
+        for _ in 0..100 {
+            report.outcome("wss://healthy", "", true);
+        }
+        assert_eq!(crate::reporting::tests::records(&bytes).len(), 1);
+        report.outcome("wss://offline", "connection failed", false);
+        report.finish(true);
+        let records = crate::reporting::tests::records(&bytes);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1]["state"], "relay_failed");
+        assert_eq!(records[1]["details"]["relay"], "wss://offline");
+        assert_eq!(records[2]["state"], "incomplete");
+        assert_eq!(records[2]["details"]["succeeded"], 100);
+        assert_eq!(records[2]["details"]["failed"], 1);
+    }
+
+    #[test]
+    fn relay_logs_preserve_failures_without_repeating_unchanged_details() {
+        let mut log = RelayLog::default();
+        assert!(log.finish("wss://healthy", "", true, false).is_none());
+        let failure = log
+            .finish(
+                "\x1b[31mwss://offline\x1b[0m",
+                "connection failed",
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(failure.contains("wss://offline"));
+        assert!(failure.contains("connection failed"));
+        assert!(!failure.contains('\x1b'));
+        assert!(
+            log.finish("wss://offline", "connection failed", false, false)
+                .is_none()
+        );
+        assert_eq!((log.succeeded, log.failed), (1, 2));
+        assert!(log.start("wss://healthy").is_some());
+        assert!(log.start("wss://healthy").is_none());
+        assert!(log.finish("wss://healthy", "", true, true).is_some());
+    }
+
+    #[test]
+    fn append_only_relay_reporters_have_no_animation_or_reveal_timer() {
+        for mode in [
+            RelayProgressMode::LogConcise,
+            RelayProgressMode::LogDetailed,
+        ] {
+            let reporter = RelayProgressReporter::with_mode(
+                "relay_fetch",
+                serde_json::json!({}),
+                "Checking relays".into(),
+                mode,
+            );
+            assert!(reporter.spinner.is_none());
+            assert!(reporter.heading.is_none());
+            assert!(reporter.timer_handle.is_none());
+            assert!(reporter.reveal_state.is_none());
+            assert!(reporter.details.as_ref().unwrap().is_hidden());
+            let handle = reporter.handle();
+            let bar = handle.add(ProgressBar::new(1).with_prefix("wss://relay"));
+            handle.finish_bar("wss://relay", &bar, String::new(), true);
+            assert_eq!(reporter.log.as_ref().unwrap().lock().unwrap().succeeded, 1);
+            reporter.finish(false, false, None).unwrap();
+        }
+    }
+
+    #[test]
     fn partial_relay_failure_is_cleared_in_concise_mode() {
         let clears = Arc::new(AtomicUsize::new(0));
         let progress = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
@@ -5724,6 +6868,8 @@ mod tests {
         let reporter = RelayProgressReporter {
             details: Some(progress),
             mode: RelayProgressMode::Concise,
+            log: None,
+            json: None,
             _spinner_multi: None,
             spinner: None,
             heading: None,
@@ -6373,6 +7519,74 @@ mod private_repository_tests {
     fn signed(keys: &Keys, builder: EventBuilder) -> Event {
         keys.sign_event(builder.finalize_unsigned(keys.public_key()))
             .unwrap()
+    }
+
+    #[test]
+    fn publication_targets_preserve_roles_and_deduplicate_destinations() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        let writes = vec!["wss://repo.example".into(), "wss://writer.example".into()];
+        let targets = publication_targets(
+            std::slice::from_ref(&repo),
+            &writes,
+            &["wss://default.example".into()],
+            &[
+                "wss://writer.example/".into(),
+                "wss://blaster.example".into(),
+            ],
+            false,
+            true,
+        );
+        assert_eq!(
+            targets.relays,
+            vec![
+                repo.to_string(),
+                writes[1].clone(),
+                "wss://blaster.example".into()
+            ]
+        );
+        assert_eq!(targets.repo_relays, vec![repo.to_string()]);
+        assert_eq!(targets.write_relays, writes);
+        assert!(
+            !targets
+                .fallback
+                .iter()
+                .any(|url| url.contains("default.example"))
+        );
+    }
+
+    #[test]
+    fn publication_targets_restrict_private_and_repository_only_fanout() {
+        let repo = RelayUrl::parse("wss://repo.example").unwrap();
+        for repos in [vec![], vec![repo.clone()]] {
+            let targets = publication_targets(
+                &repos,
+                &["wss://writer.example".into()],
+                &["wss://default.example".into()],
+                &["wss://blaster.example".into()],
+                true,
+                true,
+            );
+            assert_eq!(
+                targets.relays,
+                repos.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            assert!(targets.write_relays.is_empty());
+            assert!(targets.fallback.is_empty());
+        }
+    }
+
+    #[test]
+    fn publication_targets_use_defaults_only_without_configured_destinations() {
+        let defaults = vec!["wss://default.example".into()];
+        let blasters = vec!["wss://blaster.example".into()];
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, defaults);
+        let writes = vec!["wss://writer.example".into()];
+        let targets = publication_targets(&[], &writes, &defaults, &blasters, false, false);
+        assert_eq!(targets.relays, writes);
+        assert!(targets.fallback.is_empty());
+        let targets = publication_targets(&[], &[], &defaults, &blasters, false, true);
+        assert_eq!(targets.relays, [defaults, blasters].concat());
     }
 
     #[test]
@@ -7437,30 +8651,6 @@ mod fetch_completion_tests {
 
     use super::*;
 
-    #[test]
-    fn test_relay_budget_preserves_production_and_failure_test_defaults() {
-        for default in [7, 45] {
-            for override_secs in [None, Some("5"), Some("0"), Some("invalid")] {
-                assert_eq!(
-                    relay_timeout_for_mode(default, false, override_secs),
-                    default
-                );
-            }
-            for override_secs in [None, Some("0"), Some("invalid"), Some("-1")] {
-                assert_eq!(
-                    relay_timeout_for_mode(default, true, override_secs),
-                    crate::test_timeouts::RelayTimeout::Normal.seconds()
-                );
-            }
-            let failure = crate::test_timeouts::RelayTimeout::ExpectedFailure.seconds();
-            assert_eq!(
-                relay_timeout_for_mode(default, true, Some(&failure.to_string())),
-                failure
-            );
-            assert_eq!(relay_timeout_for_mode(default, true, Some("10")), 10);
-        }
-    }
-
     #[tokio::test]
     async fn fetch_requires_eose_instead_of_accepting_partial_history() {
         // Exercise complete, empty, disconnected and silent responses over real
@@ -7684,5 +8874,94 @@ mod announcement_search_diagnostic_tests {
         ] {
             assert_eq!(announcement_search_failure(&anyhow!(error)), expected);
         }
+    }
+}
+
+impl Client {
+    /// Subscribe after account setup using the command's existing auth/proxy
+    /// policy. The passive admission tap applies backpressure before any
+    /// latest-event reduction; notifications carry connection diagnostics only.
+    pub async fn watch_ci(
+        &self,
+        relays: &[RelayUrl],
+        filter: Filter,
+    ) -> Result<crate::ci::watch::Subscription> {
+        use nostr::prelude::{RelayMessage, SubscriptionId};
+
+        use crate::ci::watch::{Subscription, Update};
+        let id = SubscriptionId::generate();
+        let mut streams = Vec::new();
+        for url in relays {
+            if let Err(error) = self.connect(url).await {
+                crate::report_message!(
+                    "info",
+                    "relay_diagnostic",
+                    "CI watch: cannot connect to {url}: {error:#}"
+                );
+                continue;
+            }
+            if let Some(relay) = self.client.relay(url).await? {
+                let url = url.clone();
+                streams.push(
+                    relay
+                        .notifications()
+                        .map(move |notice| (url.clone(), notice)),
+                );
+            }
+        }
+        anyhow::ensure!(
+            !streams.is_empty(),
+            "no repository relay available for CI watch"
+        );
+        let mut notifications = futures::stream::select_all(streams);
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        self.ci_observer.insert(id.clone(), sender.clone());
+        let expected = id.clone();
+        let pump = tokio::spawn(async move {
+            while let Some((relay, notice)) = notifications.next().await {
+                let update = match notice {
+                    RelayNotification::Message { message } => match *message {
+                        RelayMessage::Closed {
+                            subscription_id,
+                            message,
+                        } if subscription_id.as_ref() == &expected => Some(Update::Notice(
+                            format!("{relay} closed the subscription: {message}"),
+                        )),
+                        _ => None,
+                    },
+                    RelayNotification::RelayStatus { status } => {
+                        Some(Update::Notice(format!("{relay}: {status:?}")))
+                    }
+                    RelayNotification::AuthenticationFailed => {
+                        Some(Update::Notice(format!("{relay}: authentication failed")))
+                    }
+                    _ => None,
+                };
+                if let Some(update) = update {
+                    if sender.send(Ok(update)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let subscription = Subscription {
+            id: id.clone(),
+            observer: self.ci_observer.clone(),
+            client: self.client.clone(),
+            receiver,
+            pump,
+        };
+        let target = nostr_sdk::client::ReqTarget::manual(
+            relays.iter().map(|url| (url, vec![filter.clone()])),
+        );
+        let result = self.client.subscribe(target).with_id(id).await?;
+        for (relay, reason) in &result.failed {
+            crate::report_message!("info", "relay_diagnostic", "CI watch: {relay}: {reason}");
+        }
+        anyhow::ensure!(
+            !result.success.is_empty(),
+            "no relay accepted the CI subscription"
+        );
+        Ok(subscription)
     }
 }

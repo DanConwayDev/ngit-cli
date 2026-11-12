@@ -1,0 +1,79 @@
+Workflows:
+  Before one of these tasks, read the help named beside it. That help holds
+  the rules and pitfalls for the whole workflow, including the steps done with
+  plain git; `ngit <command> <subcommand> --help` then gives exact arguments.
+  Help already read in this session does not need reading again.
+
+    open or update a PR (a `git push` of a `pr/` branch),
+    stack, review, comment, merge                        ngit pr --help
+    issues, and resolving them from commit messages      ngit issue --help
+    nostr:// URLs, clone, publish, hosting, maintainers  ngit repo --help
+    CI results, trust, workflow files, secrets           ngit ci --help
+    accounts, login, signers, stored secrets             ngit account --help
+    git servers out of step with Nostr state             ngit sync --help
+    software releases, Zapstore publication              ngit release --help
+    OCI container images                                 ngit container --help
+    static sites (nsites)                                ngit nsite --help
+    telling coding agents a repository uses ngit         ngit skill --help
+    git config and environment settings                  ngit --customize
+
+  Plain `git clone`, `fetch`, `pull` and `push` of ordinary branches work on
+  a nostr:// remote as they do anywhere else and need no workflow help.
+  Repository state (which commit each ref points to) is signed Nostr events;
+  git objects live on interchangeable git servers.
+
+Rules for agents and scripts:
+  - Preserve user and repository choices. Examples in help show syntax, not
+    policy. Carry through the selected signer, target, hosting, CI and
+    replication settings; do not add gates, waits, workflow edits or
+    configuration changes that the task or repository did not choose.
+  - PR branches MUST start with `pr/` (e.g. `pr/my-feature`). Any other
+    branch name is a plain push and never creates a PR.
+  - Read ngit output with --json. It is a global option and works at any
+    position. Stdout is one JSON document unless a command's help says it
+    streams; progress and diagnostics go to stderr as compact JSON Lines,
+    where git and subprocess output may still be plain text. `git` commands
+    have no --json. Top-level `command_status` is `ok` for exit 0 and
+    `error` otherwise; it never describes a nested domain result
+    (`ngit ci status --json` reports `ok` with `ci.conclusion: "failure"`
+    unless a gate was requested).
+  - ngit repository commands normally refresh data from Nostr relays,
+    including PRs, issues, comments, statuses and CI, unless given
+    --offline, and git commands contacting a nostr:// remote refresh that
+    data too. Use --offline where supported for subsequent ngit commands
+    when the required data is already cached and newer state is unnecessary.
+  - Identifiers. <ID|nevent> accepts `nevent1...`, a 64-char hex ID, or a
+    unique hex prefix with an optional `#` (quote it: '#deadbeef'). JSON
+    `id` and `reply_to` fields are already `nevent1...`; a command's help
+    says where it needs a full ID or returns raw hex (CI runs, container,
+    nsite and secret events). Reference events inside --body text as
+    `nostr:nevent1...` or `nostr:naddr1...`, never as raw hex. Never
+    construct a NIP-05 address (`user@domain`); use `npub1...` unless a
+    NIP-05 address was given to you.
+  - Multiline text. ngit options such as --body and --description accept
+    real newlines: --body "$(cat note.md)". Git push options cannot carry
+    newlines: write literal \n in a short inline `-o description=...`, and
+    never convert a file into a push option (open the PR with `ngit send`
+    instead).
+  - Signers. --signer <alias|npub|profile-name> selects a stored identity
+    for one ngit command; `git -c nostr.signer=<alias|npub|profile-name>
+    push ...` does the same for one git command. Neither changes the
+    configured login. Never export or pass an nsec merely to switch between
+    configured accounts.
+  - CI. A successful push says nothing about CI. Nostr CI runs workflows
+    from `.ngit/act/workflows/` or `.ngit/nix/workflows/`; another
+    provider's directory is not evidence. When CI matters, query the exact
+    commit or PR with `ngit ci status <target> --json` and read `ci.state`
+    and `ci.conclusion`, not `command_status`.
+  - Target repository. With several nostr:// remotes, pass global
+    --repo <REMOTE|NADDR|NOSTR-URL>; a configured remote name, an naddr and
+    a nostr:// URL are all accepted. It works at any position and overrides
+    `nostr.repo`, branch tracking and remote-based detection. Without it
+    ngit infers the target from those and fails rather than guesses. Before
+    a signing command, check the `target repository: <naddr> (source: ...)`
+    line on stderr.
+
+  Guides: https://ngit.dev (index for agents: https://ngit.dev/llms.txt; any
+  page as Markdown: https://ngit.dev/markdown/<route>.md). The guides may
+  describe a newer ngit; this help describes the installed one.
+  Web UI: https://gitworkshop.dev

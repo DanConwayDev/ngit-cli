@@ -352,3 +352,73 @@ async fn default_auto_pr_branches_reconstructs_only_checked_out_patch_series() -
 
     Ok(())
 }
+
+/// Ordinary bare consumers keep fetching when proposals exist. Opting into
+/// proposal refs also reconstructs patches without a checked-out working tree.
+#[tokio::test]
+async fn bare_clone_and_fetch_with_open_prs_and_patches() -> Result<()> {
+    let (harness, published, series) = setup().await?;
+    let prs = harness.publish_three_open_proposals(&published).await?;
+    let driver = harness.fresh_repo()?;
+    let dir = tempfile::tempdir()?;
+    let bare_path = dir.path().join("consumer.git");
+    let bare_path_str = bare_path.to_str().context("bare path is not UTF-8")?;
+    git_ok(
+        &driver,
+        [
+            "clone",
+            "--bare",
+            published.clone_url.as_str(),
+            bare_path_str,
+        ],
+        "clone bare repository containing PRs and patches",
+    )
+    .await?;
+    git_ok(
+        &driver,
+        ["--git-dir", bare_path_str, "fetch", "origin"],
+        "refresh bare repository containing PRs and patches",
+    )
+    .await?;
+    let bare = git2::Repository::open_bare(&bare_path)?;
+    assert_eq!(
+        bare.refname_to_id("refs/heads/main")?.to_string(),
+        published.initial_oid,
+    );
+    assert!(bare.references_glob("refs/heads/pr/*")?.next().is_none());
+
+    git_ok(
+        &driver,
+        [
+            "--git-dir",
+            bare_path_str,
+            "config",
+            "nostr.auto-pr-branches",
+            "true",
+        ],
+        "enable automatic PR branches in bare repository",
+    )
+    .await?;
+    git_ok(
+        &driver,
+        [
+            "--git-dir",
+            bare_path_str,
+            "fetch",
+            "origin",
+            "+refs/heads/*:refs/heads/*",
+        ],
+        "fetch opted-in PR and patch refs into bare repository",
+    )
+    .await?;
+    for patch in &series {
+        let name = format!("refs/heads/{}", expected_long_branch(patch)?);
+        assert_eq!(bare.refname_to_id(&name)?.to_string(), patch.tip);
+    }
+    for pr in &prs {
+        let hex = pr.event_id.to_hex();
+        let name = format!("refs/heads/pr/{}({})", pr.branch_name, &hex[..8]);
+        assert_eq!(bare.refname_to_id(&name)?.to_string(), pr.tip);
+    }
+    Ok(())
+}

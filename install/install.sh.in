@@ -483,7 +483,9 @@ main() {
         check_downgrade "$ngit_existing"
         command_exists cargo || fail 'Cargo is not available; install Cargo or rerun with --method standalone to use downloaded binaries'
         info "Updating ngit to v$VERSION through Cargo in $ngit_cargo_root (default registry and default features)"
-        cargo install ngit --locked --version "$VERSION" --root "$ngit_cargo_root"
+        # Run from the detected Cargo root rather than the caller's directory,
+        # avoiding repo-local .cargo/config.toml but retaining user config.
+        (cd "$ngit_cargo_root" && cargo install ngit --locked --version "$VERSION" --root "$ngit_cargo_root")
         ngit_dir=$ngit_existing_dir
         report_path
         exit 0

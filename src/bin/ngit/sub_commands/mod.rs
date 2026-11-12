@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod checkout;
 pub mod ci_control;
+pub mod ci_inspect;
 pub mod ci_status;
 pub mod comment;
 pub mod container;
@@ -16,6 +17,7 @@ pub mod label;
 pub mod list;
 pub mod login;
 pub mod logout;
+mod logout_all;
 pub mod nsite;
 pub mod pr_merge;
 pub mod pr_status;
@@ -30,3 +32,7 @@ pub mod set_subject;
 pub mod skill;
 pub mod sync;
 pub mod whoami;
+
+pub mod ci_watch;
+
+pub mod ci_service;

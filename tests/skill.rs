@@ -49,10 +49,7 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
     let changed_files = setup_json["changed_files"]
         .as_array()
         .context("skill install changed_files is not an array")?;
-    assert_eq!(
-        changed_files.len(),
-        2 + 2 * agent_guidance::bundled_references().len()
-    );
+    assert_eq!(changed_files.len(), 2);
     assert!(
         changed_files
             .iter()
@@ -68,16 +65,8 @@ async fn install_and_update_work_without_a_nostr_remote_or_login() -> Result<()>
     assert!(!repo.dir().join(".agents/ngit-guidance.json").exists());
     assert!(!repo.dir().join("AGENTS.md").exists());
     assert!(!repo.dir().join("CLAUDE.md").exists());
-    for (name, content) in agent_guidance::bundled_references() {
-        assert_eq!(
-            fs::read_to_string(repo.dir().join(".agents/skills/ngit/reference").join(name))?,
-            *content
-        );
-        assert_eq!(
-            fs::read_to_string(repo.dir().join(".claude/skills/ngit/reference").join(name))?,
-            *content
-        );
-    }
+    assert!(!repo.dir().join(".agents/skills/ngit/reference").exists());
+    assert!(!repo.dir().join(".claude/skills/ngit/reference").exists());
 
     let status = repo.ngit(["skill", "status", "--json"]).output().await?;
     assert!(status.status.success());
@@ -130,10 +119,7 @@ async fn ignored_skill_paths_are_not_reported_as_uncommitted() -> Result<()> {
     let changed_files = json["changed_files"]
         .as_array()
         .context("skill install changed_files is not an array")?;
-    assert_eq!(
-        changed_files.len(),
-        1 + agent_guidance::bundled_references().len()
-    );
+    assert_eq!(changed_files.len(), 1);
     assert!(changed_files.iter().all(|path| {
         path.as_str()
             .is_some_and(|path| path.starts_with(".agents/skills/ngit/"))
@@ -158,16 +144,15 @@ async fn install_updates_existing_claude_without_creating_agents_files() -> Resu
     assert!(repo.dir().join(".agents/skills/ngit/SKILL.md").is_file());
     assert!(repo.dir().join(".claude/skills/ngit/SKILL.md").is_file());
     assert!(!repo.dir().join("AGENTS.md").exists());
-    assert!(
-        fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains(".claude/skills/ngit/SKILL.md")
-    );
+    assert!(fs::read_to_string(repo.dir().join("CLAUDE.md"))?.contains("`ngit --help`"));
     Ok(())
 }
 
-/// ngit's own repository keeps single canonical `skills/ngit/SKILL.md` and
-/// `skills/ngit/reference/*.md` files that the agent-specific discovery
+/// A repository can keep a single canonical `skills/ngit/SKILL.md`, and
+/// formerly `skills/ngit/reference/*.md`, that the agent-specific discovery
 /// locations symlink to, so the copies cannot drift. Install must follow those
-/// symlinks, update the canonical files once, and leave the result uncommitted.
+/// symlinks, update the canonical skill once, unlink the `reference` symlinks
+/// without touching their target, and leave the result uncommitted.
 #[cfg(unix)]
 #[tokio::test]
 async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<()> {
@@ -182,9 +167,9 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
     )?;
     let canonical_reference = repo.dir().join("skills/ngit/reference");
     fs::create_dir_all(&canonical_reference)?;
-    for (name, _) in agent_guidance::bundled_references() {
-        fs::write(canonical_reference.join(name), "placeholder\n")?;
-    }
+    // The repository owns this directory; the discovery locations only link
+    // to it.
+    fs::write(canonical_reference.join("prs.md"), "placeholder\n")?;
     for relative in [
         ".agents/skills/ngit/SKILL.md",
         ".claude/skills/ngit/SKILL.md",
@@ -220,7 +205,16 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
     );
 
     assert!(!fs::read_to_string(&canonical)?.contains("stale canonical skill body"));
-    assert!(!fs::read_to_string(canonical_reference.join("prs.md"))?.contains("placeholder"));
+    for dir in [".agents/skills/ngit", ".claude/skills/ngit"] {
+        assert!(
+            fs::symlink_metadata(repo.dir().join(format!("{dir}/reference"))).is_err(),
+            "install kept the `{dir}/reference` symlink"
+        );
+    }
+    assert!(
+        canonical_reference.join("prs.md").is_file(),
+        "install followed a reference symlink into a repository-owned directory"
+    );
     for relative in [
         ".agents/skills/ngit/SKILL.md",
         ".claude/skills/ngit/SKILL.md",
@@ -234,12 +228,6 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
         assert_eq!(
             fs::read_to_string(repo.dir().join(relative))?,
             fs::read_to_string(&canonical)?
-        );
-    }
-    for (name, content) in agent_guidance::bundled_references() {
-        assert_eq!(
-            fs::read_to_string(canonical_reference.join(name))?,
-            *content
         );
     }
 
@@ -284,13 +272,6 @@ async fn install_updates_a_canonical_skill_copy_shared_by_symlinks() -> Result<(
         names.iter().any(|name| name == "skills/ngit/SKILL.md"),
         "no skill in {names:?}"
     );
-    for (name, _) in agent_guidance::bundled_references() {
-        let expected = format!("skills/ngit/reference/{name}");
-        assert!(
-            names.iter().any(|name| name == &expected),
-            "missing {expected} in {names:?}"
-        );
-    }
     Ok(())
 }
 
@@ -367,11 +348,12 @@ async fn global_install_targets_the_user_home_without_touching_the_repository() 
     let home = harness.home();
     assert!(home.join(".agents/skills/ngit/SKILL.md").is_file());
     assert!(home.join(".claude/skills/ngit/SKILL.md").is_file());
-    for (name, content) in agent_guidance::bundled_references() {
+    for dir in [".agents/skills/ngit", ".claude/skills/ngit"] {
         assert_eq!(
-            fs::read_to_string(home.join(format!(".agents/skills/ngit/reference/{name}")))?,
-            *content
+            fs::read_to_string(home.join(dir).join("SKILL.md"))?,
+            agent_guidance::bundled_skill()
         );
+        assert!(!home.join(dir).join("reference").exists());
     }
     assert!(!repo.dir().join(".agents").exists());
     assert!(!repo.dir().join(".claude").exists());
@@ -411,12 +393,11 @@ async fn system_install_uses_the_overridden_canonical_directory() -> Result<()> 
     assert_eq!(json["changes_uncommitted"], false);
 
     assert!(system_dir.path().join("ngit/SKILL.md").is_file());
-    for (name, content) in agent_guidance::bundled_references() {
-        assert_eq!(
-            fs::read_to_string(system_dir.path().join(format!("ngit/reference/{name}")))?,
-            *content
-        );
-    }
+    assert_eq!(
+        fs::read_to_string(system_dir.path().join("ngit/SKILL.md"))?,
+        agent_guidance::bundled_skill()
+    );
+    assert!(!system_dir.path().join("ngit/reference").exists());
     assert!(!system_dir.path().join(".agents").exists());
     assert!(!harness.home().join(".agents/skills/ngit").exists());
     assert!(!repo.dir().join(".agents").exists());
@@ -503,9 +484,9 @@ async fn global_opt_out_works_without_a_git_worktree() -> Result<()> {
     Ok(())
 }
 
-/// Release candidates bundled `reference/repo-settings.md`, which was later
-/// merged into `repositories.md`. Upgrading such an install must delete the
-/// stale copy and leave the deletion for the repository to commit.
+/// Earlier versions installed reference files beside the skill. Upgrading
+/// such an install must delete them and leave the deletion for the repository
+/// to commit.
 #[tokio::test]
 async fn upgrade_removes_a_retired_reference_installed_by_a_release_candidate() -> Result<()> {
     let harness = harness().await?;
@@ -521,7 +502,9 @@ async fn upgrade_removes_a_retired_reference_installed_by_a_release_candidate() 
         ".claude/skills/ngit/reference/repo-settings.md",
     ];
     for relative in retired {
-        fs::write(repo.dir().join(relative), "superseded reference\n")?;
+        let path = repo.dir().join(relative);
+        fs::create_dir_all(path.parent().context("reference has a parent")?)?;
+        fs::write(path, "superseded reference\n")?;
     }
     repo.git_ok(["add", "-A"], "stage the retired reference")
         .await?;

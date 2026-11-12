@@ -80,6 +80,35 @@ ngit/
 - Run `cargo clippy` to catch common issues
 - Use `anyhow::Result` for error handling
 - Prefer explicit error messages with context
+- Document a feature's workflow where users and agents look for it: the
+  command's `--help`. Flags and output contracts belong in the clap doc
+  comments; the rules and pitfalls of a whole workflow, including steps done
+  with plain git, belong in the owning command group's notes under
+  `src/bin/ngit/help/`, and the task map in `help/overview.txt` must route to
+  them. Write for an 80-column terminal. Include the command examples an
+  agent should copy alongside the rules: concrete examples are what steer
+  agents to correct usage.
+- Help is rendered from the tree built by `cli_help::command`, not directly
+  from the derive. An option's first doc-comment paragraph is its line in
+  `-h`; later paragraphs appear only in `--help` of the command that defines
+  it. Global options are listed by top-level help alone, except `--json`,
+  which every command lists, and keep one-line descriptions; their contracts
+  belong in `help/overview.txt`.
+- Keep `skills/ngit/SKILL.md` a bootstrap that routes agents to installed
+  help. Do not add commands, flags, or feature details to it; bump
+  `metadata.version` whenever its text changes.
+- Update `CHANGELOG.md` under `Unreleased` in the same commit as each relevant
+  behavior, dependency, or security change. Describe the user-facing effect and
+  distinguish upstream fixes from demonstrated ngit exposure.
+
+### Dependency updates
+
+When available, consult the local [dependency update runbook](work/dependency-updates.md)
+for dependency changes and security reports. This Git-ignored file is optional
+and is not distributed with the repository. Keep its watchlist focused on active
+findings and upgrade constraints; remove resolved items. If it is absent,
+proceed with the normal dependency checks. Keep private watchlist details out of
+public documentation, commits, and PRs.
 
 ### Testing
 
@@ -442,11 +471,11 @@ For questions about the codebase or contributions:
 <!-- ngit-agent-guidance:start -->
 ## Repository collaboration
 
-This repository uses ngit and Nostr for issues, pull requests, reviews, comments, merges, and repository state.
+This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev), not GitHub or GitLab. It uses ngit for issues, pull requests, reviews, comments, merges, and repository state.
 
 - Do not use GitHub or GitLab issues, pull requests, APIs, or the `gh`/`glab` CLIs for repository collaboration.
-- For issue, pull request, review, comment, merge, push, clone, or repository metadata tasks, load and follow `.agents/skills/ngit/SKILL.md`.
+- Before issue, pull request, review, comment, merge, CI, release, or repository metadata tasks, including pushing a pull request branch, run `ngit --help` and follow its workflow map.
 - Treat a `nostr://` remote as authoritative.
 - Pull request branches must use the `pr/` prefix.
-- If ngit is unavailable, report that it is required rather than falling back to GitHub or GitLab.
+- If ngit is unavailable, report that it is required (install: https://ngit.dev/install) rather than falling back to GitHub or GitLab.
 <!-- ngit-agent-guidance:end -->

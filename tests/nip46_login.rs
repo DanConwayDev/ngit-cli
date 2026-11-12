@@ -186,7 +186,7 @@ async fn run_nbunksec_login(
         encoded,
     ];
     if let Some(alias) = alias {
-        args.extend(["--alias", alias]);
+        args.extend(["--profile", alias]);
     }
     let mut command = repo.ngit(args);
     command
@@ -312,7 +312,7 @@ async fn bunker_login_persists_remote_signer_pubkey() {
 }
 
 #[tokio::test]
-async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Result<()> {
+async fn same_npub_remote_signers_respect_distinct_profiles() -> Result<()> {
     let relay = LocalRelayBuilder::default().build();
     let relay_url = relay.url().await;
     relay.run().await?;
@@ -342,8 +342,12 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     )?;
     let first_uri = first_remote.bunker_uri().to_string();
     let second_uri = second_remote.bunker_uri().to_string();
-    let first_task = tokio::spawn(async move { first_remote.serve(ApproveAll).await });
-    let second_task = tokio::spawn(async move { second_remote.serve(ApproveAll).await });
+    let first_counts = Arc::new(RequestCounts::default());
+    let second_counts = Arc::new(RequestCounts::default());
+    let first_actions = CountRequests(first_counts.clone());
+    let second_actions = CountRequests(second_counts.clone());
+    let first_task = tokio::spawn(async move { first_remote.serve(first_actions).await });
+    let second_task = tokio::spawn(async move { second_remote.serve(second_actions).await });
     wait_until_signer_ready(&relay_url, first_remote_keys.public_key()).await;
     wait_until_signer_ready(&relay_url, second_remote_keys.public_key()).await;
 
@@ -357,10 +361,11 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         env!("CARGO_BIN_EXE_ngit"),
         env!("CARGO_BIN_EXE_git-remote-nostr"),
     )
+    .with_relay("default")
+    .with_grasp_server("repo")
     .build()
     .await?;
     let first_repo = harness.fresh_repo()?;
-    let rejected_repo = harness.fresh_repo()?;
     let aliased_repo = harness.fresh_repo()?;
     let credentials = NamedTempFile::new()?;
 
@@ -382,22 +387,6 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
         Some("primary"),
         "credential-backed bunker login should persist its alias"
     );
-    let before_rejected_login = std::fs::read(credentials.path())?;
-
-    let rejected =
-        run_nbunksec_login(&rejected_repo, &second_encoded, credentials.path(), None).await?;
-    assert!(!rejected.status.success());
-    let stderr = String::from_utf8_lossy(&rejected.stderr);
-    assert!(
-        stderr.contains("different signer credential") && stderr.contains("--alias <name>"),
-        "same-npub replacement should explain the alias escape hatch: {stderr}"
-    );
-    assert_eq!(
-        std::fs::read(credentials.path())?,
-        before_rejected_login,
-        "a rejected same-npub login must not alter the original credential"
-    );
-
     let aliased = run_nbunksec_login(
         &aliased_repo,
         &second_encoded,
@@ -478,6 +467,87 @@ async fn same_npub_remote_signers_require_and_respect_distinct_aliases() -> Resu
     assert_eq!(dedicated["npub_default"], false);
     assert_eq!(dedicated["scopes"], serde_json::json!(["local"]));
     assert_eq!(dedicated["active"], true);
+
+    // Save another name for the second connection without changing the
+    // first connection selected in this repository. Exercise the real Git
+    // remote-helper handoff: event pubkeys alone cannot distinguish sessions
+    // that sign for the same npub, so observe requests at both signers.
+    let (_, published) = harness
+        .publish_repo(test_harness::PublishRepoOpts::default())
+        .await?;
+    let mut contributor = harness
+        .clone_published_repo(&published, test_harness::CloneLogin::None)
+        .await?;
+    contributor.set_env("NGIT_SECRET_STORAGE", "file");
+    contributor.set_env(
+        "NGIT_KEYRING_FILE",
+        credentials.path().to_str().context("credential path")?,
+    );
+    contributor
+        .git_ok(
+            ["config", "nostr.signer", "primary"],
+            "select primary connection",
+        )
+        .await?;
+    let config_path = contributor.dir().join(".git/config");
+    let previous_config = std::fs::read(&config_path)?;
+    let output = contributor
+        .ngit([
+            "account",
+            "login",
+            "dedicated",
+            "--profile",
+            "push-only",
+            "--no-activate",
+            "--offline",
+        ])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&config_path)?, previous_config);
+    contributor
+        .git_ok(
+            ["checkout", "-b", "pr/profile-only"],
+            "create proposal branch",
+        )
+        .await?;
+    std::fs::write(contributor.dir().join("profile.txt"), "explicit profile\n")?;
+    contributor
+        .git_ok(["add", "profile.txt"], "stage change")
+        .await?;
+    contributor
+        .git_ok(
+            ["commit", "-m", "test profile selection", "--no-gpg-sign"],
+            "commit change",
+        )
+        .await?;
+    let first_before = first_counts.sign_event.load(Ordering::SeqCst);
+    let second_before = second_counts.sign_event.load(Ordering::SeqCst);
+    contributor
+        .nostr_push_with_git_flags(
+            ["-c", "nostr.signer=push-only"],
+            ["origin", "pr/profile-only"],
+        )
+        .await?;
+    assert_eq!(first_counts.sign_event.load(Ordering::SeqCst), first_before);
+    assert!(second_counts.sign_event.load(Ordering::SeqCst) > second_before);
+    assert_eq!(
+        contributor.config("nostr.signer").await?.as_deref(),
+        Some("primary")
+    );
+    let proposals = harness
+        .grasp("repo")
+        .events(Filter::new().kind(test_harness::KIND_PULL_REQUEST))
+        .await?;
+    assert!(
+        proposals
+            .iter()
+            .any(|event| event.pubkey == user_keys.public_key())
+    );
 
     first_task.abort();
     second_task.abort();
@@ -758,7 +828,7 @@ async fn nbunksec_without_user_pubkey_fetches_identity_before_signing() {
     let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
     wait_until_signer_ready(&relay_url, signer_keys.public_key()).await;
 
-    let connect = nostr_connect::client::NostrConnect::new(
+    let connect = ngit::remote_signer::NostrConnect::new(
         NostrConnectUri::parse(connection.bunker_uri).expect("decoded bunker URI should parse"),
         Keys::parse(&connection.client_key).expect("decoded client key should parse"),
         Duration::from_secs(10),
@@ -811,7 +881,7 @@ async fn sanitized_bunker_uri_reconnects_with_stored_client_key() {
     let signer_task = tokio::spawn(async move { remote_signer.serve(signer_actions).await });
     wait_until_signer_ready(&relay_url, signer_keys.public_key()).await;
 
-    let connect = nostr_connect::client::NostrConnect::new(
+    let connect = ngit::remote_signer::NostrConnect::new(
         sanitized_uri,
         client_keys,
         Duration::from_secs(10),
@@ -835,4 +905,513 @@ async fn sanitized_bunker_uri_reconnects_with_stored_client_key() {
     assert_eq!(event.pubkey, user_keys.public_key());
     assert_eq!(request_counts.get_public_key.load(Ordering::SeqCst), 0);
     assert_eq!(request_counts.sign_event.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fresh_login_replaces_default_but_preserves_named_connections() -> Result<()> {
+    let relay = LocalRelayBuilder::default().build();
+    let relay_url = relay.url().await;
+    relay.run().await?;
+
+    let user_keys = Keys::generate();
+    let first_remote_keys = Keys::generate();
+    let second_remote_keys = Keys::generate();
+    let first_client_keys = Keys::generate();
+    let second_client_keys = Keys::generate();
+    let first_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: first_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let second_remote = NostrConnectRemoteSigner::new(
+        NostrConnectKeys {
+            signer: second_remote_keys.clone(),
+            user: user_keys.clone(),
+        },
+        [relay_url.clone()],
+        None,
+        None,
+    )?;
+    let first_uri = first_remote.bunker_uri().to_string();
+    let second_uri = second_remote.bunker_uri().to_string();
+    let first_task = tokio::spawn(async move { first_remote.serve(ApproveAll).await });
+    let second_task = tokio::spawn(async move { second_remote.serve(ApproveAll).await });
+    wait_until_signer_ready(&relay_url, first_remote_keys.public_key()).await;
+    wait_until_signer_ready(&relay_url, second_remote_keys.public_key()).await;
+
+    let first_encoded =
+        nbunksec::encode(&first_uri, &first_client_keys.secret_key().to_secret_hex())?;
+    let second_encoded = nbunksec::encode(
+        &second_uri,
+        &second_client_keys.secret_key().to_secret_hex(),
+    )?;
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .build()
+    .await?;
+    let repo = harness.fresh_repo()?;
+    let named_repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let npub = user_keys.public_key().to_bech32()?;
+    for encoded in [&first_encoded, &second_encoded, &first_encoded] {
+        let output = run_nbunksec_login(&repo, encoded, credentials.path(), None).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+        assert_eq!(
+            stored.as_object().unwrap().len(),
+            1,
+            "default replacement must not accumulate sessions"
+        );
+        let exported = export_stored_signer(&repo, credentials.path()).await?;
+        assert_eq!(exported, nbunksec::decode(encoded)?);
+    }
+    let output = run_nbunksec_login(
+        &named_repo,
+        &first_encoded,
+        credentials.path(),
+        Some("host"),
+    )
+    .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = run_nbunksec_login(&repo, &second_encoded, credentials.path(), None).await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&named_repo, credentials.path()).await?,
+        nbunksec::decode(&first_encoded)?
+    );
+    assert_eq!(
+        export_stored_signer(&repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(stored["nostr/alias-credential:host"], "signer-alias:host");
+    assert!(stored.get(format!("nostr/signer:{npub}")).is_some());
+
+    // A newly paired same-npub profile must reach the JSON fallback even
+    // when the OS lookup fails (rather than simply reporting no entry).
+    let fallback_repo = harness.fresh_repo()?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        fallback_repo
+            .ngit([
+                "account",
+                "login",
+                "--local",
+                "--offline",
+                "--nbunksec",
+                &first_encoded,
+                "--profile",
+                "fallback",
+                "--secret-storage",
+                "auto",
+            ])
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .env("NGIT_TEST_OS_STORE_UNAVAILABLE", "true")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&fallback_repo, credentials.path()).await?,
+        nbunksec::decode(&first_encoded)?
+    );
+    assert_eq!(
+        export_stored_signer(&repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(
+        stored["nostr/alias-credential:fallback"],
+        "signer-alias:fallback"
+    );
+    assert!(
+        fallback_repo
+            .config("nostr.bunker-app-key")
+            .await?
+            .is_none()
+    );
+
+    // Re-pair the named profile without changing the default connection.
+    let output = run_nbunksec_login(
+        &named_repo,
+        &second_encoded,
+        credentials.path(),
+        Some("host"),
+    )
+    .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        export_stored_signer(&named_repo, credentials.path()).await?,
+        nbunksec::decode(&second_encoded)?
+    );
+    // Exercise both a default-slot connection and a dedicated named session.
+    for initial_default in [&first_encoded, &second_encoded] {
+        let credentials = NamedTempFile::new()?;
+        let output = run_nbunksec_login(&repo, initial_default, credentials.path(), None).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Reproduce profile aliasing of an exact remote connection: the Android
+        // session is kept by dcdroid when dcdev is paired to a different signer.
+        let output =
+            run_nbunksec_login(&repo, &first_encoded, credentials.path(), Some("dcdev")).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut alias_command = repo.ngit([
+            "account",
+            "login",
+            "dcdev",
+            "--profile",
+            "dcdroid",
+            "--offline",
+        ]);
+        alias_command
+            .env("NGIT_SECRET_STORAGE", "file")
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output =
+            tokio::time::timeout(Duration::from_secs(30), alias_command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output =
+            run_nbunksec_login(&repo, &second_encoded, credentials.path(), Some("dcdev")).await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            export_stored_signer(&repo, credentials.path()).await?,
+            nbunksec::decode(&second_encoded)?
+        );
+        repo.git_ok(
+            ["config", "nostr.signer", "dcdroid"],
+            "select preserved fixture profile",
+        )
+        .await?;
+        assert_eq!(
+            export_stored_signer(&repo, credentials.path()).await?,
+            nbunksec::decode(&first_encoded)?
+        );
+    }
+
+    // The interactive "make global default" choice reaches this same login
+    // path. A newly paired profile changes the selector, not the old session.
+    let global_repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    let global_config = global_repo.dir().join("global-config");
+    for (profile, encoded) in [("dcdroid", &first_encoded), ("dcdev", &second_encoded)] {
+        let mut command = global_repo.ngit([
+            "account",
+            "login",
+            "--offline",
+            "--nbunksec",
+            encoded,
+            "--profile",
+            profile,
+            "--secret-storage",
+            "file",
+        ]);
+        command
+            .env_remove("NGITTEST")
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        git2::Config::open(&global_config)?.get_string("nostr.signer")?,
+        "dcdev"
+    );
+    for (profile, expected) in [("dcdroid", &first_encoded), ("dcdev", &second_encoded)] {
+        let mut command =
+            global_repo.ngit(["--signer", profile, "account", "export-keys", "--json"]);
+        command
+            .env_remove("NGITTEST")
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("NGIT_KEYRING_FILE", credentials.path())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            nbunksec::decode(
+                document["nbunksec"]
+                    .as_str()
+                    .context("missing fixture connection")?
+            )?,
+            nbunksec::decode(expected)?
+        );
+    }
+
+    first_task.abort();
+    second_task.abort();
+    Ok(())
+}
+
+/// An agent can read the URI while ngit is still running, pair from another
+/// process, and complete login with stdin closed. No connect-message resender
+/// is used: emitting the URI must mean ngit is ready to receive the response.
+#[tokio::test]
+async fn nostrconnect_cli_pairs_without_terminal_input() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true, false, false).await
+}
+
+#[tokio::test]
+async fn nostrconnect_cli_rejection_preserves_existing_login() -> Result<()> {
+    assert_nostrconnect_cli_pairing(false, false, false).await
+}
+
+#[tokio::test]
+async fn nostrconnect_cli_saves_profile_without_activation() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true, true, false).await
+}
+
+#[tokio::test]
+async fn nostrconnect_cli_quiet_preserves_pairing_action() -> Result<()> {
+    assert_nostrconnect_cli_pairing(true, false, true).await
+}
+
+async fn assert_nostrconnect_cli_pairing(
+    approve: bool,
+    no_activate: bool,
+    quiet: bool,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("signer")
+    .build()
+    .await?;
+    let relay_url = harness.relay("signer").url().to_string();
+    let repo = harness.fresh_repo()?;
+    let credentials = NamedTempFile::new()?;
+    std::fs::write(credentials.path(), "{}")?;
+    repo.git_ok(
+        ["config", "nostr.signer", "preserved-profile"],
+        "seed previous login",
+    )
+    .await?;
+    let local_config = repo.dir().join(".git/config");
+    let previous_local = std::fs::read(&local_config)?;
+    let global_config = repo.dir().join("global-config");
+    std::fs::write(&global_config, "[nostr]\n\tsigner = global-profile\n")?;
+    let previous_global = std::fs::read(&global_config)?;
+    let mut command = repo.ngit([
+        "account",
+        "login",
+        "--nostrconnect",
+        "--offline",
+        "--profile",
+        "agent",
+        "--signer-relay",
+        relay_url.as_str(),
+        "--json",
+    ]);
+    if quiet {
+        command.arg("--quiet");
+    }
+    command.arg(if no_activate {
+        "--no-activate"
+    } else {
+        "--local"
+    });
+    command
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .env("GIT_CONFIG_GLOBAL", &global_config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.env("NGIT_INTERACTIVE_MODE", "1");
+    let mut child = command.spawn()?;
+    let mut stderr = BufReader::new(child.stderr.take().context("missing stderr pipe")?).lines();
+    let mut startup_diagnostics = Vec::new();
+    let uri = tokio::time::timeout(READY_DEADLINE, async {
+        while let Some(line) = stderr.next_line().await? {
+            startup_diagnostics.push(line.clone());
+            let record: serde_json::Value = serde_json::from_str(&line)
+                .with_context(|| format!("non-JSON pairing diagnostic: {line}"))?;
+            if record["type"] == "action_required" && record["action"] == "signer_pairing" {
+                assert!(
+                    child.try_wait()?.is_none(),
+                    "pairing must be reported before completion"
+                );
+                return NostrConnectUri::parse(
+                    record["details"]["uri"]
+                        .as_str()
+                        .context("missing pairing URI")?,
+                )
+                .map_err(anyhow::Error::from);
+            }
+        }
+        anyhow::bail!("login ended without emitting a pairing URI")
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "pairing URI was not emitted before the deadline:\n{}",
+            startup_diagnostics.join("\n")
+        )
+    })??;
+    let user_keys = Keys::generate();
+    let signer_keys = Keys::generate();
+    let remote = NostrConnectRemoteSigner::from_uri(
+        uri,
+        NostrConnectKeys {
+            signer: signer_keys.clone(),
+            user: user_keys.clone(),
+        },
+        None,
+    )?;
+    struct ApprovePairing(bool);
+    impl NostrConnectSignerActions for ApprovePairing {
+        fn approve(&self, _public_key: &PublicKey, _request: &NostrConnectRequest) -> bool {
+            self.0
+        }
+    }
+    let signer_task = tokio::spawn(async move { remote.serve(ApprovePairing(approve)).await });
+    // Drain stderr concurrently so diagnostics cannot block the child.
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = Vec::new();
+        while let Some(line) = stderr.next_line().await? {
+            lines.push(line);
+        }
+        Ok::<_, std::io::Error>(lines.join("\n"))
+    });
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("noninteractive pairing did not complete")??;
+    signer_task.abort();
+    let diagnostics = stderr_task.await??;
+    for line in diagnostics.lines() {
+        let _: serde_json::Value = serde_json::from_str(line)
+            .with_context(|| format!("non-JSON signer diagnostic: {line}"))?;
+    }
+    assert!(
+        diagnostics.lines().count() < 30,
+        "excessive signer reporting: {diagnostics}"
+    );
+    if quiet {
+        for line in startup_diagnostics
+            .iter()
+            .map(String::as_str)
+            .chain(diagnostics.lines())
+        {
+            let record: serde_json::Value = serde_json::from_str(line)?;
+            assert_ne!(record["type"], "progress");
+        }
+    }
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    if !approve {
+        assert!(
+            !output.status.success(),
+            "rejected identity request must fail"
+        );
+        assert_eq!(document["command_status"], "error");
+        assert!(
+            diagnostics.to_ascii_lowercase().contains("rejected"),
+            "{diagnostics}"
+        );
+        assert_eq!(std::fs::read_to_string(credentials.path())?, "{}");
+        assert_eq!(
+            git2::Repository::open(repo.dir())?
+                .config()?
+                .get_string("nostr.signer")?,
+            "preserved-profile"
+        );
+        return Ok(());
+    }
+    assert!(output.status.success(), "{diagnostics}");
+    assert_eq!(document["command_status"], "ok");
+    if no_activate {
+        assert_eq!(std::fs::read(&local_config)?, previous_local);
+        assert_eq!(std::fs::read(&global_config)?, previous_global);
+    }
+    let exported = repo
+        .ngit(["--signer", "agent", "account", "export-keys", "--json"])
+        .env("NGIT_SECRET_STORAGE", "file")
+        .env("NGIT_KEYRING_FILE", credentials.path())
+        .output()
+        .await?;
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&exported.stdout)?;
+    let stored = nbunksec::decode(
+        document["nbunksec"]
+            .as_str()
+            .context("missing saved connection")?,
+    )?;
+    let NostrConnectUri::Bunker {
+        remote_signer_public_key,
+        ..
+    } = NostrConnectUri::parse(stored.bunker_uri)?
+    else {
+        anyhow::bail!("saved session must be a bunker URI");
+    };
+    assert_eq!(remote_signer_public_key, signer_keys.public_key());
+    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(credentials.path())?)?;
+    assert_eq!(
+        stored["nostr/alias:agent"],
+        user_keys.public_key().to_bech32()?
+    );
+    let credential = stored["nostr/alias-credential:agent"]
+        .as_str()
+        .context("paired profile should reference its stored connection")?;
+    assert!(stored.get(format!("nostr/{credential}")).is_some());
+    Ok(())
 }

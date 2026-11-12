@@ -53,6 +53,13 @@ not reuse custom Git/path sources, explicitly selected registries, or feature
 flags from the previous install. The Cargo progress message states this policy;
 use your original Cargo command to keep a customized build.
 
+Cargo is invoked from the detected Cargo installation root rather than the
+caller's working directory, so repository-local `.cargo/config.toml`
+files—such as `build.rustc-wrapper`, `target.*.linker`, or `[source]`
+replacements—are not picked up during the update build. No shared temporary
+directory is used. User-level Cargo configuration (`$CARGO_HOME`) still
+applies and is not overridden.
+
 For a standalone update, ngit downloads the asset URL from the signed NIP-82
 event, verifies its SHA-256 and size, extracts both `ngit` and
 `git-remote-nostr`, executes their version checks, and stages rollback copies

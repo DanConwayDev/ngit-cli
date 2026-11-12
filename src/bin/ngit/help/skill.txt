@@ -1,0 +1,33 @@
+Tell coding agents to use ngit:
+  Agents reach for GitHub or GitLab tools unless a repository says
+  otherwise. The recommended way to say so is a short instruction in the
+  root `AGENTS.md` or `CLAUDE.md`, because agents read those files at the
+  start of every session. Create one if the repository has neither:
+
+    This repository's forge is Grasp (git over Nostr; ngit, gitworkshop.dev),
+    not GitHub or GitLab. Use ngit for issues, pull requests, reviews, CI and
+    releases. Before any of those tasks, including pushing a pull request
+    branch, run `ngit --help` and follow its workflow map. If ngit is
+    missing, install it from https://ngit.dev/install.
+
+  Reword it to suit the repository. ngit reminds maintainers until one of
+  those files mentions both `ngit --help` and `ngit.dev/install`, or the
+  repository skill is installed. `ngit skill status` reports which it found.
+
+The repository skill (optional):
+  The skill carries the same routing for agents that discover skills but
+  are given no instruction file.
+
+    ngit skill install --json
+    ngit skill upgrade --json
+    ngit skill status --json
+    ngit skill opt-out --local       # stop reminders in this repository
+    ngit skill opt-out --global      # stop them everywhere by default
+
+  `install` writes `.agents/skills/ngit/SKILL.md` and
+  `.claude/skills/ngit/SKILL.md`, and appends the instruction above to an
+  existing `AGENTS.md` or `CLAUDE.md` that does not already mention ngit.
+  It never creates an instruction file. `upgrade` replaces installed copies
+  with the version bundled in this ngit. Both leave their changes
+  uncommitted for review; contributors who are not maintainers propose
+  them on a `pr/` branch.

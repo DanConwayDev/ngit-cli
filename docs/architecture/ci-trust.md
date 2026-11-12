@@ -3,7 +3,7 @@
 **Status:** all six work packages implemented — WP1 (`src/lib/ci/` core),
 WP2 (`provenance`, `domain`, `resolve`), WP3 (`ngit ci status`), WP4
 (`pr view` Checks, `pr list` CI column), WP5 (merge gating) and WP6
-(`ngit ci request|stop|trigger`). The deferred list below still stands.
+(`ngit ci service request|stop|trigger`). The deferred list below still stands.
 Written as a build plan: each work package below is independently buildable
 and reviewable.
 
@@ -45,9 +45,8 @@ kind-1619 update that supplied the commit, `c` = commit id. Push/tag-triggered
 events carry an `r` Git-ref tag instead. Attaching CI to a PR is therefore a
 `#E` filter; to a commit, a `#c` filter.
 
-Out of scope for now: Repository Secret Updates (29846), Coordinator
-Advertisement/Readiness/Status (19843/19844/39844) beyond what provenance
-validation needs, and NIP-11 operator-key strengthening.
+Additional CI event inspection and controls are described in the sections
+below. NIP-11 operator-key strengthening remains outside the trust model.
 
 ## Trust model — port requirements
 
@@ -127,8 +126,8 @@ source integrity.
 - `resolve.rs` — assembly with **two tiers**:
   - *cache tier*: evidence computable from the local nostr cache alone
     (control-history reduction, quote validation when the quoted event is
-    cached). Used by `pr list`. Coverage is `partial` when domain checks were
-    skipped.
+    cached). Used by `pr list`. Coverage is `partial` when relevant identity
+    evidence remains unresolved, not merely because domain checks were skipped.
   - *full tier*: additionally fetch missing quoted events and perform NIP-05
     domain verification. Used by `pr view`, `ci status`, and a merge with an
     explicit CI trust gate.
@@ -329,10 +328,11 @@ reference left open:
   costs a lookup and never a wrong answer. The cache is optional at every
   call site (`Option<&Nip05Cache>`) and its directory and TTLs are
   injectable, so tests never touch the user's cache or the clock.
-- **Cache-tier coverage is partial whenever there is a signer to describe.**
-  The domain ladder is skipped there by definition. A view with no signers
-  has nothing to leave unchecked, so it stays complete rather than
-  displaying a caveat about evidence that does not exist.
+- **Cache-tier coverage reflects unresolved evidence.**
+  The domain ladder is skipped there by definition. Signed evidence can
+  already establish coordinator authority and accepted provider delegation;
+  those roles need no optional domain checks. Unknown signers, unavailable
+  quotes and incomplete repository inputs still leave coverage partial.
 - **Control history is filtered to the confirmed-member coordinate set once.**
   `resolve` reduces `CiInputs::controls` to the controls naming a coordinate
   in that set before anything reads them, so a Service Request for a
@@ -424,9 +424,11 @@ reference left open:
   handed to `resolve`, which filters them to the confirmed-member coordinate set.
 - **The full tier fetches missing quotes from the repository relays plus the
   quote's own relay hint**, and verifies NIP-05 through the WP2 machinery
-  and its TTL cache. Coverage is routinely `partial` in practice — a GRASP
-  host that serves no NIP-05 document is an unsettled lookup, not a negative
-  claim — so the caveat is expected rather than exceptional.
+  and its TTL cache. Domain checks are omitted for signers whose relevant
+  roles already have an operational association or verified maintainer direction.
+  Accepted job delegation is checked per job; unaccepted providers still need
+  their own evidence. For unresolved signers, a GRASP host that serves no
+  NIP-05 document is an unsettled lookup, not a negative claim.
 - **CI signers' kind-0 profiles are fetched by this command.** A coordinator
   or compute provider is not a repository contributor, so the repository
   fetch never asks for its profile and the signer-declared `nip05` route
@@ -533,11 +535,9 @@ reference left open:
   evidence. It is ngit's own wording, not one of the canonical
   gitworkshop strings.
 - **The list path expresses no coverage caveat in human output.**
-  Cache-tier coverage is partial for every row that has a signer at all
-  (WP2), so a `Context incomplete` line would appear beside every row and
-  distinguish nothing. Coverage is reported per row in JSON, and the
-  detail surfaces — where the domain ladder actually runs, and where the
-  caveat therefore means something — print it.
+  Coverage is reported per row in JSON. Detail surfaces explain missing
+  repository inputs and quoted requests; optional identity diagnostics are
+  available in verbose output and JSON.
 - **The list JSON carries fields, not the glyph.** Every row has a `ci`
   object — `state`, `conclusion`, `classification`, `trust_floor_met`,
   `coverage`, `revision_matched` — including rows with no CI, so a consumer
@@ -631,7 +631,7 @@ own — and its cost is one extra filter per repository relay.
   selected maintainer's coordinate otherwise (which is also what a
   contributor with no announcement asks about). The relay hint is the
   repository's first relay. All three commands share the choice, so
-  `ngit ci stop` normally closes what `ngit ci request` opened — but the
+  `ngit ci service stop` normally closes what `ngit ci service request` opened — but the
   choice reads live state, so it is not a promise that a stop always
   lands where its request did: a signer who publishes their own announcement
   between the two, or a repository whose selected maintainer changes, gets a
@@ -727,9 +727,24 @@ own — and its cost is one extra filter per repository relay.
   `service-requested`, `service-stopped`, `triggered`. The published event is
   an `nevent`, the coordinator an `npub` and the perspective an `naddr`, as
   everywhere else in ngit's JSON; a trigger adds `commit` and `commits` as
-  hex object ids, `workflow`, `workflow_hash` and `ref`. There is no `id`
-  field: the entity these commands act on is the repository, which
-  `repository` already names.
+  hex object ids, `workflow`, `workflow_hash`, `ref` and the boolean
+  `rerun_dependencies`. There is no `id` field: the entity these commands act
+  on is the repository, which `repository` already names.
+
+### Native workflow dependency reruns
+
+`ngit ci trigger` requests a fresh target attempt. Current ngit-ci coordinators
+also run fresh attempts for its entire native Nix dependency graph, including
+successful or active prerequisites. `--rerun-dependencies` remains accepted for
+workflows under `.ngit/nix/workflows/` as a compatibility alias; it does not
+change the signed event. The obsolete `["rerun", "dependencies"]` marker is
+never emitted because current coordinators reject it. The JSON boolean
+`rerun_dependencies` records whether the flag was supplied, not whether the
+coordinator has executed dependencies. Older coordinators may retain their
+previous reuse policy; upgrade them for the current manual-trigger semantics.
+
+The coordinator resolves and authorizes the graph at the requested commit;
+ngit does not schedule jobs or expand trust classification.
 
 ## Per-PR CI state machine
 
@@ -778,14 +793,14 @@ one-line evidence summary — plus integrity marker and a trailing
 non-zero when the rolled-up current result does not meet the floor or is not
 green. Supports `--offline` (cache tier only) and JSON output.
 
-### `ngit ci request|stop|trigger <coordinator>` (new commands)
+### `ngit ci service request|stop|trigger <coordinator>` (new commands)
 
 The maintainer controls, all non-interactive and driven by flags alone:
 
 ```
-ngit ci request <COORDINATOR> [--offline]
-ngit ci stop    <COORDINATOR> [--offline]
-ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH>
+ngit ci service request <COORDINATOR> [--offline]
+ngit ci service stop    <COORDINATOR> [--offline]
+ngit ci trigger <COORDINATOR> [<COMMIT-ISH>] --workflow <PATH> [--rerun-dependencies]
                 [--ref <GIT-REF>] [--offline]
 ```
 
@@ -961,7 +976,7 @@ on WP1.
   not project CI. A `neutral` and a `skipped` conclusion are exercised on
   every surface that reads the green predicate — `ci status`, `pr list`,
   `pr view` and merge — asserting the one verdict.
-- **WP6 — maintainer controls** *(done)*: `ngit ci request|stop|trigger`
+- **WP6 — maintainer controls** *(done)*: `ngit ci service request|stop|trigger`
   publishing 9843/9844/9840 (trigger computes `w` hash from the local blob and
   peel-verifies `c` tags). These create the Level 1 evidence WP1 consumes.
   Integration tests (`tests/ci_control.rs`): the exact published shape of each
@@ -995,3 +1010,442 @@ PTY/interactive prompts (drive via flags), no `std::env::set_var`, no exact
 stdout assertions (assert on JSON output, exit codes, and events on relays),
 push via `Repo::nostr_push`, and no wall-clock sleeps — CI fixture events are
 published directly to the harness relay, so results are queryable immediately.
+
+### Exact workflow cancellation
+
+`ngit ci cancel <COORDINATOR> <RUN-ID> [--force] [--offline]` publishes a signed
+kind-9846 request by default for one exact run. Use the coordinator and 64-character run id from
+`ngit ci status`, and select the run's repository perspective with `--repo`.
+The command requires confirmed maintainership and preserves the selected
+repository coordinate even when the signer has their own announcement.
+
+Ordinary cancellation lets running jobs follow their configured cancellation
+grace periods. Add `--force` to publish kind 9848 and request an immediate stop
+of all active tasks in that run, bypassing their grace periods. A forced request
+can escalate an earlier ordinary cancellation; a later ordinary request cannot
+downgrade it. This requires a coordinator/provider version supporting forced
+cancellation.
+
+JSON reports `action: cancellation-requested`, the request event, coordinator,
+repository, run id and `forced` boolean. Publication is not cleanup
+confirmation: inspect CI status for the resulting job and workflow conclusions. Completed jobs remain completed;
+cancellation cannot undo effects that were already published. Standing service
+request/stop policy is unchanged, and cancellation does not delete prior events.
+
+## Current CI controls and observation
+
+### support issue- and release-triggered workflow results
+
+CI status recognises workflows triggered by opening, reopening or closing
+an issue, or by publishing a release. Each result identifies the exact issue
+action or signed release publication (including version, channel and asset
+references). Distinct actions/publications remain separate at the same Git
+commit; a retry replaces only an attempt for the same context. Release
+revision means the signed publication event, not a different Git commit.
+This reads CI evidence; it does not create issues, publish releases or
+independently verify release assets.
+
+### decode workflow and job execution details
+
+Status JSON exposes workflow `details` and job `execution`: dependency and
+rerun bindings, steps, outputs, artifacts, allocation/environment selection,
+skip reasons and termination/cancellation evidence. Empty and omitted outputs
+remain distinct. Aggregate success does not assert that every job succeeded.
+
+### preserve exact job results across workflow reruns
+
+A rerun can retain original job results. ngit checks exact source/new quotes,
+coordinator, repository, commit, workflow and context. `reused` and
+`execution_run_id` identify retained executions. Missing source evidence
+does not authorize reuse; multiple quoted instances of one job stay distinct.
+
+### rerun a completed workflow or selected job
+
+`ngit ci rerun COORDINATOR RESULT [--job JOB]` accepts a completed native
+Nix result ID or nevent. It creates a new attempt, preserving external
+dependency bindings; `--job` reruns that job and its dependants. It does not
+cancel an active run. Confirmed maintainership is required, and publication
+is not coordinator acceptance. Use status `result` nevents as inputs.
+
+### override native environment and resource selection
+
+Both `trigger` and `rerun` accept repeatable `--environment JOB=SHA256[,URL]`
+and `--require JOB=PATH:OP:JSON`. Overrides require native jobs that exist
+in the pinned workflow. Environment URLs must match the digest.
+`--rerun-dependencies` conflicts with rerun; use trigger for a fresh graph.
+
+### show provider progress before workflow completion
+
+Job progress (39846) is matched to exact provider/allocation/job references.
+Completed job results appear before the workflow finishes. Terminal evidence
+wins over live snapshots; expired or future snapshots are not current progress.
+
+### show workflow plans and timed step summaries
+
+`ci status` summarizes workflows and jobs, highlighting reported failed/active
+steps and completed-step counts for live jobs. Failed jobs expand their steps
+and the final three log lines; successful jobs stay on one row. Artifact links
+and routine identity/trust detail stay in inspection. Unknown signer
+context, workflow hash mismatches and incomplete evidence stay visible.
+
+`ci inspect` without an ID details the same HEAD and latest-attempt selection.
+Use `ci inspect --target <commit-ish|PR>` for the same selection as an explicit
+status target, or `ci inspect <event-ID>` for one exact attempt. Human inspection
+shows steps, durations, log links, artifact counts/manifests and trust evidence.
+Outcomes are coloured and secondary metadata muted on colour-capable terminals;
+plain output retains status words. Bold workflows start with their status.
+Plain job rows start with a right-aligned duration, followed by status and name;
+steps use the same columns with two spaces of additional indentation. Durations
+round to seconds below an hour (`2m 03s`); longer durations use hours and
+minutes (`1h  8m`) to keep rows compact. JSON retains exact milliseconds. The
+workflow row includes a muted abbreviated run ID and relative age; the first
+attempt number is omitted. Short run IDs are display labels, not inspection
+selectors: `ci inspect` still takes full event IDs/nevents, and its exact-event
+command remains visible. JSON keeps full run IDs and timestamp meanings. Completed jobs show approximate elapsed time from signed start to
+result publication; this includes any publication delay and is not an exact
+execution duration. Missing or reversed timestamps yield no duration.
+JSON retains `started_at`, `reported_at` and `elapsed_to_report_ms`, and run
+`timestamp`/`time_kind` fields. Provider identity and trust remain in JSON;
+human inspection shows coordinator trust on its own muted metadata line.
+
+Reported steps retain signed event order, including provider-added preparation
+and cleanup; workflow YAML supplies missing declarations without reordering
+execution evidence. A failure is not forced to the end if cleanup follows it.
+
+Human inspection includes unsuccessful-job logs with flush-left content between
+explicit start/end markers, without added indentation or side bars. Log content
+is muted, full-log links are labelled `logs:`, and workflows are separated by
+blank lines.
+`--no-logs` hides them; `--logs` also includes successful-job tails. Terminal
+control sequences are stripped from displayed tails so the section boundaries
+remain visible; signed JSON content is preserved.
+`status --log-tail` continues to control JSON tails only.
+
+JSON keeps structured outcomes, millisecond durations, step IDs and execution
+fields. Default/target inspection has the same CI projection as status; exact
+ID inspection retains decoded events and their status context. `--logs` adds
+embedded tails to default/target inspection JSON. Step start offsets are
+job-relative, never wall-clock timestamps. Neither view automatically downloads
+artifact manifests.
+
+When the exact local workflow blob matches the event's hash, `declared_jobs`
+provides expected jobs and stable step IDs. Native step keys and explicit act
+IDs can be matched; generated/nested act IDs and matrix expansion remain runtime
+information. Missing entries are `not reported`, not inferred as queued,
+skipped or failed. Conditions are not evaluated locally. Native live snapshots
+can initially describe planned, untimed steps as `skipped`; text distinguishes
+these from a timed skip. Unavailable or mismatched YAML falls back to reported
+execution evidence. Native explicit-step jobs publish live progress; current
+act and simple native run/build jobs do not promise equivalent live steps.
+
+### inspect execution evidence and artifact manifests
+
+`ci inspect <ID> --json` inspects exact evidence. Explicit --kind or --author
+filters support protocol diagnosis; use `ci service status` for discovery.
+
+`ci inspect <ID>` accepts an exact workflow, job or service event ID or
+nevent, including an expired event when explicitly selected. It follows exact
+quoted result/request/allocation references one hop and includes the status
+trust context when the event can be associated with a known execution.
+Missing evidence is not replaced by another attempt.
+
+The default JSON event is decoded: `id`, `kind`, `type`, `author`, `created_at`,
+`content`, and an ordered `tags` array. Each tag has its original `tag`, a
+readable `name`, and its complete `values` array. Repeated tags, empty values,
+unknown tags and extension slots survive unchanged. The signature is verified
+before decoding; `--raw --json` includes the original signed event instead.
+Signature verification is not coordinator admission or provider authorization.
+
+`--include-expired` exposes stale metadata during discovery; exact-ID inspection
+always reports its lifetime. `--limit` bounds results per kind (default 100,
+maximum 1000). `--offline` reads the cache. Relay failures remain visible in
+JSON. Ephemeral secret updates are not expected in retained-event queries.
+
+`ci inspect <ID> --artifacts` explicitly retrieves the selected event's artifact
+manifests. Downloads are bounded to 16 MiB each, verified against the Blossom
+SHA-256, and checked for schema version and declared file count. No archive is
+extracted and no listed file is downloaded. Status and watch never expand a
+manifest automatically.
+
+### watch workflow and job updates
+
+`ci status <target> --watch` refreshes the human status view as workflow/job
+updates arrive. Running jobs show reported step progress and durations, as in
+ordinary status. Terminals update the report inline once per second, leaving
+scrollback and the last report in place; redirected output receives snapshots
+on events. Active-step timers are approximate elapsed time since the first
+signed active snapshot observed by this command, not a measured execution
+duration. Snapshot renewals do not reset the timer; final durations replace it.
+Reports taller than the terminal are shortened with an inspect hint, preventing
+repeated scrolling on each timer tick.
+Historical evidence and metadata are muted. Once all observed workflows have
+concluded, watch exits after 10 seconds without a new distinct workflow/job
+update. Queued, running, stale or ungrouped evidence prevents completion;
+no CI evidence keeps waiting. New updates reset the grace period. The human
+footer shows the countdown. `--watch --follow` observes indefinitely instead.
+This is an observed-completion grace period, not a guarantee no future workflow
+will be scheduled. JSON keeps its streaming format and exits without a trailing
+summary; normal completion exits zero regardless of the CI conclusion.
+Ctrl-C stops observation without
+cancelling execution. A PR target is pinned to the revision resolved at startup;
+restart observation to follow a new revision. Ordinary network/cleanup bounds
+still apply. `--offline` and `--require-ci-trust` cannot be combined with watch.
+
+With `--watch --json`, stdout is compact JSON Lines. References use run/allocation ID prefixes, assigned once within this command
+invocation. They are exact stream labels, not arguments for inspect:
+
+- `type: "snapshot"` establishes a workflow (`ref: "f7e8170d"`) or job allocation
+  (`ref: "f7e8170d/a3b921c0"`) with its complete initial semantic state. It includes
+  `run_ref`, coordinator, full run ID, top-level workflow path, kind, source
+  `event_id`, Unix-seconds
+  `timestamp`, decoded `tags`, `steps`, `content` and `signature_verified`.
+  Jobs also include their job ID, provider and allocation ID (null for legacy
+  results without an allocation). A job snapshot may establish a run alias
+  before its workflow snapshot arrives. References start with eight characters
+  (short IDs remain whole). A newly colliding ID gets a longer prefix; reuse of
+  the identical ID by another coordinator/provider gets a numeric suffix.
+  Already assigned labels never change. Legacy jobs without an allocation use
+  their first result event ID prefix. Different coordinators, runs, providers
+  and allocations are never combined; full IDs in snapshots remain authoritative.
+- `type: "update"` carries `ref`, the delivering event's Unix-seconds
+  `timestamp`, and `changes`. There is no previous-event chain. Fields absent
+  from `changes` are unchanged. `kind` changes on progress/result transitions.
+  `content`, when present, replaces the entire content, including an empty
+  string clearing the old log tail.
+- `changes.steps` contains complete replacements for changed steps, keyed by
+  `id`; replace the whole step object, do not merge omitted optional fields.
+  `removed_steps` removes IDs. `step_order`, when present, replaces the ordered
+  list of step IDs. Snapshot steps establish the initial order.
+- Steps use `id`, `status`, optional `label`, numeric `start_ms` and
+  `duration_ms`, and `extra` for trailing protocol fields such as artifact
+  publication state. Empty/redundant labels and absent timings are omitted.
+  Live unknown steps without a duration use `status: "running"` and retain
+  `outcome: "unknown"`; this is reported state, not a locally ticking estimate.
+- `tags_added` and `tags_removed` contain decoded tags with their full values,
+  including unknown tags and empty slots. Apply removals first, one occurrence
+  per entry, then additions. Tags are a multiset: duplicates matter, order does
+  not. Step tags are represented by the step fields instead.
+
+For example, after a snapshot establishes `f7e8170d/a3b921c0`:
+
+```json
+{"type":"update","ref":"f7e8170d/a3b921c0","timestamp":1794230400,"changes":{"steps":[{"id":"compile","status":"success","duration_ms":58000}]}}
+```
+
+Timestamp/expiration-only renewals and duplicate events emit nothing. Expiration
+is excluded from compact state; use full events for liveness/expiry analysis.
+Late events cannot roll the state back; a final result supersedes progress, and
+subsequent progress cannot undo it. Unrecognized or invalid shapes remain
+visible as `type: "event"` records containing the full decoded `event` and
+`signature_verified`, without assigning a potentially misleading alias.
+
+`--watch --json --full-events` retains the original event stream: each record
+contains `event` in the same decoded representation as inspect, plus
+`signature_verified`. It emits every distinct received event, including late
+updates and renewals. Both modes omit signatures and trailing summary documents;
+neither signature verification nor compact state establishes CI authorization.
+
+Subscription starts before the cache snapshot. Events are observed after SDK
+signature/filter checks but before duplicate/replacement reduction, using a
+bounded channel with backpressure. Connection diagnostics and failures use
+stderr; fatal errors exit nonzero. The stream cannot reconstruct intermediate
+replaceable snapshots already lost before connection or during disconnection.
+Ordinary `status --json` retains its single-document summary contract.
+
+### provision encrypted repository secrets
+
+`ngit ci secrets COORDINATOR --set-file secrets.json` reads a JSON map of
+unique secret names to string values. Alternatively use repeatable
+`--set-from-env NAME` to read each value from that environment variable.
+`--remove NAME` removes names; set and remove can be one atomic update.
+Values are never accepted on argv or printed. Names, reserved namespaces,
+overlap, value lengths and total payload size are validated.
+
+The signer must be a confirmed maintainer with their own repository
+announcement. The command refreshes the coordinator's signed kind-19843
+advertisement, validates its live secret key and inboxes, encrypts with a fresh
+sender key using NIP-44 v2, and binds plaintext author/timestamp to the signed
+kind-29846 event. Publication requires acknowledgement from an advertised inbox;
+repository relays also receive the encrypted event. An expired key during
+signing is rejected. No secret values are written to ngit's cache.
+
+JSON retains `secret-update-published` with names only and adds `confirmation`
+(`accepted` or `pending`) and `confirmation_event`. After relay delivery, ngit
+waits up to 90 seconds for a new signed coordinator status (kind 39844) for this
+repository. Sets require matching names, maintainer origin and update timestamps;
+removals require absence from the new inventory, as in gitworkshop. This is
+inventory evidence, not an exact update-ID receipt or proof a credential works.
+Use `--confirmation-timeout SECONDS` to change the wait, or `0` to publish only.
+A deadline leaves confirmation pending, not rejected; exit zero still means
+publication succeeded. Automation requiring acceptance must check `confirmation`.
+Inspect kind 39844 to check later; do not republish just because the wait expired.
+`WORKFLOW_SECRETS_DECRYPTION_BUNKER` can be provisioned through the
+same channel; pairing, sanitizing and sealing remain coordinator responsibilities.
+
+`ci service request` and `ci service stop` manage standing repository service.
+The older `ci request` and `ci stop` commands remain compatible, but emit a
+deprecation warning on stderr. Their signed events and JSON results are unchanged.
+
+### Repository service status
+
+`ngit ci service status` shows which coordinators have observed workflow runs
+for this repository in the last 30 days, across commits and branches. It reports
+unique attempts, active/finished/stale counts, maintainer-authorized run counts,
+and the latest workflow outcome and age with an exact-event inspection command.
+Coordinators with requests but no recent observed runs remain visible. Current
+standing service requests, previous requests and authorization of individual
+runs are distinct; signed request quotes are verified before counting a run as
+maintainer-authorized. A run does not itself prove a standing service agreement.
+
+Coordinator labels use verified NIP-05 identities, never profile display names.
+Root identities appear as domains (`relay.ngit.dev`); named identities retain
+their local part. The full npub stays visible and JSON exposes
+`verified_identity`. Only a coordinator's declared address is looked up;
+fresh cached root-domain matches may also supply a label. Offline mode uses
+fresh cached verification only. Missing, mismatched or expired verification
+falls back to the npub without changing CI authorization or emitting trust warnings.
+
+A single observed maintainer start remains `Maintainer requested 2mo ago`.
+Multiple requests or any maintainer stop use a newest-first `Maintainer requests:`
+timeline showing at most three entries, followed by the number of earlier
+changes. These are requests, not confirmed service transitions. The coordinator's
+acting claim sits on a separate line beneath a timeline. JSON retains the full
+observed `request_history`, with action, timestamp, event ID, author and current
+maintainer attribution, plus the selected request's timestamp and event ID.
+Human output puts relationships and claims before activity, with the inspection
+tip last. Advertised availability is shown only without an
+acting claim; both protocol signals remain separately available in JSON.
+Relative ages use approximate months and years for older evidence.
+
+Service claims and advertised availability remain separate from activity.
+Repository perspectives remain explicit in JSON and in human output when the
+repository has multiple perspectives.
+A live kind-39844 acting claim requires a live kind-19843 advertisement. Expired,
+withdrawn or unavailable evidence is labelled; absence never proves stopped
+service or operator configuration. Requests are reduced with maintainer-wide
+and author-local Stop rules and current confirmed maintainer authority.
+
+Candidates come from matching kind-19844 request-readiness lists (`a` for an
+exact repository, `p` for its root owner), also requiring a live advertisement.
+Unrelated coordinator and provider advertisements are not listed. Readiness
+is a discovery hint, not a promise of acceptance. A newer list that removes
+this repository supersedes its previous readiness claim.
+
+`--offline` reads cached evidence. JSON includes separate service/request
+states, activity counts and latest-run evidence, the observation window,
+evidence event IDs, relay failures and `history_complete: false`.
+Relays may prune expired, replaced or deleted evidence; this is an observed
+history, not an authoritative archive. An acting claim does not prove a live
+network connection or that a particular workflow is eligible.
+
+Bare `ci inspect` shows current HEAD execution details. Use `ci inspect <ID>`
+for exact evidence; explicit `--kind` or `--author` filters remain available for
+protocol diagnosis.
+Use `ci service status` for repository discovery.
+
+Inspection keeps unstarted jobs on one row with declared `needs`, conditional and
+runtime-expansion markers. These are declarations, not scheduling decisions.
+Active jobs show reported steps and unreported unconditional steps; unreported
+conditional steps are counted together. A native untimed `skipped` placeholder
+is not evidence that a conditional step finished. Once execution is reported,
+its outcome and duration take precedence. Finished skipped steps are summarized
+as a count; `ci inspect <ID> --json` retains individual outcomes and reasons.
+Conditions and dependencies are retained in `declared_jobs` JSON without local
+evaluation, matrix expansion or predicting a success path. Missing events never
+turn into inferred queued or skipped states.
+
+### Selecting execution resources and environments
+
+Native `ci trigger` and `ci rerun` accept per-job overrides for that request;
+they do not edit workflow YAML. JOB is the key under `jobs`, not its display
+name. For example, request at least 8 GiB RAM and four vCPUs for `build`:
+
+```bash
+ngit ci trigger "$COORDINATOR" HEAD --workflow .ngit/nix/workflows/ci.yml \
+  --require 'build=memory-mib:gte:8192' \
+  --require 'build=vcpus:gte:4'
+```
+
+`--require JOB=PATH:OP:JSON` is repeatable. Resource paths are literal,
+case-sensitive keys; `memory-mib` is MiB and `vcpus` is a count. Environment
+paths use `env` followed by a JSON Pointer, for example:
+
+```bash
+--require 'build=env/configuration/guest/job-uid:eq:0'
+--require 'build=env/configuration/guest/no-new-privileges:eq:false'
+```
+
+Operators are `eq`, `gte`, `lte` and `contains`. Bounds require integers;
+`eq` and `contains` accept integers, booleans or strings. Preserve JSON quotes
+for a string, for example `--require 'build=some-resource:eq:"value"'`.
+Comparisons do not coerce types. JSON Pointer keys escape `/` as `~1` and `~`
+as `~0`; the wire path escapes literal `:` as `%3A` and `%` as `%25`.
+
+Each named path replaces its whole previous constraint for that job, including
+bounds inherited from coordinator, workflow or job settings. Other paths and
+jobs keep their requirements. To set both bounds, repeat the flag with `gte`
+and `lte`. Duplicate job/path/operator triples are rejected. Conditions select
+compatible offerings; they do not change guest configuration or bypass provider
+approval, isolation or secret rules. An unmatched request is not proof that
+resources have been allocated.
+
+To select an exact installed environment:
+
+```bash
+--environment "build=$ENVIRONMENT_SHA256"
+--environment "build=$ENVIRONMENT_SHA256,$MANIFEST_URL"
+```
+
+The hash is the 64-character lowercase SHA-256 of the environment manifest,
+not an image name, Git commit or environment-variable name. The optional URL
+must name that digest. Obtain pins from a provider offering (kind 39845 `x`
+tag) or an existing job's environment evidence through `ci inspect <ID> --json`;
+explicit `ci inspect --kind 39845 --author <PROVIDER> --json` is available for
+provider diagnostics. No automatic provider/environment chooser exists yet.
+Pins select installed environments, do not request image installation, and do
+not remove other requirements. Omitted pins retain the normal selection.
+
+`ci status` summarizes the latest attempt per coordinator, workflow and trigger
+context. Earlier attempts on the same tip appear as concise history rows with
+status, a labelled relative timestamp and a copyable `ci inspect <event-ID>`
+command. Running older attempts remain visible: rerunning does not cancel them.
+Results use “reported” time because the protocol has no distinct workflow finish
+timestamp; explicit start/queue times are labelled accordingly. JSON keeps
+absolute timestamps, their meaning and result/progress event types in `history`.
+History never contributes to the current conclusion or trust gate. Watch keeps
+its event-stream contract, with history only in the initial human summary.
+
+With no explicit target, `ci status` describes local HEAD and may add one
+previous-tip summary from the associated PR or configured Nostr upstream.
+PR association requires an ID suffix in the branch name or a matching branch
+name authored by the selected account. Shared commits, including an identical
+tip, do not establish an association. No matching published PR is reported
+separately from multiple matches, using the available repository data.
+PR tips are ordered by published revision, never CI arrival time. Branch
+history requires the upstream remote to match the selected repository and
+uses retained repository state plus first-parent ancestry; cached Git remote
+refs alone are not treated as refreshed publication evidence. Ambiguous,
+missing, behind or divergent history is labelled rather than guessed.
+
+Only when the current tip has no CI run evidence, the newest related previous
+tip is shown as a muted short-commit/workflow/outcome/age line per workflow.
+There is no job/step tree or command hint. Workflow basenames are shortened
+unless that would make distinct paths ambiguous. Current queued, running,
+stale or finished runs suppress this fallback in both status and human watch.
+Historical results never fill gaps in current results.
+Explicit commit targets do not infer previous tips. Explicit PR targets may
+show the previous published revision. JSON keeps this under `history.previous_tip`,
+separate from current results and trust gates, and marks history as incomplete.
+Human watch removes the fallback as soon as current-tip run evidence arrives.
+Both the human view and JSON Lines remain pinned to the original current target.
+
+Coverage diagnostics identify `repository_inputs`, `cache_only_identities`,
+`quoted_events` and `identity_lookup` gaps in `ci.coverage_gaps`. A missing
+NIP-05 check or relay response does not negate a verified maintainer request.
+Optional domain evidence is not required when signed evidence already establishes
+the relationship. Missing quotes and incomplete repository reads still leave
+coverage partial; identity lookup failures do not remove verified authorization.
+
+Routine human output omits optional identity diagnostics; verbose output and
+JSON retain them. Missing maintainer authorization is reported as unverified
+coordinator evidence, not as a failed execution or proof of distrust.

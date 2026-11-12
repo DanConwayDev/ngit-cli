@@ -25,19 +25,24 @@ pub mod proposal_base;
 pub mod push;
 pub mod relay_auth;
 pub mod relay_information;
+pub mod relay_timeouts;
 pub mod release_download;
 pub mod release_manifest;
+pub mod remote_signer;
 pub mod repo_lookup;
 pub mod repo_ref;
 pub mod repo_state;
+pub mod reporting;
 pub mod self_update;
 pub mod signer;
+pub mod signer_progress;
 pub mod software_release;
 #[doc(hidden)]
 pub mod test_timeouts;
 pub mod tls;
 pub mod utils;
 pub mod version_check;
+mod yaml;
 
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;

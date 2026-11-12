@@ -4,7 +4,10 @@ use anyhow::{Context, Result, bail};
 use bitcoin_hashes::sha1::Hash as Sha1Hash;
 use console::Style;
 use ngit::{
-    client::{Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events},
+    client::{
+        Params, get_all_proposal_patch_pr_pr_update_events_from_cache, send_events,
+        send_events_with_proposal_receipts,
+    },
     git_events::{
         EventRefType, KIND_PULL_REQUEST, generate_cover_letter_and_patch_events, tag_value,
     },
@@ -12,7 +15,7 @@ use ngit::{
         ExplicitBase, ProposalBaseInference, commits_after_base, infer_proposal_base,
         merge_base_for_fast_forward_update, resolve_explicit_base, resolve_target_branch_tip,
     },
-    push::select_servers_push_refs_and_generate_pr_or_pr_update_event,
+    push::select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts,
     repo_lookup::RepositoryLookup,
     utils::{get_all_proposals, get_open_or_draft_proposals, proposal_tip_is_pr_or_pr_update},
 };
@@ -35,40 +38,40 @@ use crate::{
 #[derive(Debug, clap::Args)]
 pub struct SubCommandArgs {
     #[arg(default_value = "")]
-    /// commits to send as proposal; like in `git format-patch` eg. HEAD~2
+    /// Commits to send as proposal; like in `git format-patch` eg. HEAD~2
     pub(crate) since_or_range: String,
     #[clap(long, value_parser, num_args = 0.., value_delimiter = ' ')]
-    /// references to an existing proposal for which this is a new
+    /// References to an existing proposal for which this is a new
     /// version and/or events / npubs to tag as mentions
     pub(crate) in_reply_to: Vec<String>,
-    /// don't prompt for a cover letter
+    /// Don't prompt for a cover letter
     #[arg(long, action)]
     pub(crate) no_cover_letter: bool,
-    /// optional cover letter subject/title
+    /// Optional cover letter subject/title
     #[clap(long, alias = "title")]
     pub(crate) subject: Option<String>,
     #[clap(long)]
-    /// optional cover letter description
+    /// Optional cover letter description
     pub(crate) description: Option<String>,
-    /// publish as Pull Request even if each commit is < 60kb
+    /// Publish as Pull Request even if each commit is < 60kb
     #[arg(long, action)]
     pub(crate) force_pr: bool,
-    /// publish as Patches even if they may be > 60kb; cannot be used when the
+    /// Publish as Patches even if they may be > 60kb; cannot be used when the
     /// existing proposal is already a PR kind (downgrades are not possible)
     #[arg(long, action)]
     pub(crate) force_patch: bool,
     #[clap(long = "push-option", short = 'o', value_parser, num_args = 0..)]
-    /// git push options to pass to the git server (eg. -o secret-scanning.skip)
+    /// Git push options to pass to the git server (eg. -o secret-scanning.skip)
     pub(crate) push_options: Vec<String>,
     #[clap(long = "git-server")]
-    /// git server URL to use for pushing the PR; accepts either a GRASP server
+    /// Git server URL to use for pushing the PR; accepts either a GRASP server
     /// base URL (eg. relay.ngit.dev) or a full clone URL (eg.
     /// <https://github.com/user/repo.git>)
     pub(crate) git_server: Option<String>,
-    /// branch this PR should target instead of the repository default
+    /// Branch this PR should target instead of the repository default
     #[clap(long)]
     pub(crate) target_branch: Option<String>,
-    /// commit, branch, root PR, or PR update to use as the base for this
+    /// Commit, branch, root PR, or PR update to use as the base for this
     /// publication. History through this base is excluded from the proposed
     /// changes. Use a commit ID or a verified ref, e.g. --base github/master
     #[clap(long)]
@@ -264,9 +267,7 @@ pub async fn launch(
         .or_else(|| effective_root.and_then(|root| tag_value(root, "b").ok()));
     let target_tip = target_branch
         .as_deref()
-        .map(|branch| {
-            resolve_target_branch_tip(&git_repo, branch, None, args.target_branch.is_some())
-        })
+        .map(|branch| resolve_target_branch_tip(&git_repo, branch))
         .transpose()?;
 
     let head = git_repo.get_head_commit()?;
@@ -568,7 +569,7 @@ pub async fn launch(
     // oldest first
     commits.reverse();
 
-    let events = if as_pr {
+    let (events, early_publication_receipts) = if as_pr {
         let tip = commits.last().context("no commits")?; // commits has been reversed to oldest first
         let first_commit = commits.first().context("no commits")?;
         let merge_base = if let Some(base) = &proposal_metadata.explicit_base {
@@ -587,7 +588,7 @@ pub async fn launch(
         {
             let push_options_refs: Vec<&str> =
                 args.push_options.iter().map(String::as_str).collect();
-            select_servers_push_refs_and_generate_pr_or_pr_update_event(
+            let pushed = select_servers_push_refs_and_generate_pr_or_pr_update_event_with_receipts(
                 &client,
                 &git_repo,
                 &repo_ref,
@@ -603,7 +604,8 @@ pub async fn launch(
                 &push_options_refs,
                 args.git_server.as_deref(),
             )
-            .await?
+            .await?;
+            (pushed.events, pushed.receipts)
         }
     } else {
         let ordering_reference = if let Some(root) = root_proposal.as_ref() {
@@ -650,19 +652,33 @@ pub async fn launch(
                 "with"
             }
         );
-        events
+        (events, vec![])
     };
 
-    let _ = send_events(
-        &client,
-        Some(git_repo_path),
-        events.clone(),
-        user_ref.relays.write(),
-        repo_ref.relays.clone(),
-        !cli_args.disable_cli_spinners,
-        false,
-    )
-    .await?;
+    let _ = if early_publication_receipts.is_empty() {
+        send_events(
+            &client,
+            Some(git_repo_path),
+            events.clone(),
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            !cli_args.disable_cli_spinners,
+            false,
+        )
+        .await?
+    } else {
+        send_events_with_proposal_receipts(
+            &client,
+            Some(git_repo_path),
+            events.clone(),
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            &early_publication_receipts,
+            !cli_args.disable_cli_spinners,
+            false,
+        )
+        .await?
+    };
 
     if crate::output::is_json() {
         let result_event = events.first().context("proposal generated no events")?;
@@ -823,7 +839,7 @@ fn choose_commits(git_repo: &Repo, proposed_commits: Vec<Sha1Hash>) -> Result<Ve
         )?;
         proposed_commits = selected.iter().map(|i| last_15_commits[*i]).collect();
 
-        if printed_error_line {
+        if printed_error_line && ngit::output_mode::progress_policy().animate {
             term.clear_last_lines(1)?;
         }
 

@@ -124,7 +124,8 @@ impl BatchAuthorizationOptions {
 /// authorization fallback extends the total before its replacement PUT starts.
 /// This keeps aggregate progress monotonic even when several placements run
 /// concurrently.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BlossomPresenceStatus {
     AlreadyStored,
     NeedsUpload,
@@ -133,7 +134,8 @@ pub enum BlossomPresenceStatus {
     Skipped,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BlossomProgressEvent {
     PresenceChecksStarted {
         blobs: usize,

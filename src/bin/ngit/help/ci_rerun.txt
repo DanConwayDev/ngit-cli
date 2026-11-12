@@ -1,0 +1,8 @@
+Notes:
+  RESULT is a completed native workflow result ID or nevent, as reported in
+  `ci status`. The rerun is a new attempt that keeps the original external
+  dependency bindings; --job reruns that job and its dependants and retains
+  the other job results. It does not cancel an attempt that is still
+  running, and --rerun-dependencies is rejected: use `ci trigger` for a
+  fresh graph. Confirmed maintainership is required. A zero exit means the
+  request was published, not that the coordinator accepted it.

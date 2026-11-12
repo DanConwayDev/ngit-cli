@@ -9,15 +9,21 @@ use nostr::{
         key::AsyncGetPublicKey,
     },
 };
-use nostr_connect::client::NostrConnect;
 
-use crate::output_mode::TransientLine;
+use crate::remote_signer::NostrConnect;
 
 /// Signer abstraction covering both local keys and remote NIP-46 bunker.
 #[derive(Clone)]
 pub enum NgitSigner {
     Keys(Keys),
     Connect(Arc<NostrConnect>),
+    /// Deterministic remote-signer refusal used by isolated relay lifecycle
+    /// tests. Production binaries never contain this standing test double.
+    #[cfg(test)]
+    Rejecting {
+        keys: Keys,
+        reason: &'static str,
+    },
 }
 
 fn validate_remote_signed_event(
@@ -45,7 +51,16 @@ impl NgitSigner {
     pub async fn get_public_key(&self) -> Result<PublicKey> {
         match self {
             Self::Keys(k) => Ok(k.public_key()),
-            Self::Connect(c) => c.get_public_key_async().await.map_err(|e| anyhow!(e)),
+            Self::Connect(c) => {
+                crate::signer_progress::run_remote_operation(
+                    c,
+                    "requesting public key from remote signer...",
+                    async { c.get_public_key_async().await.map_err(|e| anyhow!(e)) },
+                )
+                .await
+            }
+            #[cfg(test)]
+            Self::Rejecting { keys, .. } => Ok(keys.public_key()),
         }
     }
 
@@ -76,6 +91,8 @@ impl NgitSigner {
                 let event = c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e))?;
                 validate_remote_signed_event(expected_public_key, expected_event_id, event)
             }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
@@ -92,7 +109,12 @@ impl NgitSigner {
         description: &str,
     ) -> Result<Event> {
         self.with_remote_signing_progress(description, async move {
-            let public_key = self.get_public_key().await?;
+            let public_key = match self {
+                Self::Keys(keys) => keys.public_key(),
+                Self::Connect(connect) => connect.get_public_key_async().await?,
+                #[cfg(test)]
+                Self::Rejecting { keys, .. } => keys.public_key(),
+            };
             let unsigned = builder.finalize_unsigned(public_key);
             self.sign_event_inner(unsigned).await
         })
@@ -104,17 +126,19 @@ impl NgitSigner {
         description: &str,
         operation: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        if !self.is_remote() {
-            return operation.await;
+        match self {
+            Self::Keys(_) => operation.await,
+            #[cfg(test)]
+            Self::Rejecting { .. } => operation.await,
+            Self::Connect(connect) => {
+                crate::signer_progress::run_remote_operation(
+                    connect,
+                    &remote_signing_message(description),
+                    operation,
+                )
+                .await
+            }
         }
-
-        let term = console::Term::stderr();
-        let progress = TransientLine::write(&term, &remote_signing_message(description))?;
-        let result = operation.await;
-        if result.is_ok() {
-            progress.clear()?;
-        }
-        result
     }
 
     pub async fn nip44_encrypt(&self, public_key: &PublicKey, content: &str) -> Result<String> {
@@ -122,10 +146,21 @@ impl NgitSigner {
             Self::Keys(keys) => keys
                 .nip44_encrypt(public_key, content)
                 .map_err(|error| anyhow!(error)),
-            Self::Connect(connect) => connect
-                .nip44_encrypt_async(public_key, content)
+            Self::Connect(connect) => {
+                crate::signer_progress::run_remote_operation(
+                    connect,
+                    "encrypting with remote signer...",
+                    async {
+                        connect
+                            .nip44_encrypt_async(public_key, content)
+                            .await
+                            .map_err(|error| anyhow!(error))
+                    },
+                )
                 .await
-                .map_err(|error| anyhow!(error)),
+            }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
@@ -134,17 +169,33 @@ impl NgitSigner {
             Self::Keys(keys) => keys
                 .nip44_decrypt(public_key, payload)
                 .map_err(|error| anyhow!(error)),
-            Self::Connect(connect) => connect
-                .nip44_decrypt_async(public_key, payload)
+            Self::Connect(connect) => {
+                crate::signer_progress::run_remote_operation(
+                    connect,
+                    "decrypting with remote signer...",
+                    async {
+                        connect
+                            .nip44_decrypt_async(public_key, payload)
+                            .await
+                            .map_err(|error| anyhow!(error))
+                    },
+                )
                 .await
-                .map_err(|error| anyhow!(error)),
+            }
+            #[cfg(test)]
+            Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
     }
 
     /// True when this is a remote (NIP-46) signer — used to show progress
     /// messages.
     pub fn is_remote(&self) -> bool {
-        matches!(self, Self::Connect(_))
+        match self {
+            Self::Connect(_) => true,
+            #[cfg(test)]
+            Self::Rejecting { .. } => true,
+            Self::Keys(_) => false,
+        }
     }
 }
 
@@ -157,6 +208,8 @@ impl std::fmt::Debug for NgitSigner {
         match self {
             Self::Keys(k) => write!(f, "NgitSigner::Keys({})", k.public_key()),
             Self::Connect(_) => write!(f, "NgitSigner::Connect"),
+            #[cfg(test)]
+            Self::Rejecting { .. } => write!(f, "NgitSigner::Rejecting"),
         }
     }
 }
@@ -164,21 +217,10 @@ impl std::fmt::Debug for NgitSigner {
 /// Wraps an `Arc<NgitSigner>` for use with `fetch_public_key` and similar
 /// helpers.
 pub async fn fetch_public_key_from_signer(signer: &Arc<NgitSigner>) -> Result<PublicKey> {
-    if signer.is_remote() {
-        let term = console::Term::stderr();
-        let progress = TransientLine::write(&term, "fetching npub from remote signer...")?;
-        let public_key = signer
-            .get_public_key()
-            .await
-            .map_err(|e| anyhow!("failed to get npub from remote signer: {e}"))?;
-        progress.clear()?;
-        Ok(public_key)
-    } else {
-        signer
-            .get_public_key()
-            .await
-            .map_err(|e| anyhow!("failed to get public key from local keys: {e}"))
-    }
+    signer
+        .get_public_key()
+        .await
+        .context("failed to get public key from signer")
 }
 
 #[cfg(test)]

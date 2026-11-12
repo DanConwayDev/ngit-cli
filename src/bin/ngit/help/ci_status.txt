@@ -1,0 +1,61 @@
+Watching:
+  --watch refreshes the status view as workflow and job updates arrive. Once
+  every observed workflow has concluded it exits after 10 seconds without a
+  new distinct update; queued, running, stale or ungrouped evidence, or no
+  CI evidence at all, keeps it waiting, and --follow observes indefinitely.
+  This is an observed-completion grace period, not a guarantee that no
+  further workflow will be scheduled. Normal completion exits 0 whatever
+  the CI conclusion. Stopping the watch never cancels execution. A PR
+  target is pinned to the revision resolved at startup; restart to follow
+  a new revision.
+
+Watch JSON stream (--watch --json):
+  Stdout is compact JSON Lines with no trailing summary document. `ref`
+  values are run and allocation ID prefixes assigned once per invocation:
+  stream labels, not arguments for `ci inspect`. Full IDs in snapshots
+  remain authoritative. A ref can be longer than eight characters or carry
+  a numeric suffix to stay unique, and a job snapshot can arrive before its
+  workflow snapshot. Timestamps are Unix seconds.
+
+  type "snapshot"  establishes a workflow (`ref: "f7e8170d"`) or a job
+                   allocation (`ref: "f7e8170d/a3b921c0"`) with its complete
+                   initial state: `run_ref`, coordinator, full run ID,
+                   workflow path, kind, source `event_id`, `timestamp`,
+                   decoded `tags`, `steps`, `content`, `signature_verified`,
+                   and for jobs the job ID, provider and allocation ID
+  type "update"    carries `ref`, `timestamp` and `changes`; fields absent
+                   from `changes` are unchanged. `content`, when present,
+                   replaces the whole content (empty clears the log tail).
+                   `changes.steps` holds whole replacement step objects
+                   keyed by `id` (do not merge);
+                   `removed_steps` removes IDs; `step_order` replaces the
+                   order. `tags_removed` then `tags_added` apply to tags as
+                   a multiset, one occurrence per entry
+  type "event"     an unrecognised or invalid shape, passed through as the
+                   full decoded `event`
+
+  Steps have `id`, `status`, optional `label`, `start_ms`, `duration_ms` and
+  `extra`. Renewals that change only timestamps or expiry, and duplicate
+  events, emit nothing; expiry is not part of compact state, so use
+  --full-events to analyse liveness. A final result supersedes progress
+  and late events cannot roll state back. --full-events instead emits
+  every distinct received event in the decoded form `ci inspect` uses.
+  Neither mode can recover snapshots replaced before it connected, and
+  neither signature verification nor compact state establishes CI
+  authorization.
+
+JSON detail (without --watch):
+  One document. Workflow `details` and job `execution` expose dependency
+  and rerun bindings, steps, outputs, artifacts, environment selection,
+  skip reasons and cancellation evidence. `reused` and `execution_run_id`
+  mark job results retained by a rerun. An earlier attempt replaced by a
+  coordinator appears under `previous_job_attempts`, other attempts and
+  previous tips under `history`; neither is part of the current result.
+  Durations are milliseconds; step start offsets are job-relative.
+  `elapsed_to_report_ms` runs from the signed start to result publication,
+  so it includes publication delay and is not an exact execution time.
+  `declared_jobs` lists the jobs and steps expected from the workflow file
+  when its hash matches, without evaluating conditions; `live_jobs` holds
+  current progress. In a live snapshot an untimed `skipped` step can be a
+  placeholder for a step not yet reached: only a timed or final result
+  establishes a skip.

@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Result, anyhow};
@@ -22,7 +22,7 @@ use crate::{
         remote_helper,
     },
     git_http_auth::{authorization_for_url, refresh_private_git_auth_for_url},
-    output_mode::{is_quiet, is_verbose},
+    output_mode::progress_policy,
     repo_ref::is_grasp_server_clone_url,
     repo_state::RepoState,
     signer::NgitSigner,
@@ -33,59 +33,6 @@ use crate::{
 };
 
 const SPINNER_EXPAND_DELAY_SECS: u64 = 5;
-
-struct GitSpinnerState {
-    spinner: ProgressBar,
-    start_time: Instant,
-    expanded_multi: Option<MultiProgress>,
-}
-
-impl GitSpinnerState {
-    fn new() -> Self {
-        let multi_progress = MultiProgress::new();
-        let spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(
-                    ProgressStyle::with_template("{spinner} {msg}")
-                        .unwrap()
-                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈"),
-                )
-                .with_message("Checking git servers..."),
-        );
-        spinner.enable_steady_tick(Duration::from_millis(100));
-        Self {
-            spinner,
-            start_time: Instant::now(),
-            expanded_multi: None,
-        }
-    }
-
-    fn should_expand(&self) -> bool {
-        self.expanded_multi.is_none()
-            && self.start_time.elapsed().as_secs() >= SPINNER_EXPAND_DELAY_SECS
-    }
-
-    fn expand(&mut self) -> &MultiProgress {
-        if self.expanded_multi.is_none() {
-            self.spinner.finish_and_clear();
-            self.expanded_multi = Some(MultiProgress::new());
-        }
-        self.expanded_multi.as_ref().unwrap()
-    }
-
-    fn finish(&self, has_errors: bool) {
-        if has_errors {
-            if let Some(ref multi) = self.expanded_multi {
-                let _ = multi.clear();
-            }
-        } else {
-            self.spinner.finish_and_clear();
-            if let Some(ref multi) = self.expanded_multi {
-                let _ = multi.clear();
-            }
-        }
-    }
-}
 
 /// Sync issues identified for a single remote
 #[derive(Default, Debug, Clone)]
@@ -171,25 +118,25 @@ pub async fn list_from_remotes(
         return HashMap::new();
     }
 
-    let verbose = is_verbose();
-    let quiet = is_quiet();
-    let is_test = std::env::var("NGITTEST").is_ok();
-    let spinner_state = if !verbose && !quiet {
-        Some(Arc::new(Mutex::new(GitSpinnerState::new())))
+    let policy = progress_policy();
+    let quiet = policy.quiet;
+    let progress_reporter = MultiProgress::with_draw_target(if policy.animate && policy.detailed {
+        indicatif::ProgressDrawTarget::stderr()
     } else {
-        None
-    };
-    // Under test conditions the draw target must be hidden even though
-    // verbose is true (the ngit process selects verbose mode under NGITTEST). A
-    // visible MultiProgress writes ANSI cursor-movement sequences to stderr and
-    // the subsequent `progress_reporter.clear()` erases lines of real
-    // git-remote-helper output that tests rely on.
-    let progress_reporter = if verbose && !is_test {
-        MultiProgress::new()
-    } else {
-        MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden())
-    };
+        indicatif::ProgressDrawTarget::hidden()
+    });
+    let spinner = (policy.animate && !policy.detailed).then(|| {
+        let spinner = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{spinner} {msg}").unwrap())
+            .with_message("Checking git servers...");
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        spinner
+    });
+    if !policy.animate && !quiet {
+        eprintln!("Checking git servers...");
+    }
 
+    let bars = Arc::new(Mutex::new(Vec::<ProgressBar>::new()));
     let success_count = Arc::new(AtomicU64::new(0));
     let current_timeout = Arc::new(AtomicU64::new(git_server_long_timeout()));
     let total_servers = git_servers.len() as u64;
@@ -209,57 +156,27 @@ pub async fn list_from_remotes(
             let success_count_clone = success_count.clone();
             let current_timeout_clone = current_timeout.clone();
             let progress_reporter_clone = progress_reporter.clone();
+            let bars = bars.clone();
             let decoded_nostr_url = decoded_nostr_url.clone();
-            let spinner_state_clone = spinner_state.clone();
-            let verbose_for_task = verbose;
             let private_signer = private_signer.cloned();
 
             async move {
                 let server_name = get_short_git_server_name(&url);
 
-                let pb = if verbose_for_task {
-                    match git_server_pb_style(current_timeout_clone.clone()) {
-                        Ok(style) => {
-                            let pb = progress_reporter_clone.add(
-                                ProgressBar::new(1)
-                                    .with_prefix(
-                                        console::style(format!(
-                                            "{: <server_column_width$} connecting",
-                                            server_name
-                                        ))
-                                        .for_stderr()
-                                        .yellow()
-                                        .to_string(),
-                                    )
-                                    .with_style(style),
-                            );
-                            pb.enable_steady_tick(Duration::from_millis(300));
-                            Some(pb)
-                        }
-                        Err(_) => None,
-                    }
-                } else if let Some(ref spinner_state_arc) = spinner_state_clone {
-                    let mut state = spinner_state_arc.lock().unwrap();
-                    if state.should_expand() {
-                        let multi = state.expand().clone();
-                        let pb = multi.add(
+                if !policy.animate && policy.detailed && !quiet {
+                    eprintln!("{server_name}: connecting");
+                }
+                let pb = if policy.animate {
+                    git_server_pb_style(current_timeout_clone.clone()).ok().map(|style| {
+                        let pb = progress_reporter_clone.add(
                             ProgressBar::new(1)
-                                .with_prefix(
-                                    console::style(format!(
-                                        "{: <server_column_width$} connecting",
-                                        server_name
-                                    ))
-                                    .for_stderr()
-                                    .yellow()
-                                    .to_string(),
-                                )
-                                .with_style(git_server_pb_style(current_timeout_clone.clone()).unwrap()),
+                                .with_prefix(format!("{server_name:<server_column_width$} connecting"))
+                                .with_style(style),
                         );
                         pb.enable_steady_tick(Duration::from_millis(300));
-                        Some(pb)
-                    } else {
-                        None
-                    }
+                        bars.lock().unwrap().push(pb.clone());
+                        pb
+                    })
                 } else {
                     None
                 };
@@ -278,7 +195,8 @@ pub async fn list_from_remotes(
                                 .dim()
                                 .to_string(),
                         );
-                        pb.finish_with_message(
+                        pb.disable_steady_tick();
+                        pb.set_message(
                             console::style(error.to_string())
                                 .for_stderr()
                                 .red()
@@ -299,7 +217,7 @@ pub async fn list_from_remotes(
                     }
                 }
 
-                let git_repo_path = git_repo.get_path().ok().map(|p| p.to_path_buf());
+                let git_repo_path = Some(git_repo.workdir_or_git_dir().to_path_buf());
                 let url_clone = url.clone();
                 let decoded_nostr_url_clone = decoded_nostr_url.clone();
                 let pb_clone = pb.clone();
@@ -419,7 +337,11 @@ pub async fn list_from_remotes(
                                     .dim()
                                     .to_string(),
                             );
-                            pb.finish_with_message(message_style.to_string());
+                            pb.disable_steady_tick();
+                            pb.set_message(message_style.to_string());
+                        }
+                        if !policy.animate && policy.detailed && !quiet {
+                            eprintln!("{server_name}: {status_msg}");
                         }
                         Ok((url, state, is_grasp_server))
                     }
@@ -428,34 +350,65 @@ pub async fn list_from_remotes(
         })
         .collect();
 
-    let results = stream::iter(futures)
+    let work = stream::iter(futures)
         .buffer_unordered(15)
-        .collect::<Vec<Result<(String, HashMap<String, String>, bool), (String, anyhow::Error)>>>()
-        .await;
+        .collect::<Vec<Result<(String, HashMap<String, String>, bool), (String, anyhow::Error)>>>();
+    tokio::pin!(work);
+    let results = tokio::select! {
+        results = &mut work => results,
+        _ = tokio::time::sleep(Duration::from_secs(SPINNER_EXPAND_DELAY_SECS)), if spinner.is_some() => {
+            spinner.as_ref().unwrap().finish_and_clear();
+            progress_reporter.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+            work.await
+        }
+    };
 
     let mut remote_states = HashMap::new();
-    let mut has_errors = false;
+    let mut errors = Vec::new();
     for result in results {
         match result {
             Ok((url, state, is_grasp_server)) => {
                 remote_states.insert(url, (state, is_grasp_server));
             }
             Err((url, error)) => {
-                has_errors = true;
-                if !quiet {
-                    let _ = term.write_line(&format!("failed to list from {}: {}", url, error));
-                }
+                errors.push((url, error));
             }
         }
     }
 
-    if let Some(ref spinner_state_arc) = spinner_state {
-        spinner_state_arc.lock().unwrap().finish(has_errors);
-    } else if !has_errors || !is_verbose() {
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+    for bar in bars.lock().unwrap().iter() {
+        bar.finish();
+    }
+    if policy.animate && !policy.detailed {
         let _ = progress_reporter.clear();
+    }
+    if !quiet {
+        for (url, error) in &errors {
+            let _ = term.write_line(&format!("failed to list from {url}: {error}"));
+        }
+    }
+    if !policy.animate && !quiet {
+        eprintln!(
+            "{}",
+            git_servers_summary(remote_states.len(), total_servers, !errors.is_empty())
+        );
     }
 
     remote_states
+}
+
+fn git_servers_summary(responded: usize, total: u64, has_errors: bool) -> String {
+    format!(
+        "Git servers checked: {responded}/{total} responded{}.",
+        if has_errors {
+            "; some servers failed"
+        } else {
+            ""
+        }
+    )
 }
 
 // Backward-compatible synchronous wrapper for use in non-async contexts
@@ -593,10 +546,12 @@ fn list_from_remote_url(
     if let Some(header) = authorization.as_deref() {
         fetch_options.custom_headers(&[header]);
     }
-    // `connect_auth` cannot carry custom HTTP headers. An empty download
-    // performs the same advertisement exchange while preserving access to
-    // `Remote::list`, and applies the NIP-98 header to `/info/refs`.
-    git_server_remote.download(&[] as &[&str], Some(&mut fetch_options))?;
+    // `connect_auth` cannot carry the NIP-98 header. Use download to obtain
+    // the advertisement, but exclude every ref and disable automatic tags:
+    // an empty refspec list implicitly fetches HEAD and its entire history.
+    // Listing servers must not download packs into the shared object database.
+    fetch_options.download_tags(git2::AutotagOption::None);
+    git_server_remote.download(&["^*"], Some(&mut fetch_options))?;
     let mut state = HashMap::new();
     for head in git_server_remote.list()? {
         if let Some(symbolic_reference) = head.symref_target() {
@@ -931,7 +886,59 @@ pub fn generate_remote_sync_warnings(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn static_git_server_summary_preserves_partial_success() {
+        let partial = super::git_servers_summary(2, 3, true);
+        assert!(partial.contains("2/3"));
+        assert!(partial.contains("failed"));
+        let complete = super::git_servers_summary(3, 3, false);
+        assert!(complete.contains("3/3"));
+        assert!(!complete.contains("failed"));
+    }
+
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listing_refs_does_not_download_objects() -> Result<()> {
+        let source_dir = tempfile::tempdir()?;
+        let source = git2::Repository::init_bare(source_dir.path())?;
+        source.set_head("refs/heads/main")?;
+        let tree_id = source.treebuilder(None)?.write()?;
+        let tree = source.find_tree(tree_id)?;
+        let signature = git2::Signature::now("Test", "test@example.com")?;
+        let commit = source.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])?;
+        let object = source.find_object(commit, None)?;
+        source.branch("feature", &source.find_commit(commit)?, false)?;
+        let tag = source.tag("v1", &object, &signature, "release", false)?;
+
+        let file_url = reqwest::Url::from_directory_path(source_dir.path()).unwrap();
+        let server = test_harness::VanillaGitServer::start(
+            "list-refs",
+            test_harness::port::reserve_port()?,
+            source_dir.path(),
+        )
+        .await?;
+        for url in [file_url.as_str(), server.url()] {
+            let destination_dir = tempfile::tempdir()?;
+            let destination = Repo {
+                git_repo: git2::Repository::init(destination_dir.path())?,
+            };
+            let refs = list_from_remote_url(&destination, url, None, true)?;
+            assert_eq!(refs.get("HEAD"), Some(&"ref: refs/heads/main".to_string()));
+            assert_eq!(refs.get("refs/heads/main"), Some(&commit.to_string()));
+            assert_eq!(refs.get("refs/heads/feature"), Some(&commit.to_string()));
+            assert_eq!(refs.get("refs/tags/v1"), Some(&tag.to_string()));
+            assert!(!refs.contains_key("refs/tags/v1^{}"));
+            let mut object_count = 0;
+            destination.git_repo.odb()?.foreach(|_| {
+                object_count += 1;
+                true
+            })?;
+            assert_eq!(object_count, 0, "listing refs must not fetch Git objects");
+            assert_eq!(destination.git_repo.references()?.count(), 0);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_format_ref_issue_single_branch_with_ahead_behind() {
