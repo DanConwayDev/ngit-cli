@@ -754,9 +754,6 @@ pub struct ReleaseListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -776,9 +773,6 @@ pub struct ReleaseViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -856,9 +850,6 @@ pub struct ReleasePublishArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -902,9 +893,6 @@ pub struct ReleaseAppListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -918,9 +906,6 @@ pub struct ReleaseAppViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1013,9 +998,6 @@ pub struct ReleaseAppInitArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1032,9 +1014,6 @@ pub struct ReleaseAppLinkArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Parser)]
@@ -1068,9 +1047,6 @@ pub struct ReleaseAssetListArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1093,9 +1069,6 @@ pub struct ReleaseAssetViewArgs {
     /// Use local cache only, skip network fetch
     #[arg(long)]
     pub offline: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1213,9 +1186,6 @@ pub struct ReleaseAssetAddArgs {
     /// Also publish to the Zapstore catalog relay; does not change Blossom
     #[arg(long)]
     pub zapstore_relay: bool,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------

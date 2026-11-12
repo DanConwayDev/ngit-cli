@@ -73,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ngit release` subcommands no longer define their own `--json` beside the
+  global one. The flag is accepted at the same positions and produces the
+  same output; these commands now read the global JSON mode, so warnings and
+  progress follow it wherever the flag is written.
 - The bundled agent skill (version 1.30) is now a short bootstrap. It tells
   agents to use ngit in repositories with a `nostr://` remote, which its
   description also names as Grasp repositories, and to read the
