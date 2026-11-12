@@ -1,0 +1,16 @@
+version: 1
+name: Mirror release archives to GitHub
+system: x86_64-linux
+reuse: never
+on:
+  workflow_dispatch:
+needs-workflows:
+  archives: archives.yaml
+jobs:
+  mirror:
+    needs: [archives.collect]
+    run: archives.mirror
+    secrets: [GITHUB_RELEASE_TOKEN]
+    concurrency:
+      group: github-release-mirror
+      cancel-in-progress: false

@@ -36,6 +36,38 @@ The workflow must exist in the published commit. PR jobs require hardware VM
 providers and receive no release secrets. Cold multi-target builds may need
 the coordinator timeout budget described under macOS pre-release checks.
 
+## GitHub release mirror
+
+`.ngit/nix/workflows/github-mirror.yaml` is a manual, credentialed consumer of
+`archives.yaml`. It creates a draft GitHub release, uploads the complete set
+under the existing tagged filenames, verifies GitHub's asset SHA-256 digests,
+and publishes the draft only after every upload succeeds. Retries skip exact
+copies and reject conflicting assets rather than replacing released bytes.
+Existing public releases are never demoted to drafts or rewritten. Mirroring
+does not promote GitHub's `latest` pointer, so replaying an old stable release
+cannot displace a newer one.
+
+Configure `GITHUB_RELEASE_TOKEN` as a repository secret in ngit-ci, using a
+GitHub token scoped to `DanConwayDev/ngit-cli` with Contents write permission.
+Authorize only the intended Linux publication provider to receive it. No
+GitHub Actions runner or `GITHUB_TOKEN` is used. The mirror requires the tag
+already to exist on GitHub and to peel to the exact artifact commit.
+
+After the tagged commit includes this workflow and its Git refs are mirrored:
+
+```sh
+ngit ci trigger <coordinator-npub> vX.Y.Z \
+  --workflow .ngit/nix/workflows/github-mirror.yaml \
+  --ref refs/tags/vX.Y.Z --json
+```
+
+This first migration stage does not enable automatic tag publication or remove
+GitHub Actions. Do not mirror a rehearsal build over an existing GitHub-built
+release: their bytes may differ and the mirror deliberately rejects that
+conflict. At cutover, disable the old archive publisher and wire canonical
+NIP-82 publication and this independent mirror to the same verified build
+inputs. A mirror failure must not revoke or block the canonical release.
+
 ## Publishing the ngit crate
 
 Nostr CI publishes `ngit` to crates.io after the existing lint, formatting and

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An optional Nostr CI job mirrors verified release archives to GitHub
+  without using GitHub Actions or rebuilding the binaries.
+
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.
 

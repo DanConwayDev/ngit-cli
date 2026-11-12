@@ -21,6 +21,9 @@ in {
     ${pkgs.lib.optionalString (!darwin) "export NGIT_ARCHIVE_LOADER=${pkgs.glibc}/lib/ld-linux-x86-64.so.2 CARGO_ZIGBUILD_ZIG_PATH=${pkgs.zig_0_16}/bin/zig"}
     ${builtins.readFile ../../../tools/release/archive-build.sh}
   '';
+  mirror = command "mirror-release-archives" [] ''
+    python3 tools/release/github-mirror.py
+  '';
   collect = command "collect-release-archives" [] ''
     python3 -m unittest discover -s tools/release
     python3 tools/release/archives.py collect "$NGIT_CI_INPUTS" "$NGIT_CI_OUTPUT_DIR/release"
