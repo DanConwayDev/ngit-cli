@@ -19,7 +19,7 @@ let
   vendor = craneLib.vendorCargoDeps { inherit (cargo) src; };
   tools = with pkgs; [
       rust-bin.stable.latest.default stdenv.cc pkg-config
-      bash git coreutils jq gnumake gnused gnugrep gnutar gzip gawk findutils
+      bash git coreutils jq gnumake gnused gnugrep gnutar gzip gawk findutils dbus
   ];
   command = name: script: pkgs.writeShellApplication {
     inherit name;
