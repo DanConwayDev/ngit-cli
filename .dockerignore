@@ -10,3 +10,7 @@ Dockerfile
 .env
 docs/architecture/
 AGENTS.md
+
+# Local build output and private review evidence are not image inputs.
+target/
+work/

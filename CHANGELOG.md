@@ -102,6 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Build containers with Rust 1.99 on supported Alpine 3.24 and use matching
+  OpenSSL development and static libraries plus an explicit runtime CA bundle.
+
 - Update the isolated Grasp integration-test fixture to v3.1.1, including
   upstream server security fixes. This does not update deployed relays.
 
