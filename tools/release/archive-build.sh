@@ -9,6 +9,18 @@ case "${NGIT_CI_JOB_ID:?}" in
   *) echo 'Unknown release archive job' >&2; exit 1 ;;
 esac
 export CARGO_BUILD_JOBS=2
+export XWIN_CACHE_DIR="$PWD/target/xwin-cache"
+if [[ $target == universal-apple-darwin ]]; then
+  # Use the guest's Apple SDK and linker for portable downloads, not Nix dylibs.
+  mkdir -p "$PWD/target/apple-tools"
+  ln -sf /usr/bin/clang "$PWD/target/apple-tools/clang"
+  export PATH="$PWD/target/apple-tools:$PATH"
+  export CC=/usr/bin/clang CXX=/usr/bin/clang++
+  export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/clang
+  export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=/usr/bin/clang
+  export SDKROOT
+  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
+fi
 export CARGO_HOME="$PWD/target/archive-cargo-home"
 export CARGO_TARGET_DIR="$PWD/target/archives"
 mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
@@ -35,7 +47,7 @@ if [[ $target == universal-apple-darwin ]]; then
     lipo -create "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/$binary" \
       "$CARGO_TARGET_DIR/x86_64-apple-darwin/release/$binary" \
       -output "$CARGO_TARGET_DIR/$target/release/$binary"
-    codesign --force --sign - "$CARGO_TARGET_DIR/$target/release/$binary"
+    /usr/bin/codesign --force --sign - "$CARGO_TARGET_DIR/$target/release/$binary"
   done
 elif [[ $target == *windows* ]]; then
   cargo xwin build "${build_args[@]}" --target "$target"
