@@ -250,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Issue auto-resolution requires a reference immediately after the closing
+  verb and stops at prose, so incidental wording in PR cover notes cannot
+  close unrelated follow-up issues later on the same line.
 - PR merges refuse behind or diverged local default targets before changing
   refs or saving work, checking published repository state and the selected
   remote. Locally ahead targets remain mergeable.

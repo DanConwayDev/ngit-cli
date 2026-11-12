@@ -2133,7 +2133,7 @@ fn parse_issue_reference_tokens(words: &[&str]) -> Vec<IssueReferenceToken> {
                         | '\''
                 )
         });
-        if token.is_empty() {
+        if !refs.is_empty() && (token.is_empty() || token == "and" || token == "&") {
             continue;
         }
 
@@ -2152,6 +2152,9 @@ fn parse_issue_reference_tokens(words: &[&str]) -> Vec<IssueReferenceToken> {
             if seen_full.insert(event_id) {
                 refs.push(IssueReferenceToken::Full(event_id));
             }
+        } else {
+            // A directive ends at prose; do not search the rest of the line.
+            break;
         }
     }
 
@@ -3206,6 +3209,32 @@ mod tests {
                     .iter()
                     .any(|m| m.references.contains(&IssueReferenceToken::Full(id)))
             );
+        }
+
+        #[test]
+        fn incidental_prose_does_not_close_later_references() {
+            let id = EventId::from_hex(
+                "0afd5344c3345f0603bc5f5e81c8c62b963cefc1cb178c6ba603bb85a0821ef0",
+            )
+            .unwrap();
+            let nevent = Nip19Event::new(id).to_bech32().unwrap();
+            for line in [
+                format!(
+                    "The roots were resolved to PRs; remaining compatibility work is tracked in nostr:{nevent}."
+                ),
+                "Fixed the crash; see #0afd5344 for future work".to_owned(),
+                "Resolves and #0afd5344".to_owned(),
+            ] {
+                assert!(
+                    extract_issue_resolution_mentions(&line).is_empty(),
+                    "{line}"
+                );
+            }
+            let mentions = extract_issue_resolution_mentions(
+                "Fixes #11111111, #22222222 and #33333333; follow-up #44444444 remains open",
+            );
+            assert_eq!(mentions.len(), 1);
+            assert_eq!(mentions[0].references.len(), 3);
         }
 
         #[test]

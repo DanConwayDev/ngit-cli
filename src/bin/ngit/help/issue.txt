@@ -25,5 +25,9 @@ Auto-resolve from commits:
   followed by a unique hex ID or prefix or a `nostr:nevent1...` reference,
   for example `Fixes #deadbeef`. The status is published only when the
   pusher is the issue author or a confirmed repository member.
+  Put the first reference immediately after the verb. Consecutive references
+  may be separated by commas, "and" or "&"; prose ends the reference list:
+    Fixes #deadbeef, #1234abcd and #abcdef12
+  Wording such as "resolved to PRs; follow-up #deadbeef" is not a directive.
 
   Guide: https://ngit.dev/issues

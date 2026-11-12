@@ -1816,3 +1816,40 @@ fn assert_fast_forward_status_event(event: &Event, proposal: &MergedProposal) {
         );
     }
 }
+
+#[tokio::test]
+async fn incidental_merge_prose_leaves_follow_up_issue_open() -> Result<()> {
+    let harness = build_harness().await?;
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            identifier: Some("incidental-resolution".into()),
+            ..Default::default()
+        })
+        .await?;
+    let issue = ngit_issue_create(&repo, "follow-up", "still needed").await?;
+    let message = format!(
+        "Merge proposal\n\nThe roots were resolved to PRs; remaining compatibility work is tracked in {}.",
+        issue.to_hex()
+    );
+    git_ok(
+        &repo,
+        ["commit", "--allow-empty", "-m", &message, "--no-gpg-sign"],
+        "commit cover note",
+    )
+    .await?;
+    repo.nostr_push(["origin", "main"]).await?;
+    let statuses = harness
+        .grasp("repo")
+        .events(
+            Filter::new()
+                .kind(Kind::GitStatusApplied)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    assert!(
+        !statuses
+            .iter()
+            .any(|event| event_root_e_tag(event) == Some(issue))
+    );
+    Ok(())
+}
