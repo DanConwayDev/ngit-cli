@@ -258,6 +258,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update `libz-sys` to 1.1.33 for the upstream build environment disclosure
+  fix (RUSTSEC-2026-0418) and bundled zlib 1.4. The previously locked `cc`
+  version predates the environment-copying behavior required by the advisory;
+  this update is not evidence that ngit build secrets were disclosed.
+
 - Update nostr/nostr-sdk to 0.45.6 for an upstream signature-verification cache
   fix. ngit ingests relay events through this path, so clients should update.
 - `ngit release publish` rejects manifest file paths outside the repository root,
