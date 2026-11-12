@@ -6,6 +6,7 @@ import struct
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import archives
 
@@ -63,6 +64,41 @@ class Archives(unittest.TestCase):
                     out.addfile(item, io.BytesIO(elf()))
             with self.assertRaisesRegex(ValueError, "members"):
                 archives.verify_archive(path, "x86_64-unknown-linux-gnu.2.17")
+
+    def test_linkage_rejects_new_glibc(self):
+        with patch.object(archives.subprocess, "check_output", side_effect=["", "", "Name: GLIBC_2.28"]):
+            with self.assertRaisesRegex(ValueError, "newer than"):
+                archives.inspect_linkage(Path("ngit"), "x86_64-unknown-linux-gnu.2.17")
+
+    def test_linkage_rejects_nix_runtime(self):
+        with patch.object(archives.subprocess, "check_output", side_effect=["RUNPATH /nix/store/host/lib", ""]):
+            with self.assertRaisesRegex(ValueError, "Nix store"):
+                archives.inspect_linkage(Path("ngit"), "x86_64-unknown-linux-gnu.2.17")
+
+    def test_musl_rejects_dynamic_loader(self):
+        with patch.object(archives.subprocess, "check_output", side_effect=["", "INTERP"]):
+            with self.assertRaisesRegex(ValueError, "static"):
+                archives.inspect_linkage(Path("ngit"), "x86_64-unknown-linux-musl")
+
+    def test_collect_preserves_exact_verified_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            version = archives.tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+            for job, target in archives.TARGETS.items():
+                folder = root / "inputs" / job / "artifacts"
+                (folder / "archive").mkdir(parents=True)
+                (folder / "report").mkdir()
+                name = archives.filename(target)
+                path = folder / "archive" / name
+                path.write_bytes(target.encode())
+                report = dict(schema=1, commit="a" * 40, target=target, archive=name, version=version, sha256=archives.digest(path))
+                (folder / "report" / "build.json").write_text(json.dumps(report))
+            with patch.object(archives, "verify_archive") as verify:
+                archives.collect(root / "inputs", root / "output", "a" * 40)
+                self.assertEqual(verify.call_count, 5)
+            for target in archives.TARGETS.values():
+                self.assertEqual((root / "output" / archives.filename(target)).read_bytes(), target.encode())
+            self.assertEqual(len((root / "output" / "SHA256SUMS").read_text().splitlines()), 5)
 
 
 if __name__ == "__main__":

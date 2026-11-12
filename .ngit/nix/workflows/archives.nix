@@ -15,8 +15,8 @@ let
     text = script;
   };
 in {
-  build = command "build-release-archive" ([ rust pkgs.perl pkgs.gnumake pkgs.pkg-config pkgs.cmake pkgs.ninja ]
-    ++ (if darwin then [ pkgs.clang pkgs.darwin.cctools ] else [ pkgs.cargo-zigbuild pkgs.zig_0_16 pkgs.cargo-xwin pkgs.llvmPackages.clang-unwrapped pkgs.llvmPackages.lld pkgs.llvmPackages.llvm ])) ''
+  build = command "build-release-archive" ([ rust pkgs.stdenv.cc pkgs.perl pkgs.gnumake pkgs.pkg-config pkgs.cmake pkgs.ninja ]
+    ++ (if darwin then [ pkgs.clang pkgs.darwin.cctools ] else [ pkgs.binutils-unwrapped pkgs.cargo-zigbuild pkgs.zig_0_16 pkgs.cargo-xwin pkgs.llvmPackages.clang-unwrapped pkgs.llvmPackages.lld pkgs.llvmPackages.llvm ])) ''
     export NGIT_ARCHIVE_VENDOR=${vendor}
     ${pkgs.lib.optionalString (!darwin) "export NGIT_ARCHIVE_LOADER=${pkgs.glibc}/lib/ld-linux-x86-64.so.2 CARGO_ZIGBUILD_ZIG_PATH=${pkgs.zig_0_16}/bin/zig"}
     ${builtins.readFile ../../../tools/release/archive-build.sh}

@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -68,6 +69,29 @@ def verify_archive(path, target):
     openssl.verify(path)
 
 
+def inspect_linkage(path, target):
+    if "linux" in target:
+        dynamic = subprocess.check_output(["readelf", "-d", str(path)], text=True)
+        headers = subprocess.check_output(["readelf", "-l", str(path)], text=True)
+        if "/nix/store/" in dynamic or "/nix/store/" in headers:
+            raise ValueError("Portable archive depends on the Nix store")
+        needed = re.findall(r"\(NEEDED\).*?\[(.*?)\]", dynamic)
+        allowed = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libgcc_s.so.1"}
+        if set(needed) - allowed:
+            raise ValueError(f"Unexpected dynamic dependencies: {needed}")
+        if "musl" in target and (needed or "INTERP" in headers):
+            raise ValueError("musl archive must be static")
+        if target.endswith("gnu.2.17"):
+            versions = subprocess.check_output(["readelf", "--version-info", str(path)], text=True)
+            if any(tuple(map(int, v.split("."))) > (2, 17) for v in re.findall(r"GLIBC_(\d+\.\d+)", versions)):
+                raise ValueError("Archive requires glibc newer than 2.17")
+    elif "darwin" in target:
+        linked = subprocess.check_output(["otool", "-L", str(path)], text=True)
+        for line in linked.splitlines():
+            if line.startswith("\t") and not line.strip().startswith(("/usr/lib/", "/System/Library/")):
+                raise ValueError(f"Unexpected macOS dynamic dependency: {line.strip()}")
+
+
 def pack(target, binaries, output):
     output.mkdir(parents=True, exist_ok=True)
     path = output / filename(target)
@@ -75,6 +99,7 @@ def pack(target, binaries, output):
     names = [f"{name}{suffix}" for name in ("ngit", "git-remote-nostr")]
     for name in names:
         inspect_binary((binaries / name).read_bytes(), target)
+        inspect_linkage(binaries / name, target)
     if suffix:
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name in names:
