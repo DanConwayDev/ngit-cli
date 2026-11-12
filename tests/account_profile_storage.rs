@@ -158,8 +158,11 @@ async fn ignored_pairing_relay_is_rejected_before_changing_login_or_credentials(
         assert!(!output.status.success(), "unused relay option was accepted");
         let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(document["command_status"], "error");
-        let diagnostic = String::from_utf8(output.stderr)?;
-        assert!(diagnostic.contains("--nostrconnect") && diagnostic.contains("--no-activate"));
+        let diagnostic = document["error"].as_str().context("missing JSON error")?;
+        assert!(
+            diagnostic.contains("--nostrconnect") && diagnostic.contains("--no-activate"),
+            "{diagnostic}"
+        );
         assert_eq!(std::fs::read(&config_path)?, config_before);
         assert!(
             std::fs::read(credentials.path())? == credentials_before,
@@ -214,10 +217,12 @@ async fn unavailable_os_store_cannot_reassign_an_indexed_profile() -> Result<()>
         !output.status.success(),
         "indexed profile was reassigned while its backend was inaccessible"
     );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(document["command_status"], "error");
+    let diagnostic = document["error"].as_str().context("missing JSON error")?;
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("choose a new profile name"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        diagnostic.contains("choose a new profile name"),
+        "{diagnostic}"
     );
     assert_eq!(std::fs::read(&credentials)?, b"{}");
     assert_eq!(std::fs::read(&registry)?, index);
