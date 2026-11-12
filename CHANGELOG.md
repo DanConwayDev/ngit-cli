@@ -258,6 +258,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update `libssh2-sys` to 0.3.4 for upstream bounds checks before
+  encrypt-then-MAC SSH packet decryption, avoiding a local source backport.
+
 - Update `rustix` to 1.1.6 for the upstream extended-attribute buffer
   soundness fix (RUSTSEC-2026-0486).
 
