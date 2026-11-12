@@ -457,14 +457,9 @@ impl Prepared {
     /// The caveat printed when the resolved commit is not reachable from
     /// the repository state published on nostr.
     ///
-    /// The NIP makes a non-pull-request trigger eligible only for a
-    /// repository whose resolved state contains the requested commit, so a
-    /// coordinator will discard one for a commit that was never pushed. ngit
-    /// checks reachability with the objects it holds: every state ref is
-    /// peeled to a commit and tested with `graph_descendant_of`. A state ngit
-    /// cannot read, or one whose tips are all missing locally, produces no
-    /// warning — a false alarm is worse than silence for a check that is only
-    /// ever advisory.
+    /// This observes only locally available repository-state tips, not PR
+    /// object availability or the coordinator's authorization policy. Unknown
+    /// state and missing tips cannot justify a categorical rejection warning.
     async fn unreachable_commit_warning(&self, resolved: &ResolvedCommit) -> Option<String> {
         let path = self.git_repo.get_path().ok()?;
         let state = get_state_from_cache(Some(path), &self.repo_ref)
@@ -499,7 +494,7 @@ impl Prepared {
 
         (examined > 0).then(|| {
             format!(
-                "warning: commit {} is not reachable from any ref in this repository's nostr state, so a coordinator will find it ineligible and discard this trigger; push it first",
+                "warning: commit {} is not reachable from the locally available refs in this repository's nostr state; it may still be available through a published PR. Acceptance depends on coordinator policy and object availability; inspect CI status to confirm execution",
                 short(&resolved.commit),
             )
         })

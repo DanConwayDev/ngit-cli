@@ -250,6 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CI trigger reachability warnings describe only locally available signed
+  state, without predicting rejection of PR-only commits or telling users
+  to repush them. Coordinator policy and object availability decide acceptance.
 - Issue auto-resolution requires a reference immediately after the closing
   verb and stops at prose, so incidental wording in PR cover notes cannot
   close unrelated follow-up issues later on the same line.

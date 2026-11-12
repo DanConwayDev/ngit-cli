@@ -70,6 +70,9 @@ Trust gates:
 
 Acting on CI (confirmed maintainers):
   `ci trigger` runs one workflow once and needs no standing service.
+  A reachability warning only describes locally available repository-state
+  refs. A PR-only commit may still be fetchable and accepted under the
+  coordinator's policy. Confirm execution with `ngit ci status <commit>`.
   `ci rerun` starts a new attempt from a completed native result; it does
   not cancel an attempt that is still running. `ci cancel` requests
   cancellation of one exact run. `ci service request` and `ci service stop`

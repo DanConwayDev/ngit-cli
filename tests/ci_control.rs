@@ -636,7 +636,7 @@ async fn an_unpushed_commit_warns_but_still_triggers() -> Result<()> {
     let coordinator = arranged.coordinator_npub()?;
 
     // A commit that never left this clone is not in the repository state a
-    // coordinator resolves, which makes the request ineligible there.
+    // coordinator resolves; eligibility also depends on coordinator policy.
     std::fs::write(arranged.publisher.dir().join("local.md"), "not pushed\n")
         .context("failed to write local.md")?;
     arranged
@@ -662,6 +662,44 @@ async fn an_unpushed_commit_warns_but_still_triggers() -> Result<()> {
     // A caveat, never a refusal: the maintainer may be about to push.
     let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
     assert_eq!(event_id_of(&json["event"]), event.id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_published_pr_only_commit_can_be_triggered_by_a_maintainer() -> Result<()> {
+    let arranged = arrange("ci-trigger-pr-only").await?;
+    let repo = &arranged.publisher;
+    repo.git_ok(["checkout", "-b", "pr/manual-trigger"], "create PR branch")
+        .await?;
+    repo.git_ok(
+        [
+            "commit",
+            "--allow-empty",
+            "-m",
+            "PR-only commit",
+            "--no-gpg-sign",
+        ],
+        "commit",
+    )
+    .await?;
+    repo.nostr_push(["origin", "pr/manual-trigger"]).await?;
+    let head = repo.rev_parse("HEAD").await?;
+    let coordinator = arranged.coordinator_npub()?;
+    let json = ngit_json_ok(
+        repo,
+        &["ci", "trigger", &coordinator, &head, "--workflow", "ci.yml"],
+    )
+    .await?;
+    let warning = json["warning"].as_str().context("missing advisory")?;
+    assert!(!warning.contains("will find it ineligible") && !warning.contains("push it first"));
+    let event = arranged.only_published(KIND_MANUAL_TRIGGER).await?;
+    assert_eq!(
+        event.pubkey,
+        arranged.published.maintainer_keys.public_key()
+    );
+    assert_eq!(event_id_of(&json["event"]), event.id);
+    let trigger = validate_manual_trigger(&event).map_err(|reason| anyhow::anyhow!("{reason}"))?;
+    assert!(trigger.common.commits.contains(&head));
     Ok(())
 }
 
