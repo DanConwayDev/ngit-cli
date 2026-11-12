@@ -38,8 +38,9 @@ pub const HELP_INSTRUCTION_MARKERS: [&str; 2] = ["ngit --help", "ngit.dev/instal
 const UPGRADE_INSERT_HINT: &str =
     "; `ngit skill --help` describes the AGENTS.md insert now recommended";
 pub const SETUP_TIP: &str = "tip: add an AGENTS.md insert or a skill to tell collaborators' coding agents this repository uses ngit; run `ngit skill --help` for details";
-/// Environment variable overriding the machine-wide skill directory, for
-/// packagers and tests that cannot write to `/usr/local/share`.
+/// Environment variable naming one directory to hold the machine-wide skill,
+/// for packagers and systems whose agents read skills from somewhere other
+/// than the documented defaults.
 pub const SYSTEM_SKILLS_DIR_ENV: &str = "NGIT_SYSTEM_SKILLS_DIR";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const CANONICAL_SKILL: &str = include_str!("../../skills/ngit/SKILL.md");
@@ -102,7 +103,7 @@ pub enum InstallScope {
     /// Inside the user's home directory, available in all of their
     /// repositories.
     Global,
-    /// In a machine-wide directory, available to every user.
+    /// In the machine-wide directories agents read, available to every user.
     System,
 }
 
@@ -197,19 +198,27 @@ pub fn global_base() -> Result<PathBuf> {
         .context("failed to resolve the user's home directory for the global skill scope")
 }
 
-/// Resolve the machine-wide install base, honoring an explicit override.
+/// Machine-wide locations that agents document reading skills from. Codex
+/// reads its admin scope, `/etc/codex/skills`; Claude Code reads
+/// `.claude/skills` inside its managed settings directory, `/etc/claude-code`
+/// on Linux. Its documentation gives no skills path for macOS, so only Codex
+/// is covered there. On Windows the managed directory is
+/// `%ProgramFiles%\ClaudeCode`, and the skills path is inferred from it.
 fn system_base_with_override(override_dir: Option<&Path>) -> (PathBuf, SkillLayout) {
-    let base = if let Some(dir) = override_dir {
-        dir.to_path_buf()
-    } else if cfg!(windows) {
-        std::env::var_os("ALLUSERSPROFILE")
-            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
-            .join("agents")
-            .join("skills")
-    } else {
-        PathBuf::from("/usr/local/share/agents/skills")
-    };
-    (base, SkillLayout::from_skill_dirs(["ngit"]))
+    if let Some(dir) = override_dir {
+        return (dir.to_path_buf(), SkillLayout::from_skill_dirs(["ngit"]));
+    }
+    if cfg!(windows) {
+        let base = std::env::var_os("ProgramFiles")
+            .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from)
+            .join("ClaudeCode");
+        return (base, SkillLayout::from_skill_dirs([".claude/skills/ngit"]));
+    }
+    let mut dirs = vec!["codex/skills/ngit"];
+    if cfg!(target_os = "linux") {
+        dirs.push("claude-code/.claude/skills/ngit");
+    }
+    (PathBuf::from("/etc"), SkillLayout::from_skill_dirs(dirs))
 }
 
 /// The install base and layout of the system scope.
@@ -994,18 +1003,25 @@ mod tests {
     }
 
     #[test]
-    fn system_base_honors_the_override_and_falls_back_to_the_platform_default() {
+    fn system_scope_uses_documented_agent_directories_or_the_override() {
         let overridden = PathBuf::from("/opt/skills");
         let (base, layout) = system_base_with_override(Some(&overridden));
         assert_eq!(base, overridden);
         assert_eq!(layout.skill_paths, ["ngit/SKILL.md"]);
         assert!(layout.instruction_files.is_empty());
-        if cfg!(not(windows)) {
+
+        let (base, layout) = system_base_with_override(None);
+        if cfg!(target_os = "linux") {
+            assert_eq!(base, PathBuf::from("/etc"));
             assert_eq!(
-                system_base_with_override(None).0,
-                PathBuf::from("/usr/local/share/agents/skills")
+                layout.skill_paths,
+                [
+                    "codex/skills/ngit/SKILL.md",
+                    "claude-code/.claude/skills/ngit/SKILL.md"
+                ]
             );
         }
+        assert!(layout.instruction_files.is_empty());
     }
 
     #[test]

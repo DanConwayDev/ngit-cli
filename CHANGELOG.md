@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ngit skill install` and `upgrade` accept `--global` to install the skill
   for your user account (`~/.agents/skills/ngit` and `~/.claude/skills/ngit`)
-  and `--system` to install it for every user of the machine, in
-  `/usr/local/share/agents/skills/ngit` (override with
-  `NGIT_SYSTEM_SKILLS_DIR`). Interactive runs (`-i`) ask which
+  and `--system` to install it for every user of the machine, in the
+  directories agents document reading: `/etc/codex/skills/ngit` and, on
+  Linux, `/etc/claude-code/.claude/skills/ngit`. `NGIT_SYSTEM_SKILLS_DIR`
+  names a single directory to use instead. Interactive runs (`-i`) ask which
   scope to use; non-interactive runs keep the repository scope. A first
   repository install asks interactively before adding the ngit instruction
   to existing `AGENTS.md`/`CLAUDE.md` files, and `--no-agent-file` declines

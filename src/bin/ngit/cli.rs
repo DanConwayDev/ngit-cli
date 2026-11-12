@@ -598,8 +598,8 @@ pub struct SkillInstallArgs {
     /// (~/.agents/skills and ~/.claude/skills)
     #[arg(long, conflicts_with = "system")]
     pub global: bool,
-    /// Install into the machine-wide directory for every user
-    /// (`/usr/local/share/agents/skills`, or `$NGIT_SYSTEM_SKILLS_DIR`)
+    /// Install for every user of this machine (`/etc/codex/skills` and, on
+    /// Linux, `/etc/claude-code/.claude/skills`; or `$NGIT_SYSTEM_SKILLS_DIR`)
     #[arg(long, conflicts_with = "global")]
     pub system: bool,
     /// Skip adding the ngit instruction to existing AGENTS.md/CLAUDE.md files
