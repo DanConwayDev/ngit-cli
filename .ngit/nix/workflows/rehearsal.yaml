@@ -1,0 +1,16 @@
+version: 1
+name: Release rehearsal
+system: x86_64-linux
+reuse: commit
+on:
+  workflow_dispatch:
+needs-workflows:
+  ci: ci.yaml
+  macos: pre-release.yaml
+  archives: archives.yaml
+jobs:
+  ready:
+    needs: [archives.collect]
+    run: archives.rehearse
+    artifacts:
+      release-set: release

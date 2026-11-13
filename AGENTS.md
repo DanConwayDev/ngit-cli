@@ -371,7 +371,10 @@ exactly these patterns. They are non-negotiable:
 
 A release is a `chore: release vX.Y.Z` commit updating `CHANGELOG.md`,
 `Cargo.toml`, and `Cargo.lock`, followed by an annotated `vX.Y.Z` tag on that
-commit. Release candidates publish `main` and the tag to every release remote.
+commit. Before tagging, run the manual `rehearsal.yaml` workflow against the
+exact final main commit and require its successful result. A PR merge changes
+the commit, so rehearse again after merging; see `docs/releases.md`.
+Release candidates publish `main` and the tag to every release remote.
 Stable releases add a third required ref: fast-forward `stable` to the tag, then
 push `main`, the tag, and `stable` together to every release remote (currently
 `origin` and `github`). Pushing the tag triggers

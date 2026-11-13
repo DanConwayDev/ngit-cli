@@ -20,7 +20,7 @@ def prepare():
     ref = os.environ["NGIT_CI_REF"]
     if ref != f"refs/tags/{tag}":
         raise ValueError("Release tag context is inconsistent")
-    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "archives.collect/artifacts/release-set"
+    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "rehearsal.ready/artifacts/release-set"
     release = plan(directory, tag, commit)
     with environment(release) as env:
         # Provider checkouts contain the allocated commit, but omit tag objects.

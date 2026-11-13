@@ -43,13 +43,50 @@ checks its release command without a tag or credentials. Publication uses the
 same shipped binary; it does not compile another CLI. Cold archive builds may
 need the coordinator timeout budget described under macOS pre-release checks.
 
+## Full release rehearsal before tagging
+
+Prepare the version bump and changelog on a release PR branch. Run the full
+rehearsal against the branch tip to catch failures before merging. Fixes change
+the commit, so rerun the rehearsal after each fix. A normal PR merge creates a
+new commit: push that final `main` commit, then rehearse it before creating the
+annotated release tag. Never tag a different commit from the approved one.
+
+```sh
+ngit ci trigger <coordinator-npub> <exact-main-commit> \
+  --workflow .ngit/nix/workflows/rehearsal.yaml \
+  --ref refs/heads/main --json
+ngit ci status <exact-main-commit> --json
+```
+
+The manual rehearsal waits for Linux Rust CI, Apple Silicon package/unit/CLI/
+HTTPS tests, all five archive builds, collection and the publisher check.
+Its `ready` job validates the release plan and shipped CLI again, then exports
+an unchanged copy of the collected archives. Check that this specific rehearsal
+workflow concluded successfully; a successful trigger request is not approval.
+It needs no publication credentials. The standalone macOS and archive workflows
+remain manually runnable for diagnosis, but are not a full rehearsal.
+
 ## Tag publication on ngit-ci
 
-`.ngit/nix/workflows/binary-release.yaml` runs on `v*` tag pushes. It waits
-for `ci.yaml` and `archives.yaml` at the tag commit, then gives both the NIP-82
-publisher and GitHub mirror the same verified `archives.collect` output.
-Missing prerequisite builds run automatically; failed checks block publication.
-PRs and branch pushes build artifacts without publishing releases.
+`.ngit/nix/workflows/binary-release.yaml` runs on `v*` tag pushes. It requires
+`rehearsal.yaml` at the exact tag commit and consumes its `rehearsal.ready`
+archive set. The coordinator reuses the compatible retained manual rehearsal
+and its exact dependency attempts; no release rebuild or repacking is needed.
+The NIP-82 `publish` job runs first, followed by GitHub `mirror`, then
+`update-setup`. These are separate jobs so each stage can be retried.
+
+The rehearsal's approval job refuses automatic or tag-context execution.
+Without a compatible green pre-tag rehearsal, automatic dependency admission
+may run checks/builds, but cannot approve them and cannot publish a release.
+Reuse requires the same coordinator, commit, workflow bytes, trust/selection
+policy and dependency attempts. A changed policy, newer prerequisite attempt,
+or lost coordinator history requires a fresh manual branch rehearsal. PR-context
+results are not substitutes for the final main-commit rehearsal. If a tag run
+already bound to a failed rehearsal, rerunning it retains that failure; it
+cannot adopt a later rehearsal. Confirm approval before creating the tag.
+Do not force-move or recreate a product tag, or manually trigger the whole
+publication graph: fresh manual triggers rerun dependencies in tag context,
+which the pre-tag approval guard deliberately rejects.
 
 The NIP-82 job checks the package version, all five archives, source commit,
 checksums and changelog before reading credentials. Provider checkouts omit
@@ -117,36 +154,31 @@ to finish updating the action. Do not create another release tag to retry it.
 
 ## GitHub release mirror
 
-The tag workflow mirrors the canonical ngit-ci binaries to GitHub.
-`.ngit/nix/workflows/github-mirror.yaml` also provides a manual recovery path
-for a tag that has not yet been mirrored. It creates a draft GitHub release,
-uploads the complete set under the existing tagged filenames, verifies
-GitHub's asset SHA-256 digests,
-and publishes the draft only after every upload succeeds. Retries skip exact
-copies and reject conflicting assets rather than replacing released bytes.
-Existing public releases keep their metadata and assets. After verifying all
-assets, a newer stable version advances GitHub's `latest` pointer; prereleases
-and old-version retries never move it backwards.
+After successful NIP-82 publication, the separate `mirror` job uploads the
+same archives to a draft GitHub release, verifies GitHub's asset SHA-256
+digests, then publishes it. Retries skip exact copies and reject conflicting
+assets. Existing public releases retain their metadata and assets; a newer
+stable version advances Latest, while prereleases and older retries do not.
 
-Configure `GH_RELEASE_TOKEN` as a repository secret in ngit-ci, using a
-GitHub token scoped to `DanConwayDev/ngit-cli` with Contents write permission.
-Authorize only the intended Linux publication provider to receive it. No
-GitHub Actions runner or `GITHUB_TOKEN` is used. The mirror requires the tag
-already to exist on GitHub and to peel to the exact artifact commit.
+`GH_RELEASE_TOKEN` supplies GitHub authentication. The GitHub product tag must
+already exist and peel to the exact artifact commit. No GitHub Actions runner
+or `GITHUB_TOKEN` participates in normal publication.
 
-After the tagged commit includes this workflow and its Git refs are mirrored:
+Use the completed **binary-release workflow result** from `ngit ci status`:
 
 ```sh
-ngit ci trigger <coordinator-npub> vX.Y.Z \
-  --workflow .ngit/nix/workflows/github-mirror.yaml \
-  --ref refs/tags/vX.Y.Z --json
+# Retry GitHub and its downstream setup-ngit promotion.
+ngit ci rerun <coordinator-npub> <completed-result> --job mirror --json
+# Or retry only setup-ngit after both publishers succeeded.
+ngit ci rerun <coordinator-npub> <completed-result> --job update-setup --json
+# Retry NIP-82 and all downstream publication jobs if needed.
+ngit ci rerun <coordinator-npub> <completed-result> --job publish --json
 ```
 
-A fresh manual request resolves a new dependency graph; to preserve the exact
-original bytes after a partial release, prefer rerunning the mirror job in the
-original `binary-release.yaml` run. Do not mirror new ngit-ci builds over an
-existing GitHub-built release: their bytes may differ and the mirror rejects
-that conflict. Existing historical releases are not deleted by this migration.
+Job reruns preserve the exact external rehearsal binding and archive bytes.
+There is no separate mirror-recovery workflow. Do not rebuild over an existing
+release or substitute different bytes for the same version. Historical releases
+are not deleted by this migration.
 
 ## Emergency GitHub fallback builds
 
@@ -245,7 +277,9 @@ It requires an available native `aarch64-darwin` provider with at least 8 GiB
 of RAM. Tart providers advertise total disk capacity rather than free scratch
 space, so this workflow does not require a `scratch-mib` capability. Check
 available disk space on the runner before a cold build. The workflow never
-publishes a release and does not run automatically on pushes or pull requests.
+publishes a release. It runs manually or as a required rehearsal dependency;
+ordinary pushes and pull requests do not independently trigger it. Commit
+reuse lets tag publication retain its successful pre-tag test result.
 
 Before the first cold run, check the coordinator's job timeout. Its default
 is 1,800 seconds for the entire job, including all builds and tests. A release

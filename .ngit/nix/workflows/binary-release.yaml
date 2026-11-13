@@ -6,25 +6,24 @@ on:
   push:
     tags: ["v*"]
 needs-workflows:
-  ci: ci.yaml
-  archives: archives.yaml
+  rehearsal: rehearsal.yaml
 jobs:
   publish:
-    needs: [archives.collect]
+    needs: [rehearsal.ready]
     run: archives.publish
     secrets: [NGIT_PUBLISHER_NBUNKSEC]
     concurrency:
       group: binary-release
       cancel-in-progress: false
   mirror:
-    needs: [archives.collect]
+    needs: [publish, rehearsal.ready]
     run: archives.mirror
     secrets: [GH_RELEASE_TOKEN]
     concurrency:
       group: github-release-mirror
       cancel-in-progress: false
   update-setup:
-    needs: [publish, mirror, archives.collect]
+    needs: [publish, mirror, rehearsal.ready]
     run: archives.update-setup
     secrets: [NGIT_PUBLISHER_NBUNKSEC, GH_RELEASE_TOKEN]
     concurrency:

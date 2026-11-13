@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New releases prefer relay.ngit.dev for Blossom downloads, retaining the
   existing replication servers. Stable releases then update setup-ngit on
   Nostr and GitHub, verifying its pins and installer before advancing the
-  floating action tag.
+  floating action tag. Publication requires an exact-commit manual rehearsal
+  covering Linux Rust CI, macOS tests and all archives, reuses those archive
+  bytes, and runs NIP-82, GitHub and setup-ngit as sequential retryable jobs.
 
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.
