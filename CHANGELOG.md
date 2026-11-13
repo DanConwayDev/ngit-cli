@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- CI watch help explains that provider capacity refusals are automatically
+  retried allocation attempts, and directs JSON stream consumers to the
+  coordinator workflow outcome before treating a run as failed.
+
 ### Added
 
 - `ngit pr applied <ID> --reason ...` records acceptance after a missed status

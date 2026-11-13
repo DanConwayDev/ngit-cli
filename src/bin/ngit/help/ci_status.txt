@@ -9,6 +9,10 @@ Watching:
   target is pinned to the revision resolved at startup; restart to follow
   a new revision.
 
+  A job startup_failure can be a busy-provider refusal that is retried
+  automatically, including in JSON output. Follow the coordinator's workflow
+  conclusion to determine the run's outcome.
+
 Watch JSON stream (--watch --json):
   Stdout is compact JSON Lines with no trailing summary document. `ref`
   values are run and allocation ID prefixes assigned once per invocation:
