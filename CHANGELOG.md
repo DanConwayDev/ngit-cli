@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same verified archives to GitHub Releases. GitHub-built alternatives
   are available only through a manual emergency workflow, with explicit
   fallback names, checksums and build provenance; they are never published
-  automatically as releases.
+  automatically as releases. New stable mirrors advance GitHub's latest
+  release pointer without letting older retries displace them.
 
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.

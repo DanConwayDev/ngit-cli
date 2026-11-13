@@ -65,7 +65,7 @@ class Publication(unittest.TestCase):
         env = dict(NGIT_CI_TRIGGER="push", NGIT_CI_REF_TYPE="tag", NGIT_CI_REF_NAME="v1.2.3-rc.1",
                    NGIT_CI_REF="refs/tags/v1.2.3-rc.1", NGIT_CI_COMMIT_SHA="a" * 40, NGIT_CI_INPUTS="inputs")
         for tag_type in ["tag", "commit"]:
-            with self.subTest(tag_type=tag_type), patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={}), patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, tag_type, "1700000000"]):
+            with self.subTest(tag_type=tag_type), patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={"prerelease": True}), patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, tag_type, "1700000000"]):
                 if tag_type == "tag":
                     self.assertEqual(publisher.prepare()[1:], ("1.2.3-rc.1", "rc", "1700000000"))
                 else:

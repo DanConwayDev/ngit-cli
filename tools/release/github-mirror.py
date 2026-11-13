@@ -3,6 +3,8 @@
 import json
 import os
 from pathlib import Path
+import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -32,6 +34,25 @@ class API:
                 return None
         with urllib.request.build_opener(NoRedirect).open(request, timeout=180) as response:
             return json.load(response)
+
+
+def promote_latest(api, release):
+    if release["prerelease"]:
+        return False
+    def stable_version(tag):
+        match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+[0-9A-Za-z.-]+)?", tag)
+        if not match:
+            raise ValueError(f"Cannot compare GitHub latest tag: {tag}")
+        return tuple(map(int, match.groups()))
+    candidate = stable_version(release["tag_name"])
+    try:
+        latest = api.call("GET", "releases/latest")
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code != 404:
+            raise
+        return True
+    return candidate > stable_version(latest["tag_name"])
 
 
 def mirror(api, release):
@@ -73,8 +94,13 @@ def mirror(api, release):
         uploaded = api.call("POST", f"releases/{release_id}/assets?name={name}", asset["path"].read_bytes(), upload=True)
         if uploaded.get("state") != "uploaded" or uploaded.get("digest") != f'sha256:{asset["sha256"]}':
             raise ValueError(f'GitHub upload verification failed: {asset["name"]}')
+    # Check immediately before publication while the workflow concurrency group
+    # serializes our mirrors. Older retries and prereleases never move latest.
+    latest = promote_latest(api, release)
     if existing["draft"]:
-        api.call("PATCH", f"releases/{release_id}", {"draft": False, "make_latest": "false"})
+        api.call("PATCH", f"releases/{release_id}", {"draft": False, "make_latest": "true" if latest else "false"})
+    elif latest:
+        api.call("PATCH", f"releases/{release_id}", {"make_latest": "true"})
     print(f'https://github.com/{REPOSITORY}/releases/tag/{release["tag_name"]}')
 
 

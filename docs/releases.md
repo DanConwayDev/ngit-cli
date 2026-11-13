@@ -84,9 +84,9 @@ uploads the complete set under the existing tagged filenames, verifies
 GitHub's asset SHA-256 digests,
 and publishes the draft only after every upload succeeds. Retries skip exact
 copies and reject conflicting assets rather than replacing released bytes.
-Existing public releases are never demoted to drafts or rewritten. Mirroring
-does not promote GitHub's `latest` pointer, so replaying an old stable release
-cannot displace a newer one.
+Existing public releases keep their metadata and assets. After verifying all
+assets, a newer stable version advances GitHub's `latest` pointer; prereleases
+and old-version retries never move it backwards.
 
 Configure `GITHUB_RELEASE_TOKEN` as a repository secret in ngit-ci, using a
 GitHub token scoped to `DanConwayDev/ngit-cli` with Contents write permission.

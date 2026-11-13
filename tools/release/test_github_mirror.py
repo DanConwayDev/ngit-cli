@@ -50,6 +50,7 @@ class Mirror(unittest.TestCase):
             {"object": {"type": "commit", "sha": "a" * 40}},
             [{"tag_name": "v1.2.3", "id": 1, "draft": False}],
             [{"name": "ngit.zip", "state": "uploaded", "digest": "sha256:abc"}],
+            {"tag_name": "v1.2.3"},
         ]
         module.mirror(api, self.release())
         self.assertTrue(all(call.args[0] == "GET" for call in api.call.call_args_list))
@@ -70,11 +71,11 @@ class Mirror(unittest.TestCase):
         api.call.side_effect = [
             {"object": {"type": "commit", "sha": "a" * 40}}, [],
             {"id": 1, "draft": True}, [],
-            {"state": "uploaded", "digest": "sha256:abc"}, {},
+            {"state": "uploaded", "digest": "sha256:abc"}, {"tag_name": "v1.2.2"}, {},
         ]
         module.mirror(api, self.release())
         self.assertTrue(api.call.call_args_list[2].args[2]["draft"])
-        self.assertEqual(api.call.call_args_list[-1].args, ("PATCH", "releases/1", {"draft": False, "make_latest": "false"}))
+        self.assertEqual(api.call.call_args_list[-1].args, ("PATCH", "releases/1", {"draft": False, "make_latest": "true"}))
 
     def test_failed_verification_leaves_draft(self):
         api = Mock()
@@ -86,3 +87,65 @@ class Mirror(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verification"):
             module.mirror(api, self.release())
         self.assertFalse(any(call.args[0] == "PATCH" for call in api.call.call_args_list))
+
+    def test_latest_advances_only_for_newer_stable_versions(self):
+        for tag, latest, expected in [("v1.10.0", "v1.9.9", True), ("v1.2.3", "v2.0.0", False),
+                                      ("v1.2.3+build-id", "v1.2.3", False), ("v2.0.0-rc.1", "v1.2.3", False)]:
+            with self.subTest(tag=tag, latest=latest):
+                api = Mock()
+                api.call.return_value = {"tag_name": latest}
+                release = dict(tag_name=tag, prerelease="-" in tag.split("+", 1)[0])
+                self.assertEqual(module.promote_latest(api, release), expected)
+                if release["prerelease"]:
+                    api.call.assert_not_called()
+
+    def test_first_stable_release_becomes_latest_but_api_errors_propagate(self):
+        for code in [404, 403, 500]:
+            with self.subTest(code=code):
+                api = Mock()
+                api.call.side_effect = module.urllib.error.HTTPError("https://api.github.com", code, "test", {}, None)
+                if code == 404:
+                    self.assertTrue(module.promote_latest(api, self.release()))
+                else:
+                    with self.assertRaises(module.urllib.error.HTTPError):
+                        module.promote_latest(api, self.release())
+
+    def test_public_older_release_retry_does_not_change_latest(self):
+        api = Mock()
+        api.call.side_effect = [
+            {"object": {"type": "commit", "sha": "a" * 40}},
+            [{"tag_name": "v1.2.3", "id": 1, "draft": False}],
+            [{"name": "ngit.zip", "state": "uploaded", "digest": "sha256:abc"}],
+            {"tag_name": "v2.0.0"},
+        ]
+        module.mirror(api, self.release())
+        self.assertTrue(all(call.args[0] == "GET" for call in api.call.call_args_list))
+
+    def test_public_newer_release_recovers_latest_without_reuploading(self):
+        api = Mock()
+        api.call.side_effect = [
+            {"object": {"type": "commit", "sha": "a" * 40}},
+            [{"tag_name": "v1.2.3", "id": 1, "draft": False}],
+            [{"name": "ngit.zip", "state": "uploaded", "digest": "sha256:abc"}],
+            {"tag_name": "v1.2.2"}, {},
+        ]
+        module.mirror(api, self.release())
+        self.assertEqual(api.call.call_args_list[-1].args, ("PATCH", "releases/1", {"make_latest": "true"}))
+        self.assertFalse(any(call.args[0] == "POST" for call in api.call.call_args_list))
+
+    def test_unknown_latest_tag_is_not_silently_replaced(self):
+        api = Mock()
+        api.call.return_value = {"tag_name": "custom-release"}
+        with self.assertRaisesRegex(ValueError, "Cannot compare"):
+            module.promote_latest(api, self.release())
+
+    def test_old_draft_publishes_without_becoming_latest(self):
+        api = Mock()
+        api.call.side_effect = [
+            {"object": {"type": "commit", "sha": "a" * 40}},
+            [{"tag_name": "v1.2.3", "id": 1, "draft": True}],
+            [{"name": "ngit.zip", "state": "uploaded", "digest": "sha256:abc"}],
+            {"tag_name": "v2.0.0"}, {},
+        ]
+        module.mirror(api, self.release())
+        self.assertEqual(api.call.call_args_list[-1].args, ("PATCH", "releases/1", {"draft": False, "make_latest": "false"}))

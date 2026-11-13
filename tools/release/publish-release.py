@@ -32,7 +32,8 @@ def prepare():
     if not released_at.isdigit() or int(released_at) <= 0:
         raise ValueError("Missing release tag date")
     version = tag[1:]
-    channel = version.split("-", 1)[1].split(".", 1)[0].split("+", 1)[0] if "-" in version else "main"
+    core_version = version.split("+", 1)[0]
+    channel = core_version.split("-", 1)[1].split(".", 1)[0] if release["prerelease"] else "main"
     return release, version, channel, released_at
 
 

@@ -28,5 +28,5 @@ def plan(directory, tag, commit):
     if not match:
         raise ValueError(f"Missing changelog section for {version}")
     return {"tag_name": tag, "target_commitish": commit, "name": tag,
-            "body": match.group(1).strip(), "prerelease": "-" in version,
+            "body": match.group(1).strip(), "prerelease": "-" in version.split("+", 1)[0],
             "assets": assets}
