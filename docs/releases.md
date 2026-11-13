@@ -82,6 +82,10 @@ publication before retrying.
 Never substitute different bytes for an already published version: issue a
 patch release for corrected binaries.
 
+The release manifest lists `https://relay.ngit.dev` first for Blossom
+publication, followed by Primal, Ditto and Haven as replication targets.
+The first confirmed server supplies the signed asset download URL.
+
 ## GitHub release mirror
 
 The tag workflow mirrors the canonical ngit-ci binaries to GitHub.

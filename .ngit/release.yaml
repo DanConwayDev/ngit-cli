@@ -21,6 +21,7 @@ icon: media/ngit.png
 release_notes: CHANGELOG.md
 publication:
   blossom_servers:
+    - https://relay.ngit.dev
     - https://blossom.primal.net
     - https://blossom.ditto.pub
     - https://haven.danconwaydev.com
