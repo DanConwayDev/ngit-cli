@@ -41,6 +41,9 @@ if 'docs:sync:ngit' in sys.argv:
  p=Path('sources.lock.json'); d=json.loads(p.read_text())
  d['sources']['ngit']['stable']={'version':'3.0.6','commit':os.environ['NGIT_CI_COMMIT_SHA']}
  p.write_text(json.dumps(d))
+ Path('docs/public').mkdir(parents=True,exist_ok=True)
+ Path('docs/public/install.sh').write_text('verified shell')
+ Path('docs/public/install.ps1').write_text('verified windows')
  Path('release/installer-promotion.json').write_text(json.dumps({'source':{'commit':os.environ['NGIT_CI_COMMIT_SHA']},'release':{'version':'3.0.6'}}))
 ''')
             ngit = tools / "ngit"
@@ -50,6 +53,15 @@ if 'docs:sync:ngit' in sys.argv:
             env["PATH"] = str(tools) + os.pathsep + env["PATH"]
             with patch.object(docs, "REPOSITORY", str(remote)), patch.object(docs, "wait_for_site") as wait, \
                  patch.dict(os.environ, {"NGIT_CI_SECRETS_DIR": str(root)}):
+                preview_root = root / "preview"
+                preview_root.mkdir()
+                docs.update("3.0.6", preview_root, {**env, "NGIT_RELEASE_PREVIEW": "1"},
+                            preview=preview_root / "proposal")
+                self.assertTrue((preview_root / "proposal/proposed.patch").read_text())
+                Git(preview_root / "ngit-docs", env).run("apply", "--reverse", "--check", str(preview_root / "proposal/proposed.patch"))
+                self.assertEqual((preview_root / "proposal/install.sh").read_text(), "verified shell")
+                wait.assert_not_called()
+                self.assertEqual(Git(preview_root / "ngit-docs", env).ref("origin", "refs/heads/main"), git.run("rev-parse", "HEAD"))
                 heads = []
                 for attempt in ("first", "retry"):
                     work = root / attempt

@@ -14,13 +14,19 @@ REPOSITORY = "DanConwayDev/ngit-cli"
 
 
 class API:
-    def __init__(self, token):
+    def __init__(self, token, read_only=False):
+        if not token and not read_only:
+            raise ValueError("GitHub writes require a token")
         self.token = token
+        self.read_only = read_only
 
     def call(self, method, path, data=None, upload=False):
+        if self.read_only and method != "GET":
+            raise ValueError("GitHub mutation is forbidden during rehearsal")
         host = "uploads.github.com" if upload else "api.github.com"
-        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-                   "X-GitHub-Api-Version": "2026-03-10"}
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if data is not None:
             if upload:
                 headers["Content-Type"] = "application/octet-stream"
@@ -55,7 +61,7 @@ def promote_latest(api, release):
     return candidate > stable_version(latest["tag_name"])
 
 
-def mirror(api, release):
+def mirror(api, release, dry_run=False):
     tag = urllib.parse.quote(release["tag_name"], safe="")
     ref = api.call("GET", f"git/ref/tags/{tag}")["object"]
     for _ in range(8):
@@ -74,6 +80,9 @@ def mirror(api, release):
             break
     else:
         raise ValueError("Release inventory exceeds scan bound")
+    if existing is None and dry_run:
+        return {"create_release": True, "upload": [a["name"] for a in release["assets"]],
+                "make_latest": promote_latest(api, release)}
     if existing is None:
         metadata = {k: v for k, v in release.items() if k != "assets"}
         existing = api.call("POST", "releases", {**metadata, "draft": True, "make_latest": "false"})
@@ -87,6 +96,10 @@ def mirror(api, release):
         old = by_name.get(asset["name"])
         if old and (old.get("state") != "uploaded" or old.get("digest") != f'sha256:{asset["sha256"]}'):
             raise ValueError(f'Existing GitHub asset differs or lacks a verified digest: {asset["name"]}')
+    if dry_run:
+        return {"create_release": False, "publish_draft": existing["draft"],
+                "upload": [a["name"] for a in release["assets"] if a["name"] not in by_name],
+                "make_latest": promote_latest(api, release)}
     for asset in release["assets"]:
         if asset["name"] in by_name:
             continue

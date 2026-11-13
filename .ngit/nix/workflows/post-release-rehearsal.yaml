@@ -1,0 +1,43 @@
+version: 1
+name: Post-release rehearsal
+system: x86_64-linux
+reuse: never
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    requirements:
+      resources:
+        memory-mib: {gte: 2048}
+        scratch-mib: {gte: 4096}
+    run: archives.post-release-verify
+    artifacts:
+      release: post-release
+  mirror:
+    needs: [verify]
+    run: archives.post-release-rehearsal
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release
+    secrets: [GH_RELEASE_TOKEN]
+  update-gh-setup:
+    needs: [verify]
+    run: archives.post-release-rehearsal
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release
+  update-docs:
+    needs: [verify]
+    run: archives.post-release-rehearsal
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release

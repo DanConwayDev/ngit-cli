@@ -36,6 +36,8 @@ class Git:
         self.directory, self.env = directory, env
 
     def run(self, *args):
+        if "push" in args and self.env.get("NGIT_RELEASE_PREVIEW") == "1":
+            raise RuntimeError("Publication is forbidden during rehearsal")
         cancel = self.env.get("NGIT_CI_CANCEL_FILE")
         if "push" in args and cancel and Path(cancel).exists():
             raise RuntimeError("Cancelled before setup-ngit publication")
@@ -77,7 +79,7 @@ def promote(git, commit, major, observed):
             raise ValueError(f"{remote} promotion incomplete; retry the release job")
 
 
-def update(version, root, env):
+def update(version, root, env, preview=None, validate=None):
     env = {**env, **BOT}
     repo = root / "setup-ngit"
     subprocess.run(["git", "clone", "--branch", "main", "--single-branch", CANONICAL, str(repo)],
@@ -107,6 +109,8 @@ def update(version, root, env):
     def run(*args, extra=None):
         subprocess.run(args, cwd=repo, env={**env, **(extra or {})}, check=True, timeout=900)
     run("node", "scripts/sync-release.mjs", version)
+    if validate is not None:
+        validate(repo)
     run("node", "--test", *[str(p.relative_to(repo)) for p in sorted((repo / "scripts").glob("*.test.mjs"))])
     run("bash", "scripts/install.sh", extra={"NGIT_SETUP_VERSION": version,
         "NGIT_SETUP_TARGET": "linux-x86_64-musl", "RUNNER_TOOL_CACHE": str(root / "tool-cache"),
@@ -119,6 +123,13 @@ def update(version, root, env):
         if changes != "M manifest.txt":
             raise ValueError("setup-ngit validation changed files other than manifest.txt")
         git.run("add", "manifest.txt")
+    if preview is not None:
+        preview.mkdir(parents=True, exist_ok=True)
+        patch = git.run("diff", "--cached", "--binary")
+        (preview / "proposed.patch").write_text(patch + ("\n" if patch else ""))
+        (preview / "manifest.txt").write_bytes((repo / "manifest.txt").read_bytes())
+        return
+    if changes:
         git.run("-c", "core.hooksPath=/dev/null", "commit",
                 "-m", f"chore: pin setup-ngit to verified ngit {version}",
                 "-m", "Verify canonical signed release assets before updating both distribution refs.")

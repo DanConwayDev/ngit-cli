@@ -77,7 +77,7 @@ def wait_for_site(repo, commit, env, timeout=600):
     raise TimeoutError(f"Docs commit {commit} was pushed; publication/live installer verification is pending. Retry update-docs.")
 
 
-def update(version, root, env):
+def update(version, root, env, preview=None, validate=None):
     env = {**env, **BOT}
     repo = root / "ngit-docs"
     subprocess.run(["git", "clone", "--branch", "main", "--single-branch", REPOSITORY, str(repo)],
@@ -90,6 +90,8 @@ def update(version, root, env):
     run("npm", "ci", "--ignore-scripts")
     run("npm", "run", "docs:sync:ngit", "--", "--ref", f"v{version}", "--stability", "stable")
     verify_promotion(repo, version, env["NGIT_CI_COMMIT_SHA"], before)
+    if validate is not None:
+        validate(repo)
     run("npm", "run", "nsite:build")
     git.run("diff", "--check")
     paths = set(git.run("diff", "--name-only", "-z").split("\0"))
@@ -99,6 +101,14 @@ def update(version, root, env):
         raise ValueError("Docs sync changed files outside generated release content")
     if paths:
         git.run("add", "--", *sorted(paths))
+    if preview is not None:
+        preview.mkdir(parents=True, exist_ok=True)
+        patch = git.run("diff", "--cached", "--binary")
+        (preview / "proposed.patch").write_text(patch + ("\n" if patch else ""))
+        for name in ("install.sh", "install.ps1"):
+            shutil.copyfile(repo / "docs/public" / name, preview / name)
+        return
+    if paths:
         git.run("-c", "core.hooksPath=/dev/null", "commit", "-m", f"docs: sync verified ngit {version}",
                 "-m", "Import the signed stable release and its checked installer templates.")
     commit = git.run("rev-parse", "HEAD")

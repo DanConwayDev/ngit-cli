@@ -68,6 +68,14 @@ class SetupPromotion(unittest.TestCase):
              patch.object(setup, "MIRROR", str(self.root / "github")), \
              patch.object(setup, "PRODUCT", str(self.root / "origin")), \
              patch.dict(os.environ, {"NGIT_CI_SECRETS_DIR": str(self.root)}):
+            preview_root = self.root / "preview"
+            preview_root.mkdir()
+            setup.update("3.0.6", preview_root, {**env, "NGIT_RELEASE_PREVIEW": "1"},
+                         preview=preview_root / "proposal")
+            self.assertTrue((preview_root / "proposal/proposed.patch").read_text())
+            setup.Git(preview_root / "setup-ngit", env).run("apply", "--reverse", "--check", str(preview_root / "proposal/proposed.patch"))
+            self.assertEqual(self.git.ref("origin", "refs/heads/main"), baseline)
+            self.assertEqual(self.git.ref("github", "refs/tags/v3"), baseline)
             for attempt in ("first", "retry"):
                 root = self.root / attempt
                 root.mkdir()

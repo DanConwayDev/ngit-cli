@@ -9,6 +9,17 @@ let
   vendor = craneLib.vendorCargoDeps { src = craneLib.cleanCargoSource src; };
   opensslPin = builtins.fromJSON (builtins.readFile ../../../tools/release/openssl-source.json);
   opensslSource = pkgs.fetchurl { inherit (opensslPin) url sha256; };
+  recoveryPin = builtins.fromJSON (builtins.readFile ../../../tools/release/recovery-cli.json);
+  recoveryCli = pkgs.stdenvNoCC.mkDerivation {
+    pname = "ngit-recovery-cli";
+    inherit (recoveryPin) version;
+    src = pkgs.fetchurl { inherit (recoveryPin) url sha256; name = "ngit-recovery.tar.gz"; };
+    sourceRoot = ".";
+    installPhase = ''
+      mkdir -p "$out/bin"
+      install -m755 ngit git-remote-nostr "$out/bin/"
+    '';
+  };
   base = with pkgs; [ python3 bash git coreutils cacert ];
   command = name: inputs: script: pkgs.writeShellApplication {
     inherit name;
@@ -44,6 +55,15 @@ in {
   '';
   update-docs = command "update-ngit-docs" [ pkgs.nodejs ] ''
     python3 tools/release/update_docs.py
+  '';
+  post-release-verify = command "verify-published-release" [ recoveryCli ] ''
+    python3 tools/release/post_release.py
+  '';
+  post-release-rehearsal = command "rehearse-post-release" [ recoveryCli pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+    python3 tools/release/post_release.py
+  '';
+  post-release-apply = command "apply-post-release" [ recoveryCli pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+    python3 tools/release/post_release.py --apply
   '';
   collect = command "collect-release-archives" [] ''
     python3 -m unittest discover -s tools/release

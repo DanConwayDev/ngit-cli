@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rehearse post-release GitHub, setup-ngit and documentation updates without
+  publishing, and apply reviewed repair code to a pinned existing signed
+  release without rebuilding or replacing its binaries.
+
 - Standalone shell and Windows installers retry other Blossom servers and
   the versioned GitHub mirror when a download fails or its checksum differs,
   verifying the signed hash before extracting any archive.

@@ -215,6 +215,72 @@ There is no separate mirror-recovery workflow. Do not rebuild over an existing
 release or substitute different bytes for the same version. Historical releases
 are not deleted by this migration.
 
+## Repair a post-release job with newer code
+
+An ordinary `ci rerun --job` executes the original workflow code and retains
+its dependency artifacts. Use it for transient failures. It cannot pick up a
+fix committed after the release. For code fixes, use the separate manual
+post-release rehearsal and apply workflows. They never build binaries, publish
+NIP-82 events, create a product tag, or move an existing product tag.
+
+1. Create a repair PR containing the job fix. Set `.ngit/post-release.json` to
+   the **existing** release version, its canonical source commit, exact signed
+   NIP-82 release-event ID, and selected operation names. Native manual triggers
+   do not currently have arbitrary form inputs, so this file is the reviewed
+   recovery request, frozen with the repair commit. Its default empty values
+   deliberately fail before any side effects.
+2. Trigger `post-release-rehearsal.yaml` at that repair commit. Review its
+   `proposal` artifacts: GitHub's proposed actions, setup-ngit's manifest and
+   patch, and the docs patch and rendered installers. The jobs run the real
+   verification, preparation, tests and installer/site checks, then stop before
+   login, commits or pushes. GitHub requests are GET-only; Git pushes are guarded
+   against rehearsal use. These checks cannot prove write permissions.
+3. Merge the reviewed fix and request, then manually trigger
+   `post-release-apply.yaml` at the current canonical main commit. Apply rejects
+   PR/other-ref contexts or a main commit that advanced while the job queued.
+   Selected operations run with the configured publication secrets; unselected
+   jobs emit a skipped-operation report. Setup-ngit and docs follow the mirror
+   job if it is selected. If it is not selected, they can be repaired separately.
+4. Check the exact run's final results. Job-level reruns within this recovery
+   run reuse its verified release input. A further code fix needs another
+   rehearsal and fresh apply invocation, not a rerun of obsolete code.
+
+Example request (replace all identity fields from the verified release):
+
+```json
+{
+  "schema": 1,
+  "version": "3.0.6",
+  "commit": "<original 40-character release commit>",
+  "release_event": "<original 64-character signed release event ID>",
+  "operations": ["mirror", "update-gh-setup", "update-docs"]
+}
+```
+
+```sh
+ngit release view 3.0.6 --verify --json
+ngit ci trigger <coordinator-npub> <repair-pr-commit> \
+  --workflow .ngit/nix/workflows/post-release-rehearsal.yaml \
+  --ref refs/heads/pr/release-repair --json
+# After review and merge, use the new canonical main commit:
+ngit ci trigger <coordinator-npub> <repair-main-commit> \
+  --workflow .ngit/nix/workflows/post-release-apply.yaml \
+  --ref refs/heads/main --json
+```
+
+The verification job fetches the original annotated tag, verifies the pinned
+NIP-82 event's author/application/source and all five bodies, downloads the
+signed content-addressed assets, then checks the tag again. It bootstraps with
+a checksum-pinned released CLI (`tools/release/recovery-cli.json`), without a
+Rust rebuild. Consumers recheck artifact hashes and refuse pins that differ
+from the selected release. Their exporter and installer use the original CLI;
+the job logic comes from the repair checkout. Reports record both commits.
+
+Stable setup-ngit and docs promotions still reject downgrades. For prereleases,
+only `mirror` is supported. A missing or conflicting GitHub product tag requires
+syncing the correct immutable ref separately. This recovery path cannot repair
+an unpublished NIP-82 release: retry that publication in its original tag run.
+
 ## Emergency GitHub fallback builds
 
 `.github/workflows/fallback-binaries.yml` is manual only. It has read-only
