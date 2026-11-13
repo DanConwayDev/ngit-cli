@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publisher and its secret-free rehearsal use the verified static Linux
   binary from the release set, avoiding a separate CLI build at publication.
   New releases prefer relay.ngit.dev for Blossom downloads, retaining the
-  existing replication servers.
+  existing replication servers. Stable releases then update setup-ngit on
+  Nostr and GitHub, verifying its pins and installer before advancing the
+  floating action tag.
 
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.

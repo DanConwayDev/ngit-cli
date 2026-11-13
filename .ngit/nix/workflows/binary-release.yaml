@@ -23,3 +23,10 @@ jobs:
     concurrency:
       group: github-release-mirror
       cancel-in-progress: false
+  update-setup:
+    needs: [publish, mirror, archives.collect]
+    run: archives.update-setup
+    secrets: [NGIT_PUBLISHER_NBUNKSEC, GH_RELEASE_TOKEN]
+    concurrency:
+      group: setup-ngit-release
+      cancel-in-progress: false

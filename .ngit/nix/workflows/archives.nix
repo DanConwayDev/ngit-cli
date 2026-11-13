@@ -36,6 +36,9 @@ in {
   mirror = command "mirror-release-archives" [] ''
     python3 tools/release/github-mirror.py
   '';
+  update-setup = command "update-setup-ngit" [ pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+    python3 tools/release/setup_ngit.py
+  '';
   collect = command "collect-release-archives" [] ''
     python3 -m unittest discover -s tools/release
     python3 tools/release/archives.py collect "$NGIT_CI_INPUTS" "$NGIT_CI_OUTPUT_DIR/release"

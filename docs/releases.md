@@ -86,6 +86,35 @@ The release manifest lists `https://relay.ngit.dev` first for Blossom
 publication, followed by Primal, Ditto and Haven as replication targets.
 The first confirmed server supplies the signed asset download URL.
 
+## Automatic setup-ngit promotion
+
+After the canonical publisher and GitHub mirror both succeed, the tag workflow
+runs `update-setup`. For final `vX.Y.Z` releases it clones setup-ngit's canonical
+Nostr `main`, runs its signed-release sync verifier and offline tests, and
+smoke-tests the static Linux installer in an isolated tool cache. It checks the
+canonical product tag against this job's archive commit before and after
+validation. Prereleases skip this job's work without reading secrets.
+
+The job commits only `manifest.txt`, publishes setup-ngit `main` to Nostr and
+GitHub, verifies both refs, then advances the matching floating action tag
+(`v3`, for example) using explicit leases. Concurrent changes stop promotion;
+retries can finish missing mirror/tag pushes. Existing pins, downgrades and
+major-version crossings remain protected by setup-ngit's sync verifier. A
+new major still requires a reviewed promotion plan.
+
+Deploy setup-ngit's Blossom-only metadata compatibility change before enabling
+this job. Its canonical repository remains on Nostr; GitHub serves the action
+for `uses: DanConwayDev/setup-ngit@v3`. This job is not a general dependency
+update or a replacement for testing the installer on other operating systems.
+
+The existing `NGIT_PUBLISHER_NBUNKSEC` signer must have push authority in
+setup-ngit. Scope `GH_RELEASE_TOKEN` to both `DanConwayDev/ngit-cli` and
+`DanConwayDev/setup-ngit` with Contents write and Workflows write (Git pushes
+may include workflow changes). Credentials are used from secret files and an
+isolated disposable account directory, never embedded in clone URLs. A failure
+after release publication leaves the release available; rerun the failed job
+to finish updating the action. Do not create another release tag to retry it.
+
 ## GitHub release mirror
 
 The tag workflow mirrors the canonical ngit-ci binaries to GitHub.
