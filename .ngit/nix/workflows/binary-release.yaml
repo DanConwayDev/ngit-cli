@@ -10,10 +10,6 @@ needs-workflows:
   archives: archives.yaml
 jobs:
   publish:
-    requirements:
-      resources:
-        memory-mib: {gte: 8192}
-        scratch-mib: {gte: 16384}
     needs: [archives.collect]
     run: archives.publish
     secrets: [NGIT_PUBLISHER_NBUNKSEC]

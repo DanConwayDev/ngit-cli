@@ -38,8 +38,9 @@ ngit ci trigger <coordinator-npub> HEAD \
 
 The workflow must exist in the published commit. PR jobs require hardware VM
 providers and receive no release secrets. After collection, `publisher-check`
-realizes the same ngit CLI used for publication, checks its release command,
-and validates publication inputs without a tag or credentials. Cold builds may
+validates publication inputs, then extracts the verified static Linux CLI and
+checks its release command without a tag or credentials. Publication uses the
+same shipped binary; it does not compile another CLI. Cold archive builds may
 need the coordinator timeout budget described under macOS pre-release checks.
 
 ## Tag publication on ngit-ci
@@ -60,11 +61,11 @@ does not depend on a GitHub mirror being available.
 
 Configure `NGIT_PUBLISHER_NBUNKSEC` as a repository secret in ngit-ci, using
 the established release publisher session previously used on GitHub. Grant it
-only to the intended publication provider. The job builds its ngit CLI from
-the same source through Nix and requests 8 GiB RAM and 16 GiB scratch space.
-The checkout-specific CLI and its Cargo vendor directory are realized locally;
-shared toolchain dependencies still use the configured binary caches. This
-avoids cold application-cache lookups disabling toolchain substitution.
+only to the intended publication provider. After validating the complete set,
+the job extracts its static x86-64 Linux CLI and Git helper into a temporary
+directory. It checks the release command, uses those binaries for tag fetching
+and publication, then removes them. No separate compiler or Cargo dependency
+realization is required in the publication job.
 Credentials remain runtime secret files, outside Nix derivations and caches.
 The GitHub mirror has a separate secret and concurrency group, so its failure
 does not block or undo NIP-82 publication. Crates.io publication remains a

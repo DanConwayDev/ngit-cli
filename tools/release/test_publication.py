@@ -1,4 +1,5 @@
 """Publication boundaries: validate source and artifacts before any signing."""
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
@@ -17,6 +18,11 @@ spec.loader.exec_module(publisher)
 
 
 class Publication(unittest.TestCase):
+    def setUp(self):
+        cli = patch.object(publisher, "environment", side_effect=lambda release: nullcontext({"PATH": "verified-cli"}))
+        cli.start()
+        self.addCleanup(cli.stop)
+
     def fixture(self, directory):
         version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
         reports = []
@@ -67,10 +73,12 @@ class Publication(unittest.TestCase):
         for tag_type in ["tag", "commit"]:
             with self.subTest(tag_type=tag_type), patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={"prerelease": True}), patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, tag_type, "1700000000"]):
                 if tag_type == "tag":
-                    self.assertEqual(publisher.prepare()[1:], ("1.2.3-rc.1", "rc", "1700000000"))
+                    with publisher.prepare() as result:
+                        self.assertEqual(result[1:4], ("1.2.3-rc.1", "rc", "1700000000"))
                 else:
                     with self.assertRaisesRegex(ValueError, "annotated"):
-                        publisher.prepare()
+                        with publisher.prepare():
+                            pass
 
     def test_publication_preserves_verified_bytes_and_explicit_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -84,7 +92,7 @@ class Publication(unittest.TestCase):
             real_path = publisher.Path
             def path(value):
                 return root / "artifacts" if value == "artifacts" else real_path(value)
-            with patch.dict(os.environ, {"NGIT_CI_SECRETS_DIR": str(root)}, clear=True), patch.object(publisher, "Path", side_effect=path), patch.object(publisher, "prepare", return_value=(release, version, "main", "1700000000")), patch.object(publisher.subprocess, "run") as run:
+            with patch.dict(os.environ, {"NGIT_CI_SECRETS_DIR": str(root)}, clear=True), patch.object(publisher, "Path", side_effect=path), patch.object(publisher, "prepare", return_value=nullcontext((release, version, "main", "1700000000", {"PATH": "verified-cli"}))), patch.object(publisher.subprocess, "run") as run:
                 publisher.main()
             for asset in release["assets"]:
                 self.assertEqual((root / "artifacts" / asset["name"]).read_bytes(), asset["path"].read_bytes())
@@ -93,6 +101,7 @@ class Publication(unittest.TestCase):
             self.assertEqual(args[args.index("--commit") + 1], "a" * 40)
             self.assertEqual(args[args.index("--tag") + 1], f"v{version}")
             self.assertNotIn("test-credential", args)
+            self.assertEqual(run.call_args.kwargs["env"]["PATH"], "verified-cli")
 
     def test_cancelled_job_does_not_publish(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -101,7 +110,7 @@ class Publication(unittest.TestCase):
             cancel = root / "cancel"
             cancel.touch()
             env = dict(NGIT_CI_SECRETS_DIR=str(root), NGIT_CI_CANCEL_FILE=str(cancel))
-            with patch.dict(os.environ, env, clear=True), patch.object(publisher, "prepare", return_value=({}, "1.2.3", "main", "1700000000")), patch.object(publisher.subprocess, "run") as run:
+            with patch.dict(os.environ, env, clear=True), patch.object(publisher, "prepare", return_value=nullcontext(({}, "1.2.3", "main", "1700000000", {}))), patch.object(publisher.subprocess, "run") as run:
                 with self.assertRaisesRegex(RuntimeError, "Cancelled"):
                     publisher.main()
                 run.assert_not_called()
@@ -110,5 +119,6 @@ class Publication(unittest.TestCase):
         env = dict(NGIT_CI_TRIGGER="manual", NGIT_CI_REF_TYPE="tag", NGIT_CI_REF_NAME="v1.2.3",
                    NGIT_CI_REF="refs/tags/v1.2.3", NGIT_CI_COMMIT_SHA="a" * 40, NGIT_CI_INPUTS="inputs")
         with patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={"prerelease": False}) as plan, patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, "tag", "1700000000"]):
-            self.assertEqual(publisher.prepare()[1:], ("1.2.3", "main", "1700000000"))
+            with publisher.prepare() as result:
+                self.assertEqual(result[1:4], ("1.2.3", "main", "1700000000"))
             self.assertEqual(plan.call_args.args[1:], ("v1.2.3", "a" * 40))
