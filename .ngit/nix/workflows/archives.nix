@@ -39,8 +39,11 @@ in {
   mirror = command "mirror-release-archives" [] ''
     python3 tools/release/github-mirror.py
   '';
-  update-setup = command "update-setup-ngit" [ pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+  update-gh-setup = command "update-gh-setup-ngit" [ pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
     python3 tools/release/setup_ngit.py
+  '';
+  update-docs = command "update-ngit-docs" [ pkgs.nodejs ] ''
+    python3 tools/release/update_docs.py
   '';
   collect = command "collect-release-archives" [] ''
     python3 -m unittest discover -s tools/release

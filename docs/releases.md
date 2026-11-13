@@ -73,7 +73,8 @@ remain manually runnable for diagnosis, but are not a full rehearsal.
 archive set. The coordinator reuses the compatible retained manual rehearsal
 and its exact dependency attempts; no release rebuild or repacking is needed.
 The NIP-82 `publish` job runs first, followed by GitHub `mirror`, then
-`update-setup`. These are separate jobs so each stage can be retried.
+`update-gh-setup` and `update-docs` independently. These are separate jobs so
+each stage can be retried.
 
 The rehearsal's approval job refuses automatic or tag-context execution.
 Without a compatible green pre-tag rehearsal, automatic dependency admission
@@ -126,7 +127,7 @@ The first confirmed server supplies the signed asset download URL.
 ## Automatic setup-ngit promotion
 
 After the canonical publisher and GitHub mirror both succeed, the tag workflow
-runs `update-setup`. For final `vX.Y.Z` releases it clones setup-ngit's canonical
+runs `update-gh-setup`. For final `vX.Y.Z` releases it clones setup-ngit's canonical
 Nostr `main`, runs its signed-release sync verifier and offline tests, and
 smoke-tests the static Linux installer in an isolated tool cache. It checks the
 canonical product tag against this job's archive commit before and after
@@ -151,6 +152,38 @@ may include workflow changes). Credentials are used from secret files and an
 isolated disposable account directory, never embedded in clone URLs. A failure
 after release publication leaves the release available; rerun the failed job
 to finish updating the action. Do not create another release tag to retry it.
+Automation explicitly sets both Git author and committer to
+`ngit Release Bot <release-bot@ngit.dev>`; the bunker authorizes the push,
+not the Git author identity.
+
+## Automatic documentation and installer promotion
+
+The separate `update-docs` job also waits for the GitHub mirror. Final releases
+sync the exact stable tag into canonical ngit-docs, verify the installer and
+source promotion records against the release commit, and run `nsite:build`.
+It commits only generated documentation, stable imports and installer records,
+using the same release-bot identity. Concurrent main changes stop the push.
+Prereleases do not change the public stable installers or documentation.
+
+Merge the ngit-docs prebuilt-exporter companion PR before enabling this job.
+The docs sync receives the verified release CLI and its provenance commit,
+avoiding another Rust/Nix build. Ordinary manual docs syncs still build from
+the pinned source. The existing publisher bunker needs ngit-docs push authority;
+this job does not need the GitHub token or a new site-publishing credential.
+
+The push triggers ngit-docs' own validation and nsite publication workflow.
+The job waits up to ten minutes for its exact-commit, maintainer-directed
+publication success and matching live `/install.sh` and `/install.ps1` hashes.
+If publication is slow or fails, the release and docs commit remain intact;
+rerun `update-docs` to finish verification. A push alone is not deployment.
+
+Both tagged installer templates try the signed primary Blossom URL first
+(normally relay.ngit.dev for new releases), then relay.ngit.dev, Primal, Ditto
+and Haven replicas without duplicate requests, and finally the versioned
+GitHub asset. Every attempt must match the same signed SHA-256 before extraction.
+The stable docs sync renders these templates from the release tag; existing
+published installers do not change until that downstream deployment succeeds.
+
 
 ## GitHub release mirror
 
@@ -170,7 +203,9 @@ Use the completed **binary-release workflow result** from `ngit ci status`:
 # Retry GitHub and its downstream setup-ngit promotion.
 ngit ci rerun <coordinator-npub> <completed-result> --job mirror --json
 # Or retry only setup-ngit after both publishers succeeded.
-ngit ci rerun <coordinator-npub> <completed-result> --job update-setup --json
+ngit ci rerun <coordinator-npub> <completed-result> --job update-gh-setup --json
+# Retry only the docs sync/publication verification.
+ngit ci rerun <coordinator-npub> <completed-result> --job update-docs --json
 # Retry NIP-82 and all downstream publication jobs if needed.
 ngit ci rerun <coordinator-npub> <completed-result> --job publish --json
 ```

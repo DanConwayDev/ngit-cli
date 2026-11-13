@@ -22,10 +22,21 @@ jobs:
     concurrency:
       group: github-release-mirror
       cancel-in-progress: false
-  update-setup:
+  update-gh-setup:
     needs: [publish, mirror, rehearsal.ready]
-    run: archives.update-setup
+    run: archives.update-gh-setup
     secrets: [NGIT_PUBLISHER_NBUNKSEC, GH_RELEASE_TOKEN]
     concurrency:
       group: setup-ngit-release
+      cancel-in-progress: false
+  update-docs:
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    needs: [mirror, rehearsal.ready]
+    run: archives.update-docs
+    secrets: [NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: ngit-docs-release
       cancel-in-progress: false

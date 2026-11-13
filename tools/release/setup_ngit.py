@@ -14,6 +14,10 @@ CANONICAL = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5c
 MIRROR = "https://github.com/DanConwayDev/setup-ngit.git"
 
 
+BOT = {"GIT_AUTHOR_NAME": "ngit Release Bot", "GIT_AUTHOR_EMAIL": "release-bot@ngit.dev",
+       "GIT_COMMITTER_NAME": "ngit Release Bot", "GIT_COMMITTER_EMAIL": "release-bot@ngit.dev"}
+
+
 def stable_version(env):
     if env.get("NGIT_CI_TRIGGER") not in ("push", "manual") or env.get("NGIT_CI_REF_TYPE") != "tag":
         raise ValueError("setup-ngit publication requires an authorized tag context")
@@ -74,6 +78,7 @@ def promote(git, commit, major, observed):
 
 
 def update(version, root, env):
+    env = {**env, **BOT}
     repo = root / "setup-ngit"
     subprocess.run(["git", "clone", "--branch", "main", "--single-branch", CANONICAL, str(repo)],
                    env=env, check=True, timeout=600)
@@ -114,8 +119,7 @@ def update(version, root, env):
         if changes != "M manifest.txt":
             raise ValueError("setup-ngit validation changed files other than manifest.txt")
         git.run("add", "manifest.txt")
-        git.run("-c", "user.name=ngit release automation", "-c",
-                "user.email=release@ngit.dev", "-c", "core.hooksPath=/dev/null", "commit",
+        git.run("-c", "core.hooksPath=/dev/null", "commit",
                 "-m", f"chore: pin setup-ngit to verified ngit {version}",
                 "-m", "Verify canonical signed release assets before updating both distribution refs.")
     commit = git.run("rev-parse", "HEAD")
@@ -152,7 +156,7 @@ def main():
             raise ValueError("GH_RELEASE_TOKEN is empty")
         askpass = root / "askpass"
         write_askpass(askpass)
-        env = {**cli_env, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
+        env = {**cli_env, **BOT, "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
                "XDG_DATA_HOME": str(home / "data"), "XDG_CACHE_HOME": str(home / "cache"),
                "GIT_CONFIG_GLOBAL": str(home / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
                "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": str(askpass), "LC_ALL": "C",

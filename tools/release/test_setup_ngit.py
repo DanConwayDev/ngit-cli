@@ -76,6 +76,8 @@ class SetupPromotion(unittest.TestCase):
                 if attempt == "first":
                     promoted = head
                     self.assertNotEqual(promoted, baseline)
+                    author = setup.Git(root / "setup-ngit", env).run("show", "-s", "--format=%an <%ae>|%cn <%ce>", promoted)
+                    self.assertEqual(author, "ngit Release Bot <release-bot@ngit.dev>|ngit Release Bot <release-bot@ngit.dev>")
                 self.assertEqual(head, promoted)
                 for remote in ("origin", "github"):
                     self.assertEqual(self.git.ref(remote, "refs/tags/v3"), promoted)
