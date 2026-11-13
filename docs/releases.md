@@ -394,8 +394,12 @@ qualified by a native run of this preflight.
 The workflow builds the Apple Silicon Nix package, starts its `ngit` binary,
 runs library and CLI unit tests, and exercises the exact packaged binary pair
 against a local HTTPS Git server. The library tests include Reqwest certificate
-trust and hostname rejection; the Git test checks a trusted clone and rejection
-of an unrelated trust anchor through libgit2. All network fixtures are local.
+trust and hostname rejection. The Mac Git test checks rejection of an untrusted
+certificate and requires a TLS certificate exchange with the local server.
+Apple SecureTransport does not use the fixture's process-local CA file, so the
+trusted Git clone check runs on Linux only. The test does not modify the Mac
+user's keychain. Successful trusted Git HTTPS on macOS remains a coverage gap;
+do not count this rejection check as that acceptance test. All fixtures are local.
 
 Use the repository's coordinator public key (shown on its existing CI runs
 by `ngit ci status --json`) and request the exact candidate commit:

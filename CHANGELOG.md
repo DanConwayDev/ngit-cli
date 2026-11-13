@@ -56,8 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scopes` object, and install results name their `scope`. Thanks to
   hzrd149.
 - An optional manual macOS pre-release workflow builds the Apple Silicon Nix
-  package and checks its startup, unit tests, and Git HTTPS trust handling
-  before a release is tagged.
+  package and checks its startup, unit tests, and rejection of untrusted Git
+  HTTPS certificates before a release is tagged. Trusted Git HTTPS fixture
+  checks run on Linux; macOS SecureTransport requires system trust rather than
+  the fixture's process-local CA file. Rejection checks require a TLS
+  certificate exchange, not merely a failed clone.
 
 - `--help` now explains workflows as well as flags. `ngit --help` ends with a
   map from tasks to the command help that covers them, plus the conventions

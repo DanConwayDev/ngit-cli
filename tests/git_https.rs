@@ -1,6 +1,7 @@
-//! Exercise the shipped helper pair against a local trusted/untrusted HTTPS Git
-//! server. Set NGIT_TLS_TEST_BIN_DIR to an unpacked release archive to test
-//! those exact bytes.
+//! Exercise the helper pair against a local HTTPS Git server. Linux also
+//! checks a trusted clone using a process-local CA. macOS SecureTransport uses
+//! the system trust store, so its local fixture checks certificate rejection.
+//! Set NGIT_TLS_TEST_BIN_DIR to test an unpacked archive's exact bytes.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -13,8 +14,16 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use test_harness::Harness;
 use tokio::{net::TcpListener, task::JoinSet};
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn helper_pair_clones_git_https_and_rejects_untrusted_certificate() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(120), exercise()).await??;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn helper_pair_rejects_untrusted_git_https_certificate() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(120), exercise()).await??;
     Ok(())
 }
@@ -65,6 +74,7 @@ async fn exercise() -> Result<()> {
     // JoinSet drop aborts the listener and all connection tasks, including on
     // failure.
     let mut servers = JoinSet::<Result<()>>::new();
+    let (tls_progress, mut tls_events) = tokio::sync::mpsc::unbounded_channel();
     servers.spawn(async move {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
         let mut connections = JoinSet::new();
@@ -74,10 +84,25 @@ async fn exercise() -> Result<()> {
                     let (stream, _) = accepted?;
                     let acceptor = acceptor.clone();
                     let upstream = upstream.clone();
+                    let tls_progress = tls_progress.clone();
                     connections.spawn(async move {
-                        if let Ok(mut tls) = acceptor.accept(stream).await {
-                            let mut backend = tokio::net::TcpStream::connect(upstream).await?;
-                            tokio::io::copy_bidirectional(&mut tls, &mut backend).await?;
+                        match acceptor.accept(stream).await {
+                            Ok(mut tls) => {
+                                let _ = tls_progress.send((true, String::new()));
+                                let mut backend = tokio::net::TcpStream::connect(upstream).await?;
+                                tokio::io::copy_bidirectional(&mut tls, &mut backend).await?;
+                            }
+                            Err(error) => {
+                                let certificate_alert = matches!(
+                                    error.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()),
+                                    Some(rustls::Error::AlertReceived(
+                                        rustls::AlertDescription::UnknownCA
+                                            | rustls::AlertDescription::CertificateUnknown
+                                            | rustls::AlertDescription::BadCertificate
+                                    ))
+                                );
+                                let _ = tls_progress.send((certificate_alert, error.to_string()));
+                            }
                         }
                         Ok::<_, anyhow::Error>(())
                     });
@@ -135,10 +160,18 @@ async fn exercise() -> Result<()> {
         keys.public_key().to_bech32()?,
         urlencoding::encode(&relay)
     );
-    let cloned = harness.clone_url_with_git_config(&url, &[]).await?;
-    ensure!(
-        std::fs::read_to_string(cloned.dir().join("HTTPS.txt"))? == "verified HTTPS Git objects\n"
-    );
+    // SecureTransport does not support process-local CA file overrides. Do
+    // not mutate the Mac user's keychain to make this fixture trusted.
+    #[cfg(target_os = "linux")]
+    {
+        let cloned = harness.clone_url_with_git_config(&url, &[]).await?;
+        ensure!(
+            std::fs::read_to_string(cloned.dir().join("HTTPS.txt"))?
+                == "verified HTTPS Git objects\n"
+        );
+    }
+    // Discard exchanges from the successful Linux clone.
+    while tls_events.try_recv().is_ok() {}
     let untrusted = harness.fresh_repo()?;
     let unrelated_ca = directory.path().join("unrelated-ca.pem");
     let encoded = STANDARD.encode(webpki_root_certs::TLS_SERVER_ROOT_CERTS[0].as_ref());
@@ -158,5 +191,20 @@ async fn exercise() -> Result<()> {
         "untrusted Git HTTPS certificate was accepted"
     );
     ensure!(!untrusted.dir().join("rejected/HTTPS.txt").exists());
+    // Exclude failures before the helper reaches TLS. OpenSSL can complete
+    // the handshake before libgit2 rejects the peer; SecureTransport may
+    // send a certificate alert during the handshake instead.
+    let mut errors = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some((exchanged_certificate, error)) = tls_events.recv().await {
+            if exchanged_certificate {
+                return Ok(());
+            }
+            errors.push(error);
+        }
+        anyhow::bail!("TLS server stopped before observing a certificate exchange")
+    })
+    .await
+    .with_context(|| format!("no TLS certificate exchange observed; TLS errors: {errors:?}"))??;
     Ok(())
 }
