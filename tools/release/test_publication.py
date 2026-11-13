@@ -46,9 +46,9 @@ class Publication(unittest.TestCase):
                     release_plan.plan(root, f"v{version}", "a" * 40)
 
     def test_invalid_context_never_fetches_or_publishes(self):
-        for trigger, ref_type in [("pull_request", "branch"), ("manual", "tag"), ("push", "branch")]:
+        for trigger, ref_type in [("pull_request", "branch"), ("manual", "branch"), ("push", "branch")]:
             with self.subTest(trigger=trigger, ref_type=ref_type), patch.dict(os.environ, dict(NGIT_CI_TRIGGER=trigger, NGIT_CI_REF_TYPE=ref_type), clear=True), patch.object(publisher.subprocess, "run") as run:
-                with self.assertRaisesRegex(ValueError, "tag push"):
+                with self.assertRaisesRegex(ValueError, "tag context"):
                     publisher.main()
                 run.assert_not_called()
 
@@ -105,3 +105,10 @@ class Publication(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Cancelled"):
                     publisher.main()
                 run.assert_not_called()
+
+    def test_manual_restart_retains_verified_tag_context(self):
+        env = dict(NGIT_CI_TRIGGER="manual", NGIT_CI_REF_TYPE="tag", NGIT_CI_REF_NAME="v1.2.3",
+                   NGIT_CI_REF="refs/tags/v1.2.3", NGIT_CI_COMMIT_SHA="a" * 40, NGIT_CI_INPUTS="inputs")
+        with patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={"prerelease": False}) as plan, patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, "tag", "1700000000"]):
+            self.assertEqual(publisher.prepare()[1:], ("1.2.3", "main", "1700000000"))
+            self.assertEqual(plan.call_args.args[1:], ("v1.2.3", "a" * 40))

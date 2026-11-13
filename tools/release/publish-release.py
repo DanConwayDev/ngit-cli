@@ -11,8 +11,8 @@ REPOSITORY = "nostr://npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5
 
 
 def prepare():
-    if os.environ.get("NGIT_CI_TRIGGER") != "push" or os.environ.get("NGIT_CI_REF_TYPE") != "tag":
-        raise ValueError("Release publication requires a tag push")
+    if os.environ.get("NGIT_CI_TRIGGER") not in ("push", "manual") or os.environ.get("NGIT_CI_REF_TYPE") != "tag":
+        raise ValueError("Release publication requires an authorized tag context")
     tag, commit = os.environ["NGIT_CI_REF_NAME"], os.environ["NGIT_CI_COMMIT_SHA"]
     ref = os.environ["NGIT_CI_REF"]
     if ref != f"refs/tags/{tag}":

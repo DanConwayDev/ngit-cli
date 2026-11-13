@@ -71,7 +71,10 @@ Push the release refs to both `origin` and `github` as described below. The
 mirror verifies the GitHub tag; if that ref has not arrived yet, rerun only the
 mirror job against the same release run and dependency bindings. Likewise,
 retry a failed NIP-82 publisher with the existing dependency bindings rather
-than rebuilding archives. Check for partial publication before retrying.
+than rebuilding archives. Restarts use a manual trigger with the original
+tag context; the publisher accepts that context and repeats all tag and
+artifact checks. Branch/PR contexts remain rejected. Check for partial
+publication before retrying.
 Never substitute different bytes for an already published version: issue a
 patch release for corrected binaries.
 
