@@ -31,8 +31,9 @@ let
       PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.libgit2.dev pkgs.openssl.dev pkgs.dbus.dev ];
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
-      # Runtime Cargo links run outside stdenv's build-input setup hooks.
-      # libgit2's dependencies request iconv even when Cargo objects are cached.
+      # Runtime Cargo links run outside stdenv's SDK and library setup hooks.
+      # Rust otherwise searches for xcrun, which is absent from the job PATH.
+      SDKROOT = pkgs.apple-sdk.sdkroot;
       NIX_LDFLAGS = "-L${pkgs.lib.getLib pkgs.libiconv}/lib";
     };
     text = script;
