@@ -9,6 +9,16 @@ let
   vendor = craneLib.vendorCargoDeps { src = craneLib.cleanCargoSource src; };
   opensslPin = builtins.fromJSON (builtins.readFile ../../../tools/release/openssl-source.json);
   opensslSource = pkgs.fetchurl { inherit (opensslPin) url sha256; };
+  # These outputs are specific to this checkout. Build them locally so a cold
+  # fleet-cache lookup cannot disable substitution for the shared toolchain.
+  publisher = ngit-package.overrideAttrs (old: {
+    preferLocalBuild = true;
+    allowSubstitutes = false;
+    cargoDeps = old.cargoDeps.overrideAttrs (_: {
+      preferLocalBuild = true;
+      allowSubstitutes = false;
+    });
+  });
   base = with pkgs; [ python3 bash git coreutils cacert ];
   command = name: inputs: script: pkgs.writeShellApplication {
     inherit name;
@@ -27,12 +37,12 @@ in {
     ${pkgs.lib.optionalString (!darwin) "export NGIT_ARCHIVE_LOADER=${pkgs.glibc}/lib/ld-linux-x86-64.so.2 CARGO_ZIGBUILD_ZIG_PATH=${pkgs.zig_0_16}/bin/zig"}
     ${builtins.readFile ../../../tools/release/archive-build.sh}
   '';
-  check-publisher = command "check-release-publisher" [ ngit-package ] ''
+  check-publisher = command "check-release-publisher" [ publisher ] ''
     ngit --version
     ngit release publish --help > /dev/null
     python3 tools/release/check-publication.py
   '';
-  publish = command "publish-release-archives" [ ngit-package ] ''
+  publish = command "publish-release-archives" [ publisher ] ''
     python3 tools/release/publish-release.py
   '';
   mirror = command "mirror-release-archives" [] ''

@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fallback names, checksums and build provenance; they are never published
   automatically as releases. New stable mirrors advance GitHub's latest
   release pointer without letting older retries displace them. Maintainer
-  restarts retain tag validation and the original artifact bindings.
+  restarts retain tag validation and the original artifact bindings. The
+  publisher CLI is built locally in its Nix job to avoid cold fleet-cache
+  lookups disabling shared toolchain substitution.
 
 - Build and collect the five portable release archives on Nostr CI before
   tagging, including Linux-hosted Windows MSVC cross-compilation.

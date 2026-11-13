@@ -62,6 +62,9 @@ Configure `NGIT_PUBLISHER_NBUNKSEC` as a repository secret in ngit-ci, using
 the established release publisher session previously used on GitHub. Grant it
 only to the intended publication provider. The job builds its ngit CLI from
 the same source through Nix and requests 8 GiB RAM and 16 GiB scratch space.
+The checkout-specific CLI and its Cargo vendor directory are realized locally;
+shared toolchain dependencies still use the configured binary caches. This
+avoids cold application-cache lookups disabling toolchain substitution.
 Credentials remain runtime secret files, outside Nix derivations and caches.
 The GitHub mirror has a separate secret and concurrency group, so its failure
 does not block or undo NIP-82 publication. Crates.io publication remains a
