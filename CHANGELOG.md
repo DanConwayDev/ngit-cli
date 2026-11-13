@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Standalone shell and Windows installers retry other Blossom servers and
+  the versioned GitHub mirror when a download fails or its checksum differs,
+  verifying the signed hash before extracting any archive.
+
 - Publish tagged release binaries through ngit-ci to Nostr/Blossom and mirror
   the same verified archives to GitHub Releases. GitHub-built alternatives
   are available only through a manual emergency workflow, with explicit
