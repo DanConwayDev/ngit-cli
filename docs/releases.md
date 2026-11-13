@@ -95,7 +95,7 @@ Existing public releases keep their metadata and assets. After verifying all
 assets, a newer stable version advances GitHub's `latest` pointer; prereleases
 and old-version retries never move it backwards.
 
-Configure `GITHUB_RELEASE_TOKEN` as a repository secret in ngit-ci, using a
+Configure `GH_RELEASE_TOKEN` as a repository secret in ngit-ci, using a
 GitHub token scoped to `DanConwayDev/ngit-cli` with Contents write permission.
 Authorize only the intended Linux publication provider to receive it. No
 GitHub Actions runner or `GITHUB_TOKEN` is used. The mirror requires the tag

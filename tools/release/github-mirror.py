@@ -109,9 +109,9 @@ def main():
         raise ValueError("GitHub mirroring requires an authorized tag context")
     directory = Path(os.environ["NGIT_CI_INPUTS"]) / "archives.collect/artifacts/release-set"
     release = plan(directory, os.environ["NGIT_CI_REF_NAME"], os.environ["NGIT_CI_COMMIT_SHA"])
-    token = (Path(os.environ["NGIT_CI_SECRETS_DIR"]) / "GITHUB_RELEASE_TOKEN").read_text().strip()
+    token = (Path(os.environ["NGIT_CI_SECRETS_DIR"]) / "GH_RELEASE_TOKEN").read_text().strip()
     if not token:
-        raise ValueError("GITHUB_RELEASE_TOKEN is empty")
+        raise ValueError("GH_RELEASE_TOKEN is empty")
     mirror(API(token), release)
 
 

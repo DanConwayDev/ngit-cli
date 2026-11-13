@@ -10,7 +10,7 @@ jobs:
   mirror:
     needs: [archives.collect]
     run: archives.mirror
-    secrets: [GITHUB_RELEASE_TOKEN]
+    secrets: [GH_RELEASE_TOKEN]
     concurrency:
       group: github-release-mirror
       cancel-in-progress: false

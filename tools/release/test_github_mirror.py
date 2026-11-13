@@ -22,7 +22,7 @@ class Mirror(unittest.TestCase):
             (inputs / "builds.json").write_text("[]")
             secrets = root / "secrets"
             secrets.mkdir()
-            (secrets / "GITHUB_RELEASE_TOKEN").write_text("test-token")
+            (secrets / "GH_RELEASE_TOKEN").write_text("test-token")
             env = dict(NGIT_CI_REF_TYPE="tag", NGIT_CI_TRIGGER="manual",
                        NGIT_CI_INPUTS=str(root / "inputs"), NGIT_CI_REF_NAME="v1.2.3",
                        NGIT_CI_COMMIT_SHA="a" * 40, NGIT_CI_SECRETS_DIR=str(secrets))
