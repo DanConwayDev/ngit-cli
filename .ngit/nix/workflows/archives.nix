@@ -1,4 +1,4 @@
-{ pkgs, craneLib, src }:
+{ pkgs, craneLib, src, ngit-package }:
 let
   darwin = pkgs.stdenv.hostPlatform.isDarwin;
   targets = if darwin then [ "aarch64-apple-darwin" "x86_64-apple-darwin" ] else [
@@ -26,6 +26,14 @@ in {
     export NGIT_ARCHIVE_OPENSSL_SOURCE=${opensslSource}
     ${pkgs.lib.optionalString (!darwin) "export NGIT_ARCHIVE_LOADER=${pkgs.glibc}/lib/ld-linux-x86-64.so.2 CARGO_ZIGBUILD_ZIG_PATH=${pkgs.zig_0_16}/bin/zig"}
     ${builtins.readFile ../../../tools/release/archive-build.sh}
+  '';
+  check-publisher = command "check-release-publisher" [ ngit-package ] ''
+    ngit --version
+    ngit release publish --help > /dev/null
+    python3 tools/release/check-publication.py
+  '';
+  publish = command "publish-release-archives" [ ngit-package ] ''
+    python3 tools/release/publish-release.py
   '';
   mirror = command "mirror-release-archives" [] ''
     python3 tools/release/github-mirror.py

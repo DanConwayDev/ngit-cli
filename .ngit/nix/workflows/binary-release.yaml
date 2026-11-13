@@ -1,0 +1,29 @@
+version: 1
+name: Publish release binaries
+system: x86_64-linux
+reuse: never
+on:
+  push:
+    tags: ["v*"]
+needs-workflows:
+  ci: ci.yaml
+  archives: archives.yaml
+jobs:
+  publish:
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
+    needs: [archives.collect]
+    run: archives.publish
+    secrets: [NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: binary-release
+      cancel-in-progress: false
+  mirror:
+    needs: [archives.collect]
+    run: archives.mirror
+    secrets: [GITHUB_RELEASE_TOKEN]
+    concurrency:
+      group: github-release-mirror
+      cancel-in-progress: false

@@ -4,7 +4,7 @@
 Software Release events linked to the current repository. The default project
 manifest is `.ngit/release.yaml` (singular).
 
-## Portable archive rehearsal
+## Portable release archives
 
 `.ngit/nix/workflows/archives.yaml` builds the real portable release binaries
 on pull requests, main pushes and manual requests without publishing a release.
@@ -20,14 +20,14 @@ release helper; the archive command does not download it at runtime.
 The collection job consumes the provider-verified inputs, checks the complete
 set, and exports `release` with `SHA256SUMS` and `builds.json`. Internal names
 are independent of branch and tag so compatible exact-commit results can be
-reused. A future tag publisher adds the release tag to the filenames; it must
-consume these same jobs rather than maintaining another build implementation.
+reused. The tag publisher adds the release tag to the filenames without
+rebuilding or repacking their contents.
 
 Use the exact commit's `ngit ci status --json` results to retrieve artifacts.
 A passing build establishes packaging and the recorded smoke checks, not full
 native Windows or ARM Linux runtime coverage. Windows user acceptance may
 follow release; it does not block this migration. No new Windows provider is
-required. The existing GitHub tag publisher remains active during rehearsal.
+required. GitHub Actions does not build or publish binaries on tags.
 
 To request an archive rehearsal explicitly:
 
@@ -37,14 +37,51 @@ ngit ci trigger <coordinator-npub> HEAD \
 ```
 
 The workflow must exist in the published commit. PR jobs require hardware VM
-providers and receive no release secrets. Cold multi-target builds may need
-the coordinator timeout budget described under macOS pre-release checks.
+providers and receive no release secrets. After collection, `publisher-check`
+realizes the same ngit CLI used for publication, checks its release command,
+and validates publication inputs without a tag or credentials. Cold builds may
+need the coordinator timeout budget described under macOS pre-release checks.
+
+## Tag publication on ngit-ci
+
+`.ngit/nix/workflows/binary-release.yaml` runs on `v*` tag pushes. It waits
+for `ci.yaml` and `archives.yaml` at the tag commit, then gives both the NIP-82
+publisher and GitHub mirror the same verified `archives.collect` output.
+Missing prerequisite builds run automatically; failed checks block publication.
+PRs and branch pushes build artifacts without publishing releases.
+
+The NIP-82 job checks the package version, all five archives, source commit,
+checksums and changelog before reading credentials. Provider checkouts omit
+tags, so it fetches the named tag with a bounded timeout, requires an annotated
+tag and verifies its peeled commit against the allocated commit and checkout.
+It preserves the tag date and prerelease channel when publishing through
+`.ngit/release.yaml`. Canonical assets are uploaded to Blossom; the manifest
+does not depend on a GitHub mirror being available.
+
+Configure `NGIT_PUBLISHER_NBUNKSEC` as a repository secret in ngit-ci, using
+the established release publisher session previously used on GitHub. Grant it
+only to the intended publication provider. The job builds its ngit CLI from
+the same source through Nix and requests 8 GiB RAM and 16 GiB scratch space.
+Credentials remain runtime secret files, outside Nix derivations and caches.
+The GitHub mirror has a separate secret and concurrency group, so its failure
+does not block or undo NIP-82 publication. Crates.io publication remains a
+separate tag workflow.
+
+Push the release refs to both `origin` and `github` as described below. The
+mirror verifies the GitHub tag; if that ref has not arrived yet, rerun only the
+mirror job against the same release run and dependency bindings. Likewise,
+retry a failed NIP-82 publisher with the existing dependency bindings rather
+than rebuilding archives. Check for partial publication before retrying.
+Never substitute different bytes for an already published version: issue a
+patch release for corrected binaries.
 
 ## GitHub release mirror
 
-`.ngit/nix/workflows/github-mirror.yaml` is a manual, credentialed consumer of
-`archives.yaml`. It creates a draft GitHub release, uploads the complete set
-under the existing tagged filenames, verifies GitHub's asset SHA-256 digests,
+The tag workflow mirrors the canonical ngit-ci binaries to GitHub.
+`.ngit/nix/workflows/github-mirror.yaml` also provides a manual recovery path
+for a tag that has not yet been mirrored. It creates a draft GitHub release,
+uploads the complete set under the existing tagged filenames, verifies
+GitHub's asset SHA-256 digests,
 and publishes the draft only after every upload succeeds. Retries skip exact
 copies and reject conflicting assets rather than replacing released bytes.
 Existing public releases are never demoted to drafts or rewritten. Mirroring
@@ -65,12 +102,38 @@ ngit ci trigger <coordinator-npub> vX.Y.Z \
   --ref refs/tags/vX.Y.Z --json
 ```
 
-This first migration stage does not enable automatic tag publication or remove
-GitHub Actions. Do not mirror a rehearsal build over an existing GitHub-built
-release: their bytes may differ and the mirror deliberately rejects that
-conflict. At cutover, disable the old archive publisher and wire canonical
-NIP-82 publication and this independent mirror to the same verified build
-inputs. A mirror failure must not revoke or block the canonical release.
+A fresh manual request resolves a new dependency graph; to preserve the exact
+original bytes after a partial release, prefer rerunning the mirror job in the
+original `binary-release.yaml` run. Do not mirror new ngit-ci builds over an
+existing GitHub-built release: their bytes may differ and the mirror rejects
+that conflict. Existing historical releases are not deleted by this migration.
+
+## Emergency GitHub fallback builds
+
+`.github/workflows/fallback-binaries.yml` is manual only. It has read-only
+repository permissions and no release signing credential. It never creates
+GitHub Releases, uploads release assets, or publishes NIP-82 events. Normal
+release downloads therefore contain the ngit-ci-built binaries only.
+
+If a platform regression needs an urgent alternative, open GitHub Actions,
+choose **Emergency fallback binaries (no release publication)**, and select
+**Run workflow** from the branch containing this workflow. Set `source_ref` to
+the affected release tag or a full commit SHA containing a proposed fix. The
+fallback retains the previous Linux cross-build and native macOS/Windows
+build paths. One failed target does not cancel the others.
+
+Download the affected target's `github-fallback-<run>-<attempt>-<target>`
+workflow artifact. It contains a conspicuously named fallback archive,
+`fallback-build.json` (origin, source commit, requested ref, target, toolchain,
+and run URL), and `SHA256SUMS`. Workflow artifacts expire after seven days.
+They are not normal release downloads or automatic update candidates; share
+an alternative deliberately with affected users and retain its provenance.
+
+For reports, ask for the archive SHA-256 and the fallback report/run URL when
+applicable, as well as `ngit --version`. The version string alone cannot
+distinguish two builds of the same source version. Do not replace normal
+release assets with a fallback build under the same version. Once the issue
+is understood, fix the ngit-ci build and issue a patch release.
 
 ## Publishing the ngit crate
 
@@ -571,8 +634,8 @@ untrusted providers can publish claims for the same repository and commit.
 
 For native Nix workflows, use `needs-workflows` plus explicit job dependencies
 to consume verified artifacts across workflow files on the same coordinator;
-the archive rehearsal and GitHub mirror above use this path. This does not
-provide artifact dependencies across independent coordinators. Keep all
+the archive, NIP-82 and GitHub mirror workflows above use this path. This does
+not provide artifact dependencies across independent coordinators. Keep all
 platform builds under one coordinator or assemble their outputs separately
 from exact, trusted result events. The act example above does not provide
 this native cross-workflow input interface.

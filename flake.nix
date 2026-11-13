@@ -110,6 +110,7 @@
         ciCommands = ci.commands // {
           archives = import ./.ngit/nix/workflows/archives.nix {
             inherit pkgs;
+            ngit-package = self.packages.${system}.default;
             src = self;
             craneLib = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable.latest.default;
           };

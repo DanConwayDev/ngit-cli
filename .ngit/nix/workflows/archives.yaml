@@ -57,3 +57,10 @@ jobs:
     run: archives.collect
     artifacts:
       release-set: release
+  publisher-check:
+    needs: [collect]
+    run: archives.check-publisher
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
