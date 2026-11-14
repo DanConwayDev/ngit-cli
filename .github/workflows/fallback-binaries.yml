@@ -1,0 +1,111 @@
+name: Emergency fallback binaries (no release publication)
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Source tag or full commit SHA to build'
+        required: true
+        type: string
+
+jobs:
+  fallback:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu.2.17
+            build-tool: cargo-zigbuild
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu.2.17
+            build-tool: cargo-zigbuild
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build-tool: cargo-zigbuild
+          - os: macos-14
+            target: universal-apple-darwin
+            build-tool: cargo
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            build-tool: cargo
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install Zig for Linux OpenSSL cross builds
+        if: runner.os == 'Linux'
+        run: pip install ziglang==0.16.0
+      - name: Build patched static OpenSSL for the archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == Linux ]]; then
+            zig_bin_dir="$(python -c 'import ziglang, pathlib; print(pathlib.Path(ziglang.__file__).parent)')"
+            echo "$zig_bin_dir" >> "$GITHUB_PATH"
+            export PATH="$zig_bin_dir:$PATH"
+          fi
+          python tools/release/build-openssl.py '${{ matrix.target }}' --env-file "$GITHUB_ENV"
+      - id: release-archive
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: ngit,git-remote-nostr
+          target: ${{ matrix.target }}
+          features: vendored-openssl
+          build-tool: ${{ matrix.build-tool }}
+          dry-run: true
+          dry-run-intended: true
+          locked: true
+          archive: ngit-github-fallback-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+          tar: unix
+          zip: windows
+      - name: Verify fallback archive
+        shell: bash
+        run: |
+          python tools/release/verify-openssl.py '${{ steps.release-archive.outputs.tar || steps.release-archive.outputs.zip }}'
+      - name: Record fallback provenance
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.release-archive.outputs.tar || steps.release-archive.outputs.zip }}
+          BUILD_TARGET: ${{ matrix.target }}
+          REQUESTED_REF: ${{ inputs.source_ref }}
+        run: |
+          python - <<'PYTHON'
+          import hashlib, json, os, pathlib, subprocess, tomllib
+          archive = pathlib.Path(os.environ["ARCHIVE"])
+          with archive.open("rb") as source:
+              digest = hashlib.file_digest(source, "sha256").hexdigest()
+          report = {
+              "origin": "github-fallback",
+              "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "requested_ref": os.environ["REQUESTED_REF"],
+              "version": tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"],
+              "target": os.environ["BUILD_TARGET"],
+              "archive": archive.name,
+              "sha256": digest,
+              "run_url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}/attempts/{os.environ["GITHUB_RUN_ATTEMPT"]}',
+              "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+          }
+          pathlib.Path("fallback-build.json").write_text(json.dumps(report, indent=2) + "\n")
+          pathlib.Path("SHA256SUMS").write_text(f"{digest}  {archive.name}\n")
+          PYTHON
+      - name: Retain fallback for deliberate sharing
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-fallback-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+          path: |
+            ${{ steps.release-archive.outputs.tar || steps.release-archive.outputs.zip }}
+            fallback-build.json
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

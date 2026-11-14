@@ -7,13 +7,14 @@ and must use the ngit packaged alongside it; it contains no OpenSSL itself.
 """
 
 import argparse
+import json
 from pathlib import Path
 import re
 import struct
 import tarfile
 import zipfile
 
-EXPECTED = b"3.5.9"
+EXPECTED = json.loads(Path(__file__).with_name("openssl-source.json").read_text())["version"].encode()
 
 
 def macho_slices(binary):

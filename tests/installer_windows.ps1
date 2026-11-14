@@ -17,6 +17,27 @@ function Assert-Fails([scriptblock]$Action) {
 
 $temporary = Join-Path ([IO.Path]::GetTempPath()) "ngit-installer-test-$([Guid]::NewGuid())"
 try {
+    # Corrupt Blossom data must not be extracted; try the versioned GitHub mirror.
+    New-Item -ItemType Directory -Path $temporary -Force | Out-Null
+    $script:attempts = @()
+    function Invoke-WebRequest {
+        param($Uri, $OutFile, $TimeoutSec, $ErrorAction)
+        $script:attempts += [string]$Uri
+        if ($Uri -like 'https://relay.ngit.dev/*') { [IO.File]::WriteAllText($OutFile, 'corrupt'); return }
+        if ($Uri -like 'https://github.com/*') { [IO.File]::WriteAllText($OutFile, 'verified'); return }
+        throw 'unavailable fixture mirror'
+    }
+    $expectedFile = Join-Path $temporary 'expected'
+    [IO.File]::WriteAllText($expectedFile, 'verified')
+    $hash = (Get-FileHash -LiteralPath $expectedFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $download = Join-Path $temporary 'download'
+    Get-VerifiedArchive "https://relay.ngit.dev/$hash" $download $hash 'ngit.zip'
+    Assert-True ($script:attempts.Count -eq 5) 'primary Blossom server was not deduplicated'
+    Assert-True ($script:attempts[-1] -like 'https://github.com/*/releases/download/v3.0.1/ngit.zip') 'GitHub must be last'
+    Assert-True ((Get-FileHash $download).Hash.ToLowerInvariant() -eq $hash) 'unverified bytes accepted'
+    function Invoke-WebRequest { param($Uri, $OutFile, $TimeoutSec, $ErrorAction); throw 'offline' }
+    Assert-Fails { Get-VerifiedArchive "https://relay.ngit.dev/$hash" $download $hash 'ngit.zip' }
+
     # Exercise the real process runner before the file-backed installation tests.
     New-Item -ItemType Directory -Path $temporary -Force | Out-Null
     $pwsh = (Get-Process -Id $PID).Path

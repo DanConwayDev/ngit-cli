@@ -10,6 +10,7 @@ to GITHUB_ENV (or an env file to export locally). Linux cross builds require Zig
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -17,9 +18,8 @@ import subprocess
 import tarfile
 import urllib.request
 
-VERSION = "3.5.9"
-SHA256 = "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
-URL = f"https://github.com/openssl/openssl/releases/download/openssl-{VERSION}/openssl-{VERSION}.tar.gz"
+SOURCE = json.loads(Path(__file__).with_name("openssl-source.json").read_text())
+VERSION, SHA256, URL = (SOURCE[key] for key in ("version", "sha256", "url"))
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux-x86_64", None),
     "x86_64-unknown-linux-gnu.2.17": ("linux-x86_64", "x86_64-linux-gnu.2.17"),
@@ -77,12 +77,14 @@ def main():
     parser.add_argument("target", choices=[*TARGETS, "universal-apple-darwin"])
     parser.add_argument("--output", type=Path, default=Path("target/release-openssl"))
     parser.add_argument("--env-file", type=Path, required=True)
+    parser.add_argument("--source-archive", type=Path,
+                        help="Use this checksum-verified archive without downloading a source")
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     args = parser.parse_args()
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    archive = root / f"openssl-{VERSION}.tar.gz"
-    if not archive.exists():
+    archive = args.source_archive or root / f"openssl-{VERSION}.tar.gz"
+    if args.source_archive is None and not archive.exists():
         temporary = archive.with_suffix(f".{os.getpid()}.tmp")
         urllib.request.urlretrieve(URL, temporary)
         temporary.replace(archive)

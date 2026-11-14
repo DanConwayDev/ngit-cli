@@ -1,6 +1,7 @@
-//! Exercise the shipped helper pair against a local trusted/untrusted HTTPS Git
-//! server. Set NGIT_TLS_TEST_BIN_DIR to an unpacked release archive to test
-//! those exact bytes.
+//! Exercise the helper pair against a local HTTPS Git server. Linux also
+//! checks a trusted clone using a process-local CA. macOS SecureTransport uses
+//! the system trust store, so its local fixture checks certificate rejection.
+//! Set NGIT_TLS_TEST_BIN_DIR to test an unpacked archive's exact bytes.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -13,8 +14,35 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use test_harness::Harness;
 use tokio::{net::TcpListener, task::JoinSet};
 
+#[derive(Debug)]
+struct ObservedCertificate {
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    offered: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl rustls::server::ResolvesServerCert for ObservedCertificate {
+    fn resolve(
+        &self,
+        hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let certificate = self.resolver.resolve(hello);
+        if certificate.is_some() {
+            let _ = self.offered.send(());
+        }
+        certificate
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn helper_pair_clones_git_https_and_rejects_untrusted_certificate() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(120), exercise()).await??;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn helper_pair_rejects_untrusted_git_https_certificate() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(120), exercise()).await??;
     Ok(())
 }
@@ -47,7 +75,7 @@ async fn exercise() -> Result<()> {
     let backend = harness.vanilla_git_server("https-backend");
     let upstream = backend.url().trim_start_matches("http://").to_string();
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
             vec![CertificateDer::from(
@@ -57,6 +85,11 @@ async fn exercise() -> Result<()> {
                 include_bytes!("../src/lib/testdata/tls/server-key.der").to_vec(),
             )),
         )?;
+    let (offered, mut certificate_events) = tokio::sync::mpsc::unbounded_channel();
+    config.cert_resolver = Arc::new(ObservedCertificate {
+        resolver: config.cert_resolver.clone(),
+        offered,
+    });
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let https_url = format!(
         "https://localhost:{}/repo.git",
@@ -135,10 +168,18 @@ async fn exercise() -> Result<()> {
         keys.public_key().to_bech32()?,
         urlencoding::encode(&relay)
     );
-    let cloned = harness.clone_url_with_git_config(&url, &[]).await?;
-    ensure!(
-        std::fs::read_to_string(cloned.dir().join("HTTPS.txt"))? == "verified HTTPS Git objects\n"
-    );
+    // SecureTransport does not support process-local CA file overrides. Do
+    // not mutate the Mac user's keychain to make this fixture trusted.
+    #[cfg(target_os = "linux")]
+    {
+        let cloned = harness.clone_url_with_git_config(&url, &[]).await?;
+        ensure!(
+            std::fs::read_to_string(cloned.dir().join("HTTPS.txt"))?
+                == "verified HTTPS Git objects\n"
+        );
+    }
+    // Discard exchanges from the successful Linux clone.
+    while certificate_events.try_recv().is_ok() {}
     let untrusted = harness.fresh_repo()?;
     let unrelated_ca = directory.path().join("unrelated-ca.pem");
     let encoded = STANDARD.encode(webpki_root_certs::TLS_SERVER_ROOT_CERTS[0].as_ref());
@@ -158,5 +199,13 @@ async fn exercise() -> Result<()> {
         "untrusted Git HTTPS certificate was accepted"
     );
     ensure!(!untrusted.dir().join("rejected/HTTPS.txt").exists());
+    // Observe a valid ClientHello selecting our fixture certificate. macOS
+    // can close at server-auth completion before the TLS handshake finishes,
+    // without sending an alert. Requiring a completed handshake or a specific
+    // alert would reject that legitimate untrusted-certificate failure.
+    tokio::time::timeout(Duration::from_secs(5), certificate_events.recv())
+        .await
+        .context("helper did not reach TLS certificate selection")?
+        .context("TLS server stopped before selecting the fixture certificate")?;
     Ok(())
 }

@@ -1,0 +1,42 @@
+version: 1
+name: Publish release binaries
+system: x86_64-linux
+reuse: never
+on:
+  push:
+    tags: ["v*"]
+needs-workflows:
+  rehearsal: rehearsal.yaml
+jobs:
+  publish:
+    needs: [rehearsal.ready]
+    run: archives.publish
+    secrets: [NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: binary-release
+      cancel-in-progress: false
+  mirror:
+    needs: [publish, rehearsal.ready]
+    run: archives.mirror
+    secrets: [GH_RELEASE_TOKEN]
+    concurrency:
+      group: github-release-mirror
+      cancel-in-progress: false
+  update-gh-setup:
+    needs: [publish, mirror, rehearsal.ready]
+    run: archives.update-gh-setup
+    secrets: [NGIT_PUBLISHER_NBUNKSEC, GH_RELEASE_TOKEN]
+    concurrency:
+      group: setup-ngit-release
+      cancel-in-progress: false
+  update-docs:
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    needs: [mirror, rehearsal.ready]
+    run: archives.update-docs
+    secrets: [NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: ngit-docs-release
+      cancel-in-progress: false

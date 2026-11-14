@@ -121,12 +121,36 @@ download() {
     ngit_destination=$2
     if command_exists curl; then
         curl --fail --location --proto '=https' --tlsv1.2 \
-            --output "$ngit_destination" "$ngit_url"
+            --connect-timeout 15 --max-time 300 --output "$ngit_destination" "$ngit_url"
     elif command_exists wget; then
-        wget --https-only --output-document "$ngit_destination" "$ngit_url"
+        wget --https-only --timeout=30 --tries=1 --output-document "$ngit_destination" "$ngit_url"
     else
         fail 'curl or wget is required'
     fi
+}
+
+# Every source serves the same signed bytes. Never extract an unchecked copy.
+download_verified() {
+    ngit_primary=$1
+    ngit_archive_path=$2
+    ngit_seen=' '
+    for ngit_candidate in "$ngit_primary" \
+        "https://relay.ngit.dev/$ngit_expected_sha" \
+        "https://blossom.primal.net/$ngit_expected_sha" \
+        "https://blossom.ditto.pub/$ngit_expected_sha" \
+        "https://haven.danconwaydev.com/$ngit_expected_sha" \
+        "https://github.com/DanConwayDev/ngit-cli/releases/download/v$VERSION/$ngit_filename"; do
+        case "$ngit_seen" in *" $ngit_candidate "*) continue ;; esac
+        ngit_seen="$ngit_seen$ngit_candidate "
+        rm -f "$ngit_archive_path"
+        if download "$ngit_candidate" "$ngit_archive_path"; then
+            ngit_actual_sha=$(sha256 "$ngit_archive_path")
+            if [ "$ngit_actual_sha" = "$ngit_expected_sha" ]; then return 0; fi
+            info "SHA-256 mismatch from $ngit_candidate; trying the next mirror"
+        fi
+    done
+    rm -f "$ngit_archive_path"
+    fail 'no download source supplied the signed release bytes'
 }
 
 sha256() {
@@ -535,9 +559,7 @@ EOF
     ngit_temp=$(mktemp -d)
     ngit_archive="$ngit_temp/$ngit_filename"
     info "Downloading ngit v$VERSION for $ngit_target"
-    download "$ngit_url" "$ngit_archive"
-    ngit_actual_sha=$(sha256 "$ngit_archive")
-    [ "$ngit_actual_sha" = "$ngit_expected_sha" ] || fail "SHA-256 mismatch: expected $ngit_expected_sha, observed $ngit_actual_sha"
+    download_verified "$ngit_url" "$ngit_archive"
 
     ngit_extract="$ngit_temp/extracted"
     mkdir "$ngit_extract"

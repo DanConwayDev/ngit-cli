@@ -1,0 +1,54 @@
+version: 1
+name: Post-release apply
+system: x86_64-linux
+reuse: never
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    requirements:
+      resources:
+        memory-mib: {gte: 2048}
+        scratch-mib: {gte: 4096}
+    run: archives.post-release-verify
+    artifacts:
+      release: post-release
+  mirror:
+    needs: [verify]
+    run: archives.post-release-apply
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release
+    secrets: [GH_RELEASE_TOKEN]
+    concurrency:
+      group: github-release-mirror
+      cancel-in-progress: false
+  update-gh-setup:
+    needs: [verify, mirror]
+    run: archives.post-release-apply
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release
+    secrets: [GH_RELEASE_TOKEN, NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: setup-ngit-release
+      cancel-in-progress: false
+  update-docs:
+    needs: [verify, mirror]
+    run: archives.post-release-apply
+    requirements:
+      resources:
+        memory-mib: {gte: 4096}
+        scratch-mib: {gte: 8192}
+    artifacts:
+      proposal: post-release
+    secrets: [NGIT_PUBLISHER_NBUNKSEC]
+    concurrency:
+      group: ngit-docs-release
+      cancel-in-progress: false

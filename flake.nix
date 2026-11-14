@@ -107,7 +107,13 @@
           #   export BUZZ_RELAY_BIN=${buzz.packages.${system}.buzz-server-binaries}/bin/buzz-relay
           # ''
         };
-        ciCommands = ci.commands;
+        ciCommands = ci.commands // {
+          archives = import ./.ngit/nix/workflows/archives.nix {
+            inherit pkgs;
+            src = self;
+            craneLib = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable.latest.default;
+          };
+        };
         packages.ci-dependencies = ci.dependencies;
         packages.ci-test-server = ci.test-server;
         # Create packages for each binary defined in Cargo.toml

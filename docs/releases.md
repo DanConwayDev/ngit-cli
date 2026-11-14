@@ -4,6 +4,310 @@
 Software Release events linked to the current repository. The default project
 manifest is `.ngit/release.yaml` (singular).
 
+## Portable release archives
+
+`.ngit/nix/workflows/archives.yaml` builds the real portable release binaries
+on pull requests, main pushes and manual requests without publishing a release.
+Linux providers build the three Linux archives with Zig and Windows MSVC with
+cargo-xwin. The Apple Silicon provider builds both macOS slices and combines
+them into the universal archive. No ARM Linux or Intel Mac provider is needed.
+
+All five jobs export the archive and a source/target/version/checksum report.
+Linux reports identify Zig; Windows reports identify cargo-xwin and the SDK
+components. The Windows SDK is pinned to 10.0.26100 and only x86_64 is fetched.
+OpenSSL source is a checksum-pinned Nix input, shared with the standalone
+release helper; the archive command does not download it at runtime.
+The collection job consumes the provider-verified inputs, checks the complete
+set, and exports `release` with `SHA256SUMS` and `builds.json`. Internal names
+are independent of branch and tag so compatible exact-commit results can be
+reused. The tag publisher adds the release tag to the filenames without
+rebuilding or repacking their contents.
+
+Use the exact commit's `ngit ci status --json` results to retrieve artifacts.
+A passing build establishes packaging and the recorded smoke checks, not full
+native Windows or ARM Linux runtime coverage. Windows user acceptance may
+follow release; it does not block this migration. No new Windows provider is
+required. GitHub Actions does not build or publish binaries on tags.
+
+To request an archive rehearsal explicitly:
+
+```sh
+ngit ci trigger <coordinator-npub> HEAD \
+  --workflow .ngit/nix/workflows/archives.yaml --json
+```
+
+The workflow must exist in the published commit. PR jobs require hardware VM
+providers and receive no release secrets. After collection, `publisher-check`
+validates publication inputs, then extracts the verified static Linux CLI and
+checks its release command without a tag or credentials. Publication uses the
+same shipped binary; it does not compile another CLI. Cold archive builds may
+need the coordinator timeout budget described under macOS pre-release checks.
+
+## Full release rehearsal before tagging
+
+Prepare the version bump and changelog on a release PR branch. Run the full
+rehearsal against the branch tip to catch failures before merging. Fixes change
+the commit, so rerun the rehearsal after each fix. A normal PR merge creates a
+new commit: push that final `main` commit, then rehearse it before creating the
+annotated release tag. Never tag a different commit from the approved one.
+
+```sh
+ngit ci trigger <coordinator-npub> <exact-main-commit> \
+  --workflow .ngit/nix/workflows/rehearsal.yaml \
+  --ref refs/heads/main --json
+ngit ci status <exact-main-commit> --json
+```
+
+The manual rehearsal waits for Linux Rust CI, Apple Silicon package/unit/CLI/
+HTTPS tests, all five archive builds, collection and the publisher check.
+Its `ready` job validates the release plan and shipped CLI again, then exports
+an unchanged copy of the collected archives. Check that this specific rehearsal
+workflow concluded successfully; a successful trigger request is not approval.
+It needs no publication credentials. The standalone macOS and archive workflows
+remain manually runnable for diagnosis, but are not a full rehearsal.
+
+## Tag publication on ngit-ci
+
+`.ngit/nix/workflows/binary-release.yaml` runs on `v*` tag pushes. It requires
+`rehearsal.yaml` at the exact tag commit and consumes its `rehearsal.ready`
+archive set. The coordinator reuses the compatible retained manual rehearsal
+and its exact dependency attempts; no release rebuild or repacking is needed.
+The NIP-82 `publish` job runs first, followed by GitHub `mirror`, then
+`update-gh-setup` and `update-docs` independently. These are separate jobs so
+each stage can be retried.
+
+The rehearsal's approval job refuses automatic or tag-context execution.
+Without a compatible green pre-tag rehearsal, automatic dependency admission
+may run checks/builds, but cannot approve them and cannot publish a release.
+Reuse requires the same coordinator, commit, workflow bytes, trust/selection
+policy and dependency attempts. A changed policy, newer prerequisite attempt,
+or lost coordinator history requires a fresh manual branch rehearsal. PR-context
+results are not substitutes for the final main-commit rehearsal. If a tag run
+already bound to a failed rehearsal, rerunning it retains that failure; it
+cannot adopt a later rehearsal. Confirm approval before creating the tag.
+Do not force-move or recreate a product tag, or manually trigger the whole
+publication graph: fresh manual triggers rerun dependencies in tag context,
+which the pre-tag approval guard deliberately rejects.
+
+The NIP-82 job checks the package version, all five archives, source commit,
+checksums and changelog before reading credentials. Provider checkouts omit
+tags, so it fetches the named tag with a bounded timeout, requires an annotated
+tag and verifies its peeled commit against the allocated commit and checkout.
+It preserves the tag date and prerelease channel when publishing through
+`.ngit/release.yaml`. Canonical assets are uploaded to Blossom; the manifest
+does not depend on a GitHub mirror being available.
+
+Configure `NGIT_PUBLISHER_NBUNKSEC` as a repository secret in ngit-ci, using
+the established release publisher session previously used on GitHub. Grant it
+only to the intended publication provider. After validating the complete set,
+the job extracts its static x86-64 Linux CLI and Git helper into a temporary
+directory. It checks the release command, uses those binaries for tag fetching
+and publication, then removes them. No separate compiler or Cargo dependency
+realization is required in the publication job.
+Credentials remain runtime secret files, outside Nix derivations and caches.
+The GitHub mirror has a separate secret and concurrency group, so its failure
+does not block or undo NIP-82 publication. Crates.io publication remains a
+separate tag workflow.
+
+Push the release refs to both `origin` and `github` as described below. The
+mirror verifies the GitHub tag; if that ref has not arrived yet, rerun only the
+mirror job against the same release run and dependency bindings. Likewise,
+retry a failed NIP-82 publisher with the existing dependency bindings rather
+than rebuilding archives. Restarts use a manual trigger with the original
+tag context; the publisher accepts that context and repeats all tag and
+artifact checks. Branch/PR contexts remain rejected. Check for partial
+publication before retrying.
+Never substitute different bytes for an already published version: issue a
+patch release for corrected binaries.
+
+The release manifest lists `https://relay.ngit.dev` first for Blossom
+publication, followed by Primal, Ditto and Haven as replication targets.
+The first confirmed server supplies the signed asset download URL.
+
+## Automatic setup-ngit promotion
+
+After the canonical publisher and GitHub mirror both succeed, the tag workflow
+runs `update-gh-setup`. For final `vX.Y.Z` releases it clones setup-ngit's canonical
+Nostr `main`, runs its signed-release sync verifier and offline tests, and
+smoke-tests the static Linux installer in an isolated tool cache. It checks the
+canonical product tag against this job's archive commit before and after
+validation. Prereleases skip this job's work without reading secrets.
+
+The job commits only `manifest.txt`, publishes setup-ngit `main` to Nostr and
+GitHub, verifies both refs, then advances the matching floating action tag
+(`v3`, for example) using explicit leases. Concurrent changes stop promotion;
+retries can finish missing mirror/tag pushes. Existing pins, downgrades and
+major-version crossings remain protected by setup-ngit's sync verifier. A
+new major still requires a reviewed promotion plan.
+
+Deploy setup-ngit's Blossom-only metadata compatibility change before enabling
+this job. Its canonical repository remains on Nostr; GitHub serves the action
+for `uses: DanConwayDev/setup-ngit@v3`. This job is not a general dependency
+update or a replacement for testing the installer on other operating systems.
+
+The existing `NGIT_PUBLISHER_NBUNKSEC` signer must have push authority in
+setup-ngit. Scope `GH_RELEASE_TOKEN` to both `DanConwayDev/ngit-cli` and
+`DanConwayDev/setup-ngit` with Contents write and Workflows write (Git pushes
+may include workflow changes). Credentials are used from secret files and an
+isolated disposable account directory, never embedded in clone URLs. A failure
+after release publication leaves the release available; rerun the failed job
+to finish updating the action. Do not create another release tag to retry it.
+Automation explicitly sets both Git author and committer to
+`ngit Release Bot <release-bot@ngit.dev>`; the bunker authorizes the push,
+not the Git author identity.
+
+## Automatic documentation and installer promotion
+
+The separate `update-docs` job also waits for the GitHub mirror. Final releases
+sync the exact stable tag into canonical ngit-docs, verify the installer and
+source promotion records against the release commit, and run `nsite:build`.
+It commits only generated documentation, stable imports and installer records,
+using the same release-bot identity. Concurrent main changes stop the push.
+Prereleases do not change the public stable installers or documentation.
+
+Merge the ngit-docs prebuilt-exporter companion PR before enabling this job.
+The docs sync receives the verified release CLI and its provenance commit,
+avoiding another Rust/Nix build. Ordinary manual docs syncs still build from
+the pinned source. The existing publisher bunker needs ngit-docs push authority;
+this job does not need the GitHub token or a new site-publishing credential.
+
+The push triggers ngit-docs' own validation and nsite publication workflow.
+The job waits up to ten minutes for its exact-commit, maintainer-directed
+publication success and matching live `/install.sh` and `/install.ps1` hashes.
+If publication is slow or fails, the release and docs commit remain intact;
+rerun `update-docs` to finish verification. A push alone is not deployment.
+
+Both tagged installer templates try the signed primary Blossom URL first
+(normally relay.ngit.dev for new releases), then relay.ngit.dev, Primal, Ditto
+and Haven replicas without duplicate requests, and finally the versioned
+GitHub asset. Every attempt must match the same signed SHA-256 before extraction.
+The stable docs sync renders these templates from the release tag; existing
+published installers do not change until that downstream deployment succeeds.
+
+
+## GitHub release mirror
+
+After successful NIP-82 publication, the separate `mirror` job uploads the
+same archives to a draft GitHub release, verifies GitHub's asset SHA-256
+digests, then publishes it. Retries skip exact copies and reject conflicting
+assets. Existing public releases retain their metadata and assets; a newer
+stable version advances Latest, while prereleases and older retries do not.
+
+`GH_RELEASE_TOKEN` supplies GitHub authentication. The GitHub product tag must
+already exist and peel to the exact artifact commit. No GitHub Actions runner
+or `GITHUB_TOKEN` participates in normal publication.
+
+Use the completed **binary-release workflow result** from `ngit ci status`:
+
+```sh
+# Retry GitHub and its downstream setup-ngit promotion.
+ngit ci rerun <coordinator-npub> <completed-result> --job mirror --json
+# Or retry only setup-ngit after both publishers succeeded.
+ngit ci rerun <coordinator-npub> <completed-result> --job update-gh-setup --json
+# Retry only the docs sync/publication verification.
+ngit ci rerun <coordinator-npub> <completed-result> --job update-docs --json
+# Retry NIP-82 and all downstream publication jobs if needed.
+ngit ci rerun <coordinator-npub> <completed-result> --job publish --json
+```
+
+Job reruns preserve the exact external rehearsal binding and archive bytes.
+There is no separate mirror-recovery workflow. Do not rebuild over an existing
+release or substitute different bytes for the same version. Historical releases
+are not deleted by this migration.
+
+## Repair a post-release job with newer code
+
+An ordinary `ci rerun --job` executes the original workflow code and retains
+its dependency artifacts. Use it for transient failures. It cannot pick up a
+fix committed after the release. For code fixes, use the separate manual
+post-release rehearsal and apply workflows. They never build binaries, publish
+NIP-82 events, create a product tag, or move an existing product tag.
+
+1. Create a repair PR containing the job fix. Set `.ngit/post-release.json` to
+   the **existing** release version, its canonical source commit, exact signed
+   NIP-82 release-event ID, and selected operation names. Native manual triggers
+   do not currently have arbitrary form inputs, so this file is the reviewed
+   recovery request, frozen with the repair commit. Its default empty values
+   deliberately fail before any side effects.
+2. Trigger `post-release-rehearsal.yaml` at that repair commit. Review its
+   `proposal` artifacts: GitHub's proposed actions, setup-ngit's manifest and
+   patch, and the docs patch and rendered installers. The jobs run the real
+   verification, preparation, tests and installer/site checks, then stop before
+   login, commits or pushes. GitHub requests are GET-only; Git pushes are guarded
+   against rehearsal use. These checks cannot prove write permissions.
+3. Merge the reviewed fix and request, then manually trigger
+   `post-release-apply.yaml` at the current canonical main commit. Apply rejects
+   PR/other-ref contexts or a main commit that advanced while the job queued.
+   Selected operations run with the configured publication secrets; unselected
+   jobs emit a skipped-operation report. Setup-ngit and docs follow the mirror
+   job if it is selected. If it is not selected, they can be repaired separately.
+4. Check the exact run's final results. Job-level reruns within this recovery
+   run reuse its verified release input. A further code fix needs another
+   rehearsal and fresh apply invocation, not a rerun of obsolete code.
+
+Example request (replace all identity fields from the verified release):
+
+```json
+{
+  "schema": 1,
+  "version": "3.0.6",
+  "commit": "<original 40-character release commit>",
+  "release_event": "<original 64-character signed release event ID>",
+  "operations": ["mirror", "update-gh-setup", "update-docs"]
+}
+```
+
+```sh
+ngit release view 3.0.6 --verify --json
+ngit ci trigger <coordinator-npub> <repair-pr-commit> \
+  --workflow .ngit/nix/workflows/post-release-rehearsal.yaml \
+  --ref refs/heads/pr/release-repair --json
+# After review and merge, use the new canonical main commit:
+ngit ci trigger <coordinator-npub> <repair-main-commit> \
+  --workflow .ngit/nix/workflows/post-release-apply.yaml \
+  --ref refs/heads/main --json
+```
+
+The verification job fetches the original annotated tag, verifies the pinned
+NIP-82 event's author/application/source and all five bodies, downloads the
+signed content-addressed assets, then checks the tag again. It bootstraps with
+a checksum-pinned released CLI (`tools/release/recovery-cli.json`), without a
+Rust rebuild. Consumers recheck artifact hashes and refuse pins that differ
+from the selected release. Their exporter and installer use the original CLI;
+the job logic comes from the repair checkout. Reports record both commits.
+
+Stable setup-ngit and docs promotions still reject downgrades. For prereleases,
+only `mirror` is supported. A missing or conflicting GitHub product tag requires
+syncing the correct immutable ref separately. This recovery path cannot repair
+an unpublished NIP-82 release: retry that publication in its original tag run.
+
+## Emergency GitHub fallback builds
+
+`.github/workflows/fallback-binaries.yml` is manual only. It has read-only
+repository permissions and no release signing credential. It never creates
+GitHub Releases, uploads release assets, or publishes NIP-82 events. Normal
+release downloads therefore contain the ngit-ci-built binaries only.
+
+If a platform regression needs an urgent alternative, open GitHub Actions,
+choose **Emergency fallback binaries (no release publication)**, and select
+**Run workflow** from the branch containing this workflow. Set `source_ref` to
+the affected release tag or a full commit SHA containing a proposed fix. The
+fallback retains the previous Linux cross-build and native macOS/Windows
+build paths. One failed target does not cancel the others.
+
+Download the affected target's `github-fallback-<run>-<attempt>-<target>`
+workflow artifact. It contains a conspicuously named fallback archive,
+`fallback-build.json` (origin, source commit, requested ref, target, toolchain,
+and run URL), and `SHA256SUMS`. Workflow artifacts expire after seven days.
+They are not normal release downloads or automatic update candidates; share
+an alternative deliberately with affected users and retain its provenance.
+
+For reports, ask for the archive SHA-256 and the fallback report/run URL when
+applicable, as well as `ngit --version`. The version string alone cannot
+distinguish two builds of the same source version. Do not replace normal
+release assets with a fallback build under the same version. Once the issue
+is understood, fix the ngit-ci build and issue a patch release.
+
 ## Publishing the ngit crate
 
 Nostr CI publishes `ngit` to crates.io after the existing lint, formatting and
@@ -74,7 +378,9 @@ It requires an available native `aarch64-darwin` provider with at least 8 GiB
 of RAM. Tart providers advertise total disk capacity rather than free scratch
 space, so this workflow does not require a `scratch-mib` capability. Check
 available disk space on the runner before a cold build. The workflow never
-publishes a release and does not run automatically on pushes or pull requests.
+publishes a release. It runs manually or as a required rehearsal dependency;
+ordinary pushes and pull requests do not independently trigger it. Commit
+reuse lets tag publication retain its successful pre-tag test result.
 
 Before the first cold run, check the coordinator's job timeout. Its default
 is 1,800 seconds for the entire job, including all builds and tests. A release
@@ -88,8 +394,14 @@ qualified by a native run of this preflight.
 The workflow builds the Apple Silicon Nix package, starts its `ngit` binary,
 runs library and CLI unit tests, and exercises the exact packaged binary pair
 against a local HTTPS Git server. The library tests include Reqwest certificate
-trust and hostname rejection; the Git test checks a trusted clone and rejection
-of an unrelated trust anchor through libgit2. All network fixtures are local.
+trust and hostname rejection. The Mac Git test checks rejection of an untrusted
+certificate and requires the local TLS server to select the fixture certificate
+for the client handshake. SecureTransport can close before completing that
+handshake, without sending a certificate alert.
+Apple SecureTransport does not use the fixture's process-local CA file, so the
+trusted Git clone check runs on Linux only. The test does not modify the Mac
+user's keychain. Successful trusted Git HTTPS on macOS remains a coverage gap;
+do not count this rejection check as that acceptance test. All fixtures are local.
 
 Use the repository's coordinator public key (shown on its existing CI runs
 by `ngit ci status --json`) and request the exact candidate commit:
@@ -501,7 +813,10 @@ inspected and its URL passed to `--asset PLATFORM=URL`; avoid selecting an
 artifact only by name or by “latest”, because names repeat across runs and
 untrusted providers can publish claims for the same repository and commit.
 
-ngit-ci cannot currently pass artifacts across independent workflow files or
-runs. In particular, architectures built by separate coordinators cannot fan
-into a release job with `needs`; either build the release set in one supported
-workflow invocation or assemble it later from exact, trusted result events.
+For native Nix workflows, use `needs-workflows` plus explicit job dependencies
+to consume verified artifacts across workflow files on the same coordinator;
+the archive, NIP-82 and GitHub mirror workflows above use this path. This does
+not provide artifact dependencies across independent coordinators. Keep all
+platform builds under one coordinator or assemble their outputs separately
+from exact, trusted result events. The act example above does not provide
+this native cross-workflow input interface.

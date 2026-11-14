@@ -9,7 +9,7 @@ fn installer_templates_have_one_deployment_contract() {
     for template in [UNIX_TEMPLATE, WINDOWS_TEMPLATE] {
         assert_eq!(template.matches("@@VERSION@@").count(), 1);
         assert_eq!(template.matches("@@ASSET_MANIFEST@@").count(), 1);
-        assert!(!template.contains("github.com"));
+        assert!(template.contains("https://github.com/DanConwayDev/ngit-cli/releases/download/v"));
         assert!(!template.to_ascii_lowercase().contains("/latest"));
         assert!(template.contains(".ngit-install-receipt.json"));
         assert!(template.contains("git-remote-nostr"));
@@ -396,6 +396,42 @@ mod shell {
         for (name, before) in names.iter().zip(before) {
             assert_eq!(fs::read(fixture.destination.join(name)).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn failed_and_corrupt_mirrors_fall_back_to_the_same_github_bytes() {
+        let fixture = Installer::with_release_version(true, "3.0.1");
+        let script = fs::read_to_string(&fixture.script).unwrap();
+        let download = r#"download() {
+            printf '%s\n' "$1" >> "$HOME/download-attempts"
+            case "$1" in
+                https://relay.ngit.dev/*) printf corrupt > "$2" ;;
+                https://github.com/*) cp "$TEST_ARCHIVE" "$2" ;;
+                *) return 1 ;;
+            esac
+        }"#;
+        fs::write(
+            &fixture.script,
+            script.replace(r#"download() { cp "$TEST_ARCHIVE" "$2"; }"#, download),
+        )
+        .unwrap();
+        let output = fixture.run(&[]);
+        assert!(output.status.success(), "{output:?}");
+        let attempts = fs::read_to_string(fixture.home.join("download-attempts")).unwrap();
+        let urls: Vec<_> = attempts.lines().collect();
+        assert_eq!(urls.len(), 6);
+        assert!(urls[0].starts_with("https://example.invalid/"));
+        assert!(urls[1].starts_with("https://relay.ngit.dev/"));
+        assert!(
+            urls[5]
+                .starts_with("https://github.com/DanConwayDev/ngit-cli/releases/download/v3.0.1/")
+        );
+        assert!(
+            fixture
+                .destination
+                .join(".ngit-install-receipt.json")
+                .exists()
+        );
     }
 
     #[test]

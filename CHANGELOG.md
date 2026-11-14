@@ -15,6 +15,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rehearse post-release GitHub, setup-ngit and documentation updates without
+  publishing, and apply reviewed repair code to a pinned existing signed
+  release without rebuilding or replacing its binaries.
+
+- Standalone shell and Windows installers retry other Blossom servers and
+  the versioned GitHub mirror when a download fails or its checksum differs,
+  verifying the signed hash before extracting any archive.
+
+- Publish tagged release binaries through ngit-ci to Nostr/Blossom and mirror
+  the same verified archives to GitHub Releases. GitHub-built alternatives
+  are available only through a manual emergency workflow, with explicit
+  fallback names, checksums and build provenance; they are never published
+  automatically as releases. New stable mirrors advance GitHub's latest
+  release pointer without letting older retries displace them. Maintainer
+  restarts retain tag validation and the original artifact bindings. The
+  publisher and its secret-free rehearsal use the verified static Linux
+  binary from the release set, avoiding a separate CLI build at publication.
+  New releases prefer relay.ngit.dev for Blossom downloads, retaining the
+  existing replication servers. Stable releases then update setup-ngit on
+  Nostr and GitHub, verifying its pins and installer before advancing the
+  floating action tag. Publication requires an exact-commit manual rehearsal
+  covering Linux Rust CI, macOS tests and all archives, reuses those archive
+  bytes, and runs NIP-82 then GitHub before independent setup-ngit and docs
+  updates. Generated downstream commits use an explicit release-bot identity;
+  docs promotion verifies the deployed site and live installer hashes.
+
+- Build and collect the five portable release archives on Nostr CI before
+  tagging, including Linux-hosted Windows MSVC cross-compilation.
+  OpenSSL source is fetched as a pinned Nix input rather than downloaded
+  by the archive command inside the build guest.
+
 - `ngit pr applied <ID> --reason ...` records acceptance after a missed status
   publication, cherry-pick, or equivalent change without merging or touching
   Git state. Existing status authorization applies; repeated use is a no-op.
@@ -31,8 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scopes` object, and install results name their `scope`. Thanks to
   hzrd149.
 - An optional manual macOS pre-release workflow builds the Apple Silicon Nix
-  package and checks its startup, unit tests, and Git HTTPS trust handling
-  before a release is tagged.
+  package and checks its startup, unit tests, and rejection of untrusted Git
+  HTTPS certificates before a release is tagged. Trusted Git HTTPS fixture
+  checks run on Linux; macOS SecureTransport requires system trust rather than
+  the fixture's process-local CA file. Rejection checks require the TLS
+  server to select the fixture certificate, not merely a failed clone.
 
 - `--help` now explains workflows as well as flags. `ngit --help` ends with a
   map from tasks to the command help that covers them, plus the conventions

@@ -1,7 +1,7 @@
 version: 1
 name: macOS pre-release checks
 system: aarch64-darwin
-reuse: never
+reuse: commit
 on:
   workflow_dispatch:
 jobs:

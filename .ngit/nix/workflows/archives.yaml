@@ -1,0 +1,62 @@
+version: 1
+name: Portable release archives
+system: x86_64-linux
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  linux-x86_64:
+    run: archives.build
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
+    artifacts:
+      archive: ngit-x86_64-unknown-linux-gnu.2.17.tar.gz
+      report: build.json
+  linux-aarch64:
+    run: archives.build
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
+    artifacts:
+      archive: ngit-aarch64-unknown-linux-gnu.2.17.tar.gz
+      report: build.json
+  linux-musl:
+    run: archives.build
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
+    artifacts:
+      archive: ngit-x86_64-unknown-linux-musl.tar.gz
+      report: build.json
+  macos:
+    system: aarch64-darwin
+    run: archives.build
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+    artifacts:
+      archive: ngit-universal-apple-darwin.tar.gz
+      report: build.json
+  windows:
+    run: archives.build
+    requirements:
+      resources:
+        memory-mib: {gte: 8192}
+        scratch-mib: {gte: 16384}
+    artifacts:
+      archive: ngit-x86_64-pc-windows-msvc.zip
+      report: build.json
+  collect:
+    needs: [linux-x86_64, linux-aarch64, linux-musl, macos, windows]
+    run: archives.collect
+    artifacts:
+      release-set: release
+  publisher-check:
+    needs: [collect]
+    run: archives.check-publisher

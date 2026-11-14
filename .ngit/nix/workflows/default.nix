@@ -30,6 +30,16 @@ let
       PKG_CONFIG = "pkg-config";
       PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.libgit2.dev pkgs.openssl.dev pkgs.dbus.dev ];
       SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+      # Runtime Cargo links run outside stdenv's SDK and library setup hooks.
+      # Rust otherwise searches for xcrun, which is absent from the job PATH.
+      SDKROOT = pkgs.apple-sdk.sdkroot;
+      # NIX_LDFLAGS is consumed only with stdenv's compiler-role variables.
+      # Pass the library search path directly when linking outside stdenv.
+      "CARGO_TARGET_${pkgs.lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.rustcTarget)}_LINKER" =
+        pkgs.writeShellScript "ngit-darwin-test-linker" ''
+          exec ${pkgs.stdenv.cc}/bin/cc -L${pkgs.lib.getLib pkgs.libiconv}/lib "$@"
+        '';
     };
     text = script;
   };

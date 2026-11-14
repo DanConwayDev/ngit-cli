@@ -345,6 +345,30 @@ function Install-Binaries([string]$Directory, [hashtable]$Sources) {
     }
 }
 
+function Get-VerifiedArchive([string]$url, [string]$archive, [string]$expectedSha, [string]$filename) {
+    $candidates = @(
+        $url,
+        "https://relay.ngit.dev/$expectedSha",
+        "https://blossom.primal.net/$expectedSha",
+        "https://blossom.ditto.pub/$expectedSha",
+        "https://haven.danconwaydev.com/$expectedSha",
+        "https://github.com/DanConwayDev/ngit-cli/releases/download/v$version/$filename"
+    ) | Select-Object -Unique
+    $verified = $false
+    foreach ($candidate in $candidates) {
+        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        try {
+            Invoke-WebRequest -Uri $candidate -OutFile $archive -TimeoutSec 300 -ErrorAction Stop
+            $actualSha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha -eq $expectedSha) { $verified = $true; break }
+            Write-Info "SHA-256 mismatch from $candidate; trying the next mirror"
+        } catch {
+            Write-Info "Download failed from $candidate; trying the next mirror"
+        }
+    }
+    if (-not $verified) { Fail-Install "no download source supplied the signed release bytes" }
+}
+
 function Invoke-NgitInstall {
     if ($version -notmatch '^\d+\.\d+\.\d+$') {
         Fail-Install "installer template was not rendered with a stable release"
@@ -438,11 +462,7 @@ function Invoke-NgitInstall {
     try {
         $archive = Join-Path $temporaryDirectory $filename
         Write-Info "Downloading ngit v$version for windows-x86_64"
-        Invoke-WebRequest -Uri $url -OutFile $archive
-        $actualSha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualSha -ne $expectedSha) {
-            Fail-Install "SHA-256 mismatch: expected $expectedSha, observed $actualSha"
-        }
+        Get-VerifiedArchive $url $archive $expectedSha $filename
 
         $extracted = Join-Path $temporaryDirectory "extracted"
         Expand-Archive -LiteralPath $archive -DestinationPath $extracted
