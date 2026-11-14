@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Release archives build only on explicit requests and as part of manual
-  `release-prep`, instead of on every PR or main push. Prepare a release once
-  on a maintainer branch, then fast-forward main and tag the exact approved
-  commit to publish its existing archives without another build.
-
 ## [3.1.0] - 2026-11-14
 
 Expand CI controls and live status, simplify signer and agent workflows, and
@@ -54,10 +47,11 @@ improve release delivery, PR handling and security.
   New releases prefer relay.ngit.dev for Blossom downloads, retaining the
   existing replication servers. Stable releases then update setup-ngit on
   Nostr and GitHub, verifying its pins and installer before advancing the
-  floating action tag. Publication requires an exact-commit manual rehearsal
-  covering Linux Rust CI, macOS tests and all archives, reuses those archive
-  bytes, and runs NIP-82 then GitHub before independent setup-ngit and docs
-  updates. Generated downstream commits use an explicit release-bot identity;
+  floating action tag. Publication requires exact-commit manual release prep
+  covering Linux Rust CI, macOS tests and all archives. Promote the prepared commit unchanged
+  to main and an annotated tag; publication reuses its archive bytes and runs
+  NIP-82 then GitHub before independent setup-ngit and docs updates. Generated
+  downstream commits use an explicit release-bot identity;
   docs promotion verifies the deployed site and live installer hashes.
 
 - ngit's release pipeline builds and collects its five portable archives on
@@ -155,6 +149,11 @@ improve release delivery, PR handling and security.
   `ngit --customize` documents precedence and scope.
 
 ### Changed
+
+- Release archives build only on explicit requests and as part of manual
+  `release-prep`, instead of on every PR or main push. Prepare a release once
+  on a maintainer branch, then fast-forward main and tag the exact approved
+  commit to publish its existing archives without another build.
 
 - `ngit nsite publish --json` uses format version 3: successful uploads are
   summarized with replication totals and actionable per-server problems.
