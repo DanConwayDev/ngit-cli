@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rename the macOS release validation workflow to `macos-checks` for clarity.
+
 ## [3.1.0] - 2026-11-14
 
 Expand CI controls and live status, simplify signer and agent workflows, and

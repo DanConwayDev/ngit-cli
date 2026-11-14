@@ -43,7 +43,7 @@ providers and receive no release secrets. After collection, `publisher-check`
 validates publication inputs, then extracts the verified static Linux CLI and
 checks its release command without a tag or credentials. Publication uses the
 same shipped binary; it does not compile another CLI. Cold archive builds may
-need the coordinator timeout budget described under macOS pre-release checks.
+need the coordinator timeout budget described under macOS checks.
 
 ## Prepare once, then promote the exact commit
 
@@ -410,10 +410,10 @@ starts exits immediately. Forced cancellation still bounds the process lifetime.
 Cargo's own package verification remains enabled. The separate platform archive
 workflow remains responsible for platform release binaries.
 
-## Manual macOS pre-release checks
+## Manual macOS checks
 
 Before tagging a release, a maintainer can request
-`.ngit/nix/workflows/pre-release.yaml` from the repository's coordinator.
+`.ngit/nix/workflows/macos-checks.yaml` from the repository's coordinator.
 It requires an available native `aarch64-darwin` provider with at least 8 GiB
 of RAM. Tart providers advertise total disk capacity rather than free scratch
 space, so this workflow does not require a `scratch-mib` capability. Check
@@ -448,7 +448,7 @@ by `ngit ci status --json`) and request the exact candidate commit:
 
 ```sh
 ngit ci trigger <COORDINATOR> <COMMIT> \
-  --workflow .ngit/nix/workflows/pre-release.yaml
+  --workflow .ngit/nix/workflows/macos-checks.yaml
 ngit ci status <COMMIT> --json
 ```
 
@@ -462,7 +462,7 @@ branch and trigger its commit, for example:
 ```sh
 git push origin HEAD:refs/heads/release-check/dependencies
 ngit ci trigger <COORDINATOR> HEAD \
-  --workflow .ngit/nix/workflows/pre-release.yaml \
+  --workflow .ngit/nix/workflows/macos-checks.yaml \
   --ref refs/heads/release-check/dependencies
 ```
 
