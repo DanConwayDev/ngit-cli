@@ -6,6 +6,18 @@ Workflow notes:
   `ngit release publish --help` before publishing: it documents version and
   tag discovery, asset and platform options, and what an edit preserves.
 
+  Most assets need no software target. Only when platform and MIME type
+  cannot distinguish assets for clients, set an optional software_target
+  on that asset in release.yaml, or use --software-target with asset add.
+  This emits a case-sensitive T tag on the asset, not on the release;
+  ngit never infers it. For example, to distinguish a Flatpak OCI manifest
+  from another OCI manifest for the same platform:
+    ngit release asset add app@1.0 --file flatpak-manifest.json --edit \
+      --platform linux-x86_64 --software-target flatpak-oci \
+      --mime application/vnd.oci.image.manifest.v1+json
+  Apply the same discriminator to its config and layer assets when the
+  consuming client requires it. Existing untagged assets remain valid.
+
   Container images and static sites have their own commands: see
   `ngit container --help` and `ngit nsite --help`.
 

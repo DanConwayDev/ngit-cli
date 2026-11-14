@@ -27,6 +27,11 @@ improve release delivery, PR handling and security.
 
 ### Added
 
+- Release assets support an optional `software_target` manifest field and
+  `release asset add --software-target` option, emitted as a `T` tag and shown
+  in asset output. Use it only when clients need to distinguish assets sharing
+  a platform and MIME type; most assets should leave it unset.
+
 - ngit's own release pipeline supports rehearsing its post-release GitHub,
   setup-ngit and documentation updates without publishing, and applying
   reviewed repair code to an existing signed ngit release without rebuilding

@@ -466,6 +466,7 @@ An asset object has this shape:
   "platforms": ["linux-x86_64"],
   "min_platform_version": null,
   "target_platform_version": null,
+  "software_target": null,
   "supported_nips": [],
   "variant": "glibc-2.17",
   "commit": "...",
@@ -869,7 +870,8 @@ The new asset is supplied by exactly one of:
 
 - `--url URL`, with metadata flags such as repeatable `--platform`,
   `--platform-agnostic`, `--asset-id`, `--asset-version`, `--filename`,
-  `--mime`, `--variant`, `--commit`, and Android fields; or
+  `--mime`, optional `--software-target`, `--variant`, `--commit`, and Android
+  fields; or
 - `--file PATH`, with the same metadata flags and optional repeatable
   `--blossom-server URL`; or
 - `--event ASSET`, for an existing immutable asset event.
@@ -1019,11 +1021,22 @@ An asset supports:
 - `filename` and `mime` overrides;
 - `platforms` or `platform_agnostic: true`;
 - `min_platform_version` and `target_platform_version`;
+- optional `software_target`, only for assets that clients cannot otherwise
+  distinguish by platform and MIME type;
 - `supported_nips`;
 - `variant`, `commit`, and `min_allowed_version`;
 - `android.version_code`, `android.min_allowed_version_code`, and
   `android.certificate_sha256` as a list of one or more hashes;
 - `original_url`.
+
+Most assets should omit `software_target`. If supplied, it emits the optional,
+case-sensitive `T` tag on the kind-3063 asset; it is independent of platform
+(`f`), MIME type (`m`), and category (`t`). For example, `flatpak-oci` can
+distinguish Flatpak OCI components from other OCI components for the same
+platform. Values are not restricted to a built-in list and are never inferred.
+The asset JSON field is `null` when absent. New URL or local-file assets can
+also set it with `ngit release asset add --software-target TARGET`; attaching
+an existing signed event preserves its metadata and cannot override the tag.
 
 Only the literal `{version}` and `{tag}` placeholders are expanded. `{version}`
 is the explicit VERSION or the version derived from the exact tag. `{tag}` is
