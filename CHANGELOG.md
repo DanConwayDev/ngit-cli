@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Expand CI controls and live status, simplify signer and agent workflows, and
+improve release delivery, PR handling and security.
+
 ### Documentation
 
 - CI watch help explains that provider capacity refusals are automatically
@@ -15,16 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Rehearse post-release GitHub, setup-ngit and documentation updates without
-  publishing, and apply reviewed repair code to a pinned existing signed
-  release without rebuilding or replacing its binaries.
+- ngit's own release pipeline supports rehearsing its post-release GitHub,
+  setup-ngit and documentation updates without publishing, and applying
+  reviewed repair code to an existing signed ngit release without rebuilding
+  or replacing its binaries.
 
 - Standalone shell and Windows installers retry other Blossom servers and
   the versioned GitHub mirror when a download fails or its checksum differs,
   verifying the signed hash before extracting any archive.
 
-- Publish tagged release binaries through ngit-ci to Nostr/Blossom and mirror
-  the same verified archives to GitHub Releases. GitHub-built alternatives
+- ngit's own tagged releases are now built and published through ngit-ci to
+  Nostr/Blossom, with the same verified archives mirrored to GitHub Releases.
+  GitHub-built alternatives
   are available only through a manual emergency workflow, with explicit
   fallback names, checksums and build provenance; they are never published
   automatically as releases. New stable mirrors advance GitHub's latest
@@ -41,8 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates. Generated downstream commits use an explicit release-bot identity;
   docs promotion verifies the deployed site and live installer hashes.
 
-- Build and collect the five portable release archives on Nostr CI before
-  tagging, including Linux-hosted Windows MSVC cross-compilation.
+- ngit's release pipeline builds and collects its five portable archives on
+  Nostr CI before tagging, including Linux-hosted Windows MSVC
+  cross-compilation.
   OpenSSL source is fetched as a pinned Nix input rather than downloaded
   by the archive command inside the build guest.
 
@@ -61,48 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without prompting. `ngit skill status --json` reports every scope in a
   `scopes` object, and install results name their `scope`. Thanks to
   hzrd149.
-- An optional manual macOS pre-release workflow builds the Apple Silicon Nix
-  package and checks its startup, unit tests, and rejection of untrusted Git
+- An optional manual macOS pre-release workflow builds ngit's Apple Silicon
+  Nix package and checks its startup, unit tests, and rejection of untrusted Git
   HTTPS certificates before a release is tagged. Trusted Git HTTPS fixture
   checks run on Linux; macOS SecureTransport requires system trust rather than
   the fixture's process-local CA file. Rejection checks require the TLS
   server to select the fixture certificate, not merely a failed clone.
 
-- `--help` now explains workflows as well as flags. `ngit --help` ends with a
-  map from tasks to the command help that covers them, plus the conventions
-  shared by every command (JSON output, identifiers, signer and repository
-  selection). `ngit pr`, `issue`, `repo`, `ci`, `account`, `sync`, `release`,
-  `container` and `nsite --help` describe their workflow's rules and pitfalls,
-  including steps performed with plain git such as opening a PR by pushing a
-  `pr/` branch, and `ci status`, `inspect`, `secrets`, `service status` and
-  `rerun --help` describe their result and JSON contracts. `-h` stays a
-  compact summary.
-- The CLI reference export includes the workflow notes shown by `--help`.
-- `--help` is compact: each option takes one line, with no blank lines
-  between options, and its full description is shown by the command that
-  defines it. Global options such as `--repo` and `--signer` are listed
-  once, by `ngit --help` and `ngit -h`; subcommand help points there instead
-  of repeating them, and they are still accepted at every position. `--json`
-  is the exception and stays listed on every command.
-  Workflow notes are unchanged. `ngit pr merge --help` is about 60% shorter
-  and group help such as `ngit pr --help` about 20% shorter.
-- Subcommand help no longer lists `-V, --version`; the flag still works
-  there and is listed by top-level help.
-- Option descriptions consistently start with a capital letter.
-- The description at the top of a command's help is wrapped at 80 columns.
-  Indented example commands are left on one line so they stay copyable.
-- The `--repo` and `--json` option descriptions are one line each. Their
-  detail (precedence over detected targets, JSON Lines progress on stderr,
-  plain-text subprocess output) is now part of the conventions at the end of
-  `ngit --help`, which already covered the rest; the CLI reference export
-  carries it there too.
-- Help output is styled on a colour terminal: section headings, including
-  those in the workflow notes, are bold in the yellow `ngit --customize` uses
-  for its sections, and command and option names are bold. Supporting text
-  is dimmed: bracketed defaults and possible values, `# comments` in
-  examples and the pointer to the global options. Commands and names
-  quoted in backticks within the workflow notes are bold. Piped output,
-  `NO_COLOR` and `--json` invocations get plain text with no escape codes.
+- `--help` adds concise, version-matched workflow guidance across ngit's
+  commands, written to be token-efficient for AI agents and complement the
+  expanded guides in ngit-docs. The bundled skill directs agents to this
+  installed guidance instead of carrying separate reference content.
+  A top-level task map routes agents to command
+  workflows, with shared conventions for JSON, identifiers, signers and
+  repository selection. Command help covers rules, pitfalls and copyable
+  examples, including plain Git steps; the CLI reference export includes
+  these notes too. Help uses compact option listings, 80-column prose and
+  colour-terminal styling, while `-h` stays a short summary. Global options
+  and `--version` are listed at the top level; `--json` stays visible on
+  every command. Piped output, `NO_COLOR` and JSON mode remain plain text.
 
 - `--json` streams compact signer and relay progress as JSON Lines on stderr,
   with immediate waits, retries and failures, aggregate relay outcomes and
@@ -149,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conditional includes and Windows ProgramData configuration. It does not scan
   other repositories or revoke access at remote signers. `--keep-credentials`
   clears selections without accessing saved secrets, including locked keyrings.
+  Cleanup follows Git include paths, including symlink-relative paths, without
+  modifying unrelated configuration files.
 - Configure relay timeouts through `nostr.relay-timeout-secs` and
   `nostr.relay-connect-timeout-secs`, or `NGIT_RELAY_TIMEOUT_SECS` and
   `NGIT_RELAY_CONNECT_TIMEOUT_SECS`. Defaults remain 45 seconds and the smaller
@@ -209,13 +194,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how to supply credentials for the named profile.
 - Accept an explicit default branch in `ngit send --target-branch` and Git
   push `target-branch=` options, retaining it as the PR target.
-- Share relay destination selection between PR admission and ordinary event
-  publication to keep repository-only routing and fallback policy consistent.
-- Fetch and cache NIP-11 relay information during standard event fetching to
-  detect relay capabilities. When a known GRASP implementation lacking purgatory
-  (such as Pyramid) is used as a PR hint server, push Git data before publishing
-  its PR event to prevent retention of duplicate PR events.
-
 - PRs and PR updates now send the signed event to the selected hint's GRASP
   relay before pushing its Git data. If either step fails, ngit tries the next
   candidate with a newly signed event and its clone hint. Once the hint works,
@@ -225,7 +203,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overloaded GRASP servers reject unaccepted pushes cheaply and apply publisher
   Web-of-Trust policy before receiving a pack. Server selection, one clone hint,
   serial Git transfers and first-success GRASP-06 fallback are preserved.
-  Failover updates are strictly newer than earlier attempts.
+  Failover updates are strictly newer than earlier attempts. Cached NIP-11
+  capability information selects Git-first ordering for older GRASP servers
+  without purgatory support, such as Pyramid. Repository-only routing and
+  relay fallback policy also apply to PR admission.
   Parallel repository-GRASP pushes without an explicit hint are future work.
   Publication still waits for auth-required before authenticating, unless
   proactive authentication was explicitly enabled. Public-repository
@@ -270,8 +251,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are bounded to two minutes. Pairing failures retain their causes.
 - Signer progress distinguishes pairing, public-key approval and request delivery,
   shows per-relay connection state and recovery guidance, and retains reminders
-  for a second approval. Terminal progress stays aligned during pairing, and
-  concurrent requests keep separate reports. JSON and redirected progress use
+  for a second approval. Concurrent requests keep separate reports. JSON and
+  redirected progress use
   append-only stderr messages across relay, Git, signer and Blossom operations. Verbose mode retains
   detailed diagnostics; JSON stdout remains structured command output or the
   explicit CI watch stream.
@@ -281,7 +262,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinguishes active signers, repository overrides and saved accounts.
 - Ordinary logout removes the selected connection and saved profile. Use
   `--keep-credentials` to sign out without deleting credentials; identity-key
-  deletion requires `--forget`. These safeguards also apply to `--all`.
+  deletion requires `--forget`. Locked or unreachable OS stores block deletion,
+  and deletion failures leave saved profiles intact. These safeguards also
+  apply to `--all`.
   Repository overrides take precedence over defaults, with explicit `--local`
   and `--global` scope controls. Removing shared credentials affects other
   repositories that use them.
@@ -306,8 +289,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PR merges refuse behind or diverged local default targets before changing
   refs or saving work, checking published repository state and the selected
   remote. Locally ahead targets remain mergeable.
-- Nix CI includes `dbus-daemon` at runtime so isolated account credential-store
-  tests can start their private session buses.
 - Correct the spelling of "public key" in the NIP-05 lookup progress message.
 - `ngit release publish`, `ngit nsite deploy` and `ngit container` now print
   plain Blossom upload progress lines when stderr is not a terminal (log files,
@@ -337,10 +318,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Incomplete local login selections block signing rather than silently using the
   global identity. Account inventory reports unavailable selections accurately.
 - File-store logout works on headless Unix systems without a session bus or
-  installed Secret Service. Locked or unreachable OS stores block deletion;
-  failed deletion does not leave profile removal markers. Git include cleanup
-  follows symlink-relative paths without
-  modifying unrelated configuration files.
+  installed Secret Service.
 - Bare clone/fetch consumers, including Nix source caches, can load existing
   signers and discover proposal refs. Automatic PR branch visibility remains
   opt-in; this does not provide full bare-repository command or publishing support.
