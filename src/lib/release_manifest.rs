@@ -86,6 +86,7 @@ pub struct ReleaseManifestAsset {
     pub platform_agnostic: bool,
     pub min_platform_version: Option<String>,
     pub target_platform_version: Option<String>,
+    pub software_target: Option<String>,
     #[serde(default)]
     pub supported_nips: Vec<String>,
     pub variant: Option<String>,
@@ -162,6 +163,7 @@ pub struct ResolvedReleaseManifestAsset {
     pub platform_agnostic: bool,
     pub min_platform_version: Option<String>,
     pub target_platform_version: Option<String>,
+    pub software_target: Option<String>,
     pub supported_nips: Vec<String>,
     pub variant: Option<String>,
     pub commit: Option<String>,
@@ -257,6 +259,7 @@ impl ReleaseManifest {
                 platform_agnostic: false,
                 min_platform_version: None,
                 target_platform_version: None,
+                software_target: None,
                 supported_nips: self.supported_nips.clone(),
                 variant: None,
                 commit: None,
@@ -343,6 +346,7 @@ impl ReleaseManifest {
                 platform_agnostic: asset.platform_agnostic,
                 min_platform_version: asset.min_platform_version.clone(),
                 target_platform_version: asset.target_platform_version.clone(),
+                software_target: asset.software_target.clone(),
                 supported_nips: if asset.supported_nips.is_empty() {
                     self.supported_nips.clone()
                 } else {
@@ -573,6 +577,7 @@ impl ReleaseManifestAsset {
             "target_platform_version",
             self.target_platform_version.as_deref(),
         )?;
+        validate_optional_clean_value("software_target", self.software_target.as_deref())?;
         validate_optional_clean_value("variant", self.variant.as_deref())?;
         validate_optional_clean_value("commit", self.commit.as_deref())?;
         validate_optional_clean_value("min_allowed_version", self.min_allowed_version.as_deref())?;
@@ -1271,6 +1276,44 @@ assets:
         .unwrap();
         let error = duplicate_filename.resolve("1", None).unwrap_err();
         assert!(error.to_string().contains("same filename"));
+    }
+
+    #[test]
+    fn software_target_is_opt_in_for_url_and_local_assets() {
+        let manifest = parse_release_manifest(
+            r#"
+schema: 1
+assets:
+  - source: https://example.com/manifest.json
+    platforms: [linux-x86_64]
+    software_target: flatpak-oci
+  - file: other-manifest.json
+    platforms: [linux-x86_64]
+    software_target: Custom-Target
+  - file: ordinary.tar.gz
+    platforms: [linux-x86_64]
+"#,
+        )
+        .unwrap();
+        let resolved = manifest.resolve("1", None).unwrap();
+        assert_eq!(
+            resolved.assets[0].software_target.as_deref(),
+            Some("flatpak-oci")
+        );
+        assert_eq!(
+            resolved.assets[1].software_target.as_deref(),
+            Some("Custom-Target")
+        );
+        assert!(resolved.assets[2].software_target.is_none());
+        for target in ["", " ", " flatpak-oci"] {
+            let input = format!(
+                "schema: 1\nassets:\n  - file: manifest.json\n    platforms: [linux-x86_64]\n    software_target: '{target}'\n"
+            );
+            assert!(
+                format!("{:#}", parse_release_manifest(&input).unwrap_err())
+                    .contains("software_target")
+            );
+        }
     }
 
     #[test]

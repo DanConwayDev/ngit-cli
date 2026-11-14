@@ -548,6 +548,7 @@ fn unresolved_asset_json(event_id: EventId, event: Option<&Event>) -> Value {
         "platforms": [],
         "min_platform_version": null,
         "target_platform_version": null,
+        "software_target": null,
         "supported_nips": [],
         "variant": null,
         "commit": null,
@@ -680,7 +681,7 @@ fn format_application(application: &SoftwareApplication, context: &ReleaseContex
 
 fn format_asset(asset: &SoftwareAsset, verified: bool) -> String {
     format!(
-        "{}\n    id: {}\n    url: {}\n    mime: {}\n    size: {}\n    sha256: {}\n    platforms: {}{}",
+        "{}\n    id: {}\n    url: {}\n    mime: {}\n    size: {}\n    sha256: {}\n    platforms: {}{}{}",
         asset.filename.as_deref().unwrap_or("<unnamed>"),
         asset.raw_event.id,
         asset.url.as_deref().unwrap_or("-"),
@@ -690,6 +691,12 @@ fn format_asset(asset: &SoftwareAsset, verified: bool) -> String {
             .map_or_else(|| "-".to_string(), |size| size.to_string()),
         asset.sha256,
         asset.platforms.join(", "),
+        asset
+            .software_target
+            .as_deref()
+            .map_or_else(String::new, |target| {
+                format!("\n    software target: {target}")
+            }),
         if verified { "\n    verified: yes" } else { "" },
     )
 }

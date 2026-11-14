@@ -312,6 +312,9 @@ pub struct SoftwareAsset {
     pub platforms: Vec<String>,
     pub min_platform_version: Option<String>,
     pub target_platform_version: Option<String>,
+    /// Optional discriminator when platform and MIME type do not distinguish
+    /// assets.
+    pub software_target: Option<String>,
     pub supported_nips: Vec<String>,
     pub variant: Option<String>,
     pub commit: Option<String>,
@@ -350,6 +353,7 @@ impl SoftwareAsset {
             platforms: unique_values(event, "f"),
             min_platform_version: optional_value(event, "min_platform_version"),
             target_platform_version: optional_value(event, "target_platform_version"),
+            software_target: optional_value(event, "T"),
             supported_nips: repeated_values(event, "supported_nip"),
             variant: optional_value(event, "variant"),
             commit: optional_value(event, "commit"),
@@ -460,6 +464,7 @@ pub fn validate_asset(event: &Event) -> Vec<ValidationIssue> {
         "size",
         "min_platform_version",
         "target_platform_version",
+        "T",
         "variant",
         "commit",
         "min_allowed_version",
@@ -760,6 +765,9 @@ pub struct AssetInput {
     pub platforms: Vec<String>,
     pub min_platform_version: Option<String>,
     pub target_platform_version: Option<String>,
+    /// Optional discriminator when platform and MIME type do not distinguish
+    /// assets.
+    pub software_target: Option<String>,
     pub supported_nips: Vec<String>,
     pub variant: Option<String>,
     pub commit: Option<String>,
@@ -810,6 +818,7 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
             "target_platform_version",
             input.target_platform_version.as_deref(),
         ),
+        ("T", input.software_target.as_deref()),
         ("variant", input.variant.as_deref()),
         ("commit", input.commit.as_deref()),
         ("min_allowed_version", input.min_allowed_version.as_deref()),
@@ -872,6 +881,7 @@ pub fn asset_event_builder(input: AssetInput) -> Result<EventBuilder, Validation
         input.target_platform_version,
     );
     push_repeated(&mut tags, "supported_nip", input.supported_nips);
+    push_optional(&mut tags, "T", input.software_target);
     push_optional(&mut tags, "variant", input.variant);
     push_optional(&mut tags, "commit", input.commit);
     push_optional(&mut tags, "min_allowed_version", input.min_allowed_version);
@@ -1506,6 +1516,7 @@ fn is_asset_tag(name: &str) -> bool {
             | "f"
             | "min_platform_version"
             | "target_platform_version"
+            | "T"
             | "supported_nip"
             | "variant"
             | "commit"
@@ -1742,6 +1753,74 @@ mod tests {
         assert!(codes.contains(&ValidationCode::IdentifierMismatch));
         assert!(codes.contains(&ValidationCode::ApplicationAuthorMismatch));
         assert!(codes.contains(&ValidationCode::ReleaseIdentifierMismatch));
+    }
+
+    #[test]
+    fn software_target_is_optional_case_sensitive_and_not_a_topic() {
+        for target in [None, Some("flatpak-oci"), Some("Other-Target")] {
+            let event = asset_event_builder(AssetInput {
+                application: Some(AddressPointer {
+                    coordinate: Coordinate::new(SOFTWARE_APPLICATION_KIND, keys().public_key())
+                        .identifier("app"),
+                    relay_hint: None,
+                }),
+                identifier: "app".to_string(),
+                version: "1".to_string(),
+                mime: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                sha256: HASH_A.to_string(),
+                software_target: target.map(str::to_owned),
+                // A category is unrelated; extra tags cannot override the typed field.
+                extra_tags: vec![tag(["t", "flatpak-oci"]), tag(["T", "stale"])],
+                ..Default::default()
+            })
+            .unwrap()
+            .finalize(&keys())
+            .unwrap();
+            let parsed = SoftwareAsset::parse(&event).unwrap();
+            assert_eq!(parsed.software_target.as_deref(), target);
+            assert_eq!(
+                values(&event, "T").collect::<Vec<_>>(),
+                target.into_iter().collect::<Vec<_>>()
+            );
+            assert_eq!(parsed.extra_tags, vec![tag(["t", "flatpak-oci"])]);
+        }
+    }
+
+    #[test]
+    fn software_target_rejects_empty_malformed_and_duplicate_tags() {
+        let original = asset(&keys(), "app", "app", "1", &["linux-x86_64"]);
+        for tags in [
+            vec![tag(["T", ""])],
+            vec![tag(["T", " "])],
+            vec![tag(["T"])],
+            vec![tag(["T", "flatpak-oci", "extra"])],
+            vec![tag(["T", "flatpak-oci"]), tag(["T", "oci"])],
+        ] {
+            let event = EventBuilder::new(SOFTWARE_ASSET_KIND, "")
+                .tags(original.raw_event.tags.iter().cloned().chain(tags))
+                .finalize(&keys())
+                .unwrap();
+            let error = SoftwareAsset::parse(&event).unwrap_err();
+            assert!(
+                error
+                    .issues
+                    .iter()
+                    .any(|issue| issue.field.as_deref() == Some("T"))
+            );
+        }
+        for target in ["", " ", " flatpak-oci"] {
+            let error = asset_event_builder(AssetInput {
+                software_target: Some(target.to_string()),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                error
+                    .issues
+                    .iter()
+                    .any(|issue| issue.field.as_deref() == Some("T"))
+            );
+        }
     }
 
     #[test]

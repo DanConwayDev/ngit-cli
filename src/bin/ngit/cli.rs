@@ -1134,6 +1134,13 @@ pub struct ReleaseAssetAddArgs {
     /// Target platform version
     #[arg(long, value_name = "VERSION", conflicts_with = "event")]
     pub target_platform_version: Option<String>,
+    /// Optional discriminator for assets sharing a platform and MIME type
+    ///
+    /// Most assets should omit this. Sets the case-sensitive T tag only when
+    /// clients need to distinguish otherwise similar assets, for example
+    /// flatpak-oci from other OCI components. No value is inferred.
+    #[arg(long, value_name = "TARGET", conflicts_with = "event")]
+    pub software_target: Option<String>,
     /// Supported NIP number (repeatable)
     #[arg(long = "supported-nip", value_name = "NIP", conflicts_with = "event")]
     pub supported_nips: Vec<String>,
@@ -2861,6 +2868,41 @@ mod tests {
         assert_eq!(args.platforms, ["android-arm64-v8a"]);
         assert_eq!(args.android_version_code, Some(42));
         assert_eq!(args.supported_nips, ["82"]);
+    }
+
+    #[test]
+    fn software_target_only_applies_to_new_assets() {
+        for source in ["--file", "--url", "--event"] {
+            let parsed = Cli::try_parse_from([
+                "ngit",
+                "release",
+                "asset",
+                "add",
+                "app@1",
+                source,
+                "asset",
+                "--software-target",
+                "flatpak-oci",
+                "--edit",
+            ]);
+            if source == "--event" {
+                assert!(
+                    parsed.is_err(),
+                    "existing signed assets cannot change target"
+                );
+            } else {
+                let Some(Commands::Release(release)) = parsed.unwrap().command else {
+                    panic!("expected release command");
+                };
+                let ReleaseCommands::Asset(asset) = release.release_command else {
+                    panic!("expected asset command");
+                };
+                let ReleaseAssetCommands::Add(args) = asset.asset_command else {
+                    panic!("expected add command");
+                };
+                assert_eq!(args.software_target.as_deref(), Some("flatpak-oci"));
+            }
+        }
     }
 
     #[test]

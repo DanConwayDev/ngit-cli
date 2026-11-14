@@ -691,6 +691,105 @@ assets:
 }
 
 #[tokio::test]
+async fn software_targets_distinguish_same_platform_and_mime_without_becoming_required()
+-> Result<()> {
+    const MIME: &str = "application/vnd.oci.image.manifest.v1+json";
+    let (harness, publisher, published) = setup(0).await?;
+    create_application(&publisher).await?;
+    let server = AssetHttpServer::spawn(vec![
+        ServedAsset {
+            path: "/flatpak.json",
+            body: b"flatpak manifest",
+            content_type: MIME,
+        },
+        ServedAsset {
+            path: "/container.json",
+            body: b"container manifest",
+            content_type: MIME,
+        },
+        ServedAsset {
+            path: "/ordinary.json",
+            body: b"ordinary manifest",
+            content_type: MIME,
+        },
+    ])
+    .await?;
+    fs::write(
+        publisher.dir().join("release.yaml"),
+        format!(
+            r#"schema: 1
+assets:
+  - source: "{base}/flatpak.json"
+    platforms: [linux-x86_64]
+    software_target: flatpak-oci
+  - source: "{base}/container.json"
+    platforms: [linux-x86_64]
+    software_target: oci
+  - source: "{base}/ordinary.json"
+    platforms: [linux-x86_64]
+"#,
+            base = server.base_url()
+        ),
+    )?;
+    run_json(
+        &publisher,
+        &[
+            "release",
+            "publish",
+            RELEASE_VERSION,
+            "--app",
+            APP_ID,
+            "--manifest",
+            "release.yaml",
+            "--json",
+        ],
+    )
+    .await?;
+    server.finish().await?;
+    let events = harness
+        .relay("default")
+        .events(
+            Filter::new()
+                .kind(SOFTWARE_ASSET_KIND)
+                .author(published.maintainer_keys.public_key()),
+        )
+        .await?;
+    ensure!(events.len() == 3);
+    let assets = events
+        .iter()
+        .map(SoftwareAsset::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let view = run_json(
+        &publisher,
+        &["release", "view", RELEASE_IDENTIFIER, "--json"],
+    )
+    .await?;
+    for (filename, target) in [
+        ("flatpak.json", Some("flatpak-oci")),
+        ("container.json", Some("oci")),
+        ("ordinary.json", None),
+    ] {
+        let asset = asset_named(&assets, filename)?;
+        ensure!(asset.mime == MIME);
+        ensure!(asset.platforms == ["linux-x86_64"]);
+        ensure!(asset.software_target.as_deref() == target);
+        ensure!(
+            tag_values(&asset.raw_event, "T")
+                == target.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        );
+        let json_asset = view["result"]["assets"]
+            .as_array()
+            .context("missing assets")?
+            .iter()
+            .find(|entry| entry["filename"] == filename)
+            .context("missing asset")?;
+        ensure!(json_asset.get("software_target").is_some());
+        ensure!(json_asset["software_target"].as_str() == target);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_file_publish_confirms_every_discovered_server() -> Result<()> {
     const ASSET_BYTES: &[u8] = b"local Blossom release archive\n";
 
@@ -1644,6 +1743,8 @@ async fn local_file_asset_add_preserves_the_existing_release() -> Result<()> {
             "linux-aarch64",
             "--filename",
             "ngit-1.2.3-linux-aarch64.zip",
+            "--software-target",
+            "custom-target",
             "--mime",
             "application/zip",
             "--blossom-server",
@@ -1698,6 +1799,8 @@ async fn local_file_asset_add_preserves_the_existing_release() -> Result<()> {
     let asset = asset_named(&assets, "ngit-1.2.3-linux-aarch64.zip")?;
     ensure!(asset.url.as_deref() == Some(primary_url.as_str()));
     ensure!(asset.mime == "application/zip");
+    ensure!(asset.software_target.as_deref() == Some("custom-target"));
+    ensure!(tag_values(&asset.raw_event, "T") == ["custom-target"]);
     ensure!(asset.sha256 == hash);
     ensure!(asset.size == Some(ADDED_BYTES.len() as u64));
     ensure!(asset.platforms == ["linux-aarch64"]);

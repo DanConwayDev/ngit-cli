@@ -774,6 +774,7 @@ pub(super) fn asset_json(asset: &SoftwareAsset) -> Value {
         "platforms": asset.platforms,
         "min_platform_version": asset.min_platform_version,
         "target_platform_version": asset.target_platform_version,
+        "software_target": asset.software_target,
         "supported_nips": asset.supported_nips,
         "variant": asset.variant,
         "commit": asset.commit,
