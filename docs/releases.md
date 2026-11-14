@@ -7,7 +7,9 @@ manifest is `.ngit/release.yaml` (singular).
 ## Portable release archives
 
 `.ngit/nix/workflows/archives.yaml` builds the real portable release binaries
-on pull requests, main pushes and manual requests without publishing a release.
+only on explicit manual requests or as a dependency of `release-prep.yaml`,
+without publishing a release. Ordinary PRs and main pushes run Rust CI without
+starting all five archive builds.
 Linux providers build the three Linux archives with Zig and Windows MSVC with
 cargo-xwin. The Apple Silicon provider builds both macOS slices and combines
 them into the universal archive. No ARM Linux or Intel Mac provider is needed.
@@ -29,7 +31,7 @@ native Windows or ARM Linux runtime coverage. Windows user acceptance may
 follow release; it does not block this migration. No new Windows provider is
 required. GitHub Actions does not build or publish binaries on tags.
 
-To request an archive rehearsal explicitly:
+To request archive builds alone for diagnosis:
 
 ```sh
 ngit ci trigger <coordinator-npub> HEAD \
@@ -43,48 +45,86 @@ checks its release command without a tag or credentials. Publication uses the
 same shipped binary; it does not compile another CLI. Cold archive builds may
 need the coordinator timeout budget described under macOS pre-release checks.
 
-## Full release rehearsal before tagging
+## Prepare once, then promote the exact commit
 
-Prepare the version bump and changelog on a release PR branch. Run the full
-rehearsal against the branch tip to catch failures before merging. Fixes change
-the commit, so rerun the rehearsal after each fix. A normal PR merge creates a
-new commit: push that final `main` commit, then rehearse it before creating the
-annotated release tag. Never tag a different commit from the approved one.
+`release-prep.yaml` is the manual release-preparation workflow. It runs Linux
+Rust CI, Apple Silicon package/unit/CLI/HTTPS checks, all five archive builds,
+collection and the publisher check. Its `ready` job validates the release plan
+and shipped CLI, then retains an unchanged copy of the archives for publication.
+This produces the real release binaries, not disposable rehearsal builds.
+
+Start from current canonical main, incorporating any reviewed feature PRs
+before preparation. Create the version/changelog commit on an ordinary
+maintainer release branch, not a `pr/` branch. Publishing this ordinary branch
+makes the commit reachable and gives the manual run a non-PR execution context;
+the coordinator deliberately separates PR execution from release reuse.
 
 ```sh
-ngit ci trigger <coordinator-npub> <exact-main-commit> \
-  --workflow .ngit/nix/workflows/rehearsal.yaml \
-  --ref refs/heads/main --json
-ngit ci status <exact-main-commit> --json
+git fetch origin main
+git switch -c release-prep/vX.Y.Z origin/main
+# Update Cargo.toml, Cargo.lock and CHANGELOG.md, then commit:
+git commit -m 'chore: release vX.Y.Z'
+git push origin HEAD:refs/heads/release-prep/vX.Y.Z
+release_commit=$(git rev-parse HEAD)
+ngit ci trigger <coordinator-npub> "$release_commit" \
+  --workflow .ngit/nix/workflows/release-prep.yaml \
+  --ref refs/heads/release-prep/vX.Y.Z --json
+ngit ci status "$release_commit" --json
 ```
 
-The manual rehearsal waits for Linux Rust CI, Apple Silicon package/unit/CLI/
-HTTPS tests, all five archive builds, collection and the publisher check.
-Its `ready` job validates the release plan and shipped CLI again, then exports
-an unchanged copy of the collected archives. Check that this specific rehearsal
-workflow concluded successfully; a successful trigger request is not approval.
-It needs no publication credentials. The standalone macOS and archive workflows
-remain manually runnable for diagnosis, but are not a full rehearsal.
+Require a successful result for this exact manual **release-prep workflow**,
+including its dependency runs and `ready` artifacts. A published trigger or a
+successful standalone archive build is not approval. Do not launch another
+archive run alongside prep: prep already requests all its prerequisites.
+Standalone macOS and archive workflows remain available for diagnosis.
+
+After prep passes, promote the same commit without creating another commit:
+
+```sh
+git fetch origin main
+git merge-base --is-ancestor origin/main "$release_commit"
+git switch main
+git merge --ff-only "$release_commit"
+test "$(git rev-parse HEAD)" = "$release_commit"
+git tag -a vX.Y.Z "$release_commit" -m 'Release vX.Y.Z'
+```
+
+Stop if either ancestry or fast-forward validation fails. Do not use a merge
+commit, squash, rebase or force-push to promote a prepared release. Incorporate
+required main changes on the preparation branch and run prep on the new commit.
+Likewise, any fix or version/changelog edit invalidates the previous approval.
+An unchanged commit does not need a second prep run just because its branch
+moves to main. The annotated tag has its own object ID, but `reuse: commit`
+uses the commit it peels to.
+
+For a stable release, fast-forward `stable` to this tag as described in
+AGENTS.md, then push `main`, `stable` and the annotated tag to both release
+remotes. Release candidates push only `main` and the tag and leave `stable`
+unchanged. Keep the prep result and artifacts available until publication has
+completed. A successful run is reusable only under compatible coordinator,
+trust, selection-policy and dependency-attempt bindings, as described below.
 
 ## Tag publication on ngit-ci
 
 `.ngit/nix/workflows/binary-release.yaml` runs on `v*` tag pushes. It requires
-`rehearsal.yaml` at the exact tag commit and consumes its `rehearsal.ready`
-archive set. The coordinator reuses the compatible retained manual rehearsal
+`release-prep.yaml` at the exact tag commit and consumes its `prep.ready`
+archive set. The coordinator reuses the compatible retained manual release prep
 and its exact dependency attempts; no release rebuild or repacking is needed.
 The NIP-82 `publish` job runs first, followed by GitHub `mirror`, then
 `update-gh-setup` and `update-docs` independently. These are separate jobs so
 each stage can be retried.
 
-The rehearsal's approval job refuses automatic or tag-context execution.
-Without a compatible green pre-tag rehearsal, automatic dependency admission
+The prep workflow's approval job refuses automatic or tag-context execution.
+Without a compatible green pre-tag prep, automatic dependency admission
 may run checks/builds, but cannot approve them and cannot publish a release.
 Reuse requires the same coordinator, commit, workflow bytes, trust/selection
 policy and dependency attempts. A changed policy, newer prerequisite attempt,
-or lost coordinator history requires a fresh manual branch rehearsal. PR-context
-results are not substitutes for the final main-commit rehearsal. If a tag run
-already bound to a failed rehearsal, rerunning it retains that failure; it
-cannot adopt a later rehearsal. Confirm approval before creating the tag.
+or lost coordinator history requires a fresh manual branch prep. PR-context
+results cannot substitute for a maintainer branch prep run, even at the same
+commit. Use the ordinary release branch above; its approved commit can be
+fast-forwarded to main without changing the execution identity. If a tag run
+already bound to a failed prep run, rerunning it retains that failure; it
+cannot adopt a later prep run. Confirm approval before creating the tag.
 Do not force-move or recreate a product tag, or manually trigger the whole
 publication graph: fresh manual triggers rerun dependencies in tag context,
 which the pre-tag approval guard deliberately rejects.
@@ -210,7 +250,7 @@ ngit ci rerun <coordinator-npub> <completed-result> --job update-docs --json
 ngit ci rerun <coordinator-npub> <completed-result> --job publish --json
 ```
 
-Job reruns preserve the exact external rehearsal binding and archive bytes.
+Job reruns preserve the exact external prep binding and archive bytes.
 There is no separate mirror-recovery workflow. Do not rebuild over an existing
 release or substitute different bytes for the same version. Historical releases
 are not deleted by this migration.
@@ -378,7 +418,7 @@ It requires an available native `aarch64-darwin` provider with at least 8 GiB
 of RAM. Tart providers advertise total disk capacity rather than free scratch
 space, so this workflow does not require a `scratch-mib` capability. Check
 available disk space on the runner before a cold build. The workflow never
-publishes a release. It runs manually or as a required rehearsal dependency;
+publishes a release. It runs manually or as a required release-prep dependency;
 ordinary pushes and pull requests do not independently trigger it. Commit
 reuse lets tag publication retain its successful pre-tag test result.
 

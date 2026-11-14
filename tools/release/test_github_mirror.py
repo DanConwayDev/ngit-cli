@@ -17,7 +17,7 @@ class Mirror(unittest.TestCase):
         # directory, not the directory's own basename.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            inputs = root / "inputs/rehearsal.ready/artifacts/release-set"
+            inputs = root / "inputs/prep.ready/artifacts/release-set"
             inputs.mkdir(parents=True)
             (inputs / "builds.json").write_text("[]")
             secrets = root / "secrets"

@@ -121,4 +121,5 @@ class Publication(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), patch.object(publisher, "plan", return_value={"prerelease": False}) as plan, patch.object(publisher.subprocess, "run"), patch.object(publisher.subprocess, "check_output", side_effect=["a" * 40, "a" * 40, "tag", "1700000000"]):
             with publisher.prepare() as result:
                 self.assertEqual(result[1:4], ("1.2.3", "main", "1700000000"))
+            self.assertEqual(plan.call_args.args[0], Path("inputs/prep.ready/artifacts/release-set"))
             self.assertEqual(plan.call_args.args[1:], ("v1.2.3", "a" * 40))

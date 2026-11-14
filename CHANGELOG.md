@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Release archives build only on explicit requests and as part of manual
+  `release-prep`, instead of on every PR or main push. Prepare a release once
+  on a maintainer branch, then fast-forward main and tag the exact approved
+  commit to publish its existing archives without another build.
+
 ## [3.1.0] - 2026-11-14
 
 Expand CI controls and live status, simplify signer and agent workflows, and

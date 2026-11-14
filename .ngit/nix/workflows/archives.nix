@@ -41,8 +41,8 @@ in {
   check-publisher = command "check-release-publisher" [] ''
     python3 tools/release/check-publication.py
   '';
-  rehearse = command "rehearse-release" [] ''
-    python3 tools/release/rehearsal.py
+  prepare = command "prepare-release" [] ''
+    python3 tools/release/release_prep.py
   '';
   publish = command "publish-release-archives" [] ''
     python3 tools/release/publish-release.py

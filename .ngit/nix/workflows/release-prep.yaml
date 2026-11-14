@@ -1,5 +1,5 @@
 version: 1
-name: Release rehearsal
+name: Release prep
 system: x86_64-linux
 reuse: commit
 on:
@@ -11,6 +11,6 @@ needs-workflows:
 jobs:
   ready:
     needs: [archives.collect]
-    run: archives.rehearse
+    run: archives.prepare
     artifacts:
       release-set: release

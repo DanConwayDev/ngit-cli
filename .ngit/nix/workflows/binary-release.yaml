@@ -6,24 +6,24 @@ on:
   push:
     tags: ["v*"]
 needs-workflows:
-  rehearsal: rehearsal.yaml
+  prep: release-prep.yaml
 jobs:
   publish:
-    needs: [rehearsal.ready]
+    needs: [prep.ready]
     run: archives.publish
     secrets: [NGIT_PUBLISHER_NBUNKSEC]
     concurrency:
       group: binary-release
       cancel-in-progress: false
   mirror:
-    needs: [publish, rehearsal.ready]
+    needs: [publish, prep.ready]
     run: archives.mirror
     secrets: [GH_RELEASE_TOKEN]
     concurrency:
       group: github-release-mirror
       cancel-in-progress: false
   update-gh-setup:
-    needs: [publish, mirror, rehearsal.ready]
+    needs: [publish, mirror, prep.ready]
     run: archives.update-gh-setup
     secrets: [NGIT_PUBLISHER_NBUNKSEC, GH_RELEASE_TOKEN]
     concurrency:
@@ -34,7 +34,7 @@ jobs:
       resources:
         memory-mib: {gte: 4096}
         scratch-mib: {gte: 8192}
-    needs: [mirror, rehearsal.ready]
+    needs: [mirror, prep.ready]
     run: archives.update-docs
     secrets: [NGIT_PUBLISHER_NBUNKSEC]
     concurrency:

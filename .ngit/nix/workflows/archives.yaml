@@ -2,9 +2,6 @@ version: 1
 name: Portable release archives
 system: x86_64-linux
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 jobs:
   linux-x86_64:

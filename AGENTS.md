@@ -371,9 +371,13 @@ exactly these patterns. They are non-negotiable:
 
 A release is a `chore: release vX.Y.Z` commit updating `CHANGELOG.md`,
 `Cargo.toml`, and `Cargo.lock`, followed by an annotated `vX.Y.Z` tag on that
-commit. Before tagging, run the manual `rehearsal.yaml` workflow against the
-exact final main commit and require its successful result. A PR merge changes
-the commit, so rehearse again after merging; see `docs/releases.md`.
+commit. Prepare that commit on an ordinary maintainer release branch (for
+example `release-prep/vX.Y.Z`, not a `pr/` branch). Run the manual
+`release-prep.yaml` workflow and require its successful result, then
+fast-forward main to that exact commit and create its annotated tag. Do not
+create a merge commit, squash or rebase after preparation: changing the commit
+requires fresh prep. The tag reuses the approved archives without rebuilding;
+see `docs/releases.md` for the commands and reuse constraints.
 Release candidates publish `main` and the tag to every release remote.
 Stable releases add a third required ref: fast-forward `stable` to the tag, then
 push `main`, the tag, and `stable` together to every release remote (currently

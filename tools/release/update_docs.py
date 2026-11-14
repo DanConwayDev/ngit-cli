@@ -125,7 +125,7 @@ def main():
     if version is None:
         print("Prerelease: stable documentation and installers unchanged")
         return
-    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "rehearsal.ready/artifacts/release-set"
+    directory = Path(os.environ["NGIT_CI_INPUTS"]) / "prep.ready/artifacts/release-set"
     release = plan(directory, os.environ["NGIT_CI_REF_NAME"], os.environ["NGIT_CI_COMMIT_SHA"])
     with environment(release) as cli_env, tempfile.TemporaryDirectory(prefix="docs-release-", dir=".") as temporary:
         root = Path(temporary).resolve()
