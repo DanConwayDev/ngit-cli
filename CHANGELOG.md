@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-14
+
 Expand CI controls and live status, simplify signer and agent workflows, and
 improve release delivery, PR handling and security.
 
