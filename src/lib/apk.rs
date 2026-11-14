@@ -286,6 +286,26 @@ mod tests {
     }
 
     #[test]
+    fn malformed_manifest_string_pool_is_rejected() -> Result<()> {
+        // A tiny binary XML document claims a string-offset table far larger
+        // than its contents. The APK parser must reject the truncated table.
+        let mut manifest = Vec::new();
+        manifest.extend_from_slice(&3_u16.to_le_bytes()); // XML chunk
+        manifest.extend_from_slice(&8_u16.to_le_bytes());
+        manifest.extend_from_slice(&36_u32.to_le_bytes());
+        manifest.extend_from_slice(&1_u16.to_le_bytes()); // string pool
+        manifest.extend_from_slice(&28_u16.to_le_bytes());
+        for value in [28_u32, 0x3fff_fff8, 0, 0, 0xffff_fffc, 0] {
+            manifest.extend_from_slice(&value.to_le_bytes());
+        }
+        let bytes = apk(&[("AndroidManifest.xml", &manifest)])?;
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(&bytes)?;
+        assert!(super::inspect_apk_file(file.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn legacy_encoded_native_names_are_supported() -> Result<()> {
         let name = "lib/x86/cafe.so";
         let mut bytes = apk(&[("AndroidManifest.xml", b"manifest"), (name, b"contents")])?;

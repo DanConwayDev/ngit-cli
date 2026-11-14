@@ -327,6 +327,11 @@ improve release delivery, PR handling and security.
 
 ### Security
 
+- Update `apk-info` to 1.1.1 for upstream malformed-metadata allocation
+  and parsing fixes used when inspecting APK release assets. Upstream also
+  fixes extraction traversal; ngit does not use that extraction API, and
+  this update is not evidence of exploitation in ngit.
+
 - Update `libssh2-sys` to 0.3.4 for upstream bounds checks before
   encrypt-then-MAC SSH packet decryption, avoiding a local source backport.
 

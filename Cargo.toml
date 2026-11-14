@@ -13,7 +13,7 @@ categories = ["command-line-utilities","development-tools"]
 
 [dependencies]
 anyhow = "1.0.104"
-apk-info = "1.0.13"
+apk-info = "1.1.1"
 async-trait = "0.1.92"
 async-utility = "0.3"
 auth-git2 = "0.6.0"
