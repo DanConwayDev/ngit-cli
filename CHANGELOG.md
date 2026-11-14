@@ -327,6 +327,11 @@ improve release delivery, PR handling and security.
 
 ### Security
 
+- Refresh bundled Mozilla certificate roots to 1.0.12, removing the two
+  Buypass roots, DigiCert Trusted Root G4, QuoVadis Root CA 1 G3 and 3 G3,
+  and Certigna Root CA in line with upstream trust-store policy. This also
+  updates the explicit Android HTTP certificate bundle.
+
 - Update `apk-info` to 1.1.1 for upstream malformed-metadata allocation
   and parsing fixes used when inspecting APK release assets. Upstream also
   fixes extraction traversal; ngit does not use that extraction API, and
