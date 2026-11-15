@@ -30,4 +30,14 @@ requested values, and `labels` with the remaining effective values.
 
 This command publishes deletion requests and updates the publisher's cache.
 Other readers discover these requests during an online refresh, including
-for assignments already cached. Offline readers retain their last known view.
+for assignments already cached or first seen in that refresh. Originals and
+deletion requests may be served by different repository relays.
+
+After fetching repository events, ngit checks deletion requests for label
+assignments on its known issues and PRs. It batches up to 480 label IDs per
+query and checks up to four repository relays concurrently. Repositories
+without label assignments need no extra queries. This does not add deletion
+queries for every comment, status or other descendant event.
+
+Offline readers apply deletion requests already in their cache; they cannot
+discover removals published since their last online refresh.

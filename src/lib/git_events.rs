@@ -1289,21 +1289,14 @@ pub fn get_labels(event: &Event, repo_ref: &RepoRef, label_events: &[Event]) -> 
 /// with it; callers that remove a single value republish the survivors.
 #[must_use]
 pub fn apply_label_deletions(label_events: Vec<Event>, deletion_events: &[Event]) -> Vec<Event> {
-    if deletion_events.is_empty() {
-        return label_events;
-    }
+    let deleted = deletion_events
+        .iter()
+        .filter(|event| event.kind == Kind::EventDeletion)
+        .flat_map(|event| event.tags.event_ids().map(|id| (event.pubkey, id)))
+        .collect::<std::collections::HashSet<_>>();
     label_events
         .into_iter()
-        .filter(|label| {
-            !deletion_events.iter().any(|deletion| {
-                deletion.kind.as_u16() == 5
-                    && deletion.pubkey == label.pubkey
-                    && deletion.tags.iter().any(|t| {
-                        let s = t.as_slice();
-                        s.len() >= 2 && s[0].eq("e") && s[1].eq(&label.id.to_string())
-                    })
-            })
-        })
+        .filter(|label| !deleted.contains(&(label.pubkey, label.id)))
         .collect()
 }
 
