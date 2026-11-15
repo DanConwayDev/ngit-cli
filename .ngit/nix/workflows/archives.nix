@@ -53,16 +53,16 @@ in {
   update-gh-setup = command "update-gh-setup-ngit" [ pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
     python3 tools/release/setup_ngit.py
   '';
-  update-docs = command "update-ngit-docs" [ pkgs.nodejs ] ''
+  update-docs = command "update-ngit-docs" [ pkgs.nodejs pkgs.diffutils ] ''
     python3 tools/release/update_docs.py
   '';
   post-release-verify = command "verify-published-release" [ recoveryCli ] ''
     python3 tools/release/post_release.py
   '';
-  post-release-rehearsal = command "rehearse-post-release" [ recoveryCli pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+  post-release-rehearsal = command "rehearse-post-release" [ recoveryCli pkgs.nodejs pkgs.diffutils pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
     python3 tools/release/post_release.py
   '';
-  post-release-apply = command "apply-post-release" [ recoveryCli pkgs.nodejs pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
+  post-release-apply = command "apply-post-release" [ recoveryCli pkgs.nodejs pkgs.diffutils pkgs.curl pkgs.gnutar pkgs.gzip pkgs.gawk pkgs.gnugrep pkgs.findutils ] ''
     python3 tools/release/post_release.py --apply
   '';
   collect = command "collect-release-archives" [] ''

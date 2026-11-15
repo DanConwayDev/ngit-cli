@@ -1,7 +1,9 @@
 {
   "schema": 1,
-  "version": null,
-  "commit": null,
-  "release_event": null,
-  "operations": []
+  "version": "3.1.0",
+  "commit": "6159406b700b052e72d54d27c0e93f75041d0297",
+  "release_event": "602c30a035d104e85373b2d73082f267d6ec8ca46e2342fe786e6f2d65d357f7",
+  "operations": [
+    "update-docs"
+  ]
 }
