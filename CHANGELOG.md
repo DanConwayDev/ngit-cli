@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Include file comparison tools in documentation release jobs so site
+  validation can finish before publishing installer updates.
+
 ### Changed
 
 - Rename the macOS release validation workflow to `macos-checks` for clarity.
