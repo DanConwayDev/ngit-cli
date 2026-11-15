@@ -93,6 +93,11 @@ in {
         cargo test --locked --offline --test git_https
       '';
     };
+    release.package = command "check-crate-package" ''
+      # Exercise Cargo's archive creation without credentials or another build.
+      # Rust CI checks the source; publication still verifies the packaged crate.
+      cargo package --locked --no-verify --package ngit
+    '';
     release.publish = command "publish" (builtins.readFile ./publish-crate.sh);
   };
 }

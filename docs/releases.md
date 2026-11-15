@@ -49,7 +49,9 @@ need the coordinator timeout budget described under macOS checks.
 
 `release-prep.yaml` is the manual release-preparation workflow. It runs Linux
 Rust CI, Apple Silicon package/unit/CLI/HTTPS checks, all five archive builds,
-collection and the publisher check. Its `ready` job validates the release plan
+collection, Cargo crate packaging and the publisher check. Crate packaging
+checks archive creation without credentials; the tag publisher still runs
+Cargo's package build verification. Its `ready` job validates the release plan
 and shipped CLI, then retains an unchanged copy of the archives for publication.
 This produces the real release binaries, not disposable rehearsal builds.
 

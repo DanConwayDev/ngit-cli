@@ -9,8 +9,10 @@ needs-workflows:
   macos: macos-checks.yaml
   archives: archives.yaml
 jobs:
+  crate:
+    run: release.package
   ready:
-    needs: [archives.collect]
+    needs: [crate, archives.collect]
     run: archives.prepare
     artifacts:
       release-set: release

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remove an obsolete agent-skill symlink that prevented crates.io packaging,
+  and check Cargo archive creation during release prep before tagging.
+
 - Include file comparison tools in documentation release jobs so site
   validation can finish before publishing installer updates.
 
