@@ -31,3 +31,18 @@ Auto-resolve from commits:
   Wording such as "resolved to PRs; follow-up #deadbeef" is not a directive.
 
   Guide: https://ngit.dev/issues
+
+Removing labels:
+  ngit issue label <ID|nevent> --remove-label bug --json
+  ngit issue label <ID|nevent> --remove-label bug --remove-label help-wanted
+
+  Only your own assignments can be removed, with the same repository
+  permission required to add labels. Every requested value must exist in
+  your assignments; matching ignores case. Labels embedded in the original
+  event and other authors' assignments remain. Multi-target assignments
+  cannot be removed. Use --label separately to add labels.
+
+  Deletion removes a whole event. Each relay must accept replacements that
+  preserve surviving labels before receiving the deletion request. Delivery
+  can partially succeed across relays. Readers discover deletions on refresh;
+  --offline does not refresh previously cached labels.

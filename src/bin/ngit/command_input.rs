@@ -146,6 +146,25 @@ mod tests {
     }
 
     #[test]
+    fn label_removal_needs_no_addition_or_prompt() -> Result<()> {
+        for kind in ["issue", "pr"] {
+            for interactive in [false, true] {
+                let mut args = vec!["ngit", kind, "label", "deadbeef", "--remove-label", "bug"];
+                if interactive {
+                    args.push("--interactive");
+                }
+                let mut cli = Cli::try_parse_from(&args)?;
+                complete(&mut cli, |_| {
+                    panic!("removal must not prompt for labels to add")
+                })?;
+                args.extend(["--label", "other"]);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn blank_and_cancelled_input_abort_completion() -> Result<()> {
         for (args, flag) in commands() {
             let mut argv = vec!["ngit", "--interactive"];

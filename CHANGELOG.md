@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Remove your own issue and PR label assignments with `--remove-label`;
-  online refreshes discover deletion requests for cached label events.
+- Remove your own issue and PR label assignments with `--remove-label`,
+  preserving other labels from the same assignment. Other authors' assignments
+  and labels embedded in the original issue or PR remain unchanged.
 
 ### Fixed
 
