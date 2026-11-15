@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Remove your own issue and PR label assignments with `--remove-label`,
+  preserving other labels from the same assignment. Other authors' assignments
+  and labels embedded in the original issue or PR remain unchanged.
+
 ### Fixed
+
+- Honor label deletion requests during online refreshes, including when the
+  assignment and deletion are fetched from different repository relays.
 
 - Remove an obsolete agent-skill symlink that prevented crates.io packaging,
   and check Cargo archive creation during release prep before tagging.

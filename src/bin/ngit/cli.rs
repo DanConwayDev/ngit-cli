@@ -1388,14 +1388,25 @@ pub enum PrCommands {
         after_long_help = crate::cli_help::PR_POINTER
     )]
     Merge(MergeSubCommandArgs),
-    /// add one or more labels to a PR (author or maintainer only)
+    /// add labels or remove your assignments from a PR
     Label {
         /// Proposal event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Label to apply (repeatable; required unless --interactive)
-        #[arg(long = "label", value_name = "LABEL")]
+        /// Label to apply (repeatable; required unless removing or interactive)
+        #[arg(long = "label", value_name = "LABEL", conflicts_with = "remove_labels")]
         labels: Vec<String>,
+        /// Remove labels you applied (repeatable)
+        ///
+        /// Matches case-insensitively. All values must have an assignment by
+        /// the signer. Other authors' assignments and original-event labels
+        /// remain. Surviving labels are republished before deletion on each
+        /// relay. Cannot be combined with --label.
+        ///
+        /// JSON reports action "unlabelled", `removed_from_own_events` and the
+        /// remaining effective labels. Delivery is not atomic across relays.
+        #[arg(long = "remove-label", value_name = "LABEL")]
+        remove_labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,
@@ -1873,14 +1884,25 @@ pub enum IssueCommands {
         #[arg(long)]
         offline: bool,
     },
-    /// add one or more labels to an issue (author or maintainer only)
+    /// add labels or remove your assignments from an issue
     Label {
         /// Issue event-id (hex) or nevent (bech32)
         #[arg(value_name = "ID|nevent")]
         id: String,
-        /// Label to apply (repeatable; required unless --interactive)
-        #[arg(long = "label", value_name = "LABEL")]
+        /// Label to apply (repeatable; required unless removing or interactive)
+        #[arg(long = "label", value_name = "LABEL", conflicts_with = "remove_labels")]
         labels: Vec<String>,
+        /// Remove labels you applied (repeatable)
+        ///
+        /// Matches case-insensitively. All values must have an assignment by
+        /// the signer. Other authors' assignments and original-event labels
+        /// remain. Surviving labels are republished before deletion on each
+        /// relay. Cannot be combined with --label.
+        ///
+        /// JSON reports action "unlabelled", `removed_from_own_events` and the
+        /// remaining effective labels. Delivery is not atomic across relays.
+        #[arg(long = "remove-label", value_name = "LABEL")]
+        remove_labels: Vec<String>,
         /// Use local cache only, skip network fetch
         #[arg(long)]
         offline: bool,

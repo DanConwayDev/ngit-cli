@@ -356,9 +356,17 @@ async fn main() {
                 PrCommands::Label {
                     id,
                     labels,
+                    remove_labels,
                     offline,
                 } => {
-                    sub_commands::label::launch_pr_label(id, labels, *offline, signer_params).await
+                    sub_commands::label::launch_pr_label(
+                        id,
+                        labels,
+                        remove_labels,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
                 PrCommands::SetSubject {
                     id,
@@ -493,10 +501,17 @@ async fn main() {
                 IssueCommands::Label {
                     id,
                     labels,
+                    remove_labels,
                     offline,
                 } => {
-                    sub_commands::label::launch_issue_label(id, labels, *offline, signer_params)
-                        .await
+                    sub_commands::label::launch_issue_label(
+                        id,
+                        labels,
+                        remove_labels,
+                        *offline,
+                        signer_params,
+                    )
+                    .await
                 }
                 IssueCommands::SetSubject {
                     id,

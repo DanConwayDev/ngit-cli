@@ -8,7 +8,7 @@ use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_events_from_local_cache},
+    client::{Client, Connect, get_active_label_events},
     git::{Repo, RepoActions},
     login,
     repo_ref::get_resolved_repo_coordinate_for_publishing,
@@ -88,8 +88,8 @@ async fn publish_set_subject_event(
     }
 
     // Fetch existing label events so we can check whether the subject is
-    // already set to the requested value.
-    let existing_label_events = get_events_from_local_cache(
+    // already set to the requested value. Deleted label events do not count.
+    let existing_label_events = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()

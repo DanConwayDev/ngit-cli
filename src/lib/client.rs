@@ -1509,6 +1509,94 @@ impl Connect for Client {
             }
         }
 
+        // Gather labels after every discovery round, so a cold reader can
+        // find the original on one relay and its deletion on another in one
+        // refresh. Scope the cache lookup to this repository's known roots.
+        if let Some(path) = git_repo_path {
+            let mut roots = request.issue_ids.clone();
+            roots.extend(&request.proposals);
+            for report in relay_reports
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+            {
+                roots.extend(&report.issues);
+                roots.extend(&report.proposals);
+            }
+            let labels = if roots.is_empty() {
+                Vec::new()
+            } else {
+                get_active_label_events(path, vec![Filter::new().kind(KIND_LABEL).events(roots)])
+                    .await?
+            };
+            let filters = label_deletion_filters(&labels);
+            if !filters.is_empty() {
+                let routes = relay_reports
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, result)| {
+                        result
+                            .as_ref()
+                            .ok()?
+                            .label_deletion_relay
+                            .clone()
+                            .map(|relay| (index, relay))
+                    })
+                    .collect::<Vec<_>>();
+                let results = stream::iter(routes)
+                    .map(|(index, url)| {
+                        let filters = &filters;
+                        let labels = &labels;
+                        async move {
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(self.relay_timeouts.overall),
+                                async {
+                                    let relay = self
+                                        .client
+                                        .relay(&url)
+                                        .await?
+                                        .context("label deletion relay disappeared")?;
+                                    let mut count = 0;
+                                    for filter in filters {
+                                        let deletions = get_events_of(
+                                            &relay,
+                                            vec![filter.clone()],
+                                            &None,
+                                            self.relay_timeouts,
+                                        )
+                                        .await?;
+                                        cache_label_deletions(path, labels, &deletions).await?;
+                                        count += deletions.len() as u32;
+                                    }
+                                    anyhow::Ok(count)
+                                },
+                            )
+                            .await
+                            .context("timed out checking label deletions")
+                            .and_then(std::convert::identity);
+                            (index, url, result)
+                        }
+                    })
+                    .buffer_unordered(4)
+                    .collect::<Vec<_>>()
+                    .await;
+                for (index, url, result) in results {
+                    match result {
+                        Ok(count) => {
+                            if let Ok(report) = &mut relay_reports[index] {
+                                report.deletions += count;
+                            }
+                        }
+                        Err(error) => {
+                            repository_success_count.fetch_sub(1, Ordering::Relaxed);
+                            relay_reports[index] =
+                                Err(error
+                                    .context(format!("failed to check label deletions on {url}")));
+                        }
+                    }
+                }
+            }
+        }
+
         progress_reporter.fetch_relay_health = FetchRelayHealth {
             repository_relay_attempts,
             repository_relay_successes: repository_success_count.load(Ordering::Relaxed) as usize,
@@ -1547,7 +1635,12 @@ impl Connect for Client {
         let mut maintainer_listed: HashSet<PublicKey> = request.maintainer_listed_authors.clone();
         let mut session_announcements: Vec<AnnouncementListing> = Vec::new();
 
-        let mut report = FetchReport::default();
+        let mut report = FetchReport {
+            label_deletion_relay: (request.scope == RelayFetchScope::Repository)
+                .then(|| request.selected_relay.clone())
+                .flatten(),
+            ..FetchReport::default()
+        };
 
         let relay_url = request
             .selected_relay
@@ -2278,6 +2371,48 @@ mod isolated_proposal_tests {
     }
 }
 
+/// Fixed-size hexadecimal IDs need no escaping. 480 IDs leave headroom
+/// below a 32 KiB filter budget, including JSON punctuation and kind tags.
+fn label_deletion_filters(labels: &[Event]) -> Vec<Filter> {
+    let mut ids = labels
+        .iter()
+        .filter(|event| event.kind == KIND_LABEL)
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.chunks(480)
+        .map(|ids| {
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .events(ids.iter().copied())
+        })
+        .collect()
+}
+
+async fn cache_label_deletions(path: &Path, labels: &[Event], deletions: &[Event]) -> Result<()> {
+    for event in deletions {
+        save_event_in_local_cache(path, event).await?;
+    }
+    // Temporary workaround for nostr-lmdb 0.45.3: a retained deletion does
+    // not block an unknown target arriving later, and replay is a duplicate.
+    // Fixed upstream by Nostr PR 18f0f2f7 ("lmdb: reject deleted events"),
+    // merged as 04d70437e23cecdc43563dae15058180f3ccf9b2, but not yet released
+    // in our pinned dependency. After upgrading to a version with that fix,
+    // verify the arrival-order regression tests and remove this explicit
+    // eviction and the fallback filtering in get_active_label_events.
+    let survivors = crate::git_events::apply_label_deletions(labels.to_vec(), deletions)
+        .into_iter()
+        .map(|event| event.id)
+        .collect::<HashSet<_>>();
+    for label in labels {
+        if !survivors.contains(&label.id) {
+            delete_event_from_local_cache(path, label.id).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn get_events_of(
     relay: &nostr_sdk::relay::Relay,
     filters: Vec<nostr::prelude::Filter>,
@@ -2907,6 +3042,35 @@ pub async fn get_events_from_local_cache(
     }
 
     Ok(events.into_iter().collect())
+}
+
+/// Fetch cached kind-1985 label events minus any carrying a valid NIP-09
+/// deletion. Both event kinds come from the local cache, so this works
+/// offline; deletions converge from relays through the fetch filters.
+/// Callers pass the same filter they would use for the label events alone.
+pub async fn get_active_label_events(
+    git_repo_path: &Path,
+    filters: Vec<nostr::prelude::Filter>,
+) -> Result<Vec<nostr::prelude::Event>> {
+    let label_events = get_events_from_local_cache(git_repo_path, filters).await?;
+    if label_events.is_empty() {
+        return Ok(label_events);
+    }
+    // Same temporary arrival-order workaround as cache_label_deletions:
+    // hide late targets of retained deletions, including during offline reads.
+    let deletions = get_events_from_local_cache(
+        git_repo_path,
+        vec![
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .events(label_events.iter().map(|event| event.id)),
+        ],
+    )
+    .await?;
+    Ok(crate::git_events::apply_label_deletions(
+        label_events,
+        &deletions,
+    ))
 }
 
 pub async fn get_event_from_global_cache(
@@ -4856,6 +5020,8 @@ fn announcement_search_failure(error: &anyhow::Error) -> String {
 
 #[derive(Default)]
 pub struct FetchReport {
+    /// Only repository routes participate in label deletion discovery.
+    label_deletion_relay: Option<RelayUrl>,
     /// Completed and failed searches for the selected repository.
     pub announcement_searches: AnnouncementSearches,
     repo_coordinates_without_relays: HashSet<Nip19Coordinate>,
@@ -8963,5 +9129,75 @@ impl Client {
             "no relay accepted the CI subscription"
         );
         Ok(subscription)
+    }
+}
+
+#[cfg(test)]
+mod label_deletion_tests {
+    use nostr::prelude::{FinalizeEvent, Keys, Tag};
+
+    use super::*;
+
+    #[test]
+    fn deletion_queries_are_bounded_and_only_include_label_ids() -> Result<()> {
+        let keys = Keys::generate();
+        let other = EventBuilder::new(KIND_COMMENT, "unrelated").finalize(&keys)?;
+        assert!(label_deletion_filters(std::slice::from_ref(&other)).is_empty());
+        let mut events = vec![other.clone()];
+        for i in 0..1000 {
+            events.push(EventBuilder::new(KIND_LABEL, i.to_string()).finalize(&keys)?);
+        }
+        events.push(events[1].clone());
+        let filters = label_deletion_filters(&events);
+        assert_eq!(filters.len(), 3);
+        let mut covered = HashSet::new();
+        for filter in filters {
+            assert!(serde_json::to_vec(&filter)?.len() < 32 * 1024);
+            assert!(filter.limit.is_none());
+            covered.extend(
+                filter.generic_tags[&SingleLetterTag::LOWERCASE_E]
+                    .iter()
+                    .cloned(),
+            );
+        }
+        assert_eq!(covered.len(), 1000);
+        assert!(!covered.contains(&other.id.to_hex()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retained_deletions_hide_late_labels_offline_but_not_other_authors() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        git2::Repository::init(dir.path())?;
+        let keys = Keys::generate();
+        let label = EventBuilder::new(KIND_LABEL, "late").finalize(&keys)?;
+        let live = EventBuilder::new(KIND_LABEL, "live").finalize(&Keys::generate())?;
+        let deletion = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([Tag::event(label.id), Tag::event(live.id)])
+            .finalize(&keys)?;
+        save_event_in_local_cache(dir.path(), &deletion).await?;
+        for event in [&label, &live] {
+            save_event_in_local_cache(dir.path(), event).await?;
+        }
+        let active =
+            get_active_label_events(dir.path(), vec![Filter::new().kind(KIND_LABEL)]).await?;
+        assert_eq!(
+            active.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![live.id]
+        );
+        // Cache order and a repeated deletion cannot resurrect the late label.
+        cache_label_deletions(dir.path(), &[label.clone(), live.clone()], &[deletion]).await?;
+        assert!(
+            get_events_from_local_cache(dir.path(), vec![Filter::new().id(label.id)])
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            get_active_label_events(dir.path(), vec![Filter::new().kind(KIND_LABEL)])
+                .await?
+                .len(),
+            1
+        );
+        Ok(())
     }
 }

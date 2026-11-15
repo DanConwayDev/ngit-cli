@@ -20,7 +20,11 @@ pub fn complete(
                 Some((subject, "new subject", "--subject"))
             }
             IssueCommands::SetCoverNote { body, .. } => Some((body, "cover note", "--body")),
-            IssueCommands::Label { labels, .. } => {
+            IssueCommands::Label {
+                labels,
+                remove_labels,
+                ..
+            } if remove_labels.is_empty() => {
                 return complete_labels(labels, cli.interactive, input);
             }
             _ => None,
@@ -29,7 +33,11 @@ pub fn complete(
             PrCommands::Comment { body, .. } => Some((body, "comment body", "--body")),
             PrCommands::SetSubject { subject, .. } => Some((subject, "new subject", "--subject")),
             PrCommands::SetCoverNote { body, .. } => Some((body, "cover note", "--body")),
-            PrCommands::Label { labels, .. } => {
+            PrCommands::Label {
+                labels,
+                remove_labels,
+                ..
+            } if remove_labels.is_empty() => {
                 return complete_labels(labels, cli.interactive, input);
             }
             _ => None,
@@ -132,6 +140,25 @@ mod tests {
                 explicit.extend([flag, "supplied"]);
                 let mut cli = Cli::try_parse_from(explicit)?;
                 complete(&mut cli, |_| panic!("explicit values must not prompt"))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn label_removal_needs_no_addition_or_prompt() -> Result<()> {
+        for kind in ["issue", "pr"] {
+            for interactive in [false, true] {
+                let mut args = vec!["ngit", kind, "label", "deadbeef", "--remove-label", "bug"];
+                if interactive {
+                    args.push("--interactive");
+                }
+                let mut cli = Cli::try_parse_from(&args)?;
+                complete(&mut cli, |_| {
+                    panic!("removal must not prompt for labels to add")
+                })?;
+                args.extend(["--label", "other"]);
+                assert!(Cli::try_parse_from(args).is_err());
             }
         }
         Ok(())

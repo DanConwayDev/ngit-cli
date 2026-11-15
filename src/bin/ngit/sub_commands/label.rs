@@ -4,11 +4,11 @@ use ngit::{
     git_events::{KIND_LABEL, get_labels},
     repo_lookup::RepositoryLookup,
 };
-use nostr::prelude::{EventBuilder, Tag, nip10::Nip10Tag};
+use nostr::prelude::{Event, EventBuilder, Kind, PublicKey, Tag, nip10::Nip10Tag};
 
 use crate::{
     cli::SignerParams,
-    client::{Client, Connect, get_events_from_local_cache, warn_if_invited_as_maintainer},
+    client::{Client, Connect, get_active_label_events, warn_if_invited_as_maintainer},
     git::{Repo, RepoActions},
     login,
     repo_ref::get_resolved_repo_coordinate_for_publishing,
@@ -18,20 +18,19 @@ use crate::{
     },
 };
 
-/// Shared implementation: publish a NIP-32 kind-1985 label event for `target`.
-///
-/// `labels` must be non-empty. The caller is responsible for ensuring
-/// `target` is a valid issue or PR event that belongs to the current repo.
+/// Add labels or remove the signer's own NIP-32 label assignments.
+/// Resolve the target and validate the complete change before publishing.
 #[allow(clippy::too_many_lines)]
 async fn publish_label_event(
     id: &str,
     labels: &[String],
+    remove_labels: &[String],
     offline: bool,
     target_kind: &str, // "issue" or "PR" — used in error messages
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    if labels.is_empty() {
-        bail!("at least one --label value is required");
+    if labels.is_empty() && remove_labels.is_empty() {
+        bail!("at least one --label or --remove-label value is required");
     }
 
     let git_repo = Repo::discover().context("failed to find a git repository")?;
@@ -86,7 +85,7 @@ async fn publish_label_event(
     }
 
     // Fetch existing label events so we can warn about duplicates.
-    let existing_label_events = get_events_from_local_cache(
+    let existing_label_events = get_active_label_events(
         git_repo_path,
         vec![
             nostr::prelude::Filter::default()
@@ -97,6 +96,81 @@ async fn publish_label_event(
     .await?;
 
     let existing_labels = get_labels(&target, &repo_ref, &existing_label_events);
+
+    if !remove_labels.is_empty() {
+        let plans = plan_removal(&existing_label_events, user_pubkey, remove_labels)?;
+        let mut replacements = Vec::new();
+        let mut deletion_tags = vec![Tag::parse(["k", "1985"])?];
+        for RemovalPlan {
+            original,
+            surviving_tags,
+        } in plans
+        {
+            deletion_tags.push(Tag::event(original.id));
+            if let Some(tags) = surviving_tags {
+                replacements.push(
+                    ngit::client::sign_event(
+                        EventBuilder::new(KIND_LABEL, original.content.clone())
+                            .tags(tags)
+                            .custom_created_at(original.created_at),
+                        &signer,
+                        format!("preserve labels on {target_kind}"),
+                    )
+                    .await?,
+                );
+            }
+        }
+        let deletion = ngit::client::sign_event(
+            EventBuilder::new(Kind::EventDeletion, "").tags(deletion_tags),
+            &signer,
+            format!("remove labels from {target_kind}"),
+        )
+        .await?;
+        let deletion_id = deletion.id;
+        replacements.push(deletion);
+        client.set_signer(signer).await;
+        // send_events sends this ordered list separately to each relay and
+        // stops that route at its first rejection. No relay receives the
+        // deletion unless it has accepted every survivor first.
+        send_events(
+            &client,
+            Some(git_repo_path),
+            replacements,
+            user_ref.relays.write(),
+            repo_ref.relays.clone(),
+            true,
+            false,
+        )
+        .await?;
+        let remaining = get_labels(
+            &target,
+            &repo_ref,
+            &get_active_label_events(
+                git_repo_path,
+                vec![
+                    nostr::prelude::Filter::new()
+                        .kind(KIND_LABEL)
+                        .event(event_id),
+                ],
+            )
+            .await?,
+        );
+        if crate::output::is_json() {
+            crate::output::set_value(serde_json::json!({
+                "command_status": "ok", "action": "unlabelled",
+                "entity": target_kind.to_lowercase(),
+                "id": crate::output::event_id_to_nevent(event_id, repo_ref.relays.first()),
+                "event": crate::output::event_id_to_nevent(deletion_id, repo_ref.relays.first()),
+                "removed_from_own_events": remove_labels, "labels": remaining,
+            }));
+        }
+        println!(
+            "{target_kind} {}: removed your label assignments; remaining labels: {}",
+            &event_id.to_hex()[..8],
+            remaining.join(", ")
+        );
+        return Ok(());
+    }
 
     // Deduplicate: only add labels not already present.
     let new_labels: Vec<String> = labels
@@ -214,17 +288,143 @@ async fn publish_label_event(
 pub async fn launch_issue_label(
     id: &str,
     labels: &[String],
+    remove_labels: &[String],
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    publish_label_event(id, labels, offline, "issue", auth).await
+    publish_label_event(id, labels, remove_labels, offline, "issue", auth).await
 }
 
 pub async fn launch_pr_label(
     id: &str,
     labels: &[String],
+    remove_labels: &[String],
     offline: bool,
     auth: SignerParams<'_>,
 ) -> Result<()> {
-    publish_label_event(id, labels, offline, "PR", auth).await
+    publish_label_event(id, labels, remove_labels, offline, "PR", auth).await
+}
+
+/// Retain every unrelated tag and label namespace. Refuse multi-target events:
+/// deleting one would also alter another entity's labels.
+struct RemovalPlan<'a> {
+    original: &'a Event,
+    surviving_tags: Option<Vec<Tag>>,
+}
+
+fn plan_removal<'a>(
+    events: &'a [Event],
+    author: PublicKey,
+    requested: &[String],
+) -> Result<Vec<RemovalPlan<'a>>> {
+    let values: Vec<&str> = requested.iter().map(|s| s.trim()).collect();
+    if values.is_empty() || values.iter().any(|value| value.is_empty()) {
+        bail!("at least one non-empty --remove-label value is required");
+    }
+    let matches = |tag: &Tag| {
+        let s = tag.as_slice();
+        s.len() >= 3
+            && s[0] == "l"
+            && s[2] == "#t"
+            && values.iter().any(|v| v.eq_ignore_ascii_case(&s[1]))
+    };
+    let mut found = Vec::new();
+    let mut plans = Vec::new();
+    for event in events {
+        if event.kind != KIND_LABEL
+            || event.pubkey != author
+            || !event.tags.iter().any(|t| {
+                t.as_slice().first().is_some_and(|s| s == "L")
+                    && t.as_slice().get(1).is_some_and(|s| s == "#t")
+            })
+            || !event.tags.iter().any(&matches)
+        {
+            continue;
+        }
+        if event.tags.event_ids().count() != 1 {
+            bail!("cannot remove labels from a label event referencing multiple targets");
+        }
+        for tag in event.tags.iter().filter(|t| matches(t)) {
+            found.push(tag.as_slice()[1].as_str());
+        }
+        let tags: Vec<Tag> = event.tags.iter().filter(|t| !matches(t)).cloned().collect();
+        let has_survivor = tags
+            .iter()
+            .any(|t| t.as_slice().first().is_some_and(|s| s == "l"));
+        plans.push(RemovalPlan {
+            original: event,
+            surviving_tags: has_survivor.then_some(tags),
+        });
+    }
+    for value in values {
+        if !found.iter().any(|f| f.eq_ignore_ascii_case(value)) {
+            bail!(
+                "you have no removable label assignment for #{value}; labels on the original event or applied by other authors cannot be removed this way"
+            );
+        }
+    }
+    Ok(plans)
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::prelude::{EventId, Keys, event::FinalizeEvent};
+
+    use super::*;
+
+    #[test]
+    fn removal_preserves_unrelated_namespaces_and_ignores_other_authors() -> Result<()> {
+        let keys = Keys::generate();
+        let target = EventId::from_byte_array([0; 32]);
+        let event = EventBuilder::new(KIND_LABEL, "metadata")
+            .tags([
+                Tag::event(target),
+                Tag::parse(["L", "#t"])?,
+                Tag::parse(["l", "bug", "#t"])?,
+                Tag::parse(["l", "help-wanted", "#t"])?,
+                Tag::parse(["L", "other"])?,
+                Tag::parse(["l", "keep", "other"])?,
+                Tag::parse(["custom", "preserved"])?,
+            ])
+            .finalize(&keys)?;
+        let foreign = EventBuilder::new(KIND_LABEL, "")
+            .tags(event.tags.clone())
+            .finalize(&Keys::generate())?;
+        let events = vec![event.clone(), foreign];
+        let plans = plan_removal(&events, keys.public_key(), &[" BUG ".into()])?;
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].original.id, event.id);
+        let tags = plans[0].surviving_tags.as_ref().unwrap();
+        assert!(!tags.contains(&Tag::parse(["l", "bug", "#t"])?));
+        for tag in [["l", "help-wanted", "#t"], ["l", "keep", "other"]] {
+            assert!(tags.contains(&Tag::parse(tag)?));
+        }
+        assert!(tags.contains(&Tag::parse(["custom", "preserved"])?));
+        assert!(plan_removal(&events, Keys::generate().public_key(), &["bug".into()]).is_err());
+        assert!(plan_removal(&events, keys.public_key(), &["bug".into(), " ".into()]).is_err());
+        assert!(
+            plan_removal(
+                &events,
+                keys.public_key(),
+                &["bug".into(), "missing".into()]
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removal_refuses_to_change_other_targets() -> Result<()> {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(KIND_LABEL, "")
+            .tags([
+                Tag::event(EventId::from_byte_array([0; 32])),
+                Tag::event(EventId::from_byte_array([1; 32])),
+                Tag::parse(["L", "#t"])?,
+                Tag::parse(["l", "bug", "#t"])?,
+            ])
+            .finalize(&keys)?;
+        assert!(plan_removal(&[event], keys.public_key(), &["bug".into()]).is_err());
+        Ok(())
+    }
 }
