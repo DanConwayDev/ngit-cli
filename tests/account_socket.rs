@@ -1,4 +1,6 @@
 //! Socket fallback must not replace a selected account or its signing backend.
+#![cfg(unix)]
+
 use std::{
     path::Path,
     process::Output,

@@ -9,31 +9,44 @@
 //! `~/.local/share/nostr/signer.sock`, where NIP-5F clients look. Setting
 //! `nostr.signer-socket` to `false` turns this off.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail};
-use nostr::prelude::{Event, PublicKey, UnsignedEvent};
-use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{
-        UnixStream,
-        unix::{OwnedReadHalf, OwnedWriteHalf},
+use anyhow::{Result, anyhow};
+use nostr::prelude::PublicKey;
+use tokio::time::timeout;
+#[cfg(not(unix))]
+pub use unsupported::SocketSigner;
+#[cfg(unix)]
+use {
+    crate::git::{RepoActions, get_git_config_item_global},
+    anyhow::{Context, bail},
+    nostr::prelude::{Event, UnsignedEvent},
+    serde_json::{Value, json},
+    std::{
+        path::Path,
+        sync::atomic::{AtomicU64, Ordering},
     },
-    sync::Mutex,
-    time::timeout,
+    tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::{
+            UnixStream,
+            unix::{OwnedReadHalf, OwnedWriteHalf},
+        },
+        sync::Mutex,
+    },
 };
 
-use crate::git::{Repo, RepoActions, get_git_config_item_global};
+use crate::git::Repo;
+// Compile the non-Unix implementation in Unix tests as well.
+#[cfg(any(not(unix), test))]
+#[cfg_attr(unix, allow(dead_code))]
+mod unsupported;
 
 /// How long to wait for the socket to accept and greet.
+#[cfg(unix)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long to wait for an answer. A signer may one day ask its user to
-/// approve a request, so this is generous.
+/// How long to wait for an answer, including signer approval.
+#[cfg(unix)]
 const CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// NIP-5F's error codes, as nostrd uses them.
@@ -43,6 +56,7 @@ const ERROR_LOCKED: i64 = 10;
 pub const LOGOUT_MESSAGE: &str = "This account is supplied by your local signer; ngit cannot log it out. Manage it in your signer application, or disable socket signing with `git config --global nostr.signer-socket false` (a repository override takes precedence).";
 
 /// Test processes may use an explicit isolated socket, never the default.
+#[cfg(unix)]
 pub fn socket_path(git_repo: &Option<&Repo>) -> Result<Option<PathBuf>> {
     let configured = match git_repo {
         Some(repo) => repo.get_git_config_item("nostr.signer-socket", None),
@@ -58,6 +72,12 @@ pub fn socket_path(git_repo: &Option<&Repo>) -> Result<Option<PathBuf>> {
         },
     };
     Ok(path.exists().then_some(path))
+}
+
+/// Socket discovery is disabled on platforms without the Unix transport.
+#[cfg(not(unix))]
+pub fn socket_path(_git_repo: &Option<&Repo>) -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 
 /// Live signing uses the transport's normal deadlines. Inventory shares a
@@ -209,11 +229,13 @@ impl SocketStatus {
     }
 }
 
+#[cfg(unix)]
 fn default_socket() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
     Some(PathBuf::from(home).join(".local/share/nostr/signer.sock"))
 }
 
+#[cfg(unix)]
 fn expand_home(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
@@ -221,11 +243,13 @@ fn expand_home(path: &str) -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 struct Connection {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
 
+#[cfg(unix)]
 impl Connection {
     async fn open(path: &Path) -> Result<Self> {
         let stream = timeout(CONNECT_TIMEOUT, UnixStream::connect(path))
@@ -299,6 +323,7 @@ impl std::fmt::Display for SignerSocketError {
 impl std::error::Error for SignerSocketError {}
 
 /// A connection to the signer that comes back if it drops.
+#[cfg(unix)]
 struct Channel {
     path: PathBuf,
     connection: Mutex<Option<Connection>>,
@@ -307,11 +332,13 @@ struct Channel {
 
 /// One account in a socket signer. Every request names the account, so
 /// switching the signer's active account mid-command changes nothing here.
+#[cfg(unix)]
 pub struct SocketSigner {
     channel: Channel,
     account: PublicKey,
 }
 
+#[cfg(unix)]
 impl SocketSigner {
     /// Connect, and pick `account`, or the signer's active account when
     /// `None`. Fails when the signer doesn't hold that account, or has no
@@ -398,6 +425,7 @@ impl SocketSigner {
     }
 }
 
+#[cfg(unix)]
 impl Channel {
     /// Send one request and read its answer, reconnecting once if the
     /// connection went away (the signer restarted, say) before it was sent.
@@ -446,6 +474,7 @@ impl Channel {
 }
 
 /// The answer to request `id`, skipping event lines (which have no id).
+#[cfg(unix)]
 async fn read_response(connection: &mut Connection, id: &str) -> Result<Value> {
     loop {
         let message = connection.read_message().await?;
@@ -465,6 +494,7 @@ pub fn is_not_found(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.code == ERROR_NOT_FOUND)
 }
 
+#[cfg(unix)]
 impl std::fmt::Debug for SocketSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -476,7 +506,7 @@ impl std::fmt::Debug for SocketSigner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use nostr::prelude::{EventBuilder, FinalizeUnsignedEvent, Keys, Kind, SignEvent};
     use tokio::net::UnixListener;
