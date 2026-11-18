@@ -49,9 +49,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// NIP-5F's error codes, as nostrd uses them.
+/// NIP-5F's account-not-found error code.
 const ERROR_NOT_FOUND: i64 = 4;
-const ERROR_LOCKED: i64 = 10;
 
 pub const LOGOUT_MESSAGE: &str = "This account is supplied by your local signer; ngit cannot log it out. Manage it in your signer application, or disable socket signing with `git config --global nostr.signer-socket false` (a repository override takes precedence).";
 
@@ -309,14 +308,11 @@ pub struct SignerSocketError {
 
 impl std::fmt::Display for SignerSocketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.code {
-            ERROR_LOCKED => f.write_str("the local signer is locked.\nUnlock it and try again."),
-            _ => write!(
-                f,
-                "the signer refused: {} (error {})",
-                self.message, self.code
-            ),
-        }
+        write!(
+            f,
+            "the signer refused: {} (error {})",
+            self.message, self.code
+        )
     }
 }
 
@@ -512,6 +508,21 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::*;
+
+    #[test]
+    fn internal_errors_preserve_the_daemon_explanation() {
+        for message in ["database corruption", "locked"] {
+            let error = SignerSocketError {
+                code: 10,
+                message: message.to_string(),
+            };
+            let rendered = error.to_string();
+            assert!(rendered.contains(message));
+            assert!(rendered.contains("10"));
+            assert!(!rendered.contains("Unlock"));
+            assert!(!is_not_found(&anyhow!(error)));
+        }
+    }
 
     /// A NIP-5F signer for one key, answering as nostrd does.
     async fn serve(keys: Keys) -> (tempfile::TempDir, PathBuf) {
