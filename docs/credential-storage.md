@@ -212,6 +212,37 @@ accounts are marked unusable. A full npub is also unavailable when several
 alias-specific sessions remain without a default, in which case `whoami`
 requires an alias instead of advertising an ambiguous selector.
 
+## Local signer socket
+
+ngit can sign without holding any secret at all. When a signer daemon listens
+on a Unix socket speaking the draft NIP-5F protocol
+([nostr-protocol/nips#1862](https://github.com/nostr-protocol/nips/pull/1862)),
+such as [nostrd] or Amber Desktop, ngit asks it for signatures and NIP-44
+encryption instead of reading a key or opening a bunker connection.
+
+ngit looks for the socket at `~/.local/share/nostr/signer.sock`, where NIP-5F
+clients look, or at the path in the `nostr.signer-socket` Git-config item.
+Setting `nostr.signer-socket` to `false` turns the socket off.
+
+The socket only changes how ngit signs, not which account it signs as:
+
+- The account selected by `--signer` or `nostr.signer` (or a configured login)
+  is signed for through the socket when the signer holds it. Each request names
+  that account, so switching the signer's active account mid-command changes
+  nothing.
+- With no account selected, ngit signs as the signer's active account, so a
+  machine whose signer holds an account needs no `ngit account login`.
+- An account the signer doesn't hold, a signer with no active account, or
+  `--nsec` or bunker credentials given on the command line fall back to
+  ngit's own credentials as before.
+
+A locked signer fails the command with a request to unlock it rather than
+falling back to another signer. Account management (`ngit account login`,
+`logout` and `export-keys`) still works on ngit's own credentials. Because the
+protocol is a draft, its details may change before it is merged.
+
+[nostrd]: https://git.shakespeare.diy/npub1q3sle0kvfsehgsuexttt3ugjd8xdklxfwwkh559wxckmzddywnws6cd26p/nostrd.git
+
 ## Choosing where secrets live
 
 The `nostr.secret-storage` git config item — overridden by the

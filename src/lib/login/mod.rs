@@ -125,6 +125,8 @@ pub enum SignerInfoSource {
     GitGlobal,
     GitSystem,
     CommandLineArguments,
+    /// A local NIP-5F signer (nostrd) holds the account and signs for it.
+    SignerSocket,
 }
 
 fn print_logged_in_as(
@@ -176,6 +178,7 @@ pub fn logged_in_message(
         SignerInfoSource::GitSystem => {
             format!("logged in via system Git config as {identity}")
         }
+        SignerInfoSource::SignerSocket => format!("signing as {identity} with the local signer"),
     }
 }
 
@@ -195,6 +198,9 @@ pub fn logged_out_message(
         SignerInfoSource::GitGlobal => format!("logged out globally as {identity}"),
         SignerInfoSource::GitSystem => {
             format!("logged out of system Git config as {identity}")
+        }
+        SignerInfoSource::SignerSocket => {
+            format!("stopped signing as {identity} with the local signer")
         }
     }
 }

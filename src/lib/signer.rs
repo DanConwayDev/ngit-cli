@@ -10,13 +10,15 @@ use nostr::{
     },
 };
 
-use crate::remote_signer::NostrConnect;
+use crate::{remote_signer::NostrConnect, signer_socket::SocketSigner};
 
-/// Signer abstraction covering both local keys and remote NIP-46 bunker.
+/// Signer abstraction covering local keys, a remote NIP-46 bunker, and a
+/// local NIP-5F signer socket.
 #[derive(Clone)]
 pub enum NgitSigner {
     Keys(Keys),
     Connect(Arc<NostrConnect>),
+    Socket(Arc<SocketSigner>),
     /// Deterministic remote-signer refusal used by isolated relay lifecycle
     /// tests. Production binaries never contain this standing test double.
     #[cfg(test)]
@@ -59,6 +61,7 @@ impl NgitSigner {
                 )
                 .await
             }
+            Self::Socket(s) => Ok(s.public_key()),
             #[cfg(test)]
             Self::Rejecting { keys, .. } => Ok(keys.public_key()),
         }
@@ -91,6 +94,12 @@ impl NgitSigner {
                 let event = c.sign_event_async(unsigned).await.map_err(|e| anyhow!(e))?;
                 validate_remote_signed_event(expected_public_key, expected_event_id, event)
             }
+            Self::Socket(s) => {
+                let expected_public_key = unsigned.pubkey;
+                let expected_event_id = unsigned.compute_id();
+                let event = s.sign_event(unsigned).await?;
+                validate_remote_signed_event(expected_public_key, expected_event_id, event)
+            }
             #[cfg(test)]
             Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
@@ -112,6 +121,7 @@ impl NgitSigner {
             let public_key = match self {
                 Self::Keys(keys) => keys.public_key(),
                 Self::Connect(connect) => connect.get_public_key_async().await?,
+                Self::Socket(socket) => socket.public_key(),
                 #[cfg(test)]
                 Self::Rejecting { keys, .. } => keys.public_key(),
             };
@@ -127,7 +137,7 @@ impl NgitSigner {
         operation: impl Future<Output = Result<T>>,
     ) -> Result<T> {
         match self {
-            Self::Keys(_) => operation.await,
+            Self::Keys(_) | Self::Socket(_) => operation.await,
             #[cfg(test)]
             Self::Rejecting { .. } => operation.await,
             Self::Connect(connect) => {
@@ -159,6 +169,7 @@ impl NgitSigner {
                 )
                 .await
             }
+            Self::Socket(socket) => socket.nip44_encrypt(public_key, content).await,
             #[cfg(test)]
             Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
@@ -182,6 +193,7 @@ impl NgitSigner {
                 )
                 .await
             }
+            Self::Socket(socket) => socket.nip44_decrypt(public_key, payload).await,
             #[cfg(test)]
             Self::Rejecting { reason, .. } => Err(anyhow!(*reason)),
         }
@@ -194,7 +206,7 @@ impl NgitSigner {
             Self::Connect(_) => true,
             #[cfg(test)]
             Self::Rejecting { .. } => true,
-            Self::Keys(_) => false,
+            Self::Keys(_) | Self::Socket(_) => false,
         }
     }
 }
@@ -208,6 +220,7 @@ impl std::fmt::Debug for NgitSigner {
         match self {
             Self::Keys(k) => write!(f, "NgitSigner::Keys({})", k.public_key()),
             Self::Connect(_) => write!(f, "NgitSigner::Connect"),
+            Self::Socket(s) => write!(f, "NgitSigner::Socket({})", s.public_key()),
             #[cfg(test)]
             Self::Rejecting { .. } => write!(f, "NgitSigner::Rejecting"),
         }

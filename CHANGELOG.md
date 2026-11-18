@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sign through a local signer daemon, such as nostrd or Amber Desktop, over
+  the draft NIP-5F socket protocol. When one holds the selected account (or,
+  with none selected, has an active account), ngit uses it instead of a stored
+  key or bunker connection. Set `nostr.signer-socket` to another path, or to
+  `false` to turn it off.
+
 - Remove your own issue and PR label assignments with `--remove-label`,
   preserving other labels from the same assignment. Other authors' assignments
   and labels embedded in the original issue or PR remain unchanged.
