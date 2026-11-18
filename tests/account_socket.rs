@@ -282,6 +282,8 @@ async fn login_over_socket_and_logout_restore_fallback() -> Result<()> {
     );
     assert_eq!(socket.state.signed.load(Ordering::SeqCst), count);
     assert_eq!(inventory(&repo).await?["socket"]["active"], false);
+    // Retain a local-key profile for the fallback identity as well.
+    login(&repo, &socket.state.keys, "socket-account").await?;
     let output = run(
         &repo,
         &["account", "logout", "--keep-credentials", "--json"],
@@ -294,6 +296,17 @@ async fn login_over_socket_and_logout_restore_fallback() -> Result<()> {
         state["socket"]["npub"],
         socket.state.keys.public_key().to_bech32()?
     );
+    let account = &state["accounts"][0];
+    assert_eq!(account["npub"], socket.state.keys.public_key().to_bech32()?);
+    assert_eq!(account["active"], true);
+    let signers = account["signers"].as_array().expect("missing signers");
+    for kind in ["socket", "local-key"] {
+        let signer = signers
+            .iter()
+            .find(|signer| signer["type"] == kind)
+            .expect("missing retained signing backend");
+        assert_eq!(signer["active"], kind == "socket");
+    }
     assert_eq!(repo.config("nostr.signer").await?, None);
     assert_eq!(
         signed_issue(&harness, &repo, "socket-again", None).await?,

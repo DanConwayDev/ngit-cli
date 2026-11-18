@@ -306,6 +306,14 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
 
     add_signers(&mut accounts, git_repo_ref, &scopes, &mut inventory).await?;
     add_selectors(&mut accounts, git_repo_ref, &mut inventory).await;
+    if socket.selected || socket.active {
+        for account in &mut accounts {
+            account.active = socket.active && socket.npub.as_deref() == Some(account.npub.as_str());
+            for signer in &mut account.signers {
+                signer.active = account.active && signer.kind == "socket";
+            }
+        }
+    }
     accounts.sort_by(|a, b| {
         (
             !a.active,
@@ -321,14 +329,6 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
             ))
     });
 
-    if socket.selected {
-        for account in &mut accounts {
-            account.active = socket.active && socket.npub.as_deref() == Some(account.npub.as_str());
-            for signer in &mut account.signers {
-                signer.active = account.active && signer.kind == "socket";
-            }
-        }
-    }
     if json {
         crate::output::set(WhoamiJson {
             socket,
