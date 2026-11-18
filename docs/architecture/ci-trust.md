@@ -1449,3 +1449,15 @@ coverage partial; identity lookup failures do not remove verified authorization.
 Routine human output omits optional identity diagnostics; verbose output and
 JSON retain them. Missing maintainer authorization is reported as unverified
 coordinator evidence, not as a failed execution or proof of distrust.
+
+
+### Additive CI metadata
+
+CI tag layouts describe understood prefixes. Unknown tag names (including
+repeated unknown tags) and trailing extension fields are ignored by typed
+parsers; original signed events remain intact for inspection and proofs.
+Required fields, duplicate singleton checks, known markers, signatures and
+authority bindings still apply. Optional positions retain their meaning, and
+variadic lists consume every remaining value. Unknown policy values and
+malformed known fields are not extensions. This rule does not relax encrypted
+payload or manifest JSON schemas.

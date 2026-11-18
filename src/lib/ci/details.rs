@@ -113,7 +113,7 @@ fn id(raw: &str, tag: &'static str) -> Result<EventId, ShapeReason> {
 fn optional_id(event: &Event, name: &'static str) -> Result<Option<EventId>, ShapeReason> {
     one(event, name)?
         .map(|t| {
-            if t.len() != 2 {
+            if t.len() < 2 {
                 return Err(invalid(name));
             }
             id(&t[1], name)
@@ -125,7 +125,7 @@ fn optional_id(event: &Event, name: &'static str) -> Result<Option<EventId>, Sha
 pub fn restart(event: &Event) -> Result<Option<Restart>, ShapeReason> {
     one(event, "U")?
         .map(|t| {
-            if !(t.len() == 2 || t.len() == 3 && !t[2].is_empty()) {
+            if t.len() < 2 || t.get(2).is_some_and(String::is_empty) {
                 return Err(invalid("U"));
             }
             Ok(Restart {
@@ -145,7 +145,7 @@ pub fn workflow(event: &Event) -> Result<WorkflowDetails, ShapeReason> {
     };
     for t in tags(event, "q") {
         if t.get(1).is_some_and(|v| v.starts_with("39846:")) {
-            if t.len() != 5 || t[4].is_empty() {
+            if t.len() < 5 || t[4].is_empty() {
                 return Err(invalid("q"));
             }
             let address = Coordinate::from_kpi_format(&t[1]).map_err(|_| invalid("q"))?;
@@ -166,7 +166,7 @@ pub fn workflow(event: &Event) -> Result<WorkflowDetails, ShapeReason> {
         }
         let (coordinator, run_id, pending) = if let Ok(address) = Coordinate::from_kpi_format(&t[1])
         {
-            if t.len() != 5
+            if t.len() < 5
                 || address.kind != Kind::Custom(39842)
                 || address.identifier.is_empty()
                 || !t[3].is_empty()
@@ -175,7 +175,7 @@ pub fn workflow(event: &Event) -> Result<WorkflowDetails, ShapeReason> {
             }
             (address.public_key, address.identifier, true)
         } else {
-            if t.len() != 6 || t[5].is_empty() {
+            if t.len() < 6 || t[5].is_empty() {
                 return Err(invalid("D"));
             }
             id(&t[1], "D")?;
@@ -195,7 +195,7 @@ pub fn workflow(event: &Event) -> Result<WorkflowDetails, ShapeReason> {
         });
     }
     for t in tags(event, "dependency-failure") {
-        if t.len() != 2 || t[1].is_empty() {
+        if t.len() < 2 || t[1].is_empty() {
             return Err(invalid("dependency-failure"));
         }
         result.dependency_failures.push(t[1].clone());
@@ -267,7 +267,7 @@ pub fn manual(event: &Event, workflow: &str) -> Result<(), ShapeReason> {
     }
     let mut jobs = HashSet::new();
     for t in tags(event, "x") {
-        if t.len() != 4 || t[3].is_empty() || !jobs.insert(t[3].clone()) || !hash(&t[1]) {
+        if t.len() < 4 || t[3].is_empty() || !jobs.insert(t[3].clone()) || !hash(&t[1]) {
             return Err(invalid("x"));
         }
         if !t[2].is_empty() {
@@ -276,7 +276,7 @@ pub fn manual(event: &Event, workflow: &str) -> Result<(), ShapeReason> {
     }
     let mut predicates = HashSet::new();
     for t in tags(event, "f") {
-        if t.len() != 3 || t[2].is_empty() {
+        if t.len() < 3 || t[2].is_empty() {
             return Err(invalid("f"));
         }
         let (path, op) = requirement(&t[1])?;
@@ -341,7 +341,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
     };
     for t in tags(event, "q") {
         if t.get(4).is_some_and(|m| m == "job-allocation") {
-            if t.len() != 5 || result.allocation.is_some() {
+            if t.len() < 5 || result.allocation.is_some() {
                 return Err(invalid("q"));
             }
             result.allocation = Some(id(&t[1], "q")?);
@@ -349,17 +349,17 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         }
     }
     if let Some(t) = one(event, "x")? {
-        if t.len() != 3 || !hash(&t[1]) {
+        if t.len() < 3 || !hash(&t[1]) {
             return Err(invalid("x"));
         }
         if !t[2].is_empty() {
             environment_url(&t[1], &t[2])?;
         }
-        result.environment = Some(t[1..].to_vec());
+        result.environment = Some(t[1..3].to_vec());
     }
     let mut step_ids = HashSet::new();
     for t in tags(event, "step") {
-        if !(6..=7).contains(&t.len())
+        if t.len() < 6
             || t[1].is_empty()
             || !step_ids.insert(t[1].clone())
             || (Conclusion::parse(&t[5]).is_none()
@@ -368,7 +368,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         {
             return Err(invalid("step"));
         }
-        if let Some(state) = t.get(6) {
+        if let Some(state) = t.get(6).filter(|s| !s.is_empty()) {
             if !matches!(state.as_str(), "artifacts-ready" | "artifacts-failed")
                 && !(progress && state == "artifacts-uploading")
             {
@@ -377,8 +377,14 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         }
         let start_ms = timing(&t[3])?;
         let duration_ms = timing(&t[4])?;
-        if (t[5] == "pending" && (start_ms.is_some() || duration_ms.is_some() || t.len() == 7))
-            || (t[5] == "running" && (start_ms.is_none() || duration_ms.is_some() || t.len() == 7))
+        if (t[5] == "pending"
+            && (start_ms.is_some()
+                || duration_ms.is_some()
+                || t.get(6).is_some_and(|s| !s.is_empty())))
+            || (t[5] == "running"
+                && (start_ms.is_none()
+                    || duration_ms.is_some()
+                    || t.get(6).is_some_and(|s| !s.is_empty())))
             || start_ms
                 .zip(duration_ms)
                 .is_some_and(|(start, duration)| start.checked_add(duration).is_none())
@@ -391,11 +397,11 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
             start_ms,
             duration_ms,
             outcome: t[5].clone(),
-            artifacts: t.get(6).cloned(),
+            artifacts: optional(t.get(6)),
         });
     }
     for t in tags(event, "artifact") {
-        if !(4..=5).contains(&t.len()) || t[2].is_empty() || t[3].is_empty() {
+        if t.len() < 4 || t[2].is_empty() || t[3].is_empty() {
             return Err(invalid("artifact"));
         }
         blossom(&t[1])?;
@@ -407,7 +413,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         });
     }
     for t in tags(event, "artifacts") {
-        if !(2..=6).contains(&t.len()) {
+        if t.len() < 2 {
             return Err(invalid("artifacts"));
         }
         blossom(&t[1])?;
@@ -435,7 +441,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
     let mut bytes = 0;
     for name in ["output", "output-omitted"] {
         for t in tags(event, name) {
-            if t.len() != 3 || t[1].is_empty() || !names.insert(t[1].clone()) {
+            if t.len() < 3 || t[1].is_empty() || !names.insert(t[1].clone()) {
                 return Err(invalid(name));
             }
             if name == "output" {
@@ -461,8 +467,10 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
     ] {
         if let Some(t) = one(event, name)? {
             if progress
-                || !(t.len() == 2
-                    || name == "exec-stop" && t.len() == 3 && !t[2].is_empty() && t[2].len() <= 256)
+                || t.len() < 2
+                || (name == "exec-stop"
+                    && t.get(2)
+                        .is_some_and(|step| step.is_empty() || step.len() > 256))
             {
                 return Err(invalid(name));
             }
@@ -478,9 +486,15 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
             if !valid {
                 return Err(invalid(name));
             }
-            result
-                .execution
-                .insert(name.trim_start_matches("exec-").into(), t[1..].to_vec());
+            result.execution.insert(
+                name.trim_start_matches("exec-").into(),
+                t[1..if name == "exec-stop" {
+                    t.len().min(3)
+                } else {
+                    2
+                }]
+                    .to_vec(),
+            );
         }
     }
     let termination = result.execution.get("termination").map(|v| v[0].as_str());
@@ -492,7 +506,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         return Err(invalid("exec-cancellation"));
     }
     if let Some(t) = one(event, "skip-reason")? {
-        if t.len() != 2
+        if t.len() < 2
             || t[1] != "condition"
             || result.allocation.is_some()
             || progress
@@ -507,7 +521,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
         result.skip_reason = Some(t[1].clone());
     }
     if let Some(t) = one(event, "exit_code")? {
-        if t.len() != 2 || progress {
+        if t.len() < 2 || progress {
             return Err(invalid("exit_code"));
         }
         result.exit_code = Some(t[1].parse().map_err(|_| invalid("exit_code"))?);
@@ -520,7 +534,7 @@ pub fn job(event: &Event, progress: bool) -> Result<JobDetails, ShapeReason> {
     }
     let mut resources = HashSet::new();
     for t in tags(event, "f") {
-        if t.len() != 2 {
+        if t.len() < 2 {
             return Err(invalid("f"));
         }
         // Resource declarations permit homogeneous arrays in addition to scalars.
@@ -572,6 +586,118 @@ mod tests {
     use super::*;
     use crate::ci::kinds::test_events::{event, tag};
 
+    #[test]
+    fn additive_metadata_preserves_execution_and_rejects_malformed_known_fields() {
+        let keys = Keys::generate();
+        let digest = "ab".repeat(32);
+        let url = format!("https://blossom.example/{digest}");
+        let fields = vec![
+            tag(&["x", &digest, ""]),
+            tag(&[
+                "step",
+                "build",
+                "Build",
+                "1",
+                "2",
+                "success",
+                "artifacts-ready",
+            ]),
+            tag(&["artifact", &url, "binary", "release", "build"]),
+            tag(&["artifacts", &url, "", "1", "", "build"]),
+            tag(&["output", "version", "1"]),
+            tag(&["output-omitted", "missing", "missing"]),
+            tag(&["exec-cancellation", "ordinary"]),
+            tag(&["exec-stop", "checkpoint", "build"]),
+            tag(&["exec-logs", "partial"]),
+            tag(&["exit_code", "0"]),
+            tag(&["f", "cpu:eq:4"]),
+            tag(&["superseded-by", &digest]),
+        ];
+        let make = |tags| event(&keys, Kind::Custom(9841), 100, tags);
+        let expected = job(&make(fields.clone()), false).unwrap();
+        let mut extended = fields
+            .iter()
+            .map(|t| {
+                let mut values = t.as_slice().to_vec();
+                values.push("future".into());
+                nostr::prelude::Tag::parse(values).unwrap()
+            })
+            .collect::<Vec<_>>();
+        extended.extend([tag(&["future", "one"]), tag(&["future", "two"])]);
+        assert_eq!(job(&make(extended.clone()), false).unwrap(), expected);
+        let pending = job(
+            &make(vec![tag(&[
+                "step", "wait", "Wait", "", "", "pending", "", "future",
+            ])]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(pending.steps[0].artifacts, None);
+
+        extended.push(tag(&["output", "version", "duplicate", "future"]));
+        assert!(job(&make(extended), false).is_err());
+        for fields in [
+            vec![
+                "step",
+                "build",
+                "Build",
+                "1",
+                "2",
+                "success",
+                "invalid",
+                "artifacts-ready",
+            ],
+            vec!["exec-stop", "checkpoint", "", "build"],
+            vec!["exec-cancellation", "invalid", "ordinary"],
+            vec!["runs_on", "linux", ""],
+            vec!["x", "invalid", "", &digest],
+        ] {
+            assert!(job(&make(vec![tag(&fields)]), false).is_err(), "{fields:?}");
+        }
+    }
+
+    #[test]
+    fn additive_workflow_and_manual_metadata_keep_exact_bindings() {
+        let keys = Keys::generate();
+        let digest = "ab".repeat(32);
+        let address = format!("39842:{}:owner", keys.public_key());
+        let progress = format!("39846:{}:{digest}", keys.public_key());
+        let fields = vec![
+            tag(&["U", &digest, "build"]),
+            tag(&["q", &progress, "", &keys.public_key().to_hex(), "build"]),
+            tag(&["D", &address, "", "", "pending"]),
+            tag(&[
+                "D",
+                &digest,
+                "",
+                &keys.public_key().to_hex(),
+                "done",
+                "owner",
+            ]),
+            tag(&["dependency-failure", "failed"]),
+            tag(&["superseded-by", &digest]),
+        ];
+        let make = |tags| event(&keys, Kind::Custom(9842), 100, tags);
+        let expected = workflow(&make(fields.clone())).unwrap();
+        let extend = |fields: Vec<nostr::prelude::Tag>| {
+            fields
+                .into_iter()
+                .map(|t| {
+                    let mut values = t.as_slice().to_vec();
+                    values.push("future".into());
+                    nostr::prelude::Tag::parse(values).unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(workflow(&make(extend(fields))).unwrap(), expected);
+        let manual_fields = extend(vec![
+            tag(&["U", &digest, "build"]),
+            tag(&["x", &digest, "", "build"]),
+            tag(&["f", "cpu:gte:4", "build"]),
+        ]);
+        manual(&make(manual_fields), ".ngit/nix/workflows/ci.yaml").unwrap();
+        assert!(restart(&make(vec![tag(&["U", &digest, "", "build"])])).is_err());
+    }
     #[test]
     fn explicit_step_states_validate_progress_and_preserve_legacy_outcomes() {
         let keys = Keys::generate();

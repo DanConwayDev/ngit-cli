@@ -45,7 +45,7 @@ pub fn validate_workflow_cancellation(event: &Event) -> Result<WorkflowCancellat
     let view = TagView::new(event);
     for name in ["a", "p", "r"] {
         let tag = view.required_tag(name)?;
-        if tag.len() != 2 {
+        if tag.len() < 2 {
             return Err(ShapeReason::InvalidTagValue {
                 tag: name,
                 value: tag.join(":"),
@@ -1281,7 +1281,7 @@ fn parse_trigger_context(
         return Err(ShapeReason::ConflictingTriggerContext);
     }
     if let Some(tag) = issue {
-        if tag.len() != 5 || git_refs.len() != 1 || !git_refs[0].starts_with("refs/heads/") {
+        if tag.len() < 5 || git_refs.len() != 1 || !git_refs[0].starts_with("refs/heads/") {
             return Err(ShapeReason::InvalidTagValue {
                 tag: "issue",
                 value: "expected issue activity and branch context".into(),
@@ -1313,7 +1313,7 @@ fn parse_trigger_context(
         }
         let metadata = release.ok_or(ShapeReason::MissingTag("release"))?;
         let reference = release_refs[0];
-        if metadata.len() != 4 || reference.len() != 4 || metadata[2].is_empty() {
+        if metadata.len() < 4 || reference.len() < 4 || metadata[2].is_empty() {
             return Err(ShapeReason::InvalidTagValue {
                 tag: "release",
                 value: "invalid release reference".into(),
@@ -1341,7 +1341,7 @@ fn parse_trigger_context(
         let revision = parse_event_id("a", &reference[3])?;
         let mut assets = Vec::new();
         for asset in view.matching("release-asset") {
-            if asset.len() != 2 {
+            if asset.len() < 2 {
                 return Err(ShapeReason::InvalidTagValue {
                     tag: "release-asset",
                     value: "expected exact event id".into(),
@@ -1664,6 +1664,20 @@ mod tests {
                 forced
             );
             assert!(super::validate_workflow_cancellation(&make(tags.clone(), "reason")).is_err());
+            let extended = tags
+                .iter()
+                .map(|tag| {
+                    let mut values = tag.as_slice().to_vec();
+                    values.extend(["hint".into(), "metadata".into()]);
+                    Tag::parse(values).unwrap()
+                })
+                .chain([
+                    Tag::custom("future", ["one"]),
+                    Tag::custom("future", ["two"]),
+                ])
+                .collect();
+            assert!(validate_workflow_cancellation(&make(extended, "")).is_ok());
+
             for index in 0..3 {
                 let mut duplicate = tags.clone();
                 duplicate.push(tags[index].clone());
@@ -2238,6 +2252,21 @@ mod extended_context_tests {
         ]);
         let make = |tags| event(&keys, KIND_CI_WORKFLOW_RESULT, 100, tags);
         let result = validate_workflow_result(&make(tags.clone())).unwrap();
+        let extended = tags
+            .iter()
+            .map(|t| {
+                let mut fields = t.as_slice().to_vec();
+                fields.push("future".into());
+                Tag::parse(fields).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            validate_workflow_result(&make(extended))
+                .unwrap()
+                .common
+                .context,
+            result.common.context
+        );
         assert!(matches!(
             result.common.context,
             Some(TriggerContext::Issue { .. })

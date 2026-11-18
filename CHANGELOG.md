@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Accept additive CI tag metadata without discarding otherwise valid events,
+  service advertisements or secret inboxes. Known fields, duplicate identities
+  and execution policies remain validated.
+
 - Honor label deletion requests during online refreshes, including when the
   assignment and deletion are fetched from different repository relays.
 

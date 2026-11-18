@@ -70,7 +70,7 @@ fn values<'a>(e: &'a Event, name: &'a str) -> impl Iterator<Item = &'a [String]>
 fn one<'a>(e: &'a Event, name: &str) -> Option<&'a str> {
     let mut tags = e.tags.iter().filter(|t| t.as_slice()[0] == name);
     let t = tags.next()?.as_slice();
-    (t.len() == 2 && tags.next().is_none()).then(|| t[1].as_str())
+    (t.len() >= 2 && tags.next().is_none()).then(|| t[1].as_str())
 }
 fn live(e: &Event, now: Timestamp, ttl: u64) -> bool {
     one(e, "expiration")
@@ -90,7 +90,7 @@ fn capabilities(e: &Event) -> bool {
         return false;
     }
     let families: BTreeSet<_> = values(e, "W")
-        .filter(|t| t.len() == 2 && !t[1].is_empty())
+        .filter(|t| t.len() >= 2 && !t[1].is_empty())
         .map(|t| t[1].to_ascii_lowercase())
         .collect();
     if families.len() != values(e, "W").count() {
@@ -98,7 +98,7 @@ fn capabilities(e: &Event) -> bool {
     }
     let mut selected = BTreeSet::new();
     for t in values(e, "R") {
-        if t.len() != 2 {
+        if t.len() < 2 {
             return false;
         }
         let Some((family, selector)) = t[1].split_once(':') else {
@@ -131,7 +131,7 @@ fn ready(e: &Event, root: &Coordinate, now: Timestamp) -> bool {
         .map(nostr::prelude::Tag::as_slice)
         .filter(|t| matches!(t[0].as_str(), "a" | "p"))
     {
-        if !(2..=3).contains(&t.len()) || !seen.insert((t[0].clone(), t[1].clone())) {
+        if t.len() < 2 || !seen.insert((t[0].clone(), t[1].clone())) {
             return false;
         }
         matches |= (t[0] == "a" && t[1] == root.to_string())
@@ -146,7 +146,7 @@ fn status_shape(e: &Event, root: &Coordinate) -> bool {
         && capabilities(e)
         && values(e, "a")
             .next()
-            .is_some_and(|t| (2..=3).contains(&t.len()) && t[1] == root.to_string())
+            .is_some_and(|t| t.len() >= 2 && t[1] == root.to_string())
 }
 fn deleted(event: &Event, events: &[&Event], now: Timestamp) -> bool {
     let address = format!(
@@ -394,6 +394,31 @@ mod tests {
     }
     fn t(a: &str, b: impl ToString) -> Vec<String> {
         vec![a.into(), b.to_string()]
+    }
+
+    #[test]
+    fn discovery_accepts_extensions_without_losing_singleton_checks() {
+        let keys = Keys::generate();
+        let mut tags = vec![
+            t("M", "open"),
+            t("X", "automatic"),
+            t("expiration", "200"),
+            t("W", "nix"),
+            t("R", "nix:any"),
+        ];
+        for tag in &mut tags {
+            tag.push("future".into());
+        }
+        tags.extend([t("future", "one"), t("future", "two")]);
+        assert!(advertisement(
+            &event(&keys, 19843, 100, tags.clone()),
+            Timestamp::from_secs(150)
+        ));
+        tags.push(t("expiration", "200"));
+        assert!(!advertisement(
+            &event(&keys, 19843, 100, tags),
+            Timestamp::from_secs(150)
+        ));
     }
     #[test]
     fn activity_discovers_coordinators_counts_attempts_and_keeps_idle_relationships() {

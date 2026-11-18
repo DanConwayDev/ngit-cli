@@ -53,7 +53,7 @@ pub fn inbox(event: &Event, coordinator: PublicKey, now: Timestamp) -> Result<Se
         ("X", &["automatic", "request-required"][..]),
     ] {
         let tag = one(name)?;
-        if tag.len() != 2 || !values.contains(&tag[1].as_str()) {
+        if tag.len() < 2 || !values.contains(&tag[1].as_str()) {
             bail!("unknown coordinator admission policy");
         }
     }
@@ -64,7 +64,7 @@ pub fn inbox(event: &Event, coordinator: PublicKey, now: Timestamp) -> Result<Se
         .collect();
     if optional_b.len() > 1
         || optional_b.first().is_some_and(|t| {
-            t.as_slice().len() != 2
+            t.as_slice().len() < 2
                 || !matches!(t.as_slice()[1].as_str(), "not-required" | "out-of-band")
         })
     {
@@ -75,7 +75,7 @@ pub fn inbox(event: &Event, coordinator: PublicKey, now: Timestamp) -> Result<Se
         .iter()
         .filter(|t| t.as_slice()[0] == "W")
         .map(|t| {
-            if t.as_slice().len() != 2 || t.as_slice()[1].is_empty() {
+            if t.as_slice().len() < 2 || t.as_slice()[1].is_empty() {
                 bail!("invalid coordinator runner family");
             }
             Ok(t.as_slice()[1].to_ascii_lowercase())
@@ -83,7 +83,7 @@ pub fn inbox(event: &Event, coordinator: PublicKey, now: Timestamp) -> Result<Se
         .collect::<Result<_>>()?;
     let mut selected = HashSet::new();
     for tag in event.tags.iter().filter(|t| t.as_slice()[0] == "R") {
-        if tag.as_slice().len() != 2 {
+        if tag.as_slice().len() < 2 {
             bail!("invalid coordinator runner selector");
         }
         let (family, selector) = tag.as_slice()[1]
@@ -98,7 +98,7 @@ pub fn inbox(event: &Event, coordinator: PublicKey, now: Timestamp) -> Result<Se
         bail!("coordinator runner family has no selector");
     }
     let expires = one("expiration")?;
-    if expires.len() != 2 {
+    if expires.len() < 2 {
         bail!("invalid advertisement expiration");
     }
     let expiration = Timestamp::from_secs(
@@ -294,6 +294,29 @@ mod tests {
             ])
             .finalize(&coordinator)
             .unwrap();
+
+        let extended = crate::ci::kinds::test_events::with_tags(&coordinator, &ad, |tags| {
+            for tag in tags.iter_mut().filter(|t| t.as_slice()[0] != "secrets-key") {
+                let mut fields = tag.as_slice().to_vec();
+                fields.push("future".into());
+                *tag = Tag::parse(fields).unwrap();
+            }
+            tags.extend([
+                Tag::custom("future", ["one"]),
+                Tag::custom("future", ["two"]),
+            ]);
+        });
+        let extended_inbox = inbox(
+            &extended,
+            coordinator.public_key(),
+            Timestamp::from_secs(200),
+        )
+        .unwrap();
+        assert_eq!(extended_inbox.recipient, recipient.public_key());
+        let bad = crate::ci::kinds::test_events::with_tags(&coordinator, &extended, |tags| {
+            tags.push(Tag::custom("M", ["open", "future"]));
+        });
+        assert!(inbox(&bad, coordinator.public_key(), Timestamp::from_secs(200)).is_err());
         let inbox = inbox(&ad, coordinator.public_key(), Timestamp::from_secs(200)).unwrap();
         let scope =
             Coordinate::new(Kind::GitRepoAnnouncement, author.public_key()).identifier("repo");
