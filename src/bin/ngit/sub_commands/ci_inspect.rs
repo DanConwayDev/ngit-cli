@@ -397,7 +397,8 @@ async fn inspect_event(
     } else {
         Vec::new()
     };
-    let related = if args.id.is_some() || args.event.is_some() {
+    let looked_up_related = args.id.is_some() || args.event.is_some();
+    let related = if looked_up_related {
         related_events(client, path, relays, event, args.offline, failures).await?
     } else {
         Vec::new()
@@ -420,7 +421,9 @@ async fn inspect_event(
                     "  blocker for {}: owner run {} / job {}",
                     blocked.job, blocked.owner_run_id, blocked.owner_job
                 );
-                if owners.is_empty() {
+                if !looked_up_related {
+                    println!("    look up owner evidence: ngit ci inspect {}", event.id);
+                } else if owners.is_empty() {
                     println!("    owner evidence not found; absence does not prove cleanup");
                 }
                 for owner in owners {

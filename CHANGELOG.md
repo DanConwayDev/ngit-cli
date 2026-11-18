@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Offer an exact-event lookup for CI blockers in filtered inspection instead
+  of reporting owner evidence missing before looking it up.
+
 - Accept additive CI tag metadata without discarding otherwise valid events,
   service advertisements or secret inboxes. Known fields, duplicate identities
   and execution policies remain validated.
