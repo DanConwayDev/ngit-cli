@@ -26,7 +26,7 @@ use crate::{
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct SubCommandArgs {
-    /// Stored account to activate (full npub, profile, or exact Nostr display
+    /// Account to activate (full npub, profile, or exact Nostr display
     /// name)
     #[arg(
         value_name = "ACCOUNT",
@@ -42,6 +42,12 @@ pub struct SubCommandArgs {
         ]
     )]
     account: Option<String>,
+
+    /// Save a profile bound to the local signer socket. ACCOUNT must be an
+    /// npub; omit it to pin the socket's current account. Never use stored
+    /// keys.
+    #[arg(long, requires = "alias", conflicts_with_all = ["nsec", "nsec_file", "nbunksec", "nbunksec_file", "bunker_uri", "bunker_app_key", "bunker_url", "nostrconnect", "signer"])]
+    socket: bool,
 
     /// Set a repository-specific login that overrides the default account
     #[arg(long, action)]
@@ -114,7 +120,28 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         .map(credential_store::normalize_alias)
         .transpose()?;
     let account_selection = positional_account_selection(command_args);
-    let signer_info = account_selection.as_ref().or(signer.info.as_ref());
+    let socket_info = if command_args.socket {
+        let repo = discover_login_repo(command_args.local)?;
+        let account = command_args
+            .account
+            .as_deref()
+            .map(|npub| {
+                anyhow::ensure!(
+                    npub.starts_with("npub1"),
+                    "--socket ACCOUNT must be an npub"
+                );
+                PublicKey::parse(npub).map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let path = ngit::signer_socket::socket_path(&repo.as_ref())?.context("local signer socket is disabled or unavailable; check nostr.signer-socket and start your signer application")?;
+        Some(ngit::login::existing::socket_signer_info(path, account).await?)
+    } else {
+        None
+    };
+    let signer_info = socket_info
+        .as_ref()
+        .or(account_selection.as_ref())
+        .or(signer.info.as_ref());
     // Early validation: check if we have required parameters in non-interactive
     // mode
     if Interactor::is_non_interactive()
@@ -220,6 +247,11 @@ pub async fn launch(command_args: &SubCommandArgs, signer: SignerParams<'_>) -> 
         }
     }
 
+    if ngit::signer_socket::socket_path(&git_repo.as_ref())?.is_some() {
+        eprintln!(
+            "Local signer socket detected. Profiles keep their backend; --signer <npub> prefers the socket for that account. Run `ngit account whoami --offline` to check its availability and effective account."
+        );
+    }
     // If not offline, disconnect the client
     if let Some(client) = client {
         client.disconnect().await?;
@@ -299,6 +331,7 @@ fn validate_signer_before_switch(
         return Ok(None);
     };
     match signer_info {
+        SignerInfo::Socket { npub, .. } => Ok(Some(npub.clone())),
         SignerInfo::Nsec {
             nsec,
             password,
@@ -403,9 +436,10 @@ async fn resolve_login_selection(
         from_explicit_selector,
     )
     .await?;
+    let selected_by = resolved.npub;
     Ok((
         Some(resolved.signer_info),
-        Some(resolved.npub),
+        Some(selected_by),
         resolved.alias,
     ))
 }

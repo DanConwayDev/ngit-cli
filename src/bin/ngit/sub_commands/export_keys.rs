@@ -40,6 +40,9 @@ fn set_json_output(signer_info: &SignerInfo, npub: &str) -> Result<()> {
             }));
             Ok(())
         }
+        SignerInfo::Socket { .. } => anyhow::bail!(
+            "the local signer holds this account; export keys from your signer application"
+        ),
         SignerInfo::Selection { .. } => {
             anyhow::bail!("internal error: unresolved signer selection during key export")
         }
@@ -87,6 +90,9 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
             export_interactive(&logged_in_msg, &npub, "nbunksec", &nbunksec)
         }
         SignerInfo::Nsec { nsec, .. } => export_interactive(&logged_in_msg, &npub, "nsec", &nsec),
+        SignerInfo::Socket { .. } => anyhow::bail!(
+            "the local signer holds this account; export keys from your signer application"
+        ),
         SignerInfo::Selection { .. } => {
             anyhow::bail!("internal error: unresolved signer selection during key export")
         }
@@ -101,6 +107,9 @@ fn print_secret(signer_info: &SignerInfo) -> Result<()> {
             ..
         } => println!("{}", login::nbunksec::encode(bunker_uri, bunker_app_key)?),
         SignerInfo::Nsec { nsec, .. } => println!("{nsec}"),
+        SignerInfo::Socket { .. } => anyhow::bail!(
+            "the local signer holds this account; export keys from your signer application"
+        ),
         SignerInfo::Selection { .. } => {
             anyhow::bail!("internal error: unresolved signer selection during key export")
         }

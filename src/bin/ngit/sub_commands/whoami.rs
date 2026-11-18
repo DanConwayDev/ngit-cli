@@ -6,8 +6,8 @@ use ngit::{
     login::{
         SignerInfo, SignerInfoSource, credential_store,
         existing::{
-            configured_alias_names, configured_signer_npub, get_signer_info, resolve_selection,
-            signer_is_available,
+            ResolvedSelection, configured_alias_names, configured_signer_inventory,
+            resolve_selection_with_probe, signer_is_available,
         },
         user::get_user_details,
     },
@@ -29,6 +29,7 @@ pub struct SubCommandArgs {
 
 #[derive(Debug, Serialize)]
 struct WhoamiJson {
+    socket: ngit::signer_socket::SocketStatus,
     accounts: Vec<AccountJson>,
     unavailable_accounts: Vec<UnavailableAccountJson>,
     unavailable_logins: Vec<UnavailableLoginJson>,
@@ -78,6 +79,7 @@ struct SignerJson {
 
 #[derive(Debug, PartialEq, Eq)]
 enum SignerKey {
+    Socket,
     Local,
     Remote {
         bunker_uri: String,
@@ -105,32 +107,29 @@ struct Account {
     signers: Vec<SignerConnection>,
 }
 
+#[derive(Default)]
 struct LoginScopes {
+    resolved: BTreeMap<&'static str, ResolvedSelection>,
     unavailable: Vec<UnavailableLoginJson>,
-    local: Option<String>,
-    global: Option<String>,
-    system: Option<String>,
 }
 
 impl LoginScopes {
     fn active(&self) -> Option<&str> {
-        match self.active_label()? {
-            "local" => self.local.as_deref(),
-            "global" => self.global.as_deref(),
-            _ => self.system.as_deref(),
-        }
+        self.npub(self.active_label()?)
+    }
+
+    fn npub(&self, scope: &str) -> Option<&str> {
+        self.resolved
+            .get(scope)
+            .map(|selected| selected.npub.as_str())
     }
 
     fn active_label(&self) -> Option<&'static str> {
-        for (label, selected) in [
-            ("local", &self.local),
-            ("global", &self.global),
-            ("system", &self.system),
-        ] {
+        for label in ["local", "global", "system"] {
             if self.unavailable.iter().any(|login| login.scope == label) {
                 return None;
             }
-            if selected.is_some() {
+            if self.resolved.contains_key(label) {
                 return Some(label);
             }
         }
@@ -142,45 +141,87 @@ impl LoginScopes {
         repo: Option<&Repo>,
         source: SignerInfoSource,
         label: &'static str,
-    ) -> Option<String> {
-        match configured_signer_npub(&repo, source).await {
-            Ok(npub) => npub,
+        probe: &mut ngit::signer_socket::SocketProbe,
+    ) {
+        match configured_signer_inventory(&repo, source, probe).await {
+            Ok(Some(resolved)) => {
+                self.resolved.insert(label, resolved);
+            }
+            Ok(None) => {}
             Err(error) => {
                 self.unavailable.push(UnavailableLoginJson {
                     scope: label,
                     error: format!("{error:#}"),
                 });
-                None
             }
         }
     }
 
     fn labels_for(&self, npub: &str) -> Vec<String> {
-        [
-            ("local", self.local.as_deref()),
-            ("global", self.global.as_deref()),
-            ("system", self.system.as_deref()),
-        ]
-        .into_iter()
-        .filter(|(_, configured)| *configured == Some(npub))
-        .map(|(label, _)| label.to_string())
-        .collect()
+        ["local", "global", "system"]
+            .into_iter()
+            .filter(|label| self.npub(label) == Some(npub))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+struct Inventory {
+    probe: ngit::signer_socket::SocketProbe,
+    selections: BTreeMap<(String, bool), std::result::Result<ResolvedSelection, String>>,
+}
+
+impl Inventory {
+    fn new() -> Self {
+        Self {
+            probe: ngit::signer_socket::SocketProbe::inventory(),
+            selections: BTreeMap::new(),
+        }
+    }
+
+    async fn select(
+        &mut self,
+        repo: Option<&Repo>,
+        selector: &str,
+        allow_name: bool,
+    ) -> Result<ResolvedSelection> {
+        let key = (selector.to_string(), allow_name);
+        if !self.selections.contains_key(&key) {
+            let selected =
+                resolve_selection_with_probe(&repo, selector, &None, allow_name, &mut self.probe)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+            self.selections.insert(key.clone(), selected);
+        }
+        self.selections[&key].clone().map_err(anyhow::Error::msg)
+    }
+
+    async fn available(&mut self, repo: Option<&Repo>, npub: &str) -> Result<bool> {
+        match signer_is_available(&repo, npub) {
+            Ok(true) => Ok(true),
+            stored => match self.select(repo, npub, false).await {
+                Ok(_) => Ok(true),
+                Err(_) => stored,
+            },
+        }
     }
 }
 
 pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
-    let git_repo = Repo::discover()
-        .context("failed to find a git repository")
-        .ok();
+    let git_repo = Repo::discover().ok();
     let git_repo_ref = git_repo.as_ref();
 
-    let scopes = read_login_scopes(git_repo_ref).await;
+    let mut inventory = Inventory::new();
+    let scopes = read_login_scopes(git_repo_ref, &mut inventory.probe).await;
+    let socket =
+        ngit::signer_socket::status_with_probe(&git_repo_ref, &mut inventory.probe).await?;
 
-    let credential_inventory = credential_store::inventory()?;
-    let mut candidate_npubs = credential_inventory.accounts;
-    candidate_npubs.extend(scopes.local.iter().cloned());
-    candidate_npubs.extend(scopes.global.iter().cloned());
-    candidate_npubs.extend(scopes.system.iter().cloned());
+    let mut candidate_npubs = credential_store::inventory()?.accounts;
+    let selected_npubs = scopes
+        .resolved
+        .values()
+        .map(|selected| selected.npub.clone());
+    candidate_npubs.extend(selected_npubs);
 
     // Resolve each known alias through the ordinary selector path. This both
     // applies normal OS/file/local/global/system precedence and prevents a
@@ -188,7 +229,7 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     // account.
     let mut aliases_by_npub: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for alias in configured_alias_names(&git_repo_ref)? {
-        let Ok(resolved) = resolve_selection(&git_repo_ref, &alias, &None, false).await else {
+        let Ok(resolved) = inventory.select(git_repo_ref, &alias, false).await else {
             continue;
         };
         candidate_npubs.insert(resolved.npub.clone());
@@ -201,10 +242,12 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     let mut available_npubs = Vec::new();
     let mut unavailable_accounts = Vec::new();
     for npub in candidate_npubs {
-        let availability = if aliases_by_npub.contains_key(&npub) {
+        let availability = if aliases_by_npub.contains_key(&npub)
+            || (socket.active && socket.npub.as_deref() == Some(npub.as_str()))
+        {
             Ok(true)
         } else {
-            signer_is_available(&git_repo_ref, &npub)
+            inventory.available(git_repo_ref, &npub).await
         };
         let error = match availability {
             Ok(true) => {
@@ -226,8 +269,8 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     )
     .await?;
 
-    add_signers(&mut accounts, git_repo_ref, &scopes).await?;
-    add_selectors(&mut accounts, git_repo_ref).await;
+    add_signers(&mut accounts, git_repo_ref, &scopes, &mut inventory).await?;
+    add_selectors(&mut accounts, git_repo_ref, &mut inventory).await;
     accounts.sort_by(|a, b| {
         (
             !a.active,
@@ -243,14 +286,23 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
             ))
     });
 
+    if socket.selected {
+        for account in &mut accounts {
+            account.active = socket.active && socket.npub.as_deref() == Some(account.npub.as_str());
+            for signer in &mut account.signers {
+                signer.active = account.active && signer.kind == "socket";
+            }
+        }
+    }
     if json {
         crate::output::set(WhoamiJson {
+            socket,
             accounts: accounts.into_iter().map(Account::into_json).collect(),
             unavailable_accounts,
             unavailable_logins: scopes.unavailable,
         })?;
     } else {
-        print_human(&accounts, &scopes);
+        print_human(&accounts, &scopes, &socket);
         for login in scopes.unavailable {
             eprintln!(
                 "warning: {} login is unavailable: {}",
@@ -267,22 +319,20 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn read_login_scopes(git_repo_ref: Option<&Repo>) -> LoginScopes {
-    let mut scopes = LoginScopes {
-        local: None,
-        global: None,
-        system: None,
-        unavailable: Vec::new(),
-    };
-    scopes.local = scopes
-        .read(git_repo_ref, SignerInfoSource::GitLocal, "local")
+async fn read_login_scopes(
+    git_repo_ref: Option<&Repo>,
+    probe: &mut ngit::signer_socket::SocketProbe,
+) -> LoginScopes {
+    let mut scopes = LoginScopes::default();
+    scopes
+        .read(git_repo_ref, SignerInfoSource::GitLocal, "local", probe)
         .await;
     if std::env::var("NGITTEST").is_err() {
-        scopes.global = scopes
-            .read(git_repo_ref, SignerInfoSource::GitGlobal, "global")
+        scopes
+            .read(git_repo_ref, SignerInfoSource::GitGlobal, "global", probe)
             .await;
-        scopes.system = scopes
-            .read(git_repo_ref, SignerInfoSource::GitSystem, "system")
+        scopes
+            .read(git_repo_ref, SignerInfoSource::GitSystem, "system", probe)
             .await;
     }
 
@@ -353,43 +403,29 @@ async fn add_signers(
     accounts: &mut [Account],
     git_repo: Option<&Repo>,
     scopes: &LoginScopes,
+    inventory: &mut Inventory,
 ) -> Result<()> {
     for account in accounts {
         for alias in account.aliases.clone() {
-            if let Ok(resolved) = resolve_selection(&git_repo, &alias, &None, false).await {
+            if let Ok(resolved) = inventory.select(git_repo, &alias, false).await {
                 account.add_signer(&resolved.signer_info, Some(&alias), false, None, false)?;
             }
         }
 
-        if let Ok(resolved) = resolve_selection(&git_repo, &account.npub, &None, false).await {
+        if let Ok(resolved) = inventory.select(git_repo, &account.npub, false).await {
             account.add_signer(&resolved.signer_info, None, true, None, false)?;
         }
 
-        for (label, source, configured_npub) in [
-            ("local", SignerInfoSource::GitLocal, scopes.local.as_deref()),
-            (
-                "global",
-                SignerInfoSource::GitGlobal,
-                scopes.global.as_deref(),
-            ),
-            (
-                "system",
-                SignerInfoSource::GitSystem,
-                scopes.system.as_deref(),
-            ),
-        ] {
-            if configured_npub != Some(account.npub.as_str()) {
-                continue;
+        for (label, selected) in &scopes.resolved {
+            if selected.npub == account.npub {
+                account.add_signer(
+                    &selected.signer_info,
+                    selected.alias.as_deref(),
+                    false,
+                    Some(label),
+                    scopes.active_label() == Some(*label),
+                )?;
             }
-            let (signer_info, _, alias) =
-                get_signer_info(&git_repo, &None, &None, &Some(source)).await?;
-            account.add_signer(
-                &signer_info,
-                alias.as_deref(),
-                false,
-                Some(label),
-                scopes.active_label() == Some(label),
-            )?;
         }
 
         account.signers.sort_by(|a, b| {
@@ -412,14 +448,19 @@ async fn add_signers(
     Ok(())
 }
 
-async fn add_selectors(accounts: &mut [Account], git_repo: Option<&Repo>) {
+async fn add_selectors(
+    accounts: &mut [Account],
+    git_repo: Option<&Repo>,
+    inventory: &mut Inventory,
+) {
     for account in accounts {
         // Ask the selector itself before advertising a mutable profile name.
         // This applies NIP-01 profile ordering, ambiguity checks, alias
         // precedence, and credential validation exactly as the copied command
         // will.
         let profile_is_unique = account.name != account.npub
-            && resolve_selection(&git_repo, &account.name, &None, true)
+            && inventory
+                .select(git_repo, &account.name, true)
                 .await
                 .is_ok_and(|resolved| resolved.npub == account.npub);
         if profile_is_unique {
@@ -456,8 +497,8 @@ fn default_account<'a>(accounts: &'a [Account], scopes: &LoginScopes) -> Option<
     {
         return None;
     }
-    let npub = scopes.global.as_ref().or(scopes.system.as_ref())?;
-    accounts.iter().find(|account| &account.npub == npub)
+    let npub = scopes.npub("global").or(scopes.npub("system"))?;
+    accounts.iter().find(|account| account.npub == npub)
 }
 
 fn scope_label(scope: &str) -> &str {
@@ -487,7 +528,7 @@ fn print_active_account(accounts: &[Account], scopes: &LoginScopes) {
     } else {
         println!("Not logged in.");
     }
-    if scopes.local.is_some()
+    if scopes.npub("local").is_some()
         || scopes
             .unavailable
             .iter()
@@ -500,10 +541,25 @@ fn print_active_account(accounts: &[Account], scopes: &LoginScopes) {
     println!();
 }
 
-fn print_human(accounts: &[Account], scopes: &LoginScopes) {
-    print_active_account(accounts, scopes);
+fn print_human(
+    accounts: &[Account],
+    scopes: &LoginScopes,
+    socket: &ngit::signer_socket::SocketStatus,
+) {
+    if !socket.active && !socket.selected {
+        print_active_account(accounts, scopes);
+    }
+    if socket.active || socket.selected || socket.state == "available" || socket.error.is_some() {
+        println!("{}", socket.message());
+    }
     if accounts.is_empty() {
-        println!("No usable saved accounts. Log in: ngit account login");
+        if socket.active {
+            println!(
+                "No usable saved accounts; the socket account is managed by your signer application."
+            );
+        } else {
+            println!("No usable saved accounts. Log in: ngit account login");
+        }
         return;
     }
 
@@ -551,6 +607,7 @@ fn print_human(accounts: &[Account], scopes: &LoginScopes) {
                 "  {}{suffix}",
                 match signer.kind {
                     "local-key" => "identity key",
+                    "socket" => "local signer socket",
                     _ => "remote signer",
                 }
             );
@@ -597,6 +654,7 @@ impl Account {
         active: bool,
     ) -> Result<()> {
         let (key, kind) = match signer_info {
+            SignerInfo::Socket { .. } => (SignerKey::Socket, "socket"),
             SignerInfo::Nsec { .. } => (SignerKey::Local, "local-key"),
             SignerInfo::Bunker {
                 bunker_uri,
@@ -646,7 +704,7 @@ impl Account {
 }
 
 fn print_logout_guidance(accounts: &[Account], scopes: &LoginScopes) {
-    if scopes.local.is_none()
+    if scopes.npub("local").is_none()
         && !scopes
             .unavailable
             .iter()
@@ -709,17 +767,24 @@ mod presentation_tests {
     fn default_guidance_respects_global_precedence_and_unavailable_selections() {
         // Inventory order must not choose the system account ahead of global.
         let accounts = vec![account("system"), account("global")];
-        let mut scopes = LoginScopes {
-            unavailable: vec![],
-            local: Some("local".to_string()),
-            global: Some("global".to_string()),
-            system: Some("system".to_string()),
-        };
+        let mut scopes = LoginScopes::default();
+        for scope in ["local", "global", "system"] {
+            scopes.resolved.insert(
+                scope,
+                ResolvedSelection {
+                    signer_info: SignerInfo::Selection {
+                        selector: scope.to_string(),
+                    },
+                    npub: scope.to_string(),
+                    alias: None,
+                },
+            );
+        }
         assert_eq!(
             default_account(&accounts, &scopes).map(|a| a.npub.as_str()),
             Some("global")
         );
-        scopes.global = None;
+        scopes.resolved.remove("global");
         scopes.unavailable.push(UnavailableLoginJson {
             scope: "global",
             error: "missing credential".to_string(),

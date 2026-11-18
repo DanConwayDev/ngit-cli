@@ -101,6 +101,11 @@ pub fn require_account(error: anyhow::Error) -> anyhow::Error {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignerInfo {
+    /// A resolved external socket account, pinned for this command.
+    Socket {
+        path: std::path::PathBuf,
+        npub: String,
+    },
     Nsec {
         nsec: String,
         password: Option<String>,

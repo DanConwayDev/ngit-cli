@@ -36,6 +36,46 @@ Choosing who signs:
   by invalid credentials; it never falls back to another account. Never
   export or pass an nsec merely to switch between stored accounts.
 
+Local signer socket (NIP-5F):
+  An npub selects an identity; a profile selects its saved signing backend.
+  --signer <npub> first asks the local socket for that exact account, even
+  when another account is active in the signer app. The same rule applies
+  to nostr.signer=<npub>. Use saved credentials only when the socket is
+  disabled/absent or reports that it does not hold the account. A locked
+  signer or other socket error fails without switching backend.
+
+  Named profiles retain their connections, even when the socket holds the
+  same npub. Explicit nsec/bunker credentials also bypass socket discovery.
+  With no login selected, use the socket's active account as a fallback.
+  Saved but inactive profiles do not prevent that fallback.
+
+    ngit --signer <npub> issue create --subject "Bug" --body "Details"
+    git -c nostr.signer=<npub> push origin pr/topic
+    # pin the socket's current account and backend in a named profile
+    ngit account login --socket --profile desktop
+    # pin a particular socket account without changing the current login
+    ngit account login <npub> --socket --profile desktop --no-activate
+    ngit account login --local desktop
+    ngit --signer desktop issue create --subject "Bug" --body "Details"
+    ngit account whoami --offline --json
+
+  Socket profiles store an npub and public backend binding, never a secret.
+  They require auto or file storage. An unavailable socket profile fails;
+  it never uses stored keys instead. Each command pins the requested npub,
+  so changes to the signer app's active account cannot change its identity.
+  socket is not reserved; it is a normal profile name.
+
+  Default socket: ~/.local/share/nostr/signer.sock. nostr.signer-socket can
+  override the path or disable it with false. whoami reports availability
+  and the effective socket account (JSON: socket), with bounded probes.
+  Logout removes saved profile bindings but cannot revoke the signer app.
+  It can reveal the automatic socket fallback. Socket-only logout errors
+  with guidance to manage the external account or disable socket signing.
+  export-keys cannot export socket-held secrets. To disable socket signing:
+    git config --global nostr.signer-socket false
+    # repository settings take precedence over global settings
+    git config nostr.signer-socket false
+
 Secrets:
   Secrets go to the OS credential store, else ngit's user-only file store
   (--secret-storage auto|file|git-config, `NGIT_SECRET_STORAGE`, or

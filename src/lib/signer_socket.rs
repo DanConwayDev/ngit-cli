@@ -2,9 +2,8 @@
 //! (nostr-protocol/nips#1862), such as nostrd or Amber Desktop.
 //!
 //! The signer holds the account keys; ngit only asks it for signatures and
-//! NIP-44 ciphertexts. When one is listening, ngit signs through it for any
-//! account it holds, instead of reading a key or opening a bunker connection
-//! of its own.
+//! NIP-44 ciphertexts. Npub selection prefers the socket; socket profiles pin
+//! its backend and identity. With no login, use the daemon's active account.
 //!
 //! The socket is `nostr.signer-socket` from Git config, or
 //! `~/.local/share/nostr/signer.sock`, where NIP-5F clients look. Setting
@@ -41,23 +40,173 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ERROR_NOT_FOUND: i64 = 4;
 const ERROR_LOCKED: i64 = 10;
 
-/// The socket to use, if it's turned on and something is there.
-pub fn socket_path(git_repo: &Option<&Repo>) -> Option<PathBuf> {
-    if std::env::var("NGITTEST").is_ok() {
-        return None;
-    }
+pub const LOGOUT_MESSAGE: &str = "This account is supplied by your local signer; ngit cannot log it out. Manage it in your signer application, or disable socket signing with `git config --global nostr.signer-socket false` (a repository override takes precedence).";
+
+/// Test processes may use an explicit isolated socket, never the default.
+pub fn socket_path(git_repo: &Option<&Repo>) -> Result<Option<PathBuf>> {
     let configured = match git_repo {
         Some(repo) => repo.get_git_config_item("nostr.signer-socket", None),
         None => get_git_config_item_global(git_repo, "nostr.signer-socket"),
-    }
-    .ok()
-    .flatten();
+    }?;
     let path = match configured.as_deref().map(str::trim) {
-        Some("false" | "no" | "off" | "0" | "") => return None,
+        Some("false" | "no" | "off" | "0" | "") => return Ok(None),
         Some(path) => expand_home(path),
-        None => default_socket()?,
+        None if std::env::var("NGITTEST").is_ok() => return Ok(None),
+        None => match default_socket() {
+            Some(path) => path,
+            None => return Ok(None),
+        },
     };
-    path.exists().then_some(path)
+    Ok(path.exists().then_some(path))
+}
+
+/// Live signing uses the transport's normal deadlines. Inventory shares a
+/// bounded snapshot, including failures, for the lifetime of one command.
+#[derive(Default)]
+pub struct SocketProbe {
+    snapshot: Option<ProbeSnapshot>,
+}
+
+type ProbeResult = Result<PublicKey, (bool, String)>;
+
+struct ProbeSnapshot {
+    remaining: Duration,
+    accounts: std::collections::HashMap<(PathBuf, Option<PublicKey>), ProbeResult>,
+}
+
+impl SocketProbe {
+    pub fn inventory() -> Self {
+        Self {
+            snapshot: Some(ProbeSnapshot {
+                remaining: Duration::from_secs(2),
+                accounts: std::collections::HashMap::new(),
+            }),
+        }
+    }
+
+    pub fn is_inventory(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
+    pub async fn public_key(
+        &mut self,
+        path: PathBuf,
+        account: Option<PublicKey>,
+    ) -> Result<PublicKey> {
+        let Some(snapshot) = &mut self.snapshot else {
+            return Ok(SocketSigner::connect(path, account).await?.public_key());
+        };
+        let key = (path.clone(), account);
+        if !snapshot.accounts.contains_key(&key) {
+            let started = std::time::Instant::now();
+            let result = if snapshot.remaining.is_zero() {
+                Err(anyhow!("local signer inventory probe budget exhausted"))
+            } else {
+                match timeout(
+                    snapshot.remaining,
+                    SocketSigner::connect(path.clone(), account),
+                )
+                .await
+                {
+                    Ok(result) => result.map(|signer| signer.public_key()),
+                    Err(_) => Err(anyhow!("local signer inventory probe budget exhausted")),
+                }
+            };
+            snapshot.remaining = snapshot.remaining.saturating_sub(started.elapsed());
+            let result = result.map_err(|error| (is_not_found(&error), format!("{error:#}")));
+            // Discovering the active account also resolves that exact identity.
+            if let Ok(public_key) = &result {
+                snapshot
+                    .accounts
+                    .insert((path, Some(*public_key)), Ok(*public_key));
+            }
+            snapshot.accounts.insert(key.clone(), result);
+        }
+        match &snapshot.accounts[&key] {
+            Ok(public_key) => Ok(*public_key),
+            Err((true, message)) => Err(SignerSocketError {
+                code: ERROR_NOT_FOUND,
+                message: message.clone(),
+            }
+            .into()),
+            Err((false, message)) => Err(anyhow!(message.clone())),
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SocketStatus {
+    pub selected: bool,
+    pub active: bool,
+    pub state: &'static str,
+    pub npub: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Account inventory must not wait for approval from an external application.
+pub async fn status(git_repo: &Option<&Repo>) -> Result<SocketStatus> {
+    status_with_probe(git_repo, &mut SocketProbe::inventory()).await
+}
+
+pub async fn status_with_probe(
+    git_repo: &Option<&Repo>,
+    probe: &mut SocketProbe,
+) -> Result<SocketStatus> {
+    use nostr::prelude::ToBech32;
+
+    use crate::login::existing::SocketSelection;
+    // Invalid saved selections are reported by account inventory. They must
+    // never turn an optional socket availability probe into active fallback.
+    let selection =
+        crate::login::existing::socket_selection(git_repo).unwrap_or(SocketSelection::OtherBackend);
+    let account = match selection {
+        SocketSelection::Prefer(account) | SocketSelection::Required(account) => Some(account),
+        SocketSelection::Fallback | SocketSelection::OtherBackend => None,
+    };
+    let mut status = SocketStatus {
+        selected: matches!(selection, SocketSelection::Required(_)),
+        active: false,
+        state: "unavailable",
+        npub: None,
+        error: None,
+    };
+    let Some(path) = socket_path(git_repo)? else {
+        return Ok(status);
+    };
+    match probe.public_key(path, account).await {
+        Ok(public_key) => {
+            status.state = "available";
+            status.active = selection != SocketSelection::OtherBackend;
+            status.selected = status.active && account.is_some();
+            status.npub = Some(public_key.to_bech32()?);
+        }
+        Err(error) => status.error = Some(format!("{error:#}")),
+    }
+    Ok(status)
+}
+
+impl SocketStatus {
+    pub fn message(&self) -> String {
+        if self.active {
+            format!(
+                "Using local socket signer ({}). {}",
+                self.npub.as_deref().unwrap_or("unknown account"),
+                if self.selected {
+                    "The selected identity is using the socket backend."
+                } else {
+                    "No ngit login is selected; this is the fallback account."
+                }
+            )
+        } else if self.state == "available" {
+            format!(
+                "Local socket signer available ({}); use --signer <npub> to request a socket account for one command.",
+                self.npub.as_deref().unwrap_or("unknown account")
+            )
+        } else {
+            format!("Local socket signer unavailable{}. {}", if self.selected { " (selected)" } else { "" },
+                self.error.as_deref().unwrap_or("Socket signing is disabled or no socket was found; check nostr.signer-socket and your signer application."))
+        }
+    }
 }
 
 fn default_socket() -> Option<PathBuf> {

@@ -125,6 +125,7 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
         }
     }
     if target.is_none() && selected_scopes.is_empty() {
+        reject_socket_only_logout(repo.as_ref()).await?;
         if args.forget {
             bail!(
                 "no active login to forget; select the retained account with `ngit account logout ACCOUNT --forget` or --profile NAME"
@@ -137,6 +138,20 @@ pub async fn launch(args: &SubCommandArgs, signer: SignerParams<'_>) -> Result<(
     apply_logout(args, &selected_scopes, &entries)?;
     report_remaining(repo.as_ref())?;
     list_saved_profiles().await
+}
+
+async fn reject_socket_only_logout(repo: Option<&Repo>) -> Result<()> {
+    let socket = ngit::signer_socket::status(&repo).await?;
+    if socket.active
+        || socket.error.is_some()
+            && matches!(
+                ngit::login::existing::socket_selection(&repo),
+                Ok(ngit::login::existing::SocketSelection::Fallback)
+            )
+    {
+        bail!(ngit::signer_socket::LOGOUT_MESSAGE);
+    }
+    Ok(())
 }
 
 pub(super) async fn list_saved_profiles() -> Result<()> {
@@ -262,6 +277,12 @@ async fn target_entries(
             resolve_selector_npub(&repo, selected.alias.as_deref().unwrap_or(&selected.npub))?
         }
     };
+    if target.credential.as_deref() == Some(credential_store::SOCKET_BINDING) {
+        return Ok(vec![format!(
+            "alias:{}",
+            credential_store::normalize_alias(selector)?
+        )]);
+    }
     credential_store::selection_entries(&target.npub, target.credential.as_deref())
 }
 
@@ -321,7 +342,9 @@ fn report_remaining(repo: Option<&Repo>) -> Result<()> {
     {
         eprintln!("a system-wide account remains selected; its availability is listed below");
     } else {
-        eprintln!("you are now logged out; any other saved accounts are listed below");
+        eprintln!(
+            "no ngit login is selected; checking whether the local socket signer is available as a fallback"
+        );
     }
     Ok(())
 }

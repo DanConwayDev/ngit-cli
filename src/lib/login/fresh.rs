@@ -133,7 +133,35 @@ pub async fn fresh_login_or_signup(
     }
     let mut saved_source = git_config_source(target != LoginTarget::Local);
     let mut receipts = CredentialStorageReceipts::default();
-    if target == LoginTarget::ProfileOnly {
+    if matches!(signer_info, SignerInfo::Socket { .. }) {
+        if let Some(alias) = alias {
+            anyhow::ensure!(
+                credential_store::policy(git_repo) != credential_store::SecretStorage::GitConfig,
+                "socket profiles require auto or file storage for their public binding; use --secret-storage auto"
+            );
+            if target == LoginTarget::ProfileOnly {
+                store_profile_alias(
+                    git_repo,
+                    alias,
+                    &npub,
+                    Some(credential_store::SOCKET_BINDING),
+                    &mut receipts,
+                )?;
+                saved_source = SignerInfoSource::CommandLineArguments;
+            } else {
+                save_signer_alias_into(
+                    git_repo,
+                    alias,
+                    &npub,
+                    Some(credential_store::SOCKET_BINDING),
+                    target != LoginTarget::Local,
+                    &mut receipts,
+                )?;
+            }
+        } else {
+            save_signer_selection(git_repo, &npub, &npub, target != LoginTarget::Local)?;
+        }
+    } else if target == LoginTarget::ProfileOnly {
         save_profile_without_activation(git_repo, &signer_info, alias, &npub, &mut receipts)?;
         saved_source = SignerInfoSource::CommandLineArguments;
     } else if let SignerInfo::Selection { selector } = &signer_info {
@@ -198,6 +226,13 @@ pub async fn fresh_login_or_signup(
     )
     .await?;
     report_login(&user_ref, client.is_none(), &saved_source, alias, target)?;
+    if matches!(signer_info, SignerInfo::Socket { .. }) {
+        crate::report_message!(
+            "info",
+            "account_diagnostic",
+            "Selected this account through the local signer socket. Socket profiles pin this npub and backend; a bare npub selection prefers the socket but may use saved credentials if the account is absent."
+        );
+    }
     Ok((signer, user_ref, saved_source))
 }
 
@@ -1070,6 +1105,9 @@ async fn save_to_git_config(
 
         crate::report_message!("info", "account_diagnostic", "Error: {error:?}");
         match signer_info {
+            SignerInfo::Socket { .. } => {
+                bail!("use `ngit account login --socket --profile NAME` to save a socket profile")
+            }
             SignerInfo::Nsec { nsec, .. } => {
                 crate::report_message!(
                     "info",
@@ -1182,6 +1220,7 @@ pub fn configured_signer_scope_message(global: bool, signer_info: &SignerInfo) -
         "this repository's local Git config"
     };
     match signer_info {
+        SignerInfo::Socket { .. } => format!("{scope} now selects the local socket signer"),
         SignerInfo::Selection { selector } if selector.starts_with("npub1") => {
             format!("{scope} now selects signer {selector}")
         }
@@ -1439,6 +1478,7 @@ fn save_signer_selection(
 
 fn get_pubkey_from_signer_info(signer_info: &SignerInfo) -> Result<PublicKey> {
     let npub = match signer_info {
+        SignerInfo::Socket { npub, .. } => return PublicKey::parse(npub).map_err(Into::into),
         SignerInfo::Bunker {
             bunker_uri: _,
             bunker_app_key: _,
@@ -1482,7 +1522,10 @@ fn protect_secrets(
     }
     if matches!(signer_info, SignerInfo::Nsec { nsec, .. } if credential_store::parse_pointer(nsec).is_some())
         || matches!(signer_info, SignerInfo::Bunker { bunker_app_key, .. } if credential_store::parse_pointer(bunker_app_key).is_some())
-        || matches!(signer_info, SignerInfo::Selection { .. })
+        || matches!(
+            signer_info,
+            SignerInfo::Selection { .. } | SignerInfo::Socket { .. }
+        )
     {
         return Ok(signer_info.clone());
     }
@@ -1542,7 +1585,9 @@ fn protect_secrets(
                 },
             )
         }
-        SignerInfo::Selection { .. } => unreachable!("selection returned before secret storage"),
+        SignerInfo::Selection { .. } | SignerInfo::Socket { .. } => {
+            unreachable!("selection returned before secret storage")
+        }
     };
     match stored {
         Ok((protected, entry, backend)) => {
@@ -1585,7 +1630,7 @@ fn signer_storage_subject(signer_info: &SignerInfo) -> &'static str {
     match signer_info {
         SignerInfo::Nsec { .. } => "account secret",
         SignerInfo::Bunker { .. } => "remote signer connection",
-        SignerInfo::Selection { .. } => "signer selection",
+        SignerInfo::Selection { .. } | SignerInfo::Socket { .. } => "signer selection",
     }
 }
 
@@ -1604,6 +1649,7 @@ fn silently_save_to_git_config(
 
     let npub_to_save;
     match signer_info {
+        SignerInfo::Socket { .. } => bail!("socket selection must be saved without credentials"),
         SignerInfo::Nsec {
             nsec,
             password: _,
@@ -1711,6 +1757,9 @@ pub async fn signup_non_interactive(
             use crate::cli_interactor::cli_error;
 
             let mut cmds: Vec<String> = match &config_signer_info {
+                SignerInfo::Socket { npub, .. } => {
+                    vec![format!("git config --global nostr.signer {npub}")]
+                }
                 SignerInfo::Nsec { nsec, npub, .. } => {
                     let mut v = vec![format!("git config --global nostr.nsec {nsec}")];
                     if let Some(npub) = npub {

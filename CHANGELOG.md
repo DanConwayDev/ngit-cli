@@ -10,10 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Sign through a local signer daemon, such as nostrd or Amber Desktop, over
-  the draft NIP-5F socket protocol. When one holds the selected account (or,
-  with none selected, has an active account), ngit uses it instead of a stored
-  key or bunker connection. Set `nostr.signer-socket` to another path, or to
-  `false` to turn it off.
+  the draft NIP-5F socket protocol. Npub selections prefer the socket for that
+  identity; named profiles retain their backend. Save a pinned socket profile
+  with `account login --socket --profile NAME [npub]`. Without a selected
+  login, use the daemon's active account. Account reporting and logout
+  distinguish saved logins from external signer availability; disable socket
+  signing with `nostr.signer-socket=false`. Account inventory shares socket
+  probe results and a two-second socket budget across all profiles.
 
 - Remove your own issue and PR label assignments with `--remove-label`,
   preserving other labels from the same assignment. Other authors' assignments
