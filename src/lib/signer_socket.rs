@@ -429,30 +429,35 @@ impl Channel {
         let mut guard = self.connection.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let request = json!({ "id": id, "method": method, "params": params });
-        let mut retried = false;
-        let response = loop {
-            if guard.is_none() {
-                *guard = Some(Connection::open(&self.path).await?);
+        let exchange = async {
+            let mut retried = false;
+            loop {
+                if guard.is_none() {
+                    *guard = Some(Connection::open(&self.path).await?);
+                }
+                let connection = guard.as_mut().expect("connected above");
+                if let Err(error) = connection.write(&request).await {
+                    *guard = None;
+                    if retried {
+                        return Err(error);
+                    }
+                    retried = true;
+                    continue;
+                }
+                return read_response(connection, &id).await;
             }
-            let connection = guard.as_mut().expect("connected above");
-            if let Err(error) = connection.write(&request).await {
+        };
+        // Include writes and reconnects: an unresponsive reader can fill the
+        // socket buffer before ngit ever starts waiting for a response.
+        let response = match timeout(CALL_TIMEOUT, exchange).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
                 *guard = None;
-                if retried {
-                    return Err(error);
-                }
-                retried = true;
-                continue;
+                return Err(error);
             }
-            match timeout(CALL_TIMEOUT, read_response(connection, &id)).await {
-                Ok(Ok(response)) => break response,
-                Ok(Err(error)) => {
-                    *guard = None;
-                    return Err(error);
-                }
-                Err(_) => {
-                    *guard = None;
-                    bail!("the signer didn't answer {method} in time");
-                }
+            Err(_) => {
+                *guard = None;
+                bail!("the signer didn't answer {method} in time");
             }
         };
         if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
@@ -582,6 +587,41 @@ mod tests {
             }
         });
         (dir, path)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_request_write_times_out_and_discards_connection() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        // The peer stays open but never reads during the request.
+        let (stream, mut peer) = UnixStream::pair()?;
+        stream.writable().await?;
+        let (read, writer) = stream.into_split();
+        let channel = Channel {
+            path: PathBuf::from("unused.sock"),
+            connection: Mutex::new(Some(Connection {
+                reader: BufReader::new(read),
+                writer,
+            })),
+            next_id: AtomicU64::new(1),
+        };
+        let payload = "x".repeat(8 * 1024 * 1024);
+        let result = timeout(
+            CALL_TIMEOUT + Duration::from_secs(1),
+            channel.call("sign_event", vec![json!(payload)]),
+        )
+        .await
+        .context("request write escaped the channel deadline")?;
+        assert!(result.unwrap_err().to_string().contains("in time"));
+        assert!(channel.connection.lock().await.is_none());
+
+        // EOF proves the timed-out connection was closed; a partial payload
+        // proves the timeout occurred during writing, not response reading.
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(1), peer.read_to_end(&mut received)).await??;
+        assert!(!received.is_empty());
+        assert!(received.len() < payload.len());
+        Ok(())
     }
 
     #[tokio::test]
