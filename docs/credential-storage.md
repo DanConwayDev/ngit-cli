@@ -212,6 +212,72 @@ accounts are marked unusable. A full npub is also unavailable when several
 alias-specific sessions remain without a default, in which case `whoami`
 requires an alias instead of advertising an ambiguous selector.
 
+## Local signer socket
+
+ngit can sign without holding any secret at all. When a signer daemon listens
+on a Unix socket speaking the draft NIP-5F protocol
+([nostr-protocol/nips#1862](https://github.com/nostr-protocol/nips/pull/1862)),
+such as [nostrd] or Amber Desktop, ngit asks it for signatures and NIP-44
+encryption instead of reading a key or opening a bunker connection.
+
+ngit looks for the socket at `~/.local/share/nostr/signer.sock`, where NIP-5F
+clients look, or at the path in the `nostr.signer-socket` Git-config item.
+Setting `nostr.signer-socket` to `false` turns the socket off.
+
+An npub selects an identity; a named profile selects a saved backend.
+`--signer <npub>` and `nostr.signer=<npub>` prefer the socket for that exact
+account, including non-active accounts. They use ngit's stored credentials
+only when the socket is absent/disabled or reports "account not found".
+Locked signers and other socket errors fail without changing backend.
+Explicit nsec/bunker credentials and ordinary profiles retain their existing
+backend, even when the socket holds the same identity.
+
+With no login selected, the daemon's active account is the fallback. Saved
+but inactive profiles do not prevent this.
+
+```sh
+ngit --signer <npub> issue create --subject "Bug" --body "Details"
+git -c nostr.signer=<npub> push origin pr/topic
+# Pin the daemon's current identity and the socket backend:
+ngit account login --socket --profile desktop
+# Or save a particular identity without activating it:
+ngit account login <npub> --socket --profile desktop --no-activate
+ngit account login --local desktop
+ngit --signer desktop issue create --subject "Bug" --body "Details"
+```
+
+A socket profile stores only an npub and a public backend binding, using the
+existing profile store in auto/file mode. It requires the socket to hold that
+identity and never falls back to local keys or a bunker. Saving a profile
+from an npub that resolves through the socket also binds that backend;
+`--socket` explicitly requires it when creating the profile. The name
+`socket` is not reserved and has no special selection behavior.
+
+Each command pins the public key for all requests. Changing the daemon's
+active account affects automatic fallback on the next command, but cannot
+change a profile's pinned identity or an operation already running.
+
+`account whoami` reports availability and the effective socket account;
+JSON exposes this separately in `socket`. Inventory probes are bounded and
+do not sign anything. A socket file existing is not proof of readiness.
+
+Logout removes ngit's selected profile and its binding as usual, then reports
+any socket fallback. It does not delete the external account's keys or revoke
+signer permissions. With only automatic socket signing active, logout errors
+with instructions to manage the account in the signer application or disable
+socket signing. `logout --all` cannot revoke the external signer either.
+`export-keys` cannot export a socket account's secrets.
+
+```sh
+git config --global nostr.signer-socket false
+# A repository setting overrides the global setting:
+git config nostr.signer-socket false
+```
+
+The protocol remains a draft; its wire format may change before adoption.
+
+[nostrd]: https://git.shakespeare.diy/npub1q3sle0kvfsehgsuexttt3ugjd8xdklxfwwkh559wxckmzddywnws6cd26p/nostrd.git
+
 ## Choosing where secrets live
 
 The `nostr.secret-storage` git config item — overridden by the

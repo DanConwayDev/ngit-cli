@@ -29,6 +29,7 @@ use crate::{
     },
     output_mode::TransientLine,
     remote_signer::NostrConnect,
+    signer_socket::{self, SocketProbe, SocketSigner},
 };
 
 #[derive(Debug)]
@@ -80,10 +81,27 @@ pub async fn load_existing_login(
     prompt_for_password: bool,
     fetch_profile_updates: bool,
 ) -> Result<(Arc<crate::NgitSigner>, UserRef, SignerInfoSource)> {
-    let (signer_info, source, alias) =
-        get_signer_info(git_repo, signer_info, password, source).await?;
-
-    let (signer, public_key) = get_signer(&signer_info, prompt_for_password).await?;
+    let resolved = get_signer_info(git_repo, signer_info, password, source).await;
+    let (info, mut source, alias) = match resolved {
+        Ok(resolved) => resolved,
+        Err(error) if source.is_none() && error.downcast_ref::<SignerInfoNotFound>().is_some() => {
+            let Some(path) = signer_socket::socket_path(git_repo)? else {
+                return Err(error);
+            };
+            match socket_signer_info(path, None).await {
+                Ok(info) => (info, SignerInfoSource::SignerSocket, None),
+                Err(socket_error) if signer_socket::is_not_found(&socket_error) => {
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let (signer, public_key) = get_signer(&info, prompt_for_password).await?;
+    if matches!(info, SignerInfo::Socket { .. }) {
+        source = SignerInfoSource::SignerSocket;
+    }
 
     let user_ref = get_user_details(
         &public_key,
@@ -100,6 +118,17 @@ pub async fn load_existing_login(
     Ok((signer, user_ref, source))
 }
 
+pub async fn socket_signer_info(
+    path: std::path::PathBuf,
+    account: Option<PublicKey>,
+) -> Result<SignerInfo> {
+    let signer = SocketSigner::connect(path.clone(), account).await?;
+    Ok(SignerInfo::Socket {
+        path,
+        npub: signer.public_key().to_bech32()?,
+    })
+}
+
 /// The alias a persisted `nostr.signer` selector names, for display.
 ///
 /// Config-scoped `nostr.signer` values keep strict npub/alias semantics, so
@@ -112,7 +141,7 @@ pub fn selected_alias(
     source: &SignerInfoSource,
 ) -> Result<Option<String>> {
     let selector = match source {
-        SignerInfoSource::CommandLineArguments => None,
+        SignerInfoSource::CommandLineArguments | SignerInfoSource::SignerSocket => None,
         SignerInfoSource::GitLocal => {
             let repo = git_repo.context("cannot read local signer alias without a repository")?;
             get_git_config_item(&Some(repo), "nostr.signer")?
@@ -136,6 +165,23 @@ pub async fn get_signer_info(
     password: &Option<String>,
     source: &Option<SignerInfoSource>,
 ) -> Result<(SignerInfo, SignerInfoSource, Option<String>)> {
+    get_signer_info_with_probe(
+        git_repo,
+        signer_info,
+        password,
+        source,
+        &mut SocketProbe::default(),
+    )
+    .await
+}
+
+async fn get_signer_info_with_probe(
+    git_repo: &Option<&Repo>,
+    signer_info: &Option<SignerInfo>,
+    password: &Option<String>,
+    source: &Option<SignerInfoSource>,
+    probe: &mut SocketProbe,
+) -> Result<(SignerInfo, SignerInfoSource, Option<String>)> {
     Ok(match source {
         None => {
             let mut result = None;
@@ -154,11 +200,12 @@ pub async fn get_signer_info(
             } {
                 // recursion inside an async fn needs boxing to keep the
                 // future's size computable
-                match Box::pin(get_signer_info(
+                match Box::pin(get_signer_info_with_probe(
                     git_repo,
                     signer_info,
                     password,
                     &Some(source.clone()),
+                    probe,
                 ))
                 .await
                 {
@@ -188,7 +235,8 @@ pub async fn get_signer_info(
                                     get_git_config_item_global(git_repo, key)?
                                 }
                                 SignerInfoSource::GitSystem => get_git_config_item_system(key)?,
-                                SignerInfoSource::CommandLineArguments => None,
+                                SignerInfoSource::CommandLineArguments
+                                | SignerInfoSource::SignerSocket => None,
                             };
                             configured_selection |= value.is_some();
                         }
@@ -205,12 +253,16 @@ pub async fn get_signer_info(
             }
             result.ok_or(SignerInfoNotFound)?
         }
+        Some(SignerInfoSource::SignerSocket) => {
+            bail!("the local signer isn't a git config scope to read signer info from")
+        }
         Some(SignerInfoSource::CommandLineArguments) => {
             if let Some(signer_info) = signer_info {
                 let (signer_info, alias) = match signer_info {
                     SignerInfo::Selection { selector } => {
                         let resolved =
-                            resolve_selection(git_repo, selector, password, true).await?;
+                            resolve_selection_with_probe(git_repo, selector, password, true, probe)
+                                .await?;
                         (resolved.signer_info, resolved.alias)
                     }
                     signer_info => (signer_info.clone(), None),
@@ -226,8 +278,14 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item(&Some(git_repo), "nostr.signer")
                 .context("failed get local git config")?
             {
-                let resolved =
-                    resolve_selection(&Some(git_repo), &selector, password, false).await?;
+                let resolved = resolve_selection_with_probe(
+                    &Some(git_repo),
+                    &selector,
+                    password,
+                    false,
+                    probe,
+                )
+                .await?;
                 (
                     resolved.signer_info,
                     SignerInfoSource::GitLocal,
@@ -268,7 +326,9 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item_global(git_repo, "nostr.signer")
                 .context("failed to get global git config")?
             {
-                let resolved = resolve_selection(git_repo, &selector, password, false).await?;
+                let resolved =
+                    resolve_selection_with_probe(git_repo, &selector, password, false, probe)
+                        .await?;
                 (
                     resolved.signer_info,
                     SignerInfoSource::GitGlobal,
@@ -308,7 +368,9 @@ pub async fn get_signer_info(
             if let Some(selector) = get_git_config_item_system("nostr.signer")
                 .context("failed to get system git config")?
             {
-                let resolved = resolve_selection(git_repo, &selector, password, false).await?;
+                let resolved =
+                    resolve_selection_with_probe(git_repo, &selector, password, false, probe)
+                        .await?;
                 (
                     resolved.signer_info,
                     SignerInfoSource::GitSystem,
@@ -442,6 +504,18 @@ pub async fn configured_signer_npub(
     git_repo: &Option<&Repo>,
     source: SignerInfoSource,
 ) -> Result<Option<String>> {
+    Ok(
+        configured_signer_inventory(git_repo, source, &mut SocketProbe::default())
+            .await?
+            .map(|selected| selected.npub),
+    )
+}
+
+pub async fn configured_signer_inventory(
+    git_repo: &Option<&Repo>,
+    source: SignerInfoSource,
+    probe: &mut SocketProbe,
+) -> Result<Option<ResolvedSelection>> {
     let mut has_login = false;
     for key in [
         "nostr.signer",
@@ -456,7 +530,7 @@ pub async fn configured_signer_npub(
             },
             SignerInfoSource::GitGlobal => get_git_config_item_global(git_repo, key)?,
             SignerInfoSource::GitSystem => get_git_config_item_system(key)?,
-            SignerInfoSource::CommandLineArguments => None,
+            SignerInfoSource::CommandLineArguments | SignerInfoSource::SignerSocket => None,
         };
         has_login |= value.is_some();
     }
@@ -464,12 +538,19 @@ pub async fn configured_signer_npub(
         return Ok(None);
     }
 
-    let (signer_info, _, _) = get_signer_info(git_repo, &None, &None, &Some(source)).await?;
-    signer_info_npub(&signer_info).map(Some)
+    let (signer_info, _, alias) =
+        get_signer_info_with_probe(git_repo, &None, &None, &Some(source), probe).await?;
+    let npub = signer_info_npub(&signer_info)?;
+    Ok(Some(ResolvedSelection {
+        signer_info,
+        npub,
+        alias,
+    }))
 }
 
 fn signer_info_npub(signer_info: &SignerInfo) -> Result<String> {
     let expected = match signer_info {
+        SignerInfo::Socket { npub, .. } => PublicKey::parse(npub)?,
         SignerInfo::Nsec { nsec, npub, .. } => {
             if let Some(npub) = npub {
                 return PublicKey::parse(npub)
@@ -498,6 +579,37 @@ fn signer_info_npub(signer_info: &SignerInfo) -> Result<String> {
 /// signer for `npub` using the same precedence as `--signer <npub>`.
 pub fn signer_is_available(git_repo: &Option<&Repo>, npub: &str) -> Result<bool> {
     Ok(resolve_signer_for_npub(git_repo, npub, &None)?.is_some())
+}
+
+/// Account policy inferred from saved selection metadata, without signing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketSelection {
+    Fallback,
+    Prefer(PublicKey),
+    Required(PublicKey),
+    OtherBackend,
+}
+
+pub fn socket_selection(git_repo: &Option<&Repo>) -> Result<SocketSelection> {
+    for scope in selection_scopes(git_repo) {
+        if let Some(selector) = config_value(git_repo, scope, "nostr.signer")? {
+            let target = resolve_selector_npub(git_repo, &selector)?;
+            let public_key = PublicKey::parse(&target.npub)?;
+            return Ok(if selector.starts_with("npub1") {
+                SocketSelection::Prefer(public_key)
+            } else if target.credential.as_deref() == Some(credential_store::SOCKET_BINDING) {
+                SocketSelection::Required(public_key)
+            } else {
+                SocketSelection::OtherBackend
+            });
+        }
+        for key in ["nostr.nsec", "nostr.bunker-uri", "nostr.bunker-app-key"] {
+            if config_value(git_repo, scope, key)?.is_some() {
+                return Ok(SocketSelection::OtherBackend);
+            }
+        }
+    }
+    Ok(SocketSelection::Fallback)
 }
 
 fn config_value(git_repo: &Option<&Repo>, scope: ConfigScope, key: &str) -> Result<Option<String>> {
@@ -534,7 +646,7 @@ fn resolve_scope_secret(
 }
 
 /// A signer selector resolved to concrete signer material.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolvedSelection {
     pub signer_info: SignerInfo,
     /// canonical npub of the selected identity — the only form of a
@@ -556,6 +668,43 @@ pub async fn resolve_selection(
     password: &Option<String>,
     allow_profile_name: bool,
 ) -> Result<ResolvedSelection> {
+    resolve_selection_with_probe(
+        git_repo,
+        selector,
+        password,
+        allow_profile_name,
+        &mut SocketProbe::default(),
+    )
+    .await
+}
+
+pub async fn resolve_selection_with_probe(
+    git_repo: &Option<&Repo>,
+    selector: &str,
+    password: &Option<String>,
+    allow_profile_name: bool,
+    probe: &mut SocketProbe,
+) -> Result<ResolvedSelection> {
+    if selector.starts_with("npub1") {
+        let account = PublicKey::parse(selector).context("--signer contains an invalid npub")?;
+        if let Some(path) = signer_socket::socket_path(git_repo)? {
+            match probe.public_key(path.clone(), Some(account)).await {
+                Ok(_) => {
+                    let signer_info = SignerInfo::Socket {
+                        path,
+                        npub: account.to_bech32()?,
+                    };
+                    return Ok(ResolvedSelection {
+                        signer_info,
+                        npub: account.to_bech32()?,
+                        alias: None,
+                    });
+                }
+                Err(error) if signer_socket::is_not_found(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     match resolve_selector_npub(git_repo, selector) {
         Ok(target) => {
             let alias = if selector.starts_with("npub1") {
@@ -563,7 +712,20 @@ pub async fn resolve_selection(
             } else {
                 credential_store::normalize_alias(selector).ok()
             };
-            let signer_info = if let Some(credential) = target.credential {
+            let signer_info = if target.credential.as_deref()
+                == Some(credential_store::SOCKET_BINDING)
+            {
+                let path = signer_socket::socket_path(git_repo)?.context("this profile requires a local signer socket; enable nostr.signer-socket and start your signer application")?;
+                if probe.is_inventory() {
+                    probe
+                        .public_key(path.clone(), Some(PublicKey::parse(&target.npub)?))
+                        .await?;
+                }
+                SignerInfo::Socket {
+                    path,
+                    npub: target.npub.clone(),
+                }
+            } else if let Some(credential) = target.credential {
                 let signer =
                     credential_store::retrieve_bunker_signer_named(&credential, &target.npub)?;
                 SignerInfo::Bunker {
@@ -930,6 +1092,7 @@ pub fn command_signer_public_key(
     password: &Option<String>,
 ) -> Result<Option<PublicKey>> {
     match signer_info {
+        SignerInfo::Socket { npub, .. } => Ok(Some(PublicKey::parse(npub)?)),
         SignerInfo::Nsec {
             nsec,
             password: signer_password,
@@ -1126,6 +1289,14 @@ async fn get_signer(
     prompt_for_ncryptsec_password: bool,
 ) -> Result<(Arc<crate::NgitSigner>, PublicKey)> {
     match signer_info {
+        SignerInfo::Socket { path, npub } => {
+            let public_key = PublicKey::parse(npub)?;
+            let signer = SocketSigner::connect(path.clone(), Some(public_key)).await?;
+            Ok((
+                Arc::new(crate::NgitSigner::Socket(Arc::new(signer))),
+                public_key,
+            ))
+        }
         SignerInfo::Nsec {
             nsec,
             password,

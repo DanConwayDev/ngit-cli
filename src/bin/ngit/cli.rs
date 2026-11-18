@@ -81,8 +81,8 @@ pub struct Cli {
         ]
     )]
     pub nbunksec_file: Option<PathBuf>,
-    /// Use a configured signer by npub, profile, or cached Nostr display name
-    /// for this command
+    /// Use an identity by npub, saved profile, or cached Nostr display
+    /// name for this command
     #[arg(
         long,
         global = true,

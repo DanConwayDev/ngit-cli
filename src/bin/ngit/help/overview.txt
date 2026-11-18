@@ -62,6 +62,8 @@ Rules for agents and scripts:
     push ...` does the same for one git command. Neither changes the
     configured login. Never export or pass an nsec merely to switch between
     configured accounts.
+    Npubs prefer the local socket; profiles keep their backend. See
+    account --help for socket profiles and fallback/logout behavior.
   - CI. A successful push says nothing about CI. Nostr CI runs workflows
     from `.ngit/act/workflows/` or `.ngit/nix/workflows/`; another
     provider's directory is not evidence. When CI matters, query the exact

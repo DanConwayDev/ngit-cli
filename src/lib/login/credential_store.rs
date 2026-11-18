@@ -96,6 +96,9 @@ const SIGNER_RECORD_VERSION: u8 = 1;
 const ALIAS_RECORD_VERSION: u8 = 1;
 const ALIAS_PREFIX: &str = "alias:";
 const ALIAS_CREDENTIAL_PREFIX: &str = "alias-credential:";
+/// Public backend binding; this is not the name of a secret entry.
+pub const SOCKET_BINDING: &str = "socket";
+
 const ALIAS_DEFAULT_CREDENTIAL: &str = "default";
 const FORGOTTEN_PROFILE_PREFIX: &str = "forgotten-profile:";
 const SIGNER_PREFIX: &str = "signer:";
@@ -480,7 +483,9 @@ fn bunker_signer_entry_for_store(
         match retrieve_signer_alias_from(alias, backend) {
             Ok(binding) => {
                 if binding.npub == npub {
-                    if let Some(credential) = binding.credential {
+                    if let Some(credential) =
+                        binding.credential.filter(|entry| entry != SOCKET_BINDING)
+                    {
                         return Ok(credential);
                     }
                 }
@@ -825,7 +830,7 @@ fn parse_signer_alias(name: &str, value: &str) -> std::result::Result<SignerAlia
 fn validate_alias_credential(alias: &str, npub: &str, credential: &str) -> Result<()> {
     let default = signer_entry_name(npub)?;
     let dedicated = alias_signer_entry_name(alias)?;
-    if credential != default && credential != dedicated {
+    if credential != SOCKET_BINDING && credential != default && credential != dedicated {
         bail!("signer alias '{alias}' points to invalid credential entry '{credential}'");
     }
     Ok(())
@@ -1382,6 +1387,9 @@ pub fn forget_entries(entries: &[String]) -> Result<usize> {
 pub fn selection_entries(npub: &str, credential: Option<&str>) -> Result<Vec<String>> {
     let npub = canonical_npub(npub)?;
     if let Some(credential) = credential {
+        if credential == SOCKET_BINDING {
+            return Ok(Vec::new());
+        }
         return Ok(vec![credential.to_string()]);
     }
     let entries = inventory_for_npub(&npub)?;
@@ -1465,7 +1473,9 @@ pub fn config_pointers(
                         pointers.insert(binding);
                     }
                     if let Some(credential) = target.credential {
-                        pointers.insert(credential);
+                        if credential != SOCKET_BINDING {
+                            pointers.insert(credential);
+                        }
                         return pointers.into_iter().collect();
                     }
                 }
