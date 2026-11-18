@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show CI concurrency blockers with the owner run and job. Exact-event
+  inspection follows owner workflow evidence within the same repository and
+  coordinator, including cached evidence with `--offline`.
+
 - Sign through a local signer daemon, such as nostrd or Amber Desktop, over
   the draft NIP-5F socket protocol. Npub selections prefer the socket for that
   identity; named profiles retain their backend. Save a pinned socket profile

@@ -168,3 +168,125 @@ async fn manifest_expansion_is_explicit_verified_and_does_not_download_files() -
     blossom.finish().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn blocker_inspection_resolves_only_the_same_repository_coordinator_and_attempt() -> Result<()>
+{
+    use test_harness::{CiJob, CiProgress, CiRunSpec, CiTrigger, build_ci_run};
+    let harness = Harness::builder(
+        env!("CARGO_BIN_EXE_ngit"),
+        env!("CARGO_BIN_EXE_git-remote-nostr"),
+    )
+    .with_relay("default")
+    .with_relay("ci")
+    .with_grasp_server("repo")
+    .build()
+    .await?;
+    let relay = harness.relay("ci").url().to_string();
+    let (repo, published) = harness
+        .publish_repo(PublishRepoOpts {
+            extra_repo_relays: vec![relay.clone()],
+            ..Default::default()
+        })
+        .await?;
+    let coordinator = Keys::generate();
+    let now = Timestamp::now().as_secs();
+    let owner_spec = CiRunSpec::new(
+        &published,
+        "owner",
+        "11".repeat(20),
+        CiTrigger::push("refs/heads/main"),
+        now,
+    );
+    let owner_spec = owner_spec.job(CiJob::new("publish", "success", &Keys::generate()));
+    let owner_events = build_ci_run(&coordinator, &owner_spec)?;
+    let owner_job = owner_events.jobs[0].clone();
+    let owner = owner_events.result.context("owner result")?;
+    let waiter_spec = CiRunSpec::new(
+        &published,
+        "waiter",
+        "22".repeat(20),
+        CiTrigger::push("refs/heads/main"),
+        now,
+    )
+    .conclusion(None)
+    .progress(CiProgress::running(now));
+    let waiter = build_ci_run(&coordinator, &waiter_spec)?
+        .progress
+        .context("waiter progress")?;
+    let waiter = EventBuilder::new(waiter.kind, "")
+        .custom_created_at(waiter.created_at)
+        .tags(waiter.tags.iter().cloned().chain([
+            Tag::custom(
+                "blocked",
+                ["deploy", "concurrency", "production", "owner", "publish"],
+            ),
+            Tag::custom(
+                "blocked",
+                ["docs", "concurrency", "website", "missing", "upload"],
+            ),
+        ]))
+        .finalize(&coordinator)?;
+    let wrong_author = build_ci_run(&Keys::generate(), &owner_spec)?
+        .result
+        .unwrap();
+    let mut wrong_repo_spec = owner_spec.clone();
+    wrong_repo_spec.repo_coordinate = format!("30617:{}:another", coordinator.public_key());
+    let wrong_repo = build_ci_run(&coordinator, &wrong_repo_spec)?
+        .result
+        .unwrap();
+    let mut wrong_run_spec = owner_spec.clone();
+    wrong_run_spec.run_id = "different-attempt".into();
+    let wrong_run = build_ci_run(&coordinator, &wrong_run_spec)?.result.unwrap();
+    harness
+        .publish_ci_events(
+            &relay,
+            &[
+                waiter.clone(),
+                owner.clone(),
+                wrong_author,
+                wrong_repo,
+                wrong_run,
+                owner_job.clone(),
+            ],
+        )
+        .await?;
+    for offline in [false, true] {
+        let id = waiter.id.to_hex();
+        let mut args = vec!["ci", "inspect", &id, "--json"];
+        if offline {
+            args.push("--offline");
+        }
+        let output = repo.ngit(args).output().await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let related = json["events"][0]["related"]
+            .as_array()
+            .context("related evidence")?;
+        assert_eq!(related.len(), 1, "{json}");
+        assert_eq!(related[0]["id"], owner.id.to_hex());
+    }
+    let output = repo
+        .ngit(["ci", "inspect", &owner.id.to_hex(), "--json"])
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        json["events"][0]["related"]
+            .as_array()
+            .context("owner job evidence")?
+            .iter()
+            .any(|event| event["id"] == owner_job.id.to_hex())
+    );
+    // Missing owners do not cause a substitute attempt to be returned.
+    Ok(())
+}

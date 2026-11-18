@@ -63,3 +63,18 @@ JSON detail (without --watch):
   current progress. In a live snapshot an untimed `skipped` step can be a
   placeholder for a step not yet reached: only a timed or final result
   establishes a skip.
+
+Concurrency blockers:
+  A coordinator's `blocked` tag names the waiting job, concurrency group
+  and owner run/job. It is advisory: the owner may be waiting for cleanup,
+  and cancellation or timeout does not prove the group can be released.
+  Status shows the report and an exact-event inspection command:
+
+    ngit ci inspect <waiting-workflow-event-id> --json
+
+  Exact-event inspection follows owner workflow progress/results one hop,
+  scoped to the same coordinator and repository. JSON includes this evidence
+  in `related`; inspect a returned event ID to see its jobs and logs.
+  --offline uses cached evidence. Missing owner evidence remains missing,
+  never proof of cleanup. Historical or expired snapshots can be stale;
+  no inspection command cancels a run or releases a lock.

@@ -213,10 +213,13 @@ async fn related_events(
                 .flatten()
         })
         .collect();
-    if ids.is_empty() {
+    let mut filters = blocker_filters(event);
+    if !ids.is_empty() {
+        filters.push(Filter::new().ids(ids.clone()));
+    }
+    if filters.is_empty() {
         return Ok(Vec::new());
     }
-    let filters = vec![Filter::new().ids(ids)];
     if !offline {
         for (relay, result) in fetch_filters_to_local_cache(client, path, relays, &filters).await? {
             if let Err(error) = result {
@@ -225,7 +228,74 @@ async fn related_events(
         }
     }
     let events = get_events_from_local_cache(path, filters).await?;
-    Ok(events.into_iter().filter(|e| e.verify().is_ok()).collect())
+    Ok(events
+        .into_iter()
+        .filter(|e| e.verify().is_ok() && (ids.contains(&e.id) || blocker_matches(event, e)))
+        .collect())
+}
+
+/// Resolve only the named attempt on this coordinator and repository, even
+/// when it ran another workflow or commit. Never recursively chase blockers.
+fn blocker_filters(event: &nostr::prelude::Event) -> Vec<Filter> {
+    let Ok(progress) = ngit::ci::kinds::validate_workflow_progress(event) else {
+        return Vec::new();
+    };
+    let repositories = progress
+        .common
+        .repositories
+        .iter()
+        .map(|r| r.coordinate.to_string())
+        .collect::<Vec<_>>();
+    let owners = progress
+        .details
+        .blocked
+        .iter()
+        .map(|b| b.owner_run_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    owners
+        .into_iter()
+        .flat_map(|run| {
+            [
+                (39842, SingleLetterTag::LOWERCASE_D),
+                (9842, SingleLetterTag::LOWERCASE_R),
+            ]
+            .map(|(kind, tag)| {
+                Filter::new()
+                    .kind(Kind::Custom(kind))
+                    .author(event.pubkey)
+                    .custom_tags(SingleLetterTag::LOWERCASE_A, repositories.clone())
+                    .custom_tags(tag, [run.clone()])
+                    .limit(10)
+            })
+        })
+        .collect()
+}
+
+fn blocker_matches(source: &nostr::prelude::Event, candidate: &nostr::prelude::Event) -> bool {
+    use ngit::ci::kinds::{CiEvent, validate, validate_workflow_progress};
+    let Ok(progress) = validate_workflow_progress(source) else {
+        return false;
+    };
+    if candidate.pubkey != source.pubkey {
+        return false;
+    }
+    let (run, common) = match validate(candidate) {
+        Ok(CiEvent::WorkflowProgress(p)) => (p.run_id, p.common),
+        Ok(CiEvent::WorkflowResult(r)) => (r.run_id, r.common),
+        _ => return false,
+    };
+    progress
+        .details
+        .blocked
+        .iter()
+        .any(|b| b.owner_run_id == run)
+        && common.repositories.iter().any(|r| {
+            progress
+                .common
+                .repositories
+                .iter()
+                .any(|p| p.coordinate == r.coordinate)
+        })
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -332,6 +402,33 @@ async fn inspect_event(
     } else {
         Vec::new()
     };
+    if !crate::output::is_json() {
+        if let Ok(progress) = ngit::ci::kinds::validate_workflow_progress(event) {
+            for blocked in &progress.details.blocked {
+                let owners = related
+                    .iter()
+                    .filter(|candidate| {
+                        blocker_matches(event, candidate)
+                            && candidate.tags.iter().any(|t| {
+                                let t = t.as_slice();
+                                t.first().is_some_and(|name| name == "d" || name == "r")
+                                    && t.get(1) == Some(&blocked.owner_run_id)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "  blocker for {}: owner run {} / job {}",
+                    blocked.job, blocked.owner_run_id, blocked.owner_job
+                );
+                if owners.is_empty() {
+                    println!("    owner evidence not found; absence does not prove cleanup");
+                }
+                for owner in owners {
+                    println!("    owner evidence: ngit ci inspect {}", owner.id);
+                }
+            }
+        }
+    }
     if show_envelope {
         for related in &related {
             println!(

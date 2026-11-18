@@ -30,8 +30,20 @@ pub struct JobProgressReference {
     pub job: String,
 }
 
+/// Advisory contention reported by this repository's coordinator.
+/// This is neither proof of owner execution nor authority to cancel it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockedJob {
+    pub job: String,
+    pub reason: String,
+    pub group: String,
+    pub owner_run_id: String,
+    pub owner_job: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WorkflowDetails {
+    pub blocked: Vec<BlockedJob>,
     pub job_progress: Vec<JobProgressReference>,
     pub restart: Option<Restart>,
     pub dependencies: Vec<Dependency>,
@@ -143,6 +155,33 @@ pub fn workflow(event: &Event) -> Result<WorkflowDetails, ShapeReason> {
         superseded_by: optional_id(event, "superseded-by")?,
         ..Default::default()
     };
+    // Only workflow progress defines this advisory tag. Other kinds preserve
+    // it as an uninterpreted extension.
+    if event.kind == Kind::Custom(39842) {
+        let mut jobs = HashSet::new();
+        for t in tags(event, "blocked") {
+            if t.len() < 6
+                || t[1..6].iter().any(String::is_empty)
+                || t[2] != "concurrency"
+                || !jobs.insert(t[1].clone())
+                || one(event, "status")?
+                    .and_then(|t| t.get(1))
+                    .is_some_and(|s| s == "concluded")
+                || tags(event, "in-progress")
+                    .iter()
+                    .any(|active| active[1..].contains(&t[1]))
+            {
+                return Err(invalid("blocked"));
+            }
+            result.blocked.push(BlockedJob {
+                job: t[1].clone(),
+                reason: t[2].clone(),
+                group: t[3].clone(),
+                owner_run_id: t[4].clone(),
+                owner_job: t[5].clone(),
+            });
+        }
+    }
     for t in tags(event, "q") {
         if t.get(1).is_some_and(|v| v.starts_with("39846:")) {
             if t.len() < 5 || t[4].is_empty() {
@@ -585,6 +624,59 @@ mod tests {
 
     use super::*;
     use crate::ci::kinds::test_events::{event, tag};
+
+    #[test]
+    fn concurrency_blockers_are_advisory_progress_with_exact_owner_fields() {
+        use crate::ci::kinds::{ProgressStatus, test_events::*, validate_workflow_progress};
+        let keys = Keys::generate();
+        let base = workflow_progress(&keys, &keys, "waiter", ProgressStatus::Queued, 100, 200);
+        let blocked = tag(&[
+            "blocked",
+            "deploy",
+            "concurrency",
+            "production",
+            "owner",
+            "publish",
+            "future",
+        ]);
+        let event = with_tags(&keys, &base, |tags| tags.push(blocked.clone()));
+        let progress = validate_workflow_progress(&event).unwrap();
+        assert_eq!(progress.details.blocked[0].owner_run_id, "owner");
+        assert_eq!(progress.details.blocked[0].owner_job, "publish");
+        assert_eq!(progress.details.blocked[0].group, "production");
+        assert_eq!(progress.status, ProgressStatus::Queued);
+        for extra in [blocked, tag(&["in-progress", "deploy"])] {
+            let bad = with_tags(&keys, &event, |tags| tags.push(extra));
+            assert!(validate_workflow_progress(&bad).is_err());
+        }
+        for fields in [
+            vec!["blocked", "deploy", "concurrency"],
+            vec![
+                "blocked",
+                "deploy",
+                "concurrency",
+                "production",
+                "",
+                "publish",
+            ],
+        ] {
+            let bad = with_tags(&keys, &base, |tags| tags.push(tag(&fields)));
+            assert!(validate_workflow_progress(&bad).is_err());
+        }
+        let terminal =
+            workflow_progress(&keys, &keys, "waiter", ProgressStatus::Concluded, 100, 200);
+        let bad = with_tags(&keys, &terminal, |tags| {
+            tags.push(tag(&[
+                "blocked",
+                "deploy",
+                "concurrency",
+                "production",
+                "owner",
+                "publish",
+            ]))
+        });
+        assert!(validate_workflow_progress(&bad).is_err());
+    }
 
     #[test]
     fn additive_metadata_preserves_execution_and_rejects_malformed_known_fields() {

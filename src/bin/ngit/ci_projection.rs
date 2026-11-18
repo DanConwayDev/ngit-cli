@@ -758,6 +758,32 @@ impl RunReport {
         })
     }
 
+    pub(crate) fn blocker_lines(&self) -> String {
+        let mut output = String::new();
+        if let Some(progress) = self
+            .run
+            .progress
+            .as_ref()
+            .filter(|p| self.run.result.is_none() && p.is_pending())
+        {
+            for blocked in &progress.details.blocked {
+                let _ = writeln!(
+                    output,
+                    "    {}: waiting for concurrency group {:?}; owner run {} / job {} (coordinator report)",
+                    blocked.job, blocked.group, blocked.owner_run_id, blocked.owner_job
+                );
+            }
+            if !progress.details.blocked.is_empty() {
+                let _ = writeln!(
+                    output,
+                    "      inspect owner evidence: ngit ci inspect {}",
+                    progress.event_id
+                );
+            }
+        }
+        output
+    }
+
     pub(crate) fn running_jobs(&self) -> Vec<&str> {
         self.run
             .progress
@@ -826,6 +852,7 @@ impl RunReport {
 
     pub fn print(&self, log_tail: LogTailMode) {
         self.print_header();
+        print!("{}", self.blocker_lines());
         let now = Timestamp::now();
         let mut clocks = crate::ci_plan::LiveStepClocks::default();
         for job in &self.run.live_jobs {
@@ -2161,6 +2188,51 @@ mod tests {
         assert!(!metadata.contains("elapsed"));
         report.run.result.as_mut().unwrap().started_at = Some(Timestamp::from_secs(100));
         assert!(crate::ci_display::run_metadata(&report).contains(" · 1m 40s"));
+    }
+
+    #[test]
+    fn blockers_are_visible_in_json_and_text_without_changing_outcomes() {
+        let mut report = run_report_with_job(Conclusion::Success, "", None);
+        let result = report.run.result.take().unwrap();
+        let mut details = result.details.clone();
+        details.blocked.push(ngit::ci::details::BlockedJob {
+            job: "deploy".into(),
+            reason: "concurrency".into(),
+            group: "production".into(),
+            owner_run_id: "owner".into(),
+            owner_job: "publish".into(),
+        });
+        report.run.progress = Some(kinds::WorkflowProgress {
+            details,
+            event_id: result.event_id,
+            author: result.author,
+            created_at: Timestamp::now(),
+            run_id: result.run_id.clone(),
+            status: kinds::ProgressStatus::InProgress,
+            conclusion: None,
+            expiration: Timestamp::from_secs(Timestamp::now().as_secs() + 600),
+            queued_at: None,
+            started_at: None,
+            queue: None,
+            in_progress_jobs: vec![],
+            provenance: None,
+            jobs: vec![],
+            common: result.common.clone(),
+        });
+        report.state = RunState::Running;
+        let json = report.to_json(LogTailMode::None);
+        assert_eq!(json["details"]["blocked"][0]["owner_job"], "publish");
+        assert_eq!(json["state"], "running");
+        assert!(json["conclusion"].is_null());
+        let text = report.blocker_lines();
+        assert!(text.contains("production") && text.contains("owner / job publish"));
+        assert!(text.contains(&format!("ngit ci inspect {}", result.event_id)));
+        report.run.result = Some(result);
+        assert!(report.blocker_lines().is_empty());
+        assert_eq!(
+            report.to_json(LogTailMode::None)["details"]["blocked"],
+            json!([])
+        );
     }
 
     #[test]
