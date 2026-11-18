@@ -68,6 +68,8 @@ Local signer socket (NIP-5F):
   Default socket: ~/.local/share/nostr/signer.sock. nostr.signer-socket can
   override the path or disable it with false. whoami reports availability
   and the effective socket account (JSON: socket), with bounded probes.
+  Unavailable socket profiles retain their name, npub, backend and error
+  in JSON unavailable_profiles and in human-readable warnings.
   Logout removes saved profile bindings but cannot revoke the signer app.
   It can reveal the automatic socket fallback. Socket-only logout errors
   with guidance to manage the external account or disable socket signing.

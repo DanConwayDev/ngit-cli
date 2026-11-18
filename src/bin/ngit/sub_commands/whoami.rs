@@ -7,7 +7,7 @@ use ngit::{
         SignerInfo, SignerInfoSource, credential_store,
         existing::{
             ResolvedSelection, configured_alias_names, configured_signer_inventory,
-            resolve_selection_with_probe, signer_is_available,
+            resolve_selection_with_probe, resolve_selector_npub, signer_is_available,
         },
         user::get_user_details,
     },
@@ -32,6 +32,7 @@ struct WhoamiJson {
     socket: ngit::signer_socket::SocketStatus,
     accounts: Vec<AccountJson>,
     unavailable_accounts: Vec<UnavailableAccountJson>,
+    unavailable_profiles: Vec<UnavailableProfileJson>,
     unavailable_logins: Vec<UnavailableLoginJson>,
 }
 
@@ -44,6 +45,15 @@ struct UnavailableLoginJson {
 #[derive(Debug, Serialize)]
 struct UnavailableAccountJson {
     npub: String,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UnavailableProfileJson {
+    profile: String,
+    npub: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
     error: String,
 }
 
@@ -167,6 +177,7 @@ impl LoginScopes {
 }
 
 struct Inventory {
+    unavailable_profiles: Vec<UnavailableProfileJson>,
     probe: ngit::signer_socket::SocketProbe,
     selections: BTreeMap<(String, bool), std::result::Result<ResolvedSelection, String>>,
 }
@@ -176,6 +187,7 @@ impl Inventory {
         Self {
             probe: ngit::signer_socket::SocketProbe::inventory(),
             selections: BTreeMap::new(),
+            unavailable_profiles: Vec::new(),
         }
     }
 
@@ -196,11 +208,46 @@ impl Inventory {
         self.selections[&key].clone().map_err(anyhow::Error::msg)
     }
 
+    async fn aliases(
+        &mut self,
+        repo: Option<&Repo>,
+        candidate_npubs: &mut BTreeSet<String>,
+    ) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        let mut aliases: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for alias in configured_alias_names(&repo)? {
+            match self.select(repo, &alias, false).await {
+                Ok(resolved) => {
+                    candidate_npubs.insert(resolved.npub.clone());
+                    aliases.entry(resolved.npub).or_default().insert(alias);
+                }
+                Err(error) => {
+                    // A failed probe must not hide a saved public socket binding.
+                    if let Ok(target) = resolve_selector_npub(&repo, &alias) {
+                        if target.credential.as_deref() != Some(credential_store::SOCKET_BINDING) {
+                            continue;
+                        }
+                        candidate_npubs.insert(target.npub.clone());
+                        self.unavailable_profiles.push(UnavailableProfileJson {
+                            profile: alias,
+                            npub: target.npub,
+                            kind: "socket",
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(aliases)
+    }
+
     async fn available(&mut self, repo: Option<&Repo>, npub: &str) -> Result<bool> {
         match signer_is_available(&repo, npub) {
             Ok(true) => Ok(true),
             stored => match self.select(repo, npub, false).await {
                 Ok(_) => Ok(true),
+                Err(error) if ngit::signer_socket::socket_path(&repo)?.is_some() => {
+                    stored.and(Err(error))
+                }
                 Err(_) => stored,
             },
         }
@@ -223,21 +270,9 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
         .map(|selected| selected.npub.clone());
     candidate_npubs.extend(selected_npubs);
 
-    // Resolve each known alias through the ordinary selector path. This both
-    // applies normal OS/file/local/global/system precedence and prevents a
-    // shadowed lower-priority mapping from being advertised for the wrong
-    // account.
-    let mut aliases_by_npub: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for alias in configured_alias_names(&git_repo_ref)? {
-        let Ok(resolved) = inventory.select(git_repo_ref, &alias, false).await else {
-            continue;
-        };
-        candidate_npubs.insert(resolved.npub.clone());
-        aliases_by_npub
-            .entry(resolved.npub.clone())
-            .or_default()
-            .insert(alias.clone());
-    }
+    let aliases_by_npub = inventory
+        .aliases(git_repo_ref, &mut candidate_npubs)
+        .await?;
 
     let mut available_npubs = Vec::new();
     let mut unavailable_accounts = Vec::new();
@@ -299,10 +334,17 @@ pub async fn launch(command_args: &SubCommandArgs, json: bool) -> Result<()> {
             socket,
             accounts: accounts.into_iter().map(Account::into_json).collect(),
             unavailable_accounts,
+            unavailable_profiles: inventory.unavailable_profiles,
             unavailable_logins: scopes.unavailable,
         })?;
     } else {
         print_human(&accounts, &scopes, &socket);
+        for profile in &inventory.unavailable_profiles {
+            eprintln!(
+                "warning: profile {} ({}; {}) is unavailable: {}",
+                profile.profile, profile.kind, profile.npub, profile.error
+            );
+        }
         for login in scopes.unavailable {
             eprintln!(
                 "warning: {} login is unavailable: {}",

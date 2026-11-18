@@ -513,3 +513,53 @@ async fn inventory_reuses_socket_results_and_bounds_total_probe_time() -> Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn unavailable_socket_profile_retains_its_metadata_and_error() -> Result<()> {
+    let (_harness, repo, socket) = fixture().await?;
+    let npub = socket.state.other.public_key().to_bech32()?;
+    socket_profile(&repo, &npub, "desktop").await?;
+    assert!(aliases_for(&inventory(&repo).await?, &npub).contains(&json!("desktop")));
+    socket.state.locked.store(true, Ordering::SeqCst);
+    let state = inventory(&repo).await?;
+    let profile = state["unavailable_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["profile"] == "desktop")
+        .expect("saved profile vanished");
+    assert_eq!(profile["npub"], npub);
+    assert_eq!(profile["type"], "socket");
+    assert!(profile["error"].as_str().unwrap().contains("locked"));
+    let account = state["unavailable_accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["npub"] == npub)
+        .expect("missing unavailable account");
+    assert!(account["error"].as_str().unwrap().contains("locked"));
+
+    // An alternative local backend must not hide the failed socket profile.
+    login(&repo, &socket.state.other, "work").await?;
+    let state = inventory(&repo).await?;
+    assert!(aliases_for(&state, &npub).contains(&json!("work")));
+    assert!(
+        state["unavailable_profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|profile| profile["profile"] == "desktop")
+    );
+    run_ok(
+        &repo,
+        &["account", "logout", "--profile", "desktop", "--json"],
+    )
+    .await?;
+    assert!(
+        inventory(&repo).await?["unavailable_profiles"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    Ok(())
+}
