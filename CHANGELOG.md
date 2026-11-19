@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-19
+
+Secure remote signer pairing, add local signer socket support, show CI
+concurrency blockers, and let contributors remove their own labels.
+
 ### Security
 
 - Fix remote signer spoofing during client-initiated NIP-46 pairing. ngit now

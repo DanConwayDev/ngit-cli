@@ -2347,7 +2347,7 @@ checksum = "fd6f12461d14b5768028d39fab3cdfbcefb0bc7f09e95f413a00b6fdedcc9c2d"
 
 [[package]]
 name = "ngit"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "apk-info",
