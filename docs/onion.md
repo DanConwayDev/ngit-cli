@@ -40,10 +40,9 @@ how to enable Tor.
 4. **Nostr-SDK relay client**: built with [`Proxy::onion(addr)`][proxy-onion],
    so `.onion` relay connections go through the configured SOCKS5 proxy and
    everything else stays direct.
-5. **libgit2 fetch / list / push**: when the server URL host ends in `.onion`,
-   ngit configures libgit2's `ProxyOptions` with `socks5h://<addr>`. The
-   trailing `h` keeps DNS resolution at the proxy, which is mandatory for
-   `.onion` addresses (the local resolver can't resolve them).
+5. For HTTP and HTTPS onion Git servers, ngit invokes system Git to list,
+   fetch and push. It passes the configured proxy as `socks5h://<addr>`
+   so Tor resolves the onion hostname.
 
 [proxy-onion]: https://docs.rs/nostr-sdk/latest/nostr_sdk/proxy/struct.Proxy.html#method.onion
 
@@ -78,10 +77,9 @@ an issue.
 - `no Tor SOCKS5 proxy is available`: check that Tor is running on
   `127.0.0.1:9050` or `127.0.0.1:9150`, or set `NGIT_TOR_PROXY` to its actual
   address.
-- `Couldn't resolve host` from libgit2 when cloning a `.onion` URL: this
-  usually means libgit2 isn't using SOCKS5h and is trying to resolve the
-  onion name locally. Confirm the URL host is `.onion` and the env var
-  resolves to a usable SOCKS5 endpoint.
+- To check the Git connection with the same proxy, run
+  `git -c http.proxy=socks5h://127.0.0.1:9050 ls-remote <onion-repo-url>`.
+  Substitute your proxy address if you set `NGIT_TOR_PROXY`.
 - The relay accepts connections but the kind:30617 announcement isn't found:
   the relay-hint segment in the `nostr://` URL must match exactly what the
   maintainer published in their announcement event's `clone` / `relays` tags.

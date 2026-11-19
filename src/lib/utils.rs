@@ -475,10 +475,7 @@ pub fn set_protocol_preference(
 /// returns `None` otherwise so callers fall back to libgit2's default
 /// (no proxy / auto-detected from gitconfig).
 ///
-/// libgit2 dispatches to libcurl on most platforms, which understands
-/// `socks5h://host:port` (the trailing `h` keeps DNS resolution on the
-/// proxy side, which is required for `.onion` addresses).
-///
+/// HTTP(S) onion operations use system Git, which supports SOCKS5h.
 /// The proxy address comes from the same `NGIT_TOR_PROXY` env var as the
 /// nostr-sdk relay proxy ([`crate::client::tor_socks5_proxy_addr`]); set
 /// it to `none` to disable.

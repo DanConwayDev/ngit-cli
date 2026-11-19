@@ -211,6 +211,16 @@ pub fn push_to_remote_url(
     term: &Term,
     git_server_push_options: &[&str],
 ) -> Result<HashMap<String, Option<String>>> {
+    if remote_helper::is_onion_http(git_server_url) {
+        return remote_helper::push(
+            git_repo,
+            git_server_url,
+            remote_refspecs,
+            term,
+            git_server_push_options,
+            None,
+        );
+    }
     let git_config = git_repo.git_repo.config()?;
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_url)?;
     let auth = {
