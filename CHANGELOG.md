@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh Cargo dependencies used for TLS certificate verification, ZIP
+  archives, YAML configuration, CLI argument parsing, and relay sync.
+
 - Rename the macOS release validation workflow to `macos-checks` for clarity.
 
 ## [3.1.0] - 2026-11-14
