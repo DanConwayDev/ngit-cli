@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- List, fetch and push HTTP(S) onion Git servers through the configured Tor
+  SOCKS5 proxy using system Git. Failed listings include the transport error.
+
 - Offer an exact-event lookup for CI blockers in filtered inspection instead
   of reporting owner evidence missing before looking it up.
 

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use auth_git2::GitAuthenticator;
-use git2::{Progress, Repository};
+use git2::Progress;
 
 use crate::{
     cli_interactor::count_lines_per_msg_vec,
@@ -148,7 +148,7 @@ pub fn fetch_from_git_server(
             term,
             &format!("fetching {git_server_url} via Git remote helper..."),
         )?;
-        return remote_helper::fetch(git_repo, git_server_url, oids, term);
+        return remote_helper::fetch(git_repo, git_server_url, oids, term, false);
     }
 
     let server_url = git_server_url.parse::<CloneUrl>()?;
@@ -167,7 +167,7 @@ pub fn fetch_from_git_server(
 
         let formatted_url = server_url.format_as(protocol)?;
         let res = fetch_from_git_server_url(
-            &git_repo.git_repo,
+            git_repo,
             oids,
             &formatted_url,
             [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
@@ -261,7 +261,7 @@ pub fn fetch_refs_from_git_server(
             &format!("fetching {git_server_url} via Git remote helper..."),
         )?;
         let oids: Vec<String> = missing.iter().map(|(_, oid)| oid.clone()).collect();
-        return remote_helper::fetch(git_repo, git_server_url, &oids, term);
+        return remote_helper::fetch(git_repo, git_server_url, &oids, term, false);
     }
 
     let ref_names: Vec<String> = missing.iter().map(|(name, _)| name.clone()).collect();
@@ -279,7 +279,7 @@ pub fn fetch_refs_from_git_server(
         )?;
         let formatted_url = server_url.format_as(protocol)?;
         let res = fetch_from_git_server_url(
-            &git_repo.git_repo,
+            git_repo,
             &ref_names,
             &formatted_url,
             [ServerProtocol::UnauthHttps, ServerProtocol::UnauthHttp].contains(protocol),
@@ -316,13 +316,17 @@ pub fn fetch_refs_from_git_server(
 /// wants for `download`, which writes objects to the odb without
 /// creating or updating any local refs.
 fn fetch_from_git_server_url(
-    git_repo: &Repository,
+    git_repo: &Repo,
     refspecs: &[String],
     git_server_url: &str,
     dont_authenticate: bool,
     ssh_key_file: Option<&String>,
     term: &console::Term,
 ) -> Result<()> {
+    if remote_helper::is_onion_http(git_server_url) {
+        return remote_helper::fetch(git_repo, git_server_url, refspecs, term, dont_authenticate);
+    }
+    let git_repo = &git_repo.git_repo;
     if git_server_url.parse::<CloneUrl>()?.protocol() == ServerProtocol::Ssh && !check_ssh_keys() {
         bail!("no default SSH key file found.\nCheck your Git SSH setup or use an HTTPS Git URL.");
     }
@@ -608,7 +612,7 @@ mod tests {
         use nostr::prelude::*;
 
         let directory = tempfile::tempdir()?;
-        let git_repo = Repository::init_opts(
+        let git_repo = git2::Repository::init_opts(
             directory.path(),
             git2::RepositoryInitOptions::new()
                 .initial_head("main")

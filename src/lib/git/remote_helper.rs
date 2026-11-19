@@ -74,18 +74,54 @@ pub(crate) fn is_direct_pr_clone_url(url: &str) -> bool {
             .is_some_and(|scheme| matches!(scheme.to_ascii_lowercase().as_str(), "ws" | "wss"))
 }
 
-pub(crate) fn list(repo: &Repo, url: &str) -> Result<HashMap<String, String>> {
+/// Git's HTTP transport supports SOCKS5 with proxy-side hostname resolution.
+pub(crate) fn is_onion_http(url: &str) -> bool {
+    nostr::prelude::Url::parse(url).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url
+                .host_str()
+                .is_some_and(|host| host.trim_end_matches('.').ends_with(".onion"))
+    })
+}
+
+fn configure_onion_git(command: &mut Command, url: &str, proxy: std::net::SocketAddr) {
+    command
+        .arg(format!("--config-env=http.{url}.proxy=NGIT_GIT_PROXY"))
+        .env("NGIT_GIT_PROXY", format!("socks5h://{proxy}"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("no_proxy", "")
+        .env("NO_PROXY", "");
+    if let Some(header) = crate::git_http_auth::authorization_for_url(url) {
+        command
+            .arg(format!(
+                "--config-env=http.{url}.extraHeader=NGIT_GIT_AUTH_HEADER"
+            ))
+            .env("NGIT_GIT_AUTH_HEADER", header);
+    }
+}
+
+pub(crate) fn list(
+    repo: &Repo,
+    url: &str,
+    dont_authenticate: bool,
+) -> Result<HashMap<String, String>> {
     let mut args = vec!["ls-remote", "--symref"];
     if is_quiet() {
         args.push("--quiet");
     }
     args.extend(["--", url]);
-    let output = run_git(repo, args, None)?;
+    let output = run_git(repo, url, args, None, dont_authenticate)?;
     ensure_success("list", url, &output)?;
     parse_ls_remote(std::str::from_utf8(&output.stdout).context("Git returned non-UTF-8 refs")?)
 }
 
-pub(crate) fn fetch(repo: &Repo, url: &str, oids: &[String], term: &Term) -> Result<()> {
+pub(crate) fn fetch(
+    repo: &Repo,
+    url: &str,
+    refspecs: &[String],
+    term: &Term,
+    dont_authenticate: bool,
+) -> Result<()> {
     let mut args = vec![
         OsString::from("fetch"),
         OsString::from("--no-tags"),
@@ -97,9 +133,9 @@ pub(crate) fn fetch(repo: &Repo, url: &str, oids: &[String], term: &Term) -> Res
     if is_quiet() {
         args.insert(1, OsString::from("--quiet"));
     }
-    args.extend(oids.iter().map(OsString::from));
+    args.extend(refspecs.iter().map(OsString::from));
 
-    let output = run_git(repo, args, Some(term))?;
+    let output = run_git(repo, url, args, Some(term), dont_authenticate)?;
     ensure_success("fetch", url, &output)
 }
 
@@ -140,7 +176,7 @@ pub(crate) fn push(
     args.push(OsString::from(url));
     args.extend(refspecs.iter().map(OsString::from));
 
-    let output = run_git(repo, args, Some(term))?;
+    let output = run_git(repo, url, args, Some(term), false)?;
     let stdout =
         std::str::from_utf8(&output.stdout).context("Git returned non-UTF-8 push status")?;
     let updates = parse_push_porcelain(stdout, refspecs);
@@ -163,7 +199,13 @@ struct GitOutput {
     stderr: Vec<u8>,
 }
 
-fn run_git<I, S>(repo: &Repo, args: I, term: Option<&Term>) -> Result<GitOutput>
+fn run_git<I, S>(
+    repo: &Repo,
+    url: &str,
+    args: I,
+    term: Option<&Term>,
+    dont_authenticate: bool,
+) -> Result<GitOutput>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -171,6 +213,24 @@ where
     let git_dir = repo.git_repo.path();
     let current_dir = repo.git_repo.workdir().unwrap_or(git_dir);
     let mut command = Command::new("git");
+    if is_onion_http(url) {
+        let addr = crate::client::tor_socks5_proxy_addr().context(
+            "no Tor SOCKS5 proxy available for onion Git server; start Tor or set NGIT_TOR_PROXY",
+        )?;
+        configure_onion_git(&mut command, url, addr);
+        if dont_authenticate {
+            command
+                .args([
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    "credential.interactive=false",
+                ])
+                .env("GIT_ASKPASS", "")
+                .env("SSH_ASKPASS", "")
+                .args(["-c", "core.askPass="]);
+        }
+    }
     command
         // A transport operation should not trigger unrelated background work.
         .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
@@ -521,6 +581,27 @@ mod tests {
     }
 
     #[test]
+    fn onion_http_uses_proxy_side_dns() {
+        let url = "https://example.onion:443/repo.git";
+        assert!(is_onion_http(url));
+        assert!(is_onion_http("http://EXAMPLE.ONION/repo.git"));
+        assert!(!is_onion_http("https://example.org/example.onion"));
+        assert!(!is_onion_http("ssh://example.onion/repo.git"));
+
+        let mut command = Command::new("git");
+        configure_onion_git(&mut command, url, "127.0.0.1:9050".parse().unwrap());
+        let output = command
+            .args(["config", "--get-urlmatch", "http.proxy", url])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "socks5h://127.0.0.1:9050"
+        );
+    }
+
+    #[test]
     fn recognizes_urls_that_need_git_dispatch() {
         for url in [
             "htree://self/project",
@@ -718,7 +799,7 @@ mod tests {
         let workdir = repos.destination.git_repo.workdir().context("workdir")?;
         run(workdir, ["config", "protocol.ext.allow", "never"])?;
 
-        let error = list(&repos.destination, &repos.helper_url()).unwrap_err();
+        let error = list(&repos.destination, &repos.helper_url(), false).unwrap_err();
 
         assert!(error.to_string().contains("protocol.ext.allow"));
         Ok(())
@@ -728,7 +809,12 @@ mod tests {
     fn names_the_missing_helper_in_errors() -> Result<()> {
         let repos = Repositories::new()?;
 
-        let error = list(&repos.destination, "ngit-missing-helper://example/project").unwrap_err();
+        let error = list(
+            &repos.destination,
+            "ngit-missing-helper://example/project",
+            false,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("git-remote-ngit-missing-helper"));
         Ok(())

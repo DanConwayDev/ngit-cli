@@ -441,7 +441,7 @@ fn list_from_remote_sync(
         if let Some(pb) = pb {
             pb.set_message("via Git remote helper");
         }
-        return remote_helper::list(git_repo, git_server_url);
+        return remote_helper::list(git_repo, git_server_url, false);
     }
 
     let server_url = git_server_url.parse::<CloneUrl>()?;
@@ -449,6 +449,7 @@ fn list_from_remote_sync(
         get_read_protocols_to_try(git_repo, &server_url, decoded_nostr_url, is_grasp_server);
 
     let mut failed_protocols = vec![];
+    let mut last_failure = None;
     let mut remote_state: Option<HashMap<String, String>> = None;
 
     for protocol in &protocols_to_attempt {
@@ -487,6 +488,7 @@ fn list_from_remote_sync(
                     if let Some(pb) = pb {
                         pb.set_message(format!("all protocols failed: {}", error));
                     }
+                    last_failure = Some(error);
                 }
             }
         }
@@ -505,7 +507,10 @@ fn list_from_remote_sync(
                 ""
             },
         );
-        Err(error)
+        match last_failure {
+            Some(cause) => Err(anyhow!("{error}: {cause:#}")),
+            None => Err(error),
+        }
     }
 }
 
@@ -515,6 +520,9 @@ fn list_from_remote_url(
     ssh_key_file: Option<&String>,
     dont_authenticate: bool,
 ) -> Result<HashMap<String, String>> {
+    if remote_helper::is_onion_http(git_server_remote_url) {
+        return remote_helper::list(git_repo, git_server_remote_url, dont_authenticate);
+    }
     let git_config = git_repo.git_repo.config()?;
 
     let mut git_server_remote = git_repo.git_repo.remote_anonymous(git_server_remote_url)?;
