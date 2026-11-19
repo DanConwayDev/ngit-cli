@@ -82,7 +82,7 @@ in {
         cargo test --workspace --locked --offline
       '';
     };
-    pre-release.macos = {
+    macos-checks.macos = {
       smoke = command "smoke" ''
         ${ngit-package}/bin/ngit --version
       '';
