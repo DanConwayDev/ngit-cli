@@ -44,8 +44,8 @@ mime_guess = "2.0"
 # NostrDevKit 0.45.0 is a stable release, so an ordinary caret requirement
 # is safe again: it no longer admits breaking pre-releases the way a caret
 # on `0.45.0-alpha.N` did. Bump these together.
-nostr = { version = "0.45.6", features = ["nip44", "nip49"] }
-nostr-connect = "0.45.2"
+nostr = { version = "0.45.7", features = ["nip44", "nip49"] }
+nostr-connect = "0.45.3"
 nostr-database = "0.45.2"
 nostr-lmdb = "0.45.3"
 nostr-memory = "0.45.2"

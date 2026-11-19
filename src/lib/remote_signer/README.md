@@ -1,6 +1,7 @@
 # Instrumented NIP-46 client
 
 `mod.rs` derives from crates.io `nostr-connect` 0.45.2 `src/client.rs`.
+It incorporates the client-initiated pairing fix from 0.45.3.
 Its MIT license is retained in LICENSE. Keeping the module in ngit's sources
 also includes it in crates.io packages, where Cargo patches are not retained.
 

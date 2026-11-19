@@ -87,6 +87,11 @@ Secrets:
   any command as a one-shot identity for CI.
 
 Remote signers (NIP-46):
+  When you scan ngit's QR code or copy its nostrconnect:// URI, your signer
+  must return the pairing secret. For a signer that only replies with "ack",
+  use the bunker:// URI from the signer:
+    ngit account login --bunker-url bunker://...
+
   A fresh pairing needs interactive approval, so unattended runs use an
   established connection. An nbunksec is one in portable form: it holds no
   npub, so the identity is resolved from the signer. A fresh login replaces

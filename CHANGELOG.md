@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Fix remote signer spoofing during client-initiated NIP-46 pairing. ngit now
+  requires the signer to return the secret from the pairing URI before saving
+  its identity. This applies the
+  [upstream fix](https://github.com/nostrdevkit/nostr/security/advisories/GHSA-5wwx-wf9g-8c69)
+  to ngit's own client and updates `nostr-connect` to 0.45.3 and `nostr` to
+  0.45.7. Signers that only return `ack` can pair via a signer-provided
+  `bunker://` URI.
+
 ### Added
 
 - Show CI concurrency blockers with the owner run and job. Exact-event

@@ -454,7 +454,7 @@ impl NostrConnect {
             .send_request_with_pk(req, remote_signer_public_key)
             .await?;
 
-        if is_valid_connect_response(&res, secret.as_deref()) {
+        if is_valid_bunker_response(&res, secret.as_deref()) {
             return Ok(());
         }
 
@@ -582,7 +582,7 @@ async fn get_remote_signer_public_key(
                         error: None,
                     }) = msg.to_response(NostrConnectMethod::Connect)
                     {
-                        if is_valid_connect_response(&result, Some(expected_secret)) {
+                        if is_valid_nostrconnect_response(&result, expected_secret) {
                             return Ok(event.pubkey);
                         } else {
                             tracing::warn!(
@@ -600,7 +600,13 @@ async fn get_remote_signer_public_key(
     .ok_or_else(|| Error::simple(ErrorKind::Timeout))?
 }
 
-fn is_valid_connect_response(response: &ResponseResult, expected_secret: Option<&str>) -> bool {
+// The signer identity is discovered from this reply, so require proof of the
+// URI secret.
+fn is_valid_nostrconnect_response(response: &ResponseResult, expected_secret: &str) -> bool {
+    matches!(response, ResponseResult::ConnectSecret(secret) if secret == expected_secret)
+}
+
+fn is_valid_bunker_response(response: &ResponseResult, expected_secret: Option<&str>) -> bool {
     match &response {
         // Some signers (e.g. those following older interpretations) return "ack"
         ResponseResult::Ack => true,
@@ -768,17 +774,28 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_connect_response() {
-        assert!(is_valid_connect_response(&ResponseResult::Ack, None));
-        assert!(is_valid_connect_response(
+    fn client_pairing_requires_the_uri_secret() {
+        let matching = ResponseResult::ConnectSecret("pairing-secret".into());
+        assert!(is_valid_nostrconnect_response(&matching, "pairing-secret"));
+        assert!(!is_valid_nostrconnect_response(&matching, "different"));
+        assert!(!is_valid_nostrconnect_response(
+            &ResponseResult::Ack,
+            "pairing-secret"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_bunker_response() {
+        assert!(is_valid_bunker_response(&ResponseResult::Ack, None));
+        assert!(is_valid_bunker_response(
             &ResponseResult::ConnectSecret("secret".to_string()),
             Some("secret")
         ));
-        assert!(!is_valid_connect_response(
+        assert!(!is_valid_bunker_response(
             &ResponseResult::ConnectSecret("secret".to_string()),
             Some("other_secret")
         ));
-        assert!(!is_valid_connect_response(
+        assert!(!is_valid_bunker_response(
             &ResponseResult::ConnectSecret("secret".to_string()),
             None
         ));
